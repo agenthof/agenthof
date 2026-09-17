@@ -16,7 +16,7 @@ func TestRenderFullRun(t *testing.T) {
 	events := []engine.Event{
 		{Time: ts(5), Type: "workflow_started", Binding: bind},
 		{Time: ts(5), Type: "step_started", Step: "plan", Agent: "planner", Binding: bind},
-		{Time: ts(6), Type: "step_succeeded", Step: "plan", Agent: "planner", Artifact: "[planner] fix", Binding: bind},
+		{Time: ts(6), Type: "step_succeeded", Step: "plan", Agent: "planner", Artifact: "[planner] fix", ArtifactSHA: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd", Binding: bind},
 		{Time: ts(6), Type: "step_failed", Step: "code", Agent: "coder", Reason: "synthetic", Binding: bind},
 		{Time: ts(6), Type: "bounced_back", Step: "code", Status: "plan", Binding: bind},
 		{Time: ts(7), Type: "workflow_finished", Status: "succeeded", Binding: bind},
@@ -28,7 +28,7 @@ func TestRenderFullRun(t *testing.T) {
 		"status: succeeded",
 		"12:04:05  workflow started",
 		"step plan (agent planner) started",
-		"step plan succeeded — artifact: [planner] fix",
+		"step plan succeeded — artifact 01234567: [planner] fix",
 		"step code (agent coder) failed — synthetic",
 		"bounced back to plan",
 		"workflow finished: succeeded",

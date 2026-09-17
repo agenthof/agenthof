@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/registry"
@@ -22,8 +23,10 @@ type StepExecutor interface {
 }
 
 type Options struct {
-	LogDir      string
-	StepTimeout time.Duration
+	LogDir       string
+	StepTimeout  time.Duration
+	ArtifactDir  string
+	WorkspaceDir string
 }
 
 const defaultMaxBounces = 2
@@ -37,6 +40,9 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	if opts.StepTimeout == 0 {
 		opts.StepTimeout = 5 * time.Minute
 	}
+	if opts.ArtifactDir == "" {
+		opts.ArtifactDir = ".agenthof/artifacts"
+	}
 	runID := NewRunID()
 	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}
 	log, err := OpenLog(opts.LogDir, runID)
@@ -44,6 +50,10 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		return runID, "failed", err
 	}
 	defer log.Close()
+	store, err := artifact.NewStore(opts.ArtifactDir)
+	if err != nil {
+		return runID, "failed", err
+	}
 	now := func() time.Time { return time.Now().UTC() }
 	var logErr error
 	emit := func(e Event) {
@@ -96,10 +106,23 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		}
 
 		if res.Success {
+			preview, sha := "", ""
+			if res.Artifact != "" {
+				var perr error
+				sha, preview, perr = store.Put(res.Artifact)
+				if perr != nil {
+					storeErr := fmt.Errorf("artifact store: %w", perr)
+					emit(Event{Type: "workflow_finished", Status: "failed", Reason: "artifact store: " + perr.Error()})
+					if logErr != nil {
+						return runID, "failed", errors.Join(storeErr, fmt.Errorf("ledger write failed: %w", logErr))
+					}
+					return runID, "failed", storeErr
+				}
+			}
 			if agent.Output != "" {
 				artifacts[agent.Output] = res.Artifact
 			}
-			emit(Event{Type: "step_succeeded", Step: step.Name, Agent: agent.Name, Artifact: res.Artifact})
+			emit(Event{Type: "step_succeeded", Step: step.Name, Agent: agent.Name, Artifact: preview, ArtifactSHA: sha})
 			i++
 			continue
 		}
