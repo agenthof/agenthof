@@ -12,7 +12,22 @@ and attributed to the human who asked for it.
 
 ## Status
 
-Pre-release. The V1 design is complete; implementation is underway.
+Pre-release. The core is real: config → validated registry → event-sourced
+engine (linear + fail-back) → invoker-attributed audit trail, running offline
+with a built-in echo executor. Model-backed agents (ADK), gateways, OIDC, and
+RBAC land next.
+
+## Quickstart
+
+    go build -o agenthof ./cmd/agenthof
+    ./agenthof apply --config examples/config
+    ./agenthof run software-engineer fix-bug --input "fix the login bug" --as you@example.com --config examples/config
+    ./agenthof audit <run-id>
+
+Try the kill switch:
+
+    ./agenthof registry disable coder --config examples/config
+    ./agenthof apply --config examples/config   # fails, naming every dependent workflow
 
 ## The idea in three commands
 
