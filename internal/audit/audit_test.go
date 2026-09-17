@@ -49,3 +49,48 @@ func TestRenderRefusedAndEmpty(t *testing.T) {
 		t.Fatal("empty render contract")
 	}
 }
+
+func TestRenderLedgerIntegrityVerified(t *testing.T) {
+	dir := t.TempDir()
+	id := "r-1a2b3c4d"
+	log, err := engine.OpenLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "software-engineer", Workflow: "fix-bug", RunID: id}
+	events := []engine.Event{
+		{Time: ts(5), Type: "workflow_started", Binding: bind},
+		{Time: ts(6), Type: "step_started", Step: "plan", Agent: "planner", Binding: bind},
+		{Time: ts(7), Type: "workflow_finished", Status: "succeeded", Binding: bind},
+	}
+	for _, e := range events {
+		if err := log.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := engine.ReadLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := Render(got)
+	if !strings.Contains(out, "ledger integrity: verified (3 events)") {
+		t.Fatalf("missing verified integrity line in:\n%s", out)
+	}
+}
+
+func TestRenderLedgerIntegrityBroken(t *testing.T) {
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "software-engineer", Workflow: "fix-bug", RunID: "r-1a2b3c4d"}
+	// Hand-built events without valid Prev chaining.
+	events := []engine.Event{
+		{Time: ts(5), Type: "workflow_started", Binding: bind},
+		{Time: ts(6), Type: "step_started", Step: "plan", Agent: "planner", Binding: bind},
+		{Time: ts(7), Type: "workflow_finished", Status: "succeeded", Binding: bind},
+	}
+	out := Render(events)
+	if !strings.Contains(out, "ledger integrity: BROKEN at event") {
+		t.Fatalf("missing broken integrity line in:\n%s", out)
+	}
+}

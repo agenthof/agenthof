@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -24,7 +25,18 @@ func Render(events []engine.Event) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "run %s — %s (role %s)\n", b.RunID, b.Workflow, b.Role)
 	fmt.Fprintf(&sb, "invoked by %s (%s, issuer %s)\n", b.Invoker.Subject, b.Invoker.Method, b.Invoker.Issuer)
-	fmt.Fprintf(&sb, "status: %s\n\n", status)
+	fmt.Fprintf(&sb, "status: %s\n", status)
+	if err := engine.VerifyChain(events); err != nil {
+		var broken *engine.ChainBrokenError
+		if errors.As(err, &broken) {
+			fmt.Fprintf(&sb, "ledger integrity: BROKEN at event %d\n", broken.Index)
+		} else {
+			fmt.Fprintf(&sb, "ledger integrity: BROKEN at event 0\n")
+		}
+	} else {
+		fmt.Fprintf(&sb, "ledger integrity: verified (%d events)\n", len(events))
+	}
+	fmt.Fprint(&sb, "\n")
 	for _, e := range events {
 		t := e.Time.UTC().Format("15:04:05")
 		switch e.Type {

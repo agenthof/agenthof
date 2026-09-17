@@ -72,7 +72,7 @@ func TestRunAndAuditEndToEnd(t *testing.T) {
 	if code := cmdAudit([]string{m[1], "--log-dir", logs}, &out); code != 0 {
 		t.Fatalf("audit: %s", out.String())
 	}
-	for _, want := range []string{"invoked by dana@example.com (asserted", "status: succeeded", "step plan succeeded"} {
+	for _, want := range []string{"invoked by dana@example.com (asserted", "status: succeeded", "step plan succeeded", "ledger integrity: verified"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("audit missing %q:\n%s", want, out.String())
 		}
