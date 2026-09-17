@@ -27,7 +27,7 @@ const usage = `agenthof — the agents' court
 Usage:
   agenthof apply    --config <dir>
   agenthof registry list|enable|disable [<agent>] --config <dir>
-  agenthof run <role> <workflow> --input <text> [--as <user>] [--config <dir>] [--log-dir <dir>] [--executor echo|adk] [--workspace <dir>] [--artifact-dir <dir>]
+  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--executor echo|adk] [--workspace <dir>] [--artifact-dir <dir>]
   agenthof audit <run-id> [--log-dir <dir>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
   agenthof gateway provision --config <dir> [--admin-base <url>]
@@ -163,7 +163,9 @@ func cmdRun(args []string, out io.Writer) int {
 	role, workflow := args[0], args[1]
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	input := fs.String("input", "", "task input for the workflow")
-	as := fs.String("as", "", "invoker identity (defaults to the OS user)")
+	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
+	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
+	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	cfgDir := fs.String("config", "./config", "config directory")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	executorName := fs.String("executor", "echo", `step executor: "echo" or "adk"`)
@@ -181,12 +183,72 @@ func cmdRun(args []string, out io.Writer) int {
 		fmt.Fprintf(out, "run: invalid --executor %q, want \"echo\" or \"adk\"\n", *executorName)
 		return 2
 	}
+
+	rawToken := *token
+	if rawToken == "" {
+		rawToken = os.Getenv("AGENTHOF_TOKEN")
+	}
+	var inv identity.Invoker
+	if rawToken != "" {
+		issuerURL := os.Getenv("AGENTHOF_OIDC_ISSUER")
+		if issuerURL == "" {
+			fmt.Fprintln(out, "run: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+			return 2
+		}
+		clientID := os.Getenv("AGENTHOF_OIDC_CLIENT_ID")
+		if clientID == "" {
+			clientID = "agenthof"
+		}
+		authInv, err := (identity.OIDC{IssuerURL: issuerURL, ClientID: clientID}).Authenticate(context.Background(), rawToken)
+		if err != nil {
+			// Never echo the raw token: it's a bearer credential.
+			fmt.Fprintf(out, "run: token authentication failed: %v\n", err)
+			return 1
+		}
+		inv = authInv
+	} else {
+		var g []string
+		for _, raw := range strings.Split(*groups, ",") {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed != "" {
+				g = append(g, trimmed)
+			}
+		}
+		// identity.Static only takes --as; it's set here rather than adding a
+		// groups parameter, since ~15 existing call sites across the engine,
+		// audit, and identity test suites call Static with a single arg.
+		// Invoker.Groups is a plain exported field, so mutating the returned
+		// value is equivalent to threading it through the constructor.
+		inv = identity.Static(*as)
+		inv.Groups = g
+	}
+
 	ws := *workspace
 	if ws == "" {
 		ws = filepath.Join(".agenthof", "workspaces", strconv.FormatInt(time.Now().UnixNano(), 10))
 	}
-	cfg, reg := loadRegistry(*cfgDir, out)
-	if reg == nil {
+	cfg, loadErrs := config.LoadDir(*cfgDir)
+	for _, e := range loadErrs {
+		fmt.Fprintln(out, e)
+	}
+	reg, valErrs := registry.Build(cfg)
+	for _, e := range valErrs {
+		fmt.Fprintln(out, e.Error())
+	}
+	if len(loadErrs) > 0 || len(valErrs) > 0 {
+		var firstErr string
+		if len(loadErrs) > 0 {
+			firstErr = loadErrs[0].Error()
+		} else {
+			firstErr = valErrs[0].Error()
+		}
+		reason := "configuration invalid: " + firstErr
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, reason)
+		if refErr != nil {
+			fmt.Fprintln(out, refErr)
+			return 1
+		}
+		fmt.Fprintf(out, "run %s refused: configuration invalid\n", runID)
 		return 1
 	}
 	fmt.Fprintf(out, "workspace: %s\n", ws)
@@ -194,15 +256,15 @@ func cmdRun(args []string, out io.Writer) int {
 		fmt.Fprintln(out, err)
 		return 1
 	}
-	inv := identity.Static(*as)
-	var exec engine.StepExecutor
+	var contained engine.StepExecutor
 	switch *executorName {
 	case "adk":
 		key := gateway.LoadRoleKey(".", role)
-		exec = agentrt.ADKExecutor{Gateway: cfg.Gateway, RoleKey: key, WorkspaceDir: ws}
+		contained = agentrt.ADKExecutor{Gateway: cfg.Gateway, RoleKey: key, WorkspaceDir: ws}
 	default:
-		exec = engine.EchoExecutor{}
+		contained = engine.EchoExecutor{}
 	}
+	exec := agentrt.MuxExecutor{Contained: contained, Fronted: agentrt.AdapterExecutor{}}
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, WorkspaceDir: ws})
 	if err != nil && status == "refused" {

@@ -2,6 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agenthof/agenthof/internal/engine"
 )
 
 func writeSample(t *testing.T) string {
@@ -399,5 +408,323 @@ func TestRunADKExecutorEndToEnd(t *testing.T) {
 	}
 	if !regexp.MustCompile(`succeeded — artifact [0-9a-f]{8}:`).MatchString(out.String()) {
 		t.Fatalf("audit missing artifact sha8 line: %s", out.String())
+	}
+}
+
+// --- OIDC wiring, ledgered validation refusals, and mux dispatch ---
+
+// cmdTestOIDCServer spins up an httptest server serving OIDC discovery and
+// JWKS documents backed by the given RSA key. Mirrors the recipe in
+// internal/identity/oidc_test.go (kept separate so cmd/agenthof does not
+// need to export test helpers from internal/identity).
+func cmdTestOIDCServer(t *testing.T, key *rsa.PrivateKey) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                                srv.URL,
+			"jwks_uri":                              srv.URL + "/keys",
+			"authorization_endpoint":                srv.URL + "/auth",
+			"token_endpoint":                        srv.URL + "/token",
+			"response_types_supported":              []string{"id_token"},
+			"subject_types_supported":               []string{"public"},
+			"id_token_signing_alg_values_supported": []string{"RS256"},
+		})
+	})
+
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		n := base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes())
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"keys": []map[string]any{
+				{
+					"kty": "RSA",
+					"kid": "test",
+					"alg": "RS256",
+					"use": "sig",
+					"n":   n,
+					"e":   "AQAB",
+				},
+			},
+		})
+	})
+
+	return srv
+}
+
+// cmdMintToken hand-builds an RS256-signed JWT from the given claims.
+func cmdMintToken(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {
+	t.Helper()
+
+	header := map[string]any{"alg": "RS256", "kid": "test", "typ": "JWT"}
+	headerJSON, err := json.Marshal(header)
+	if err != nil {
+		t.Fatalf("marshal header: %v", err)
+	}
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
+
+	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
+	digest := sha256.Sum256([]byte(signingInput))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
+}
+
+func TestRunTokenRequiresIssuerEnv(t *testing.T) {
+	t.Chdir(t.TempDir())
+	root := writeSample(t)
+	t.Setenv("AGENTHOF_OIDC_ISSUER", "")
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug",
+		"--input", "x", "--token", "some-raw-jwt-value",
+		"--config", root, "--log-dir", t.TempDir()}, &out)
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "AGENTHOF_OIDC_ISSUER") {
+		t.Fatalf("error must name AGENTHOF_OIDC_ISSUER: %s", out.String())
+	}
+	if strings.Contains(out.String(), "some-raw-jwt-value") {
+		t.Fatalf("error must not echo the raw token: %s", out.String())
+	}
+}
+
+func TestRunStaticRBAC(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_TOKEN", "") // a token exported in the ambient shell must not divert this static-path test onto OIDC
+	root := writeSample(t)
+	rolePath := filepath.Join(root, "roles", "se.yaml")
+	if err := os.WriteFile(rolePath, []byte("name: software-engineer\nworkflows: [fix-bug]\nallowed_groups: [finance]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logs := t.TempDir()
+
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug",
+		"--input", "fix the login bug", "--as", "dana@example.com", "--groups", "finance",
+		"--config", root, "--log-dir", logs}, &out)
+	if code != 0 {
+		t.Fatalf("run with allowed group: %d\n%s", code, out.String())
+	}
+
+	out.Reset()
+	code = cmdRun([]string{"software-engineer", "fix-bug",
+		"--input", "fix the login bug", "--as", "dana@example.com", "--groups", "engineering",
+		"--config", root, "--log-dir", logs}, &out)
+	if code == 0 || !strings.Contains(out.String(), "refused") {
+		t.Fatalf("expected refusal for wrong group: code=%d out=%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out must contain run id: %s", out.String())
+	}
+	events, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != "run_refused" {
+		t.Fatalf("expected single run_refused event, got %+v", events)
+	}
+}
+
+func TestRunValidationFailureIsLedgered(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_TOKEN", "") // a token exported in the ambient shell must not divert this static-path test onto OIDC
+	root := writeSample(t)
+	var discard bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root}, &discard); code != 0 {
+		t.Fatalf("disable: %d\n%s", code, discard.String())
+	}
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug",
+		"--input", "x", "--as", "dev@x",
+		"--config", root, "--log-dir", logs}, &out)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d\n%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused: configuration invalid`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out must contain run id and refusal message: %s", out.String())
+	}
+	events, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != "run_refused" {
+		t.Fatalf("expected single run_refused event, got %+v", events)
+	}
+	if !strings.HasPrefix(events[0].Reason, "configuration invalid:") {
+		t.Fatalf("reason must start with %q: %s", "configuration invalid:", events[0].Reason)
+	}
+}
+
+func TestRunOIDCHappyPathEndToEnd(t *testing.T) {
+	t.Chdir(t.TempDir())
+	root := writeSample(t)
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := cmdTestOIDCServer(t, key)
+	token := cmdMintToken(t, key, map[string]any{
+		"iss":   srv.URL,
+		"aud":   "agenthof",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"sub":   "u-123",
+		"email": "dana@example.com",
+	})
+	t.Setenv("AGENTHOF_OIDC_ISSUER", srv.URL)
+	t.Setenv("AGENTHOF_OIDC_CLIENT_ID", "agenthof") // pin: the minted token's aud is fixed to "agenthof"
+
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug",
+		"--input", "fix the login bug", "--token", token,
+		"--config", root, "--log-dir", logs}, &out)
+	if code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), token) {
+		t.Fatalf("output must not echo the raw token: %s", out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+
+	out.Reset()
+	if code := cmdAudit([]string{m[1], "--log-dir", logs}, &out); code != 0 {
+		t.Fatalf("audit: %s", out.String())
+	}
+	want := fmt.Sprintf("invoked by dana@example.com (oidc, issuer %s)", srv.URL)
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("audit missing %q:\n%s", want, out.String())
+	}
+}
+
+// TestRunBadTokenIsRejectedWithoutEcho is the CLI-layer token-non-echo
+// regression test: a real OIDC issuer is configured (so the failure is a
+// genuine signature-verification failure, not a missing-issuer short
+// circuit), the --token is cryptographically invalid, and the assertion
+// covers both a non-zero exit with a clear error AND that the raw token
+// string never appears anywhere in the combined CLI output.
+func TestRunBadTokenIsRejectedWithoutEcho(t *testing.T) {
+	t.Chdir(t.TempDir())
+	root := writeSample(t)
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := cmdTestOIDCServer(t, key)
+	t.Setenv("AGENTHOF_OIDC_ISSUER", srv.URL)
+	t.Setenv("AGENTHOF_OIDC_CLIENT_ID", "agenthof")
+
+	// A well-formed JWT (valid header/claims, correct issuer/audience) but
+	// signed with a different key than the one the issuer's JWKS publishes —
+	// so verification fails on the signature, not on shape or discovery.
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate other key: %v", err)
+	}
+	badToken := cmdMintToken(t, otherKey, map[string]any{
+		"iss":   srv.URL,
+		"aud":   "agenthof",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"sub":   "u-123",
+		"email": "dana@example.com",
+	})
+
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug",
+		"--input", "fix the login bug", "--token", badToken,
+		"--config", root, "--log-dir", logs}, &out)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for a bad token, got 0:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "token authentication failed") {
+		t.Fatalf("error must mention authentication failure: %s", out.String())
+	}
+	if strings.Contains(out.String(), badToken) {
+		t.Fatalf("output must not echo the raw token: %s", out.String())
+	}
+}
+
+func TestRunFrontedAgentEndToEnd(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_TOKEN", "") // a token exported in the ambient shell must not divert this static-path test onto OIDC
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"artifact":"front result"}`))
+	}))
+	defer stub.Close()
+
+	root := t.TempDir()
+	files := map[string]string{
+		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\n",
+		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
+		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\n",
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
+		"--config", root, "--log-dir", logs}, &out)
+	if code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+
+	out.Reset()
+	if code := cmdAudit([]string{m[1], "--log-dir", logs}, &out); code != 0 {
+		t.Fatalf("audit: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "invoked by dev@x") {
+		t.Fatalf("audit missing invoker: %s", out.String())
+	}
+
+	events, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Type == "step_succeeded" && e.Execution == "fronted" {
+			found = true
+			// The artifact must be the stub adapter's response, not an
+			// echo-executor artifact — proof the mux actually routed this
+			// step to the HTTP adapter rather than falling through to the
+			// contained (echo) executor.
+			if e.Artifact != "front result" {
+				t.Fatalf("expected artifact from the fronted stub, got %q", e.Artifact)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected step_succeeded event with Execution=fronted, got %+v", events)
 	}
 }
