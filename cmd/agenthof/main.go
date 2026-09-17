@@ -34,29 +34,34 @@ Usage:
 `
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
+	os.Exit(dispatch(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// dispatch routes argv to a subcommand and returns the process exit code.
+// It exists (rather than logic living in main) so the testscript harness can
+// run the real CLI in-process.
+func dispatch(argv []string, stdout, stderr io.Writer) int {
+	if len(argv) < 1 {
+		fmt.Fprint(stderr, usage)
+		return 2
 	}
-	var code int
-	switch os.Args[1] {
+	switch argv[0] {
 	case "apply":
-		code = cmdApply(os.Args[2:], os.Stdout)
+		return cmdApply(argv[1:], stdout)
 	case "registry":
-		code = cmdRegistry(os.Args[2:], os.Stdout)
+		return cmdRegistry(argv[1:], stdout)
 	case "run":
-		code = cmdRun(os.Args[2:], os.Stdout)
+		return cmdRun(argv[1:], stdout)
 	case "audit":
-		code = cmdAudit(os.Args[2:], os.Stdout)
+		return cmdAudit(argv[1:], stdout)
 	case "runs":
-		code = cmdRuns(os.Args[2:], os.Stdout)
+		return cmdRuns(argv[1:], stdout)
 	case "gateway":
-		code = cmdGateway(os.Args[2:], os.Stdout)
+		return cmdGateway(argv[1:], stdout)
 	default:
-		fmt.Fprint(os.Stderr, usage)
-		code = 2
+		fmt.Fprint(stderr, usage)
+		return 2
 	}
-	os.Exit(code)
 }
 
 // loadRegistry loads and validates the config at configRoot, printing any
