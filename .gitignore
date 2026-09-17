@@ -1,3 +1,4 @@
 .agenthof/
 *.env
 .DS_Store
+/agenthof

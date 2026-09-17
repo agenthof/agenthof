@@ -1,0 +1,8 @@
+name: reconcile-lite
+description: Categorize then reconcile transactions
+steps:
+  - name: categorize
+    agent: categorizer
+  - name: reconcile
+    agent: reconciler
+    on_failure: categorize

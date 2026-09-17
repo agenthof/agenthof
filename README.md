@@ -24,6 +24,10 @@ RBAC land next.
     ./agenthof run software-engineer fix-bug --input "fix the login bug" --as you@example.com --config examples/config
     ./agenthof audit <run-id>
 
+Expected output from `apply`:
+
+    registry ok: 5 agents, 2 workflows, 2 roles
+
 Try the kill switch:
 
     ./agenthof registry disable coder --config examples/config
@@ -63,6 +67,12 @@ agenthof apply ./config      # roles, workflows, agents — validated, governed
 agenthof run software-engineer fix-bug --input "..."
 agenthof audit <run-id>      # who asked → what ran → what it touched → what it cost
 ```
+
+## The three demos
+
+Walk through CONFIG (registry management), AUDIT (run traceability), and GOVERNANCE (RBAC + budgeting) with scripted end-to-end examples.
+
+See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 
 ## License
 

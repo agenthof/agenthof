@@ -1,0 +1,5 @@
+name: accountant
+description: Financial operations and reconciliation
+workflows: [reconcile-lite]
+allowed_groups: [finance]
+budget_usd_month: 20
