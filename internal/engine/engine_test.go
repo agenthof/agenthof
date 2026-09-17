@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/identity"
@@ -112,5 +114,71 @@ func TestRunRefusals(t *testing.T) {
 	}
 	if len(ex.calls) != 0 {
 		t.Fatal("refusal must happen before any execution")
+	}
+}
+
+func TestRunFailBackThenSucceed(t *testing.T) {
+	dir := t.TempDir()
+	ex := &fakeExec{fail: map[string]int{"coder": 1}} // coder fails once, then succeeds
+	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+		identity.Static("dev@x"), ex, Options{LogDir: dir})
+	if err != nil || status != "succeeded" {
+		t.Fatalf("status=%q err=%v", status, err)
+	}
+	// planner, coder(fail), planner(again), coder, reviewer
+	want := []string{"planner", "coder", "planner", "coder", "reviewer"}
+	if len(ex.calls) != len(want) {
+		t.Fatalf("calls: %v", ex.calls)
+	}
+	events, _ := ReadLog(dir, id)
+	var bounced *Event
+	for i := range events {
+		if events[i].Type == "bounced_back" {
+			bounced = &events[i]
+		}
+	}
+	if bounced == nil || bounced.Step != "code" || bounced.Status != "plan" {
+		t.Fatalf("bounced_back must record failing step and target: %+v", bounced)
+	}
+}
+
+func TestRunBounceExhaustion(t *testing.T) {
+	dir := t.TempDir()
+	ex := &fakeExec{fail: map[string]int{"reviewer": 99}} // reviewer max_bounces: 1
+	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+		identity.Static("dev@x"), ex, Options{LogDir: dir})
+	if err != nil || status != "failed" {
+		t.Fatalf("status=%q err=%v", status, err)
+	}
+	events, _ := ReadLog(dir, id)
+	last := events[len(events)-1]
+	if last.Type != "workflow_finished" || last.Status != "failed" || !strings.Contains(last.Reason, "review") {
+		t.Fatalf("exhaustion must fail honestly naming the step: %+v", last)
+	}
+}
+
+func TestRunFirstStepFailureFails(t *testing.T) {
+	dir := t.TempDir()
+	ex := &fakeExec{fail: map[string]int{"planner": 99}}
+	_, status, _ := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+		identity.Static("dev@x"), ex, Options{LogDir: dir})
+	if status != "failed" {
+		t.Fatalf("first-step failure with no fail-back target must fail, got %q", status)
+	}
+}
+
+type hangExec struct{}
+
+func (hangExec) Execute(ctx context.Context, agent config.AgentDef, input string, artifacts map[string]string) (StepResult, error) {
+	<-ctx.Done()
+	return StepResult{}, ctx.Err()
+}
+
+func TestRunStepTimeout(t *testing.T) {
+	dir := t.TempDir()
+	_, status, _ := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+		identity.Static("dev@x"), hangExec{}, Options{LogDir: dir, StepTimeout: 50 * time.Millisecond})
+	if status != "failed" {
+		t.Fatalf("timeout must fail the run, got %q", status)
 	}
 }

@@ -87,13 +87,34 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 			i++
 			continue
 		}
-		// Failure handling (fail-back) is completed in the next change set;
-		// for now any failure ends the workflow honestly.
+		// failure: resolve the fail-back target
 		emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: res.Reason})
-		emit(Event{Type: "workflow_finished", Status: "failed", Reason: res.Reason})
-		return runID, "failed", nil
+		target := step.OnFailure
+		if target == "" && i > 0 {
+			target = wf.Steps[i-1].Name
+		}
+		cap := step.MaxBounces
+		if cap == 0 {
+			cap = defaultMaxBounces
+		}
+		bounces[step.Name]++
+		if target == "" || bounces[step.Name] > cap {
+			reason := res.Reason
+			if target != "" {
+				reason = fmt.Sprintf("step %q exhausted its %d bounce(s): %s", step.Name, cap, res.Reason)
+			}
+			emit(Event{Type: "workflow_finished", Status: "failed", Reason: reason})
+			return runID, "failed", nil
+		}
+		emit(Event{Type: "bounced_back", Step: step.Name, Status: target, Reason: res.Reason})
+		for j, s := range wf.Steps {
+			if s.Name == target {
+				i = j
+				break
+			}
+		}
+		continue
 	}
-	_ = bounces
 	emit(Event{Type: "workflow_finished", Status: "succeeded"})
 	return runID, "succeeded", nil
 }
