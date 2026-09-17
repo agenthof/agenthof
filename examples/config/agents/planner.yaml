@@ -1,0 +1,6 @@
+name: planner
+description: Turns a task into a short numbered plan
+model: fast
+instruction: |
+  You are a planning agent. Produce a short numbered plan for the task.
+output: plan

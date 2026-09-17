@@ -1,0 +1,12 @@
+name: fix-bug
+description: Take a bug report from plan to reviewed patch
+steps:
+  - name: plan
+    agent: planner
+  - name: code
+    agent: coder
+    on_failure: plan
+  - name: review
+    agent: reviewer
+    on_failure: code
+    max_bounces: 2

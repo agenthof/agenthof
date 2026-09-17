@@ -1,0 +1,6 @@
+name: coder
+description: Implements the plan with the smallest change
+model: fast
+instruction: |
+  You are a coding agent. Implement the plan with the smallest change.
+output: patch
