@@ -201,8 +201,17 @@ func cmdRun(args []string, out io.Writer) int {
 		}
 		authInv, err := (identity.OIDC{IssuerURL: issuerURL, ClientID: clientID}).Authenticate(context.Background(), rawToken)
 		if err != nil {
-			// Never echo the raw token: it's a bearer credential.
+			// Never echo the raw token: it's a bearer credential. Nor do we
+			// echo the go-oidc error text into the ledger below — it can
+			// echo claim values from the (unverified) token.
 			fmt.Fprintf(out, "run: token authentication failed: %v\n", err)
+			refusedInv := identity.Invoker{Subject: "(unverified)", Issuer: issuerURL, Method: "oidc-rejected"}
+			runID, refErr := engine.Refuse(*logDir, role, workflow, refusedInv, "token verification failed")
+			if refErr != nil {
+				fmt.Fprintln(out, refErr)
+				return 1
+			}
+			fmt.Fprintf(out, "run %s refused: token verification failed\n", runID)
 			return 1
 		}
 		inv = authInv

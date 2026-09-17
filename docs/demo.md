@@ -107,13 +107,12 @@ Demonstrates how every run is attributed to an invoker, and the audit trail capt
 
 ### 2.1 Run a workflow as an identity and audit it
 
-Run the fix-bug workflow as dana@example.com (with engineering group):
+Run the fix-bug workflow as dana@example.com:
 
 ```bash
 ./agenthof run software-engineer fix-bug \
   --input "fix the login bug" \
   --as dana@example.com \
-  --groups engineering \
   --executor echo \
   --config examples/config
 ```

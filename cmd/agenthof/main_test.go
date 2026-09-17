@@ -661,6 +661,32 @@ func TestRunBadTokenIsRejectedWithoutEcho(t *testing.T) {
 	if strings.Contains(out.String(), badToken) {
 		t.Fatalf("output must not echo the raw token: %s", out.String())
 	}
+
+	// The rejection must still be ledgered, like any other refusal, but
+	// under a distinct method ("oidc-rejected") that can never be confused
+	// with a genuinely verified "oidc" invoker, and with a fixed reason
+	// string rather than the raw go-oidc error text (which can echo claim
+	// values).
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused: token verification failed`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("expected a ledgered refusal with a run id: %s", out.String())
+	}
+	events, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != "run_refused" {
+		t.Fatalf("expected single run_refused event, got %+v", events)
+	}
+	if events[0].Binding.Invoker.Method != "oidc-rejected" {
+		t.Errorf("Method = %q, want %q", events[0].Binding.Invoker.Method, "oidc-rejected")
+	}
+	if events[0].Reason != "token verification failed" {
+		t.Errorf("Reason = %q, want %q", events[0].Reason, "token verification failed")
+	}
+	if strings.Contains(events[0].Reason, badToken) {
+		t.Fatalf("ledgered reason must not echo the raw token: %s", events[0].Reason)
+	}
 }
 
 func TestRunFrontedAgentEndToEnd(t *testing.T) {

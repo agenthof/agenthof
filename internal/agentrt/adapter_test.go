@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -230,6 +231,78 @@ func TestAdapterExecutor_Execute_MalformedJSON(t *testing.T) {
 	}
 	if res.Reason == "" {
 		t.Errorf("Reason = %q, want a non-empty reason", res.Reason)
+	}
+}
+
+// TestAdapterExecutor_Execute_DoesNotFollowRedirects proves the adapter
+// treats a 3xx response as a failed step naming the status code, rather than
+// following the redirect to whatever Location the fronted agent names. The
+// adapter is a trust boundary: a misbehaving or compromised fronted agent
+// must not be able to redirect the platform's outbound request to an
+// arbitrary third party.
+func TestAdapterExecutor_Execute_DoesNotFollowRedirects(t *testing.T) {
+	var secondHits int32
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&secondHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"artifact":"should never be reached"}`))
+	}))
+	defer second.Close()
+
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, second.URL, http.StatusFound)
+	}))
+	defer first.Close()
+
+	x := AdapterExecutor{}
+	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: first.URL}
+
+	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	if err != nil {
+		t.Fatalf("Execute: unexpected error: %v", err)
+	}
+	if res.Success {
+		t.Fatalf("Execute: Success = true, want false (redirect must not be followed)")
+	}
+	if res.Reason != "adapter returned 302" {
+		t.Errorf("Reason = %q, want %q", res.Reason, "adapter returned 302")
+	}
+	if hits := atomic.LoadInt32(&secondHits); hits != 0 {
+		t.Errorf("second server hit %d time(s), want 0 — the adapter followed the redirect", hits)
+	}
+}
+
+// TestAdapterExecutor_Execute_ReasonTruncated proves an oversized
+// endpoint-supplied reason (success:false path) is capped, so a
+// misbehaving fronted agent can't bloat the ledger/audit output with an
+// unbounded string.
+func TestAdapterExecutor_Execute_ReasonTruncated(t *testing.T) {
+	longReason := strings.Repeat("a", 10000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := json.Marshal(map[string]any{"success": false, "reason": longReason})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	x := AdapterExecutor{}
+	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: srv.URL}
+
+	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	if err != nil {
+		t.Fatalf("Execute: unexpected error: %v", err)
+	}
+	if res.Success {
+		t.Fatalf("Execute: Success = true, want false")
+	}
+	if len(res.Reason) > 320 {
+		t.Errorf("Reason length = %d, want bounded (~313)", len(res.Reason))
+	}
+	if !strings.Contains(res.Reason, "truncated") {
+		t.Errorf("Reason = %q, want a truncation marker", res.Reason)
 	}
 }
 

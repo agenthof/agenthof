@@ -15,7 +15,7 @@ and attributed to the human who asked for it.
 Pre-release. The core is real: config → validated registry → event-sourced
 engine (linear + fail-back) → invoker-attributed audit trail, running offline
 with a built-in echo executor. Model-backed agents (ADK), gateways, OIDC, and
-RBAC land next.
+RBAC are implemented.
 
 ## Quickstart
 
@@ -52,7 +52,7 @@ export is needed once a role has been provisioned. Setting `AGENTHOF_GATEWAY_KEY
 OPTIONAL — a fallback used only when no role key file exists yet.
 
 **Important:** Role keys live under `.agenthof/keys/` and are gitignored; never commit them.
-**Requires:** Go >= 1.26.6 toolchain (auto-downloaded via `go.mod`).
+**Requires:** Go >= 1.27 toolchain (auto-downloaded via `go.mod`).
 
 For the full end-to-end walkthrough, including budget behavior and audit trails, see [`scripts/live-smoke.md`](scripts/live-smoke.md).
 

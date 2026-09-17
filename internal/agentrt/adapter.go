@@ -22,6 +22,26 @@ const defaultAdapterTimeout = 60 * time.Second
 // returning an unbounded response body.
 const maxAdapterResponseBytes = 1 << 20 // 1 MiB
 
+// maxAdapterReasonChars caps the length of an endpoint-supplied reason
+// string (the success:false path) before it's stored on StepResult. The
+// adapter is a trust boundary: a misbehaving or compromised fronted agent
+// must not be able to bloat the ledger/audit output with an unbounded
+// reason string.
+const maxAdapterReasonChars = 300
+
+// adapterClient is used for all outbound requests to fronted agents. It
+// must not follow redirects: a fronted agent is an untrusted trust
+// boundary, and following a 3xx Location it names would let it redirect
+// the platform's outbound request to an arbitrary third party. This is a
+// dedicated client rather than a mutation of http.DefaultClient, since
+// OIDC discovery elsewhere in the platform relies on DefaultClient's
+// normal (redirect-following) behavior.
+var adapterClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 // AdapterExecutor runs a config.AgentDef as a "fronted" agent: it POSTs the
 // step input to the agent's HTTP endpoint and maps the adapter's JSON
 // response onto a StepResult. It implements engine.StepExecutor.
@@ -55,13 +75,17 @@ type adapterResponse struct {
 }
 
 // Execute POSTs {"input", "artifacts", "agent"} as JSON to a.Endpoint, with
-// header X-Agenthof-Agent set to a.Name. A 200 response is decoded and
-// mapped verbatim onto StepResult. A non-200 response, a transport error, a
-// timeout, or a response body over maxAdapterResponseBytes is reported as a
-// failed step (Success: false) with a nil error, since those reflect the
-// fronted agent's own availability or behavior, not a problem with the
-// engine driving it. An empty endpoint — which validation should already
-// have rejected — is a configuration error wrapping engine.ErrStepConfig.
+// header X-Agenthof-Agent set to a.Name, using a client that does not follow
+// redirects (a fronted agent is a trust boundary; a 3xx is reported as a
+// failed step like any other non-200). A 200 response is decoded and mapped
+// onto StepResult, except that an endpoint-supplied failure reason
+// (success:false) is capped at maxAdapterReasonChars. A non-200 response, a
+// transport error, a timeout, or a response body over maxAdapterResponseBytes
+// is reported as a failed step (Success: false) with a nil error, since those
+// reflect the fronted agent's own availability or behavior, not a problem
+// with the engine driving it. An empty endpoint — which validation should
+// already have rejected — is a configuration error wrapping
+// engine.ErrStepConfig.
 func (x AdapterExecutor) Execute(ctx context.Context, a config.AgentDef, input string, artifacts map[string]string) (engine.StepResult, error) {
 	if a.Endpoint == "" {
 		return engine.StepResult{}, fmt.Errorf("agent %q has no endpoint: %w", a.Name, engine.ErrStepConfig)
@@ -86,7 +110,7 @@ func (x AdapterExecutor) Execute(ctx context.Context, a config.AgentDef, input s
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Agenthof-Agent", a.Name)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := adapterClient.Do(req)
 	if err != nil {
 		return engine.StepResult{Success: false, Reason: err.Error()}, nil
 	}
@@ -108,5 +132,10 @@ func (x AdapterExecutor) Execute(ctx context.Context, a config.AgentDef, input s
 		return engine.StepResult{Success: false, Reason: err.Error()}, nil
 	}
 
-	return engine.StepResult{Success: out.Success, Artifact: out.Artifact, Reason: out.Reason}, nil
+	reason := out.Reason
+	if !out.Success && len(reason) > maxAdapterReasonChars {
+		reason = reason[:maxAdapterReasonChars] + "… (truncated)"
+	}
+
+	return engine.StepResult{Success: out.Success, Artifact: out.Artifact, Reason: reason}, nil
 }
