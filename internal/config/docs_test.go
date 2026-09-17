@@ -30,7 +30,7 @@ func TestConfigReferenceCoversAllYAMLFields(t *testing.T) {
 				missing = append(missing, fmt.Sprintf("%s.%s (yaml %q)", owner, f.Name, tag))
 			}
 			ft := f.Type
-			for ft.Kind() == reflect.Ptr || ft.Kind() == reflect.Slice || ft.Kind() == reflect.Map {
+			for ft.Kind() == reflect.Pointer || ft.Kind() == reflect.Slice || ft.Kind() == reflect.Map {
 				ft = ft.Elem()
 			}
 			if ft.Kind() == reflect.Struct {

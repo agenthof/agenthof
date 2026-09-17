@@ -30,7 +30,7 @@ func Refuse(logDir, role, workflow string, inv identity.Invoker, reason string) 
 	if err != nil {
 		return runID, err
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}
 	e := Event{
 		Time:    time.Now().UTC(),

@@ -37,7 +37,7 @@ func listFilesTool(j *Jail) (tool.Tool, error) {
 		}
 		entries := make([]fileEntry, len(files))
 		for i, f := range files {
-			entries[i] = fileEntry{Path: f.Path, Size: f.Size}
+			entries[i] = fileEntry(f)
 		}
 		return listFilesResult{Files: entries, Truncated: truncated}, nil
 	})

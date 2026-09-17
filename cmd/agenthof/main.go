@@ -42,7 +42,7 @@ func main() {
 // run the real CLI in-process.
 func dispatch(argv []string, stdout, stderr io.Writer) int {
 	if len(argv) < 1 {
-		fmt.Fprint(stderr, usage)
+		_, _ = fmt.Fprint(stderr, usage)
 		return 2
 	}
 	switch argv[0] {
@@ -59,7 +59,7 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 	case "gateway":
 		return cmdGateway(argv[1:], stdout)
 	default:
-		fmt.Fprint(stderr, usage)
+		_, _ = fmt.Fprint(stderr, usage)
 		return 2
 	}
 }
@@ -71,11 +71,11 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 func loadRegistry(configRoot string, out io.Writer) (config.Config, *registry.Registry) {
 	cfg, loadErrs := config.LoadDir(configRoot)
 	for _, e := range loadErrs {
-		fmt.Fprintln(out, e)
+		_, _ = fmt.Fprintln(out, e)
 	}
 	reg, valErrs := registry.Build(cfg)
 	for _, e := range valErrs {
-		fmt.Fprintln(out, e.Error())
+		_, _ = fmt.Fprintln(out, e.Error())
 	}
 	if len(loadErrs) > 0 || len(valErrs) > 0 {
 		return cfg, nil
@@ -97,23 +97,23 @@ func cmdApply(args []string, out io.Writer) int {
 	}
 	cfg, loadErrs := config.LoadDir(*cfgDir)
 	for _, e := range loadErrs {
-		fmt.Fprintln(out, e)
+		_, _ = fmt.Fprintln(out, e)
 	}
 	_, valErrs := registry.Build(cfg)
 	for _, e := range valErrs {
-		fmt.Fprintln(out, e.Error())
+		_, _ = fmt.Fprintln(out, e.Error())
 	}
 	if len(loadErrs) > 0 || len(valErrs) > 0 {
 		return 1
 	}
-	fmt.Fprintf(out, "registry ok: %d agents, %d workflows, %d roles\n",
+	_, _ = fmt.Fprintf(out, "registry ok: %d agents, %d workflows, %d roles\n",
 		len(cfg.Agents), len(cfg.Workflows), len(cfg.Roles))
 	return 0
 }
 
 func cmdRegistry(args []string, out io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(out, "registry needs a subcommand: list, enable, disable")
+		_, _ = fmt.Fprintln(out, "registry needs a subcommand: list, enable, disable")
 		return 2
 	}
 	sub := args[0]
@@ -121,7 +121,7 @@ func cmdRegistry(args []string, out io.Writer) int {
 	var target string
 	if sub == "enable" || sub == "disable" {
 		if len(rest) < 1 {
-			fmt.Fprintf(out, "registry %s needs an agent name\n", sub)
+			_, _ = fmt.Fprintf(out, "registry %s needs an agent name\n", sub)
 			return 2
 		}
 		target, rest = rest[0], rest[1:]
@@ -139,30 +139,30 @@ func cmdRegistry(args []string, out io.Writer) int {
 			return 1
 		}
 		for _, line := range reg.List() {
-			fmt.Fprintln(out, line)
+			_, _ = fmt.Fprintln(out, line)
 		}
 		return 0
 	case "enable", "disable":
 		enabled := sub == "enable"
 		if err := registry.SetEnabled(*cfgDir, target, enabled); err != nil {
-			fmt.Fprintln(out, err)
+			_, _ = fmt.Fprintln(out, err)
 			return 1
 		}
 		state := "disabled"
 		if enabled {
 			state = "enabled"
 		}
-		fmt.Fprintf(out, "agent %s %s\n", target, state)
+		_, _ = fmt.Fprintf(out, "agent %s %s\n", target, state)
 		return 0
 	default:
-		fmt.Fprintf(out, "unknown registry subcommand %q\n", sub)
+		_, _ = fmt.Fprintf(out, "unknown registry subcommand %q\n", sub)
 		return 2
 	}
 }
 
 func cmdRun(args []string, out io.Writer) int {
 	if len(args) < 2 {
-		fmt.Fprintln(out, "run needs: <role> <workflow>")
+		_, _ = fmt.Fprintln(out, "run needs: <role> <workflow>")
 		return 2
 	}
 	role, workflow := args[0], args[1]
@@ -181,11 +181,11 @@ func cmdRun(args []string, out io.Writer) int {
 		return 2
 	}
 	if *input == "" {
-		fmt.Fprintln(out, "run needs --input")
+		_, _ = fmt.Fprintln(out, "run needs --input")
 		return 2
 	}
 	if *executorName != "echo" && *executorName != "adk" {
-		fmt.Fprintf(out, "run: invalid --executor %q, want \"echo\" or \"adk\"\n", *executorName)
+		_, _ = fmt.Fprintf(out, "run: invalid --executor %q, want \"echo\" or \"adk\"\n", *executorName)
 		return 2
 	}
 
@@ -197,7 +197,7 @@ func cmdRun(args []string, out io.Writer) int {
 	if rawToken != "" {
 		issuerURL := os.Getenv("AGENTHOF_OIDC_ISSUER")
 		if issuerURL == "" {
-			fmt.Fprintln(out, "run: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+			_, _ = fmt.Fprintln(out, "run: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
 			return 2
 		}
 		clientID := os.Getenv("AGENTHOF_OIDC_CLIENT_ID")
@@ -209,14 +209,14 @@ func cmdRun(args []string, out io.Writer) int {
 			// Never echo the raw token: it's a bearer credential. Nor do we
 			// echo the go-oidc error text into the ledger below — it can
 			// echo claim values from the (unverified) token.
-			fmt.Fprintf(out, "run: token authentication failed: %v\n", err)
+			_, _ = fmt.Fprintf(out, "run: token authentication failed: %v\n", err)
 			refusedInv := identity.Invoker{Subject: "(unverified)", Issuer: issuerURL, Method: "oidc-rejected"}
 			runID, refErr := engine.Refuse(*logDir, role, workflow, refusedInv, "token verification failed")
 			if refErr != nil {
-				fmt.Fprintln(out, refErr)
+				_, _ = fmt.Fprintln(out, refErr)
 				return 1
 			}
-			fmt.Fprintf(out, "run %s refused: token verification failed\n", runID)
+			_, _ = fmt.Fprintf(out, "run %s refused: token verification failed\n", runID)
 			return 1
 		}
 		inv = authInv
@@ -243,11 +243,11 @@ func cmdRun(args []string, out io.Writer) int {
 	}
 	cfg, loadErrs := config.LoadDir(*cfgDir)
 	for _, e := range loadErrs {
-		fmt.Fprintln(out, e)
+		_, _ = fmt.Fprintln(out, e)
 	}
 	reg, valErrs := registry.Build(cfg)
 	for _, e := range valErrs {
-		fmt.Fprintln(out, e.Error())
+		_, _ = fmt.Fprintln(out, e.Error())
 	}
 	if len(loadErrs) > 0 || len(valErrs) > 0 {
 		var firstErr string
@@ -259,15 +259,15 @@ func cmdRun(args []string, out io.Writer) int {
 		reason := "configuration invalid: " + firstErr
 		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, reason)
 		if refErr != nil {
-			fmt.Fprintln(out, refErr)
+			_, _ = fmt.Fprintln(out, refErr)
 			return 1
 		}
-		fmt.Fprintf(out, "run %s refused: configuration invalid\n", runID)
+		_, _ = fmt.Fprintf(out, "run %s refused: configuration invalid\n", runID)
 		return 1
 	}
-	fmt.Fprintf(out, "workspace: %s\n", ws)
+	_, _ = fmt.Fprintf(out, "workspace: %s\n", ws)
 	if err := os.MkdirAll(ws, 0o755); err != nil {
-		fmt.Fprintln(out, err)
+		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
 	var contained engine.StepExecutor
@@ -282,14 +282,14 @@ func cmdRun(args []string, out io.Writer) int {
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, WorkspaceDir: ws})
 	if err != nil && status == "refused" {
-		fmt.Fprintf(out, "run %s refused: %v\n", runID, err)
+		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", runID, err)
 		return 1
 	}
 	if err != nil {
-		fmt.Fprintf(out, "run %s error: %v\n", runID, err)
+		_, _ = fmt.Fprintf(out, "run %s error: %v\n", runID, err)
 		return 1
 	}
-	fmt.Fprintf(out, "run %s finished: %s\n", runID, status)
+	_, _ = fmt.Fprintf(out, "run %s finished: %s\n", runID, status)
 	if status != "succeeded" {
 		return 1
 	}
@@ -298,7 +298,7 @@ func cmdRun(args []string, out io.Writer) int {
 
 func cmdGateway(args []string, out io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(out, "gateway needs a subcommand: provision")
+		_, _ = fmt.Fprintln(out, "gateway needs a subcommand: provision")
 		return 2
 	}
 	sub := args[0]
@@ -307,7 +307,7 @@ func cmdGateway(args []string, out io.Writer) int {
 	case "provision":
 		return cmdGatewayProvision(rest, out)
 	default:
-		fmt.Fprintf(out, "unknown gateway subcommand %q\n", sub)
+		_, _ = fmt.Fprintf(out, "unknown gateway subcommand %q\n", sub)
 		return 2
 	}
 }
@@ -322,7 +322,7 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 	}
 	masterKey := os.Getenv("LITELLM_MASTER_KEY")
 	if masterKey == "" {
-		fmt.Fprintln(out, "gateway provision needs LITELLM_MASTER_KEY set in the environment")
+		_, _ = fmt.Fprintln(out, "gateway provision needs LITELLM_MASTER_KEY set in the environment")
 		return 2
 	}
 	// Provisioning needs the raw role list (registry.Registry only exposes
@@ -330,11 +330,11 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 	// through buildRegistry.
 	cfg, loadErrs := config.LoadDir(*cfgDir)
 	for _, e := range loadErrs {
-		fmt.Fprintln(out, e)
+		_, _ = fmt.Fprintln(out, e)
 	}
 	_, valErrs := registry.Build(cfg)
 	for _, e := range valErrs {
-		fmt.Fprintln(out, e.Error())
+		_, _ = fmt.Fprintln(out, e.Error())
 	}
 	if len(loadErrs) > 0 || len(valErrs) > 0 {
 		return 1
@@ -343,13 +343,13 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 	for _, role := range cfg.Roles {
 		created, err := p.EnsureRoleKey(".", role)
 		if err != nil {
-			fmt.Fprintf(out, "role %s: %v\n", role.Name, err)
+			_, _ = fmt.Fprintf(out, "role %s: %v\n", role.Name, err)
 			return 1
 		}
 		if created {
-			fmt.Fprintf(out, "provisioned key for role %s (budget $%g)\n", role.Name, role.BudgetUSDMonth)
+			_, _ = fmt.Fprintf(out, "provisioned key for role %s (budget $%g)\n", role.Name, role.BudgetUSDMonth)
 		} else {
-			fmt.Fprintf(out, "role %s: key ok\n", role.Name)
+			_, _ = fmt.Fprintf(out, "role %s: key ok\n", role.Name)
 		}
 	}
 	return 0
@@ -357,7 +357,7 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 
 func cmdAudit(args []string, out io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(out, "audit needs a run id")
+		_, _ = fmt.Fprintln(out, "audit needs a run id")
 		return 2
 	}
 	runID := args[0]
@@ -369,16 +369,16 @@ func cmdAudit(args []string, out io.Writer) int {
 	}
 	events, err := engine.ReadLog(*logDir, runID)
 	if err != nil {
-		fmt.Fprintln(out, err)
+		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
-	fmt.Fprint(out, audit.Render(events))
+	_, _ = fmt.Fprint(out, audit.Render(events))
 	return 0
 }
 
 func cmdRuns(args []string, out io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(out, "runs needs a subcommand: prune")
+		_, _ = fmt.Fprintln(out, "runs needs a subcommand: prune")
 		return 2
 	}
 	sub := args[0]
@@ -387,7 +387,7 @@ func cmdRuns(args []string, out io.Writer) int {
 	case "prune":
 		return cmdRunsPrune(rest, out)
 	default:
-		fmt.Fprintf(out, "unknown runs subcommand %q\n", sub)
+		_, _ = fmt.Fprintf(out, "unknown runs subcommand %q\n", sub)
 		return 2
 	}
 }
@@ -403,17 +403,17 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 	}
 	dur, err := parseRetentionDuration(*olderThan)
 	if err != nil {
-		fmt.Fprintf(out, "invalid --older-than %q: %v\n", *olderThan, err)
+		_, _ = fmt.Fprintf(out, "invalid --older-than %q: %v\n", *olderThan, err)
 		return 2
 	}
 	if dur <= 0 {
-		fmt.Fprintln(out, "--older-than must be a positive duration")
+		_, _ = fmt.Fprintln(out, "--older-than must be a positive duration")
 		return 2
 	}
 
 	runsPruned, err := pruneRuns(*logDir, dur)
 	if err != nil {
-		fmt.Fprintln(out, err)
+		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
 
@@ -427,20 +427,20 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 	if _, statErr := os.Stat(*artifactDir); statErr == nil {
 		store, err := artifact.NewStore(*artifactDir)
 		if err != nil {
-			fmt.Fprintln(out, err)
+			_, _ = fmt.Fprintln(out, err)
 			return 1
 		}
 		artifactsPruned, err = store.Prune(dur)
 		if err != nil {
-			fmt.Fprintln(out, err)
+			_, _ = fmt.Fprintln(out, err)
 			return 1
 		}
 	} else if !os.IsNotExist(statErr) {
-		fmt.Fprintln(out, statErr)
+		_, _ = fmt.Fprintln(out, statErr)
 		return 1
 	}
 
-	fmt.Fprintf(out, "pruned %d run(s) and %d artifact(s) older than %s\n", runsPruned, artifactsPruned, *olderThan)
+	_, _ = fmt.Fprintf(out, "pruned %d run(s) and %d artifact(s) older than %s\n", runsPruned, artifactsPruned, *olderThan)
 	return 0
 }
 

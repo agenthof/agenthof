@@ -60,7 +60,9 @@ func TestPutIdempotentAndPrune(t *testing.T) {
 	if err := os.Chtimes(old, past, past); err != nil {
 		t.Fatal(err)
 	}
-	s.Put("fresh")
+	if _, _, err := s.Put("fresh"); err != nil {
+		t.Fatal(err)
+	}
 	n, err := s.Prune(24 * time.Hour)
 	if err != nil || n != 1 {
 		t.Fatalf("prune n=%d err=%v", n, err)

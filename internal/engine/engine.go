@@ -63,7 +63,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	if err != nil {
 		return runID, "failed", err
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	store, err := artifact.NewStore(opts.ArtifactDir)
 	if err != nil {
 		return runID, "failed", err

@@ -96,7 +96,7 @@ func Validate(cfg config.Config) []ValidationError {
 			}
 			if s.OnSuccess != "" {
 				last := i == len(w.Steps)-1
-				if !(last && s.OnSuccess == "finish") {
+				if !last || s.OnSuccess != "finish" {
 					j, ok := index[s.OnSuccess]
 					if !ok || j != i+1 {
 						add(w.SourceFile, w.Name, "bad-graph",

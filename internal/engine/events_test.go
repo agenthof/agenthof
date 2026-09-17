@@ -124,7 +124,9 @@ func TestChainCompatWithPreArtifactSHALogs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	log.Close()
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
 	events, err := ReadLog(dir, id)
 	if err != nil {
 		t.Fatal(err)
