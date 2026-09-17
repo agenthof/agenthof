@@ -81,6 +81,32 @@ func TestRenderLedgerIntegrityVerified(t *testing.T) {
 	}
 }
 
+func TestRenderRefuseHelper(t *testing.T) {
+	dir := t.TempDir()
+	inv := identity.Invoker{Subject: "dev@x", Groups: []string{"engineering"}}
+	id, err := engine.Refuse(dir, "fin", "simple", inv, `role "fin" does not allow the invoker: allowed groups [finance]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := engine.ReadLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != "run_refused" {
+		t.Fatalf("Refuse must write exactly one run_refused event: %+v", events)
+	}
+	if err := engine.VerifyChain(events); err != nil {
+		t.Fatalf("Refuse's single event must form a valid chain: %v", err)
+	}
+	out := Render(events)
+	if !strings.Contains(out, "status: refused") {
+		t.Fatalf("missing refused status in:\n%s", out)
+	}
+	if !strings.Contains(out, "ledger integrity: verified (1 events)") {
+		t.Fatalf("missing verified integrity line in:\n%s", out)
+	}
+}
+
 func TestRenderLedgerIntegrityBroken(t *testing.T) {
 	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "software-engineer", Workflow: "fix-bug", RunID: "r-1a2b3c4d"}
 	// Hand-built events without valid Prev chaining.
