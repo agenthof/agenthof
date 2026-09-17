@@ -29,6 +29,26 @@ Try the kill switch:
     ./agenthof registry disable coder --config examples/config
     ./agenthof apply --config examples/config   # fails, naming every dependent workflow
 
+### Model-backed runs (LiteLLM)
+
+To run agents with real models instead of the echo executor, use a local LiteLLM gateway:
+
+    cd deploy
+    docker compose up -d                                    # start LiteLLM
+    cd ..
+    ./agenthof gateway provision --config examples/config   # provision per-role keys
+    export AGENTHOF_GATEWAY_KEY=$(cat .agenthof/keys/software-engineer.key)
+    ./agenthof run software-engineer fix-bug \
+      --executor adk \
+      --input "your task here" \
+      --as you@example.com \
+      --config examples/config
+
+**Important:** Role keys live under `.agenthof/keys/` and are gitignored; never commit them.
+**Requires:** Go >= 1.26.6 toolchain (auto-downloaded via `go.mod`).
+
+For the full end-to-end walkthrough, including budget behavior and audit trails, see [`scripts/live-smoke.md`](scripts/live-smoke.md).
+
 Retention (compliance floor, free forever):
 
     ./agenthof runs prune --older-than 180d
