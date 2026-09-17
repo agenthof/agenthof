@@ -22,15 +22,16 @@ type Binding struct {
 }
 
 type Event struct {
-	Time     time.Time `json:"time"`
-	Type     string    `json:"type"`
-	Step     string    `json:"step,omitempty"`
-	Agent    string    `json:"agent,omitempty"`
-	Status   string    `json:"status,omitempty"`
-	Reason   string    `json:"reason,omitempty"`
-	Artifact string    `json:"artifact,omitempty"`
-	Binding  Binding   `json:"binding"`
-	Prev     string    `json:"prev"`
+	Time        time.Time `json:"time"`
+	Type        string    `json:"type"`
+	Step        string    `json:"step,omitempty"`
+	Agent       string    `json:"agent,omitempty"`
+	Status      string    `json:"status,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
+	Artifact    string    `json:"artifact,omitempty"`
+	ArtifactSHA string    `json:"artifact_sha,omitempty"`
+	Binding     Binding   `json:"binding"`
+	Prev        string    `json:"prev"`
 }
 
 func NewRunID() string {

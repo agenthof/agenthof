@@ -107,3 +107,33 @@ func TestVerifyChainValid(t *testing.T) {
 		t.Fatalf("error must name broken index 2, got: %d", broken.Index)
 	}
 }
+
+func TestChainCompatWithPreArtifactSHALogs(t *testing.T) {
+	// A ledger written before ArtifactSHA existed must still verify:
+	// empty ArtifactSHA is omitted on re-marshal, so bytes match.
+	dir := t.TempDir()
+	id := NewRunID()
+	log, err := OpenLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := Binding{Invoker: identity.Static("x@y"), Role: "r", Workflow: "w", RunID: id}
+	for _, typ := range []string{"workflow_started", "step_started", "workflow_finished"} {
+		if err := log.Append(Event{Time: time.Now().UTC(), Type: typ, Binding: bind}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log.Close()
+	events, err := ReadLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.ArtifactSHA != "" {
+			t.Fatal("no event should carry a sha here")
+		}
+	}
+	if err := VerifyChain(events); err != nil {
+		t.Fatalf("chain must verify with omitted artifact_sha: %v", err)
+	}
+}
