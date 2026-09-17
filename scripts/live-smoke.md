@@ -69,3 +69,9 @@ Expected output includes:
 - Model costs accumulated per step
 - Budget remaining or exhausted state
 - If budget exhausted mid-task: a note that re-running will skip already-completed steps and resume from the checkpoint
+
+## Notes
+
+- The admin key-check (`gateway provision`'s `GET /key/info?key=...`) passes
+  the key as a query parameter, so it may appear in LiteLLM server access
+  logs — run the gateway on localhost or behind TLS.

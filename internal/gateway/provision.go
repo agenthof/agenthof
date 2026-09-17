@@ -3,14 +3,41 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/agenthof/agenthof/internal/config"
 )
+
+// sanitizeURLErr strips any query string (which may carry a secret, e.g.
+// checkKey's "?key=<key>") out of a *url.Error before it can reach a log
+// line or a printed error. net/http's transport embeds the full request
+// URL, query string included, in both *http.NewRequest's parse errors and
+// the error returned by (*http.Client).Do — so this must wrap both call
+// sites, not just one, or the redaction is bypassed by whichever path
+// happens to fail.
+func sanitizeURLErr(err error) error {
+	var u *url.Error
+	if errors.As(err, &u) {
+		return fmt.Errorf("%s %s: %w", u.Op, redactURL(u.URL), u.Err)
+	}
+	return err
+}
+
+// redactURL replaces a URL's query string with a fixed marker, so a secret
+// passed as a query parameter (e.g. "?key=sk-...") never appears in an
+// error message.
+func redactURL(s string) string {
+	if i := strings.IndexByte(s, '?'); i >= 0 {
+		s = s[:i] + "?[redacted]"
+	}
+	return s
+}
 
 // Provisioner talks to a LiteLLM-compatible admin API to provision and
 // verify per-role API keys.
@@ -71,13 +98,13 @@ func (p Provisioner) checkKey(key string) (bool, error) {
 
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
-		return false, fmt.Errorf("gateway: building key info request: %w", err)
+		return false, fmt.Errorf("gateway: building key info request: %w", sanitizeURLErr(err))
 	}
 	req.Header.Set("Authorization", "Bearer "+p.MasterKey)
 
 	resp, err := p.httpClient().Do(req)
 	if err != nil {
-		return false, fmt.Errorf("gateway: key info request failed: %w", err)
+		return false, fmt.Errorf("gateway: key info request failed: %w", sanitizeURLErr(err))
 	}
 	defer resp.Body.Close()
 
@@ -103,14 +130,14 @@ func (p Provisioner) generateKey(role config.RoleDef) (string, error) {
 
 	req, err := http.NewRequest(http.MethodPost, p.AdminBase+"/key/generate", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("gateway: building key generate request: %w", err)
+		return "", fmt.Errorf("gateway: building key generate request: %w", sanitizeURLErr(err))
 	}
 	req.Header.Set("Authorization", "Bearer "+p.MasterKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.httpClient().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("gateway: key generate request failed: %w", err)
+		return "", fmt.Errorf("gateway: key generate request failed: %w", sanitizeURLErr(err))
 	}
 	defer resp.Body.Close()
 

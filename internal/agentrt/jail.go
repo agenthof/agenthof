@@ -3,7 +3,8 @@
 // directory: relative escapes ("..") and absolute-looking inputs are folded
 // back under the root rather than rejected, symlinks that would carry an
 // operation outside the root (or that are themselves the final target) are
-// refused, and any path touching a ".git" component is refused outright.
+// refused, and any path with a dot-prefixed component (".git", ".env",
+// ".ssh", etc., relative to the jail root) is refused outright.
 //
 // This package must never import "os/exec" or otherwise shell out; every
 // operation here is a plain filesystem read/write.
@@ -60,8 +61,9 @@ type FileInfo struct {
 
 // listAll walks the jail from its root, returning every eligible file
 // sorted by relative path, with no result cap. A file is eligible unless:
-// it (or an ancestor directory) is named ".git", "node_modules", or
-// "vendor"; it is larger than maxFileSize; or it is itself a symlink.
+// it (or an ancestor directory) has a dot-prefixed name (".git", ".env",
+// ".ssh", etc.) or is named "node_modules" or "vendor"; it is larger than
+// maxFileSize; or it is itself a symlink.
 //
 // Skipping symlinked files is not spelled out in the List contract, but it
 // is load-bearing here: listAll backs Search too, and Search reads each
@@ -81,11 +83,11 @@ func (j *Jail) listAll() ([]FileInfo, error) {
 			return nil
 		}
 		name := d.Name()
-		if strings.EqualFold(name, ".git") {
+		if strings.HasPrefix(name, ".") {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
-			return nil // a gitfile (worktree pointer) — skip, don't descend (nothing to)
+			return nil // a dotfile (".git" worktree pointer, ".env", etc.) — skip
 		}
 		if d.IsDir() {
 			if name == "node_modules" || name == "vendor" {
@@ -137,14 +139,18 @@ func withinRoot(p, root string) bool {
 	return strings.HasPrefix(p, root+string(filepath.Separator))
 }
 
-// containsGitComponent reports whether any "/"-separated component of a
-// slash-style path (rooted, i.e. starting with "/") is ".git". The compare
-// is case-insensitive because APFS (macOS's default filesystem) is
-// case-insensitive-but-preserving, so ".GIT" resolves to the same real
-// directory as ".git".
-func containsGitComponent(slashPath string) bool {
+// containsDotComponent reports whether any "/"-separated component of a
+// slash-style path (rooted, i.e. starting with "/") has a leading dot
+// (".git", ".env", ".ssh", etc.). This is Constitution Art. I's dotfile
+// denial: any dot-prefixed path component, relative to the jail root, is
+// refused outright — never just ".git" — so secrets and tool config
+// (".env", ".ssh/id_rsa", ".aws/credentials", ...) can't be read, written,
+// or edited by a jailed agent any more than the repo's own VCS metadata
+// can. The leading "/" this is always called with is not itself a
+// dot-prefixed component, so it never false-positives on the root.
+func containsDotComponent(slashPath string) bool {
 	for _, part := range strings.Split(slashPath, "/") {
-		if strings.EqualFold(part, ".git") {
+		if strings.HasPrefix(part, ".") {
 			return true
 		}
 	}
@@ -158,23 +164,24 @@ func containsGitComponent(slashPath string) bool {
 //  1. rel is Cleaned against a synthetic leading "/" so ".." components and
 //     absolute-looking input can never climb above the root — they fold
 //     back under it instead of erroring.
-//  2. any ".git" path component in the (cleaned) input is refused outright.
+//  2. any dot-prefixed path component in the (cleaned) input is refused
+//     outright (".git", ".env", ".ssh", etc.).
 //  3. the deepest EXISTING ancestor of the target's parent directory is
 //     located and fully resolved with EvalSymlinks; the resolved location
 //     plus the still-nonexistent remainder must stay under root, or the
 //     call is refused as escaping the workspace. (A nonexistent path
 //     segment cannot itself be a symlink, so only the existing prefix needs
 //     resolving.)
-//  4. the resolved location is re-checked for a ".git" component, so a
-//     symlink whose literal input name doesn't mention ".git" can't be used
-//     to alias into one (e.g. a symlink "alias" -> ".git").
+//  4. the resolved location is re-checked for a dot-prefixed component, so
+//     a symlink whose literal input name doesn't start with a dot can't be
+//     used to alias into one (e.g. a symlink "alias" -> ".git").
 //  5. the final path component itself must not be a symlink, even one that
 //     resolves back inside the root — Read/Write/Edit only ever operate on
 //     real files the jail placed there.
 func (j *Jail) resolve(rel string) (string, error) {
 	clean := filepath.Clean("/" + rel)
-	if containsGitComponent(clean) {
-		return "", fmt.Errorf("agentrt: path %q refused: contains a .git component", rel)
+	if containsDotComponent(clean) {
+		return "", fmt.Errorf("agentrt: path %q: dot-prefixed components are refused", rel)
 	}
 
 	full := filepath.Join(j.root, clean)
@@ -217,8 +224,8 @@ func (j *Jail) resolve(rel string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("agentrt: resolve %q: %w", rel, err)
 	}
-	if containsGitComponent(filepath.ToSlash(relFinal)) {
-		return "", fmt.Errorf("agentrt: path %q refused: contains a .git component", rel)
+	if containsDotComponent(filepath.ToSlash(relFinal)) {
+		return "", fmt.Errorf("agentrt: path %q: dot-prefixed components are refused", rel)
 	}
 
 	if fi, statErr := os.Lstat(finalPath); statErr == nil && fi.Mode()&os.ModeSymlink != 0 {
@@ -259,6 +266,13 @@ func (j *Jail) Read(rel string, startLine, endLine int) (content string, start, 
 
 	lines := splitLines(string(data))
 	total = len(lines)
+
+	if total == 0 {
+		// An empty file has no lines at all, not a single empty one — return
+		// it as a clean, error-free empty read rather than making callers
+		// special-case "start line 1 is beyond end of file (0 lines)".
+		return "", 1, 0, 0, false, nil
+	}
 
 	if startLine <= 0 {
 		startLine = 1

@@ -266,6 +266,62 @@ func TestInvariant4_ListAndSearchSkipGitWorktreeFile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
+// Invariant 4b: the dot-prefixed-component denial generalizes beyond
+// ".git" to ANY leading-dot path component (Constitution Art. I), applied
+// at both the pre-resolution and post-resolution checks in resolve().
+// ---------------------------------------------------------------------
+
+func TestInvariant4b_DotComponentRefused_ReadWriteEdit(t *testing.T) {
+	j := newTestJail(t)
+	writeFile(t, filepath.Join(j.root, ".env"), "SECRET=1\n")
+	writeFile(t, filepath.Join(j.root, ".ssh", "id_rsa"), "-----BEGIN-----\n")
+	writeFile(t, filepath.Join(j.root, "sub", ".hidden"), "shh\n")
+
+	for _, rel := range []string{".env", ".ssh/id_rsa", "sub/.hidden"} {
+		if _, _, _, _, _, err := j.Read(rel, 0, 0); err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Fatalf("Read of %q: got err=%v, want refusal", rel, err)
+		}
+		if err := j.Write(rel, "x"); err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Fatalf("Write of %q: got err=%v, want refusal", rel, err)
+		}
+		if _, err := j.Edit(rel, "x", "y", false); err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Fatalf("Edit of %q: got err=%v, want refusal", rel, err)
+		}
+	}
+
+	// The refused Write must not have created (or modified) anything.
+	if _, err := os.Stat(filepath.Join(j.root, ".env")); err != nil {
+		t.Fatalf("stat .env: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(j.root, ".env"))
+	if err != nil || string(data) != "SECRET=1\n" {
+		t.Fatalf(".env content changed by a refused write: data=%q err=%v", data, err)
+	}
+}
+
+func TestInvariant4b_ListAndSearchOmitDotfiles(t *testing.T) {
+	j := newTestJail(t)
+	writeFile(t, filepath.Join(j.root, ".env"), "MATCHME\n")
+	writeFile(t, filepath.Join(j.root, "keep.txt"), "keep\n")
+
+	entries, _, err := j.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Path != "keep.txt" {
+		t.Fatalf("entries = %+v, want only keep.txt (.env must be skipped)", entries)
+	}
+
+	_, count, err := j.Search("MATCHME", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("Search matched inside .env: count=%d", count)
+	}
+}
+
+// ---------------------------------------------------------------------
 // Invariant 5: Write refuses to overwrite an existing file over the
 // 16000-byte cap
 // ---------------------------------------------------------------------
@@ -448,6 +504,19 @@ func TestRead_MidWindow(t *testing.T) {
 	}
 	if content != "3\n4\n5" || start != 3 || end != 5 || total != 10 || truncated {
 		t.Fatalf("got content=%q start=%d end=%d total=%d truncated=%v", content, start, end, total, truncated)
+	}
+}
+
+func TestRead_EmptyFileReturnsCleanEmptyResult(t *testing.T) {
+	j := newTestJail(t)
+	writeFile(t, filepath.Join(j.root, "empty.txt"), "")
+
+	content, start, end, total, truncated, err := j.Read("empty.txt", 0, 0)
+	if err != nil {
+		t.Fatalf("Read of empty file: unexpected error: %v", err)
+	}
+	if content != "" || start != 1 || end != 0 || total != 0 || truncated {
+		t.Fatalf("got content=%q start=%d end=%d total=%d truncated=%v, want (\"\", 1, 0, 0, false)", content, start, end, total, truncated)
 	}
 }
 
