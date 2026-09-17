@@ -3,8 +3,9 @@
 # Requires: docker, curl, jq, go. Run from the repo root.
 set -euo pipefail
 
-cleanup() { docker compose -f deploy/docker-compose.yml down -v >/dev/null 2>&1 || true; }
+cleanup() { docker compose -f deploy/docker-compose.yml rm -sf dex >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+# Cleanup only stops/removes the dex container; a running litellm stack is left untouched.
 
 # docker-compose.yml requires LITELLM_MASTER_KEY for interpolation even when
 # only the dex service is targeted; this tier doesn't touch litellm, so a

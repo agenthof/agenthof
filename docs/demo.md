@@ -158,9 +158,10 @@ The audit trail shows:
 
 This variant demonstrates identity assertion via OIDC, suitable for production (e.g., Okta, Auth0, or a local Dex instance).
 
-First, ensure Dex is running:
+First, ensure Dex is running. `docker compose` needs `LITELLM_MASTER_KEY` set even when only starting dex (the compose file interpolates it for the litellm service too); a placeholder is fine here:
 
 ```bash
+export LITELLM_MASTER_KEY=anything
 cd deploy
 docker compose up -d dex
 cd ..
