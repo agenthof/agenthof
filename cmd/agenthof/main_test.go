@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeSample(t *testing.T) string {
@@ -98,5 +99,56 @@ func TestRunRefusedUnknownRole(t *testing.T) {
 		"--config", root, "--log-dir", t.TempDir()}, &out)
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("code=%d out=%s", code, out.String())
+	}
+}
+
+func TestRunsPruneDeletesOldRuns(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "r-old.jsonl")
+	newPath := filepath.Join(dir, "r-new.jsonl")
+	if err := os.WriteFile(oldPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-200 * 24 * time.Hour)
+	if err := os.Chtimes(oldPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", dir}, &out)
+	if code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 1 run(s)") {
+		t.Fatalf("out: %s", out.String())
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old run should be gone, err=%v", err)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("new run should remain: %v", err)
+	}
+}
+
+func TestRunsPruneGarbageDuration(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRuns([]string{"prune", "--older-than", "abc", "--log-dir", dir}, &out)
+	if code != 2 {
+		t.Fatalf("expected exit 2 for garbage duration, got %d\n%s", code, out.String())
+	}
+}
+
+func TestRunsPruneMissingLogDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+	var out bytes.Buffer
+	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", dir}, &out)
+	if code != 0 {
+		t.Fatalf("expected exit 0 for missing log dir, got %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 0 run(s)") {
+		t.Fatalf("out: %s", out.String())
 	}
 }

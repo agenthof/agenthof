@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/audit"
 	"github.com/agenthof/agenthof/internal/config"
@@ -21,6 +25,7 @@ Usage:
   agenthof registry list|enable|disable [<agent>] --config <dir>
   agenthof run <role> <workflow> --input <text> [--as <user>] [--config <dir>] [--log-dir <dir>]
   agenthof audit <run-id> [--log-dir <dir>]
+  agenthof runs prune --older-than <duration> [--log-dir <dir>]
 `
 
 func main() {
@@ -38,6 +43,8 @@ func main() {
 		code = cmdRun(os.Args[2:], os.Stdout)
 	case "audit":
 		code = cmdAudit(os.Args[2:], os.Stdout)
+	case "runs":
+		code = cmdRuns(os.Args[2:], os.Stdout)
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		code = 2
@@ -192,4 +199,72 @@ func cmdAudit(args []string, out io.Writer) int {
 	}
 	fmt.Fprint(out, audit.Render(events))
 	return 0
+}
+
+func cmdRuns(args []string, out io.Writer) int {
+	if len(args) < 1 {
+		fmt.Fprintln(out, "runs needs a subcommand: prune")
+		return 2
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "prune":
+		return cmdRunsPrune(rest, out)
+	default:
+		fmt.Fprintf(out, "unknown runs subcommand %q\n", sub)
+		return 2
+	}
+}
+
+func cmdRunsPrune(args []string, out io.Writer) int {
+	fs := flag.NewFlagSet("runs prune", flag.ContinueOnError)
+	olderThan := fs.String("older-than", "", "prune runs older than this duration (e.g. 720h or 180d)")
+	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
+	fs.SetOutput(out)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	dur, err := parseRetentionDuration(*olderThan)
+	if err != nil {
+		fmt.Fprintf(out, "invalid --older-than %q: %v\n", *olderThan, err)
+		return 2
+	}
+	cutoff := time.Now().Add(-dur)
+	entries, err := os.ReadDir(*logDir)
+	if err != nil {
+		fmt.Fprintf(out, "pruned 0 run(s) older than %s\n", *olderThan)
+		return 0
+	}
+	pruned := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(*logDir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(path); err == nil {
+				pruned++
+			}
+		}
+	}
+	fmt.Fprintf(out, "pruned %d run(s) older than %s\n", pruned, *olderThan)
+	return 0
+}
+
+// parseRetentionDuration parses a Go duration string, plus a "d" suffix
+// meaning days (e.g. "180d" = 180*24h).
+func parseRetentionDuration(s string) (time.Duration, error) {
+	if strings.HasSuffix(s, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil {
+			return 0, fmt.Errorf("not a valid day count: %s", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
 }
