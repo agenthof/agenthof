@@ -158,9 +158,10 @@ The audit trail shows:
 
 This variant demonstrates identity assertion via OIDC, suitable for production (e.g., Okta, Auth0, or a local Dex instance).
 
-First, ensure Dex is running:
+First, ensure Dex is running. `docker compose` needs `LITELLM_MASTER_KEY` set even when only starting dex (the compose file interpolates it for the litellm service too); a placeholder is fine here:
 
 ```bash
+export LITELLM_MASTER_KEY=anything
 cd deploy
 docker compose up -d dex
 cd ..
@@ -175,10 +176,14 @@ TOKEN=$(curl -s -X POST http://localhost:5556/dex/token \
   -d "username=dana@example.com" \
   -d "password=demo1234" \
   -d "client_id=agenthof" \
-  -d "scope=openid" | jq -r '.id_token')
+  -d "scope=openid email profile" | jq -r '.id_token')
 
 echo "Token (first 50 chars): ${TOKEN:0:50}..."
 ```
+
+The `email` scope is required: without it, dex's ID token carries only the
+opaque `sub` claim (no `email`), and the audit trail below would show that
+opaque subject instead of `dana@example.com`.
 
 Set OIDC environment variables:
 

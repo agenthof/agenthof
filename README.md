@@ -28,37 +28,7 @@ Expected output from `apply`:
 
     registry ok: 5 agents, 2 workflows, 2 roles
 
-Try the kill switch:
-
-    ./agenthof registry disable coder --config examples/config
-    ./agenthof apply --config examples/config   # fails, naming every dependent workflow
-
-### Model-backed runs (LiteLLM)
-
-To run agents with real models instead of the echo executor, use a local LiteLLM gateway:
-
-    cd deploy
-    docker compose up -d                                    # start LiteLLM
-    cd ..
-    ./agenthof gateway provision --config examples/config   # provision per-role keys
-    ./agenthof run software-engineer fix-bug \
-      --executor adk \
-      --input "your task here" \
-      --as you@example.com \
-      --config examples/config
-
-`run` auto-loads the role key from `.agenthof/keys/<role>.key` (`gateway.LoadRoleKey`), so no
-export is needed once a role has been provisioned. Setting `AGENTHOF_GATEWAY_KEY` yourself is
-OPTIONAL — a fallback used only when no role key file exists yet.
-
-**Important:** Role keys live under `.agenthof/keys/` and are gitignored; never commit them.
-**Requires:** Go >= 1.27 toolchain (auto-downloaded via `go.mod`).
-
-For the full end-to-end walkthrough, including budget behavior and audit trails, see [`scripts/live-smoke.md`](scripts/live-smoke.md).
-
-Retention (compliance floor, free forever):
-
-    ./agenthof runs prune --older-than 180d
+See [`docs/quickstart.md`](docs/quickstart.md) for the kill switch, model-backed runs (LiteLLM), retention, and the full walkthrough.
 
 ## The idea in three commands
 
@@ -74,6 +44,19 @@ Walk through CONFIG (registry management), AUDIT (run traceability), and GOVERNA
 
 See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 
+## Documentation
+
+- [`docs/quickstart.md`](docs/quickstart.md) — build, run, kill switch,
+  model-backed runs, retention.
+- [`docs/concepts.md`](docs/concepts.md) — the ideas behind the registry:
+  planes, gateways, execution tiers, identity, the ledger.
+- [`docs/reference/config.md`](docs/reference/config.md) — every YAML field,
+  required/optional, defaults, and validation rules.
+- [`docs/demo.md`](docs/demo.md) — the three scripted demos (CONFIG, AUDIT,
+  GOVERNANCE).
+- [`docs/constitution.md`](docs/constitution.md) — the binding invariants
+  every change must honor.
+
 ## License
 
 Apache-2.0
@@ -83,3 +66,6 @@ Apache-2.0
 - [`docs/constitution.md`](docs/constitution.md) — the binding invariants every change must honor.
 - [`docs/design/v1-design.md`](docs/design/v1-design.md) — the committed V1 design spec.
 - [`docs/development.md`](docs/development.md) — how this repo is built, reviewed, and merged.
+
+Contributions are welcome under the DCO — see [CONTRIBUTING.md](CONTRIBUTING.md).
+Security reports: see [SECURITY.md](SECURITY.md).

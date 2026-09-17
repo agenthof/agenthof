@@ -439,7 +439,7 @@ func cmdTestOIDCServer(t *testing.T, key *rsa.PrivateKey) *httptest.Server {
 
 	mux.HandleFunc("/keys", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		n := base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes())
+		n := base64.RawURLEncoding.EncodeToString(key.N.Bytes())
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"keys": []map[string]any{
 				{

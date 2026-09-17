@@ -1,0 +1,17 @@
+# Demo Part 2.1: run fix-bug with an asserted identity, audit shows the
+# invoker, integrity line, and artifact shas — docs/demo.md §2.1.
+
+exec agenthof run software-engineer fix-bug --input 'fix the login bug' --as dana@example.com --executor echo --config examples/config --log-dir logs --artifact-dir artifacts --workspace ws
+stdout 'finished: succeeded'
+
+lastrun logs
+exec agenthof audit $RUNID --log-dir logs
+stdout 'fix-bug \(role software-engineer\)'
+stdout 'invoked by dana@example.com \(asserted, issuer local\)'
+stdout 'status: succeeded'
+stdout 'ledger integrity: verified \(8 events\)'
+stdout 'step plan \(agent planner\) started'
+stdout 'step plan succeeded — artifact 511878f2: \[planner\] fix the login bug'
+stdout 'step code succeeded — artifact 565dfc2c: \[coder\] fix the login bug'
+stdout 'step review succeeded — artifact 79866298: \[reviewer\] fix the login bug'
+stdout 'workflow finished: succeeded'

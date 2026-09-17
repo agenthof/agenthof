@@ -114,7 +114,7 @@ func (x AdapterExecutor) Execute(ctx context.Context, a config.AgentDef, input s
 	if err != nil {
 		return engine.StepResult{Success: false, Reason: err.Error()}, nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return engine.StepResult{Success: false, Reason: fmt.Sprintf("adapter returned %d", resp.StatusCode)}, nil

@@ -1,0 +1,37 @@
+# apply validates and counts the registry; unknown subcommands print usage.
+
+exec agenthof apply --config config
+stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+
+! exec agenthof bogus
+stderr 'Usage:'
+
+# run + audit exercises lastrun for real: it must find the just-written run
+# log (skipping anything else that may live under logs/) and expose its id.
+exec agenthof run software-engineer plan-only --input hello --as tester --executor echo --config config --log-dir logs --artifact-dir artifacts --workspace ws
+stdout 'finished: succeeded'
+
+lastrun logs
+
+exec agenthof audit $RUNID --log-dir logs
+stdout 'status: succeeded'
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: software-engineer
+workflows: [plan-only]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

@@ -105,7 +105,7 @@ func (p Provisioner) checkKey(key string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("gateway: key info request failed: %w", sanitizeURLErr(err))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -138,7 +138,7 @@ func (p Provisioner) generateKey(role config.RoleDef) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("gateway: key generate request failed: %w", sanitizeURLErr(err))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("gateway: key generate returned status %d", resp.StatusCode)
