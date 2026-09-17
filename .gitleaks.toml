@@ -8,6 +8,6 @@ description = "documented demo credentials and offline test fixtures"
 paths = [
   '''deploy/dex-config\.yaml''',                # bcrypt of the documented demo password
   '''cmd/agenthof/main_test\.go''',             # hand-minted offline test JWTs
-  '''internal/identity/oidc_test\.go''',
+  '''internal/identity/oidc_test\.go''',        # offline test JWTs minted with throwaway keys
   '''internal/gateway/provision_test\.go''',    # fake "sk-..." strings returned by an in-test mock LiteLLM admin server; never real credentials
 ]

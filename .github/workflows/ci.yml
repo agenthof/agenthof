@@ -47,7 +47,7 @@ jobs:
       # secret for org repos; we don't have one, so run the (free, OSS)
       # gitleaks CLI directly instead of the action.
       - name: gitleaks
-        run: go run github.com/zricethezav/gitleaks/v8@latest detect --source . --config .gitleaks.toml --redact --no-banner
+        run: go run github.com/zricethezav/gitleaks/v8@v8.30.1 detect --source . --config .gitleaks.toml --redact --no-banner
 
   fips:
     runs-on: ubuntu-latest
