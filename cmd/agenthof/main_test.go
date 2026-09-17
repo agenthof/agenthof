@@ -57,6 +57,25 @@ func TestApplyOKAndFailure(t *testing.T) {
 	}
 }
 
+func TestApplyFailsOnFrontedAgentMissingEndpoint(t *testing.T) {
+	root := writeSample(t)
+	// Add a fronted agent without endpoint
+	helperPath := filepath.Join(root, "agents", "helper.yaml")
+	if err := os.WriteFile(helperPath, []byte("name: helper\nexecution: fronted\ninstruction: help\noutput: result\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root}, &out); code != 1 {
+		t.Fatalf("apply must fail with fronted agent missing endpoint, got code %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "helper") {
+		t.Fatalf("error must name the agent: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "endpoint") {
+		t.Fatalf("error must mention endpoint: %s", out.String())
+	}
+}
+
 func TestRunAndAuditEndToEnd(t *testing.T) {
 	t.Chdir(t.TempDir())
 	root := writeSample(t)

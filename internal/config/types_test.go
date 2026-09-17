@@ -32,6 +32,40 @@ output: plan
 	}
 }
 
+func TestAgentDefExecutionAndEndpoint(t *testing.T) {
+	// Test YAML parsing with execution and endpoint
+	src := `
+name: api-agent
+model: fast
+instruction: Call external API
+output: response
+execution: fronted
+endpoint: https://api.example.com/agent
+`
+	var a AgentDef
+	if err := yaml.Unmarshal([]byte(src), &a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Execution != "fronted" || a.Endpoint != "https://api.example.com/agent" {
+		t.Fatalf("parsed: %+v", a)
+	}
+	if a.EffectiveExecution() != "fronted" {
+		t.Fatal("EffectiveExecution must return fronted")
+	}
+
+	// Test EffectiveExecution: empty Execution defaults to contained
+	a.Execution = ""
+	if a.EffectiveExecution() != "contained" {
+		t.Fatal("EffectiveExecution must return contained when Execution is empty")
+	}
+
+	// Test explicit contained
+	a.Execution = "contained"
+	if a.EffectiveExecution() != "contained" {
+		t.Fatal("EffectiveExecution must return contained")
+	}
+}
+
 func TestWorkflowAndRoleParse(t *testing.T) {
 	wsrc := `
 name: fix-bug
