@@ -25,3 +25,9 @@ agenthof audit <run-id>      # who asked → what ran → what it touched → wh
 ## License
 
 Apache-2.0
+
+## Governance
+
+- [`docs/constitution.md`](docs/constitution.md) — the binding invariants every change must honor.
+- [`docs/design/v1-design.md`](docs/design/v1-design.md) — the committed V1 design spec.
+- [`docs/development.md`](docs/development.md) — how this repo is built, reviewed, and merged.
