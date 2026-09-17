@@ -40,16 +40,19 @@ If this returns 404, the LiteLLM version does not support the Responses API and 
 
 ## Run
 
-Load the gateway key and invoke the agent:
+Invoke the agent:
 
 ```bash
-export AGENTHOF_GATEWAY_KEY=$(cat .agenthof/keys/software-engineer.key)
 ./agenthof run software-engineer fix-bug \
   --executor adk \
   --input "write NOTES.md summarizing this task" \
   --as you@example.com \
   --config examples/config
 ```
+
+`run` auto-loads the role key from `.agenthof/keys/<role>.key` (`gateway.LoadRoleKey`), so no
+`export` is needed once a role has been provisioned. Exporting `AGENTHOF_GATEWAY_KEY` yourself
+is OPTIONAL / fallback-only — it's only consulted when no role key file exists yet.
 
 This runs a complete workflow:
 1. The agent plans the task

@@ -58,6 +58,7 @@ func TestApplyOKAndFailure(t *testing.T) {
 }
 
 func TestRunAndAuditEndToEnd(t *testing.T) {
+	t.Chdir(t.TempDir())
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
@@ -83,6 +84,7 @@ func TestRunAndAuditEndToEnd(t *testing.T) {
 }
 
 func TestRunFailBackOffline(t *testing.T) {
+	t.Chdir(t.TempDir())
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
@@ -95,6 +97,7 @@ func TestRunFailBackOffline(t *testing.T) {
 }
 
 func TestRunRefusedUnknownRole(t *testing.T) {
+	t.Chdir(t.TempDir())
 	root := writeSample(t)
 	var out bytes.Buffer
 	code := cmdRun([]string{"ghost", "fix-bug", "--input", "x", "--as", "dev@x",
@@ -123,7 +126,7 @@ func TestRunsPruneDeletesOldRuns(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("prune: %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "pruned 1 run(s)") {
+	if !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
 		t.Fatalf("out: %s", out.String())
 	}
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
@@ -131,6 +134,56 @@ func TestRunsPruneDeletesOldRuns(t *testing.T) {
 	}
 	if _, err := os.Stat(newPath); err != nil {
 		t.Fatalf("new run should remain: %v", err)
+	}
+}
+
+func TestRunsPruneAlsoPrunesArtifactStore(t *testing.T) {
+	logDir := t.TempDir()
+	artifactDir := t.TempDir()
+
+	oldArtifact := filepath.Join(artifactDir, "deadbeef")
+	newArtifact := filepath.Join(artifactDir, "cafef00d")
+	if err := os.WriteFile(oldArtifact, []byte("stale body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newArtifact, []byte("fresh body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-200 * 24 * time.Hour)
+	if err := os.Chtimes(oldArtifact, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", logDir, "--artifact-dir", artifactDir}, &out)
+	if code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 0 run(s) and 1 artifact(s)") {
+		t.Fatalf("out: %s", out.String())
+	}
+	if _, err := os.Stat(oldArtifact); !os.IsNotExist(err) {
+		t.Fatalf("old artifact should be gone, err=%v", err)
+	}
+	if _, err := os.Stat(newArtifact); err != nil {
+		t.Fatalf("new artifact should remain: %v", err)
+	}
+}
+
+func TestRunsPruneMissingArtifactDirIsNotAnError(t *testing.T) {
+	logDir := t.TempDir()
+	artifactDir := filepath.Join(t.TempDir(), "does-not-exist")
+
+	var out bytes.Buffer
+	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", logDir, "--artifact-dir", artifactDir}, &out)
+	if code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 0 run(s) and 0 artifact(s)") {
+		t.Fatalf("out: %s", out.String())
+	}
+	if _, err := os.Stat(artifactDir); !os.IsNotExist(err) {
+		t.Fatalf("a missing artifact-dir must not be created just to find nothing to prune: %v", err)
 	}
 }
 
@@ -150,7 +203,7 @@ func TestRunsPruneMissingLogDir(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0 for missing log dir, got %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "pruned 0 run(s)") {
+	if !strings.Contains(out.String(), "pruned 0 run(s) and 0 artifact(s)") {
 		t.Fatalf("out: %s", out.String())
 	}
 }

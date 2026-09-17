@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/agentrt"
+	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/audit"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
@@ -28,7 +29,7 @@ Usage:
   agenthof registry list|enable|disable [<agent>] --config <dir>
   agenthof run <role> <workflow> --input <text> [--as <user>] [--config <dir>] [--log-dir <dir>] [--executor echo|adk] [--workspace <dir>] [--artifact-dir <dir>]
   agenthof audit <run-id> [--log-dir <dir>]
-  agenthof runs prune --older-than <duration> [--log-dir <dir>]
+  agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
   agenthof gateway provision --config <dir> [--admin-base <url>]
 `
 
@@ -184,13 +185,13 @@ func cmdRun(args []string, out io.Writer) int {
 	if ws == "" {
 		ws = filepath.Join(".agenthof", "workspaces", strconv.FormatInt(time.Now().UnixNano(), 10))
 	}
+	cfg, reg := loadRegistry(*cfgDir, out)
+	if reg == nil {
+		return 1
+	}
 	fmt.Fprintf(out, "workspace: %s\n", ws)
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		fmt.Fprintln(out, err)
-		return 1
-	}
-	cfg, reg := loadRegistry(*cfgDir, out)
-	if reg == nil {
 		return 1
 	}
 	inv := identity.Static(*as)
@@ -319,6 +320,7 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("runs prune", flag.ContinueOnError)
 	olderThan := fs.String("older-than", "", "prune runs older than this duration (e.g. 720h or 180d)")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
+	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -332,22 +334,58 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 		fmt.Fprintln(out, "--older-than must be a positive duration")
 		return 2
 	}
-	cutoff := time.Now().Add(-dur)
-	entries, err := os.ReadDir(*logDir)
+
+	runsPruned, err := pruneRuns(*logDir, dur)
 	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Fprintf(out, "pruned 0 run(s) older than %s\n", *olderThan)
-			return 0
-		}
 		fmt.Fprintln(out, err)
 		return 1
+	}
+
+	// Constitution Art. III keeps artifact bodies out of the immutable
+	// ledger precisely so they can be pruned independently; do that here
+	// too, rather than leaving retention half-enforced. A missing
+	// artifact-dir is not an error (nothing provisioned it yet, e.g. an
+	// echo-executor-only deployment) — mirror the missing-log-dir case
+	// instead of having artifact.NewStore create it just to prune nothing.
+	artifactsPruned := 0
+	if _, statErr := os.Stat(*artifactDir); statErr == nil {
+		store, err := artifact.NewStore(*artifactDir)
+		if err != nil {
+			fmt.Fprintln(out, err)
+			return 1
+		}
+		artifactsPruned, err = store.Prune(dur)
+		if err != nil {
+			fmt.Fprintln(out, err)
+			return 1
+		}
+	} else if !os.IsNotExist(statErr) {
+		fmt.Fprintln(out, statErr)
+		return 1
+	}
+
+	fmt.Fprintf(out, "pruned %d run(s) and %d artifact(s) older than %s\n", runsPruned, artifactsPruned, *olderThan)
+	return 0
+}
+
+// pruneRuns removes run log files under logDir whose modification time is
+// older than dur. A missing logDir is not an error — nothing has run yet —
+// and prunes 0.
+func pruneRuns(logDir string, dur time.Duration) (int, error) {
+	cutoff := time.Now().Add(-dur)
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
 	}
 	pruned := 0
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}
-		path := filepath.Join(*logDir, entry.Name())
+		path := filepath.Join(logDir, entry.Name())
 		info, err := entry.Info()
 		if err != nil {
 			continue
@@ -358,8 +396,7 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 			}
 		}
 	}
-	fmt.Fprintf(out, "pruned %d run(s) older than %s\n", pruned, *olderThan)
-	return 0
+	return pruned, nil
 }
 
 // parseRetentionDuration parses a Go duration string, plus a "d" suffix

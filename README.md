@@ -37,12 +37,15 @@ To run agents with real models instead of the echo executor, use a local LiteLLM
     docker compose up -d                                    # start LiteLLM
     cd ..
     ./agenthof gateway provision --config examples/config   # provision per-role keys
-    export AGENTHOF_GATEWAY_KEY=$(cat .agenthof/keys/software-engineer.key)
     ./agenthof run software-engineer fix-bug \
       --executor adk \
       --input "your task here" \
       --as you@example.com \
       --config examples/config
+
+`run` auto-loads the role key from `.agenthof/keys/<role>.key` (`gateway.LoadRoleKey`), so no
+export is needed once a role has been provisioned. Setting `AGENTHOF_GATEWAY_KEY` yourself is
+OPTIONAL — a fallback used only when no role key file exists yet.
 
 **Important:** Role keys live under `.agenthof/keys/` and are gitignored; never commit them.
 **Requires:** Go >= 1.26.6 toolchain (auto-downloaded via `go.mod`).
