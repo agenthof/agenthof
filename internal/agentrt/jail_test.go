@@ -118,6 +118,39 @@ func TestInvariant2_SymlinkedAncestorDirEscapeRefused(t *testing.T) {
 	}
 }
 
+// TestInvariant2_ListAndSearchDoNotDescendSymlinkedSubdir guards against a
+// bulk-exfiltration path distinct from the single-path Read/Write refusal
+// above: List and Search walk the tree themselves rather than resolving a
+// caller-supplied path, so they need their own check that a symlinked
+// subdirectory never gets listed into or read through.
+func TestInvariant2_ListAndSearchDoNotDescendSymlinkedSubdir(t *testing.T) {
+	j := newTestJail(t)
+	external := t.TempDir()
+	writeFile(t, filepath.Join(external, "secret.txt"), "MATCHME")
+
+	if err := os.Symlink(external, filepath.Join(j.root, "evil")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	entries, _, err := j.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Path, "evil/") || e.Path == "evil" {
+			t.Fatalf("List surfaced a path under the symlinked subdirectory: %q", e.Path)
+		}
+	}
+
+	_, count, err := j.Search("MATCHME", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("Search matched external content through symlinked subdirectory: count=%d", count)
+	}
+}
+
 // ---------------------------------------------------------------------
 // Invariant 3: a symlink AS THE FINAL TARGET is refused outright, even if
 // it resolves back inside the root
