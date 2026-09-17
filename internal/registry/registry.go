@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"gopkg.in/yaml.v3"
@@ -50,12 +51,7 @@ func (r *Registry) RoleOwnsWorkflow(role, wf string) bool {
 	if !ok {
 		return false
 	}
-	for _, w := range ro.Workflows {
-		if w == wf {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ro.Workflows, wf)
 }
 
 func (r *Registry) List() []string {

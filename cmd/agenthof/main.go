@@ -402,8 +402,8 @@ func pruneRuns(logDir string, dur time.Duration) (int, error) {
 // parseRetentionDuration parses a Go duration string, plus a "d" suffix
 // meaning days (e.g. "180d" = 180*24h).
 func parseRetentionDuration(s string) (time.Duration, error) {
-	if strings.HasSuffix(s, "d") {
-		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+	if before, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.Atoi(before)
 		if err != nil {
 			return 0, fmt.Errorf("not a valid day count: %s", s)
 		}

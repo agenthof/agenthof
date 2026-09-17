@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,9 +23,7 @@ type fakeExec struct {
 func (f *fakeExec) Execute(ctx context.Context, agent config.AgentDef, input string, artifacts map[string]string) (StepResult, error) {
 	f.calls = append(f.calls, agent.Name)
 	cp := map[string]string{}
-	for k, v := range artifacts {
-		cp[k] = v
-	}
+	maps.Copy(cp, artifacts)
 	f.seen = append(f.seen, cp)
 	if n := f.fail[agent.Name]; n > 0 {
 		f.fail[agent.Name] = n - 1

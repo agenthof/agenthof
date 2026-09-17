@@ -433,7 +433,7 @@ func sortedStrings(ss []string) bool {
 
 func TestList_CapAndTruncated(t *testing.T) {
 	j := newTestJail(t)
-	for i := 0; i < 305; i++ {
+	for i := range 305 {
 		writeFile(t, filepath.Join(j.root, "many", padNum(i)+".txt"), "x")
 	}
 	entries, truncated, err := j.List()
@@ -470,7 +470,7 @@ func pathsOf(entries []FileInfo) []string {
 
 func makeNumberedLines(n int, width int) []string {
 	lines := make([]string, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		body := strings.Repeat("x", width)
 		lines[i] = body + itoa(i)
 	}
@@ -566,10 +566,7 @@ func TestRead_CapCutAtLineBoundary(t *testing.T) {
 
 	// The line just past the cut is unreachable via the whole-file read but
 	// must still be reachable through a smaller, explicit window.
-	nextLine := end + 50
-	if nextLine > total {
-		nextLine = total
-	}
+	nextLine := min(end+50, total)
 	c2, s2, e2, t2, trunc2, err := j.Read("big.txt", nextLine, nextLine)
 	if err != nil {
 		t.Fatalf("windowed Read beyond cap: %v", err)
@@ -751,7 +748,7 @@ func TestSearch_SkipsBinaryFiles(t *testing.T) {
 func TestSearch_DefaultAndHardCap(t *testing.T) {
 	j := newTestJail(t)
 	var b strings.Builder
-	for i := 0; i < 250; i++ {
+	for range 250 {
 		b.WriteString("MATCH line\n")
 	}
 	writeFile(t, filepath.Join(j.root, "many.txt"), b.String())
@@ -777,7 +774,7 @@ func TestSearch_OutputByteCap(t *testing.T) {
 	j := newTestJail(t)
 	var b strings.Builder
 	longLine := strings.Repeat("m", 300)
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		b.WriteString("MATCH " + longLine + "\n")
 	}
 	writeFile(t, filepath.Join(j.root, "many.txt"), b.String())

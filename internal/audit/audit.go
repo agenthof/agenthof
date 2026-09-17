@@ -27,8 +27,7 @@ func Render(events []engine.Event) string {
 	fmt.Fprintf(&sb, "invoked by %s (%s, issuer %s)\n", b.Invoker.Subject, b.Invoker.Method, b.Invoker.Issuer)
 	fmt.Fprintf(&sb, "status: %s\n", status)
 	if err := engine.VerifyChain(events); err != nil {
-		var broken *engine.ChainBrokenError
-		if errors.As(err, &broken) {
+		if broken, ok := errors.AsType[*engine.ChainBrokenError](err); ok {
 			fmt.Fprintf(&sb, "ledger integrity: BROKEN at event %d\n", broken.Index)
 		} else {
 			fmt.Fprintf(&sb, "ledger integrity: BROKEN at event 0\n")

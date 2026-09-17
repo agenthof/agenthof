@@ -149,7 +149,7 @@ func withinRoot(p, root string) bool {
 // can. The leading "/" this is always called with is not itself a
 // dot-prefixed component, so it never false-positives on the root.
 func containsDotComponent(slashPath string) bool {
-	for _, part := range strings.Split(slashPath, "/") {
+	for part := range strings.SplitSeq(slashPath, "/") {
 		if strings.HasPrefix(part, ".") {
 			return true
 		}
@@ -194,7 +194,7 @@ func (j *Jail) resolve(rel string) (string, error) {
 
 	candidate := parent
 	var remainder []string
-	for i := 0; i < 1024; i++ {
+	for range 1024 {
 		if _, statErr := os.Lstat(candidate); statErr == nil {
 			break
 		}
@@ -436,10 +436,7 @@ outer:
 		if readErr != nil {
 			continue
 		}
-		probeLen := len(data)
-		if probeLen > 8192 {
-			probeLen = 8192
-		}
+		probeLen := min(len(data), 8192)
 		if bytes.IndexByte(data[:probeLen], 0) != -1 {
 			continue // binary file — skip
 		}
