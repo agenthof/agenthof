@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/artifact"
@@ -11,6 +12,19 @@ import (
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/registry"
 )
+
+// groupsIntersect reports whether any of the invoker's groups appear in the
+// role's allowed groups.
+func groupsIntersect(invokerGroups, allowedGroups []string) bool {
+	for _, g := range invokerGroups {
+		for _, a := range allowedGroups {
+			if g == a {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 type StepResult struct {
 	Artifact string
@@ -77,13 +91,17 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	if !ok {
 		return refuse(fmt.Sprintf("role %q is not in the registry", role))
 	}
-	_ = ro
 	wf, ok := reg.Workflow(workflow)
 	if !ok {
 		return refuse(fmt.Sprintf("workflow %q is not in the registry", workflow))
 	}
 	if !reg.RoleOwnsWorkflow(role, workflow) {
 		return refuse(fmt.Sprintf("role %q does not own workflow %q", role, workflow))
+	}
+	if len(ro.AllowedGroups) > 0 && !groupsIntersect(inv.Groups, ro.AllowedGroups) {
+		return refuse(fmt.Sprintf(
+			"role %q requires membership in one of its allowed groups (%s); the invoker's groups don't qualify",
+			role, strings.Join(ro.AllowedGroups, ", ")))
 	}
 
 	emit(Event{Type: "workflow_started"})
@@ -96,12 +114,23 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		}
 		step := wf.Steps[i]
 		agent, _ := reg.Agent(step.Agent)
-		emit(Event{Type: "step_started", Step: step.Name, Agent: agent.Name})
+		execTier := agent.EffectiveExecution()
+		emit(Event{Type: "step_started", Step: step.Name, Agent: agent.Name, Execution: execTier})
 
 		stepCtx, cancel := context.WithTimeout(ctx, opts.StepTimeout)
 		res, execErr := exec.Execute(stepCtx, agent, input, artifacts)
 		cancel()
 		if execErr != nil {
+			if errors.Is(execErr, ErrStepConfig) {
+				// Configuration errors can't be fixed by retrying: fail the
+				// workflow outright instead of bouncing back to a prior step.
+				emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: execErr.Error(), Execution: execTier})
+				emit(Event{Type: "workflow_finished", Status: "failed", Reason: execErr.Error()})
+				if logErr != nil {
+					return runID, "failed", fmt.Errorf("ledger write failed: %w", logErr)
+				}
+				return runID, "failed", nil
+			}
 			res = StepResult{Success: false, Reason: execErr.Error()}
 		}
 
@@ -122,12 +151,12 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 			if agent.Output != "" {
 				artifacts[agent.Output] = res.Artifact
 			}
-			emit(Event{Type: "step_succeeded", Step: step.Name, Agent: agent.Name, Artifact: preview, ArtifactSHA: sha})
+			emit(Event{Type: "step_succeeded", Step: step.Name, Agent: agent.Name, Artifact: preview, ArtifactSHA: sha, Execution: execTier})
 			i++
 			continue
 		}
 		// failure: resolve the fail-back target
-		emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: res.Reason})
+		emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: res.Reason, Execution: execTier})
 		target := step.OnFailure
 		if target == "" && i > 0 {
 			target = wf.Steps[i-1].Name

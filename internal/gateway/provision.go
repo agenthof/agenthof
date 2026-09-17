@@ -22,8 +22,7 @@ import (
 // sites, not just one, or the redaction is bypassed by whichever path
 // happens to fail.
 func sanitizeURLErr(err error) error {
-	var u *url.Error
-	if errors.As(err, &u) {
+	if u, ok := errors.AsType[*url.Error](err); ok {
 		return fmt.Errorf("%s %s: %w", u.Op, redactURL(u.URL), u.Err)
 	}
 	return err

@@ -1,0 +1,6 @@
+name: reconciler
+description: Reconciles categorized transactions
+model: fast
+instruction: |
+  You are a reconciliation agent. Review the categorized transactions and produce a reconciliation report.
+output: reconciliation

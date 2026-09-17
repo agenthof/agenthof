@@ -110,3 +110,65 @@ func TestValidateDuplicatesAndEmptiness(t *testing.T) {
 		t.Fatalf("codes: %v", c)
 	}
 }
+
+func TestValidateExecutionTiers(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Agents[0].Execution = "invalid"
+	c := codes(Validate(cfg))
+	if c["bad-execution"] != 1 {
+		t.Fatalf("invalid execution must be bad-execution: %v", c)
+	}
+
+	// Test fronted agent without endpoint
+	cfg = baseCfg()
+	cfg.Agents[0].Execution = "fronted"
+	c = codes(Validate(cfg))
+	if c["fronted-needs-endpoint"] != 1 {
+		t.Fatalf("fronted without endpoint must be fronted-needs-endpoint: %v", c)
+	}
+
+	// Test contained agent with endpoint
+	cfg = baseCfg()
+	cfg.Agents[0].Execution = "contained"
+	cfg.Agents[0].Endpoint = "https://example.com/agent"
+	c = codes(Validate(cfg))
+	if c["contained-has-endpoint"] != 1 {
+		t.Fatalf("contained with endpoint must be contained-has-endpoint: %v", c)
+	}
+
+	// Test fronted agent with tools
+	cfg = baseCfg()
+	cfg.Agents[0].Execution = "fronted"
+	cfg.Agents[0].Endpoint = "https://example.com/agent"
+	cfg.Agents[0].Tools = []string{"read_file", "write_file"}
+	c = codes(Validate(cfg))
+	if c["bad-execution"] != 1 {
+		t.Fatalf("fronted with tools must be bad-execution: %v", c)
+	}
+
+	// Test fronted agent with endpoint, no model, no tools - should pass
+	cfg = baseCfg()
+	cfg.Agents[0].Execution = "fronted"
+	cfg.Agents[0].Endpoint = "https://example.com/agent"
+	cfg.Agents[0].Model = ""
+	cfg.Agents[0].Tools = []string{}
+	errs := Validate(cfg)
+	// Filter to just agent-related errors
+	agentErrs := []ValidationError{}
+	for _, e := range errs {
+		if e.Entity == "planner" {
+			agentErrs = append(agentErrs, e)
+		}
+	}
+	if len(agentErrs) != 0 {
+		t.Fatalf("fronted agent with endpoint and no model should pass: %v", agentErrs)
+	}
+
+	// Test that empty execution defaults to contained (no endpoint needed)
+	cfg = baseCfg()
+	cfg.Agents[0].Execution = ""
+	cfg.Agents[0].Endpoint = ""
+	if errs := Validate(cfg); len(errs) != 0 {
+		t.Fatalf("agent with empty execution should default to contained: %v", errs)
+	}
+}

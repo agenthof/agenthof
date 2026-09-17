@@ -8,10 +8,20 @@ type AgentDef struct {
 	Instruction string   `yaml:"instruction"`
 	Tools       []string `yaml:"tools"`
 	Output      string   `yaml:"output"`
+	Execution   string   `yaml:"execution"` // "", "contained", or "fronted"; "" means contained
+	Endpoint    string   `yaml:"endpoint"`  // fronted only: the agent's HTTP endpoint
 	SourceFile  string   `yaml:"-"`
 }
 
 func (a AgentDef) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
+
+// EffectiveExecution normalizes the execution tier: empty means contained.
+func (a AgentDef) EffectiveExecution() string {
+	if a.Execution == "" {
+		return "contained"
+	}
+	return a.Execution
+}
 
 type Step struct {
 	Name       string `yaml:"name"`

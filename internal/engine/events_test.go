@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -135,5 +136,21 @@ func TestChainCompatWithPreArtifactSHALogs(t *testing.T) {
 	}
 	if err := VerifyChain(events); err != nil {
 		t.Fatalf("chain must verify with omitted artifact_sha: %v", err)
+	}
+
+	// Events without an execution tier must marshal without the "execution"
+	// key too, so old ledger lines (written before Execution existed) stay
+	// byte-compatible the same way pre-ArtifactSHA ones do.
+	for _, e := range events {
+		if e.Execution != "" {
+			t.Fatalf("no event should carry an execution tier here: %+v", e)
+		}
+	}
+	data, err := json.Marshal(events[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "\"execution\"") {
+		t.Fatal("empty Execution must be omitted from marshaled JSON")
 	}
 }

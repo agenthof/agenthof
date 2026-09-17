@@ -1,0 +1,6 @@
+name: categorizer
+description: Categorizes transactions by type
+model: fast
+instruction: |
+  You are a categorization agent. Examine the input and produce a list of transaction categories.
+output: categories

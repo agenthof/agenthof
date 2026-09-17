@@ -30,6 +30,7 @@ type Event struct {
 	Reason      string    `json:"reason,omitempty"`
 	Artifact    string    `json:"artifact,omitempty"`
 	ArtifactSHA string    `json:"artifact_sha,omitempty"`
+	Execution   string    `json:"execution,omitempty"`
 	Binding     Binding   `json:"binding"`
 	Prev        string    `json:"prev"`
 }

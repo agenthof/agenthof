@@ -1,0 +1,38 @@
+issuer: http://localhost:5556/dex
+storage:
+  type: sqlite3
+  config:
+    file: ":memory:"
+
+web:
+  http: 0.0.0.0:5556
+
+telemetry:
+  http: 0.0.0.0:5558
+
+logger:
+  level: info
+
+oauth2:
+  responseTypes: [code]
+  skipApprovalScreen: true
+  passwordConnector: local
+
+connectors:
+  - type: mockCallback
+    id: mock
+    name: Mock
+
+staticClients:
+  - id: agenthof
+    redirectURIs:
+      - http://localhost:8000/callback
+    name: Agenthof
+    public: true
+
+enablePasswordDB: true
+staticPasswords:
+  - email: dana@example.com
+    hash: "$2a$10$hc3AGaDiHNEGHzcHyN4vNeKgBJYRuirdCd84ILHZLzgoxZGZBuH76"
+    username: dana
+    userID: "00000000-0000-0000-0000-000000000001"

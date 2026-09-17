@@ -27,13 +27,39 @@ func Validate(cfg config.Config) []ValidationError {
 			continue
 		}
 		agents[a.Name] = a
-		model := a.Model
-		if model == "" {
-			model = cfg.Gateway.Defaults.Model
+
+		// Validate execution tier and endpoint
+		if a.Execution != "" && a.Execution != "contained" && a.Execution != "fronted" {
+			add(a.SourceFile, a.Name, "bad-execution",
+				fmt.Sprintf("execution %q must be \"contained\" or \"fronted\"", a.Execution))
 		}
-		if _, ok := cfg.Gateway.Models[model]; !ok {
-			add(a.SourceFile, a.Name, "unroutable-model",
-				fmt.Sprintf("model %q has no route in gateway.yaml and no default is set", a.Model))
+
+		effectiveExec := a.EffectiveExecution()
+		if effectiveExec == "fronted" && a.Endpoint == "" {
+			add(a.SourceFile, a.Name, "fronted-needs-endpoint",
+				"fronted agents must have an endpoint")
+		}
+		if effectiveExec == "contained" && a.Endpoint != "" {
+			add(a.SourceFile, a.Name, "contained-has-endpoint",
+				"endpoint is only valid on fronted agents")
+		}
+
+		// Fronted agents cannot declare tools
+		if effectiveExec == "fronted" && len(a.Tools) > 0 {
+			add(a.SourceFile, a.Name, "bad-execution",
+				"fronted agents cannot declare tools; tools are contained-runtime capabilities")
+		}
+
+		// Skip model routing check for fronted agents
+		if effectiveExec != "fronted" {
+			model := a.Model
+			if model == "" {
+				model = cfg.Gateway.Defaults.Model
+			}
+			if _, ok := cfg.Gateway.Models[model]; !ok {
+				add(a.SourceFile, a.Name, "unroutable-model",
+					fmt.Sprintf("model %q has no route in gateway.yaml and no default is set", a.Model))
+			}
 		}
 	}
 
