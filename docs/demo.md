@@ -175,10 +175,14 @@ TOKEN=$(curl -s -X POST http://localhost:5556/dex/token \
   -d "username=dana@example.com" \
   -d "password=demo1234" \
   -d "client_id=agenthof" \
-  -d "scope=openid" | jq -r '.id_token')
+  -d "scope=openid email profile" | jq -r '.id_token')
 
 echo "Token (first 50 chars): ${TOKEN:0:50}..."
 ```
+
+The `email` scope is required: without it, dex's ID token carries only the
+opaque `sub` claim (no `email`), and the audit trail below would show that
+opaque subject instead of `dana@example.com`.
 
 Set OIDC environment variables:
 
