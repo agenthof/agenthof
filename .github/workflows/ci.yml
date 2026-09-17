@@ -43,9 +43,11 @@ jobs:
           go-version-file: go.mod
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # gitleaks/gitleaks-action@v2 now requires a paid GITLEAKS_LICENSE
+      # secret for org repos; we don't have one, so run the (free, OSS)
+      # gitleaks CLI directly instead of the action.
+      - name: gitleaks
+        run: go run github.com/zricethezav/gitleaks/v8@latest detect --source . --config .gitleaks.toml --redact --no-banner
 
   fips:
     runs-on: ubuntu-latest
