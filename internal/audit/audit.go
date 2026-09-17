@@ -45,7 +45,13 @@ func Render(events []engine.Event) string {
 		case "step_started":
 			fmt.Fprintf(&sb, "  %s  step %s (agent %s) started\n", t, e.Step, e.Agent)
 		case "step_succeeded":
-			fmt.Fprintf(&sb, "  %s  step %s succeeded — artifact: %s\n", t, e.Step, e.Artifact)
+			sha := e.ArtifactSHA
+			if sha == "" {
+				sha = "-"
+			} else if len(sha) > 8 {
+				sha = sha[:8]
+			}
+			fmt.Fprintf(&sb, "  %s  step %s succeeded — artifact %s: %s\n", t, e.Step, sha, e.Artifact)
 		case "step_failed":
 			fmt.Fprintf(&sb, "  %s  step %s (agent %s) failed — %s\n", t, e.Step, e.Agent, e.Reason)
 		case "bounced_back":
