@@ -1,0 +1,16 @@
+# Demo Part 1: apply, kill switch, re-enable — docs/demo.md §1.
+
+exec agenthof apply --config examples/config
+stdout 'registry ok: 5 agents, 2 workflows, 2 roles'
+
+exec agenthof registry disable coder --config examples/config
+stdout 'agent coder disabled'
+
+! exec agenthof apply --config examples/config
+stdout 'workflows/fix-bug\.yaml: fix-bug: workflow "fix-bug" depends on agent "coder", which is disabled in the registry'
+
+exec agenthof registry enable coder --config examples/config
+stdout 'agent coder enabled'
+
+exec agenthof apply --config examples/config
+stdout 'registry ok: 5 agents, 2 workflows, 2 roles'
