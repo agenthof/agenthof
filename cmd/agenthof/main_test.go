@@ -152,3 +152,42 @@ func TestRunsPruneMissingLogDir(t *testing.T) {
 		t.Fatalf("out: %s", out.String())
 	}
 }
+
+func TestRunsPruneNonPositiveDuration(t *testing.T) {
+	// A non-positive duration would push the cutoff into the future,
+	// deleting every run file. Guard against it instead.
+	cases := []string{"-5d", "0d", "-3h", "0h"}
+	for _, olderThan := range cases {
+		t.Run(olderThan, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "r-x.jsonl")
+			if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			code := cmdRuns([]string{"prune", "--older-than", olderThan, "--log-dir", dir}, &out)
+			if code != 2 {
+				t.Fatalf("expected exit 2 for %q, got %d\n%s", olderThan, code, out.String())
+			}
+			if !strings.Contains(out.String(), "--older-than must be a positive duration") {
+				t.Fatalf("out for %q: %s", olderThan, out.String())
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("run file should be untouched for %q: %v", olderThan, err)
+			}
+		})
+	}
+}
+
+func TestRunsPruneLogDirIsRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", notADir}, &out)
+	if code != 1 {
+		t.Fatalf("expected exit 1 when --log-dir is a regular file, got %d\n%s", code, out.String())
+	}
+}

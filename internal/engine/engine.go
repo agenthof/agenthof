@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -44,11 +45,23 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	}
 	defer log.Close()
 	now := func() time.Time { return time.Now().UTC() }
-	emit := func(e Event) { e.Time = now(); e.Binding = bind; _ = log.Append(e) }
+	var logErr error
+	emit := func(e Event) {
+		if logErr != nil {
+			return
+		}
+		e.Time = now()
+		e.Binding = bind
+		logErr = log.Append(e)
+	}
 
 	refuse := func(reason string) (string, string, error) {
+		refusalErr := fmt.Errorf("%s", reason)
 		emit(Event{Type: "run_refused", Reason: reason})
-		return runID, "refused", fmt.Errorf("%s", reason)
+		if logErr != nil {
+			return runID, "refused", errors.Join(refusalErr, fmt.Errorf("ledger write failed: %w", logErr))
+		}
+		return runID, "refused", refusalErr
 	}
 	ro, ok := reg.Role(role)
 	if !ok {
@@ -68,6 +81,9 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	bounces := map[string]int{}
 	i := 0
 	for i < len(wf.Steps) {
+		if logErr != nil {
+			return runID, "failed", fmt.Errorf("ledger write failed: %w", logErr)
+		}
 		step := wf.Steps[i]
 		agent, _ := reg.Agent(step.Agent)
 		emit(Event{Type: "step_started", Step: step.Name, Agent: agent.Name})
@@ -104,6 +120,9 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 				reason = fmt.Sprintf("step %q exhausted its %d bounce(s): %s", step.Name, cap, res.Reason)
 			}
 			emit(Event{Type: "workflow_finished", Status: "failed", Reason: reason})
+			if logErr != nil {
+				return runID, "failed", fmt.Errorf("ledger write failed: %w", logErr)
+			}
 			return runID, "failed", nil
 		}
 		emit(Event{Type: "bounced_back", Step: step.Name, Status: target, Reason: res.Reason})
@@ -116,5 +135,8 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		continue
 	}
 	emit(Event{Type: "workflow_finished", Status: "succeeded"})
+	if logErr != nil {
+		return runID, "failed", fmt.Errorf("ledger write failed: %w", logErr)
+	}
 	return runID, "succeeded", nil
 }

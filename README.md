@@ -29,6 +29,10 @@ Try the kill switch:
     ./agenthof registry disable coder --config examples/config
     ./agenthof apply --config examples/config   # fails, naming every dependent workflow
 
+Retention (compliance floor, free forever):
+
+    ./agenthof runs prune --older-than 180d
+
 ## The idea in three commands
 
 ```

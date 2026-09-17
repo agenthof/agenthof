@@ -230,11 +230,19 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 		fmt.Fprintf(out, "invalid --older-than %q: %v\n", *olderThan, err)
 		return 2
 	}
+	if dur <= 0 {
+		fmt.Fprintln(out, "--older-than must be a positive duration")
+		return 2
+	}
 	cutoff := time.Now().Add(-dur)
 	entries, err := os.ReadDir(*logDir)
 	if err != nil {
-		fmt.Fprintf(out, "pruned 0 run(s) older than %s\n", *olderThan)
-		return 0
+		if os.IsNotExist(err) {
+			fmt.Fprintf(out, "pruned 0 run(s) older than %s\n", *olderThan)
+			return 0
+		}
+		fmt.Fprintln(out, err)
+		return 1
 	}
 	pruned := 0
 	for _, entry := range entries {
