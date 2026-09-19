@@ -30,6 +30,44 @@ relicense your contribution out from under you.
 - Changes land as small, independently testable units, test first. Every
   commit must be green on `gofmt`, `go build`, `go vet`, and `go test`.
 
+## Engineering guidelines
+
+What we optimise for, and what to do when these pull against each other.
+
+**Correctness first.** A change is done when its *failure* modes are tested, not
+when the happy path works. Tests exercise real behavior rather than mocks of our
+own code. Where a design can either fail clearly or recover silently, fail
+clearly: a loud error an operator can act on beats a guess that corrupts a
+ledger. For anything that records or enforces governance, the test that proves
+the guarantee holds is part of the feature.
+
+**Easy to reason about.** A reader should be able to hold a file in their head
+and answer: what does this do, how do I use it, what does it depend on. One
+responsibility per file; split when a file starts answering two questions. Name
+things after what they are. Cross-package behavior should be legible from the
+interfaces without reading implementations.
+
+**Keep it simple.** Build the simplest thing that satisfies the constitution and
+the tests. No abstraction before its second real caller, no configuration knob
+before someone needs it, no capacity planning for scale we do not have. Deleting
+a possibility is usually better than adding a flag to control it.
+
+**Idiomatic Go.** Follow the standard library's shape. Wrap errors with `%w` and
+let callers decide; return errors rather than logging and continuing; keep zero
+values useful. Avoid reflection and cleverness in anything on a correctness
+path. `gofmt`, `go vet`, and golangci-lint are gates, not suggestions.
+
+**Secure by construction.** Prefer designs where the bad outcome is impossible
+over designs where it is merely forbidden — no exec tool at all beats an exec
+allowlist, and a jailed path beats a path check. Validate at the boundary, once,
+and trust the validated value inward. Never log or persist secrets, tokens, or
+raw credentials. Bound anything an outside party controls: response sizes,
+string lengths written to the ledger, retries.
+
+When these conflict, correctness wins, then clarity. An optimisation that makes
+the ledger harder to verify, or a clever abstraction that makes a security
+property harder to see, is not a good trade.
+
 ## Commit style
 
 One-line imperative subject, `type(scope): summary` (e.g.
