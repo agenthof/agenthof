@@ -1,8 +1,7 @@
 # The Agenthof Constitution
 
-This document states the invariants every change to Agenthof must honor. It
-is distilled from the design spec (`docs/design/v1-design.md`). Where the two
-disagree, this constitution wins.
+This document states the invariants every change to Agenthof must honor.
+Where it and any other document disagree, this constitution wins.
 
 ## Article I — Containment by construction
 

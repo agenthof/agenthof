@@ -24,6 +24,11 @@ relicense your contribution out from under you.
   govulncheck, gitleaks, and a FIPS build gate (`GOFIPS140=latest`).
 - The constitution (`docs/constitution.md`) is binding: additive-only ledger
   schema, no exec in agent runtimes, no secrets in config or logs.
+- Every feature, and every new event type, must trace to a specific
+  constitution article or to a concept documented in `docs/concepts.md`. If
+  it can't be traced, it doesn't ship.
+- Changes land as small, independently testable units, test first. Every
+  commit must be green on `gofmt`, `go build`, `go vet`, and `go test`.
 
 ## Commit style
 

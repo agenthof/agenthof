@@ -63,9 +63,10 @@ Apache-2.0
 
 ## Governance
 
-- [`docs/constitution.md`](docs/constitution.md) — the binding invariants every change must honor.
-- [`docs/design/v1-design.md`](docs/design/v1-design.md) — the committed V1 design spec.
-- [`docs/development.md`](docs/development.md) — how this repo is built, reviewed, and merged.
+Every change is held to the invariants in
+[`docs/constitution.md`](docs/constitution.md): containment, identity, the
+ledger, compliance floors, the license, and scope discipline. They change
+only by an explicit commit that amends that file.
 
 Contributions are welcome under the DCO — see [CONTRIBUTING.md](CONTRIBUTING.md).
 Security reports: see [SECURITY.md](SECURITY.md).
