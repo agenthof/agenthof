@@ -45,9 +45,8 @@ artifact bodies are never written to an event, under any circumstance.
 
 Retention controls ship in the open-source core (`runs prune
 --older-than <d>`) — never gated behind a commercial tier. Audit logging and
-basic RBAC are permanently free in the open-source core; every competitor
-paywalls these, and that contrast is load-bearing for the project, not
-incidental. The FIPS build path (Go's native FIPS 140-3 mode, `GOFIPS140`)
+basic RBAC are permanently free in the open-source core; they are not, and
+will not become, paid features. The FIPS build path (Go's native FIPS 140-3 mode, `GOFIPS140`)
 must never be broken by a dependency; a dependency bump that breaks it is a
 regression, not a tradeoff. The self-hosting customer is the data
 controller for any personal data in the ledger — Agenthof does not act as a
@@ -83,6 +82,6 @@ unless that facade cannot satisfy Articles I through VI.
 
 These articles change only by an explicit commit that edits this file, with
 a commit message stating which article changed and why. No article is
-amended implicitly by a code change, a config default, or a design-doc
-edit alone. If the design spec and this constitution ever diverge, this
-constitution is binding until amended.
+amended implicitly by a code change, a config default, or an edit to any
+other document. If another document and this constitution ever diverge,
+this constitution is binding until amended.

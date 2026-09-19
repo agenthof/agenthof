@@ -54,10 +54,10 @@ Invoke the agent:
 `export` is needed once a role has been provisioned. Exporting `AGENTHOF_GATEWAY_KEY` yourself
 is OPTIONAL / fallback-only — it's only consulted when no role key file exists yet.
 
-This runs a complete workflow:
-1. The agent plans the task
-2. Executes the plan via ADK (model-backed actions)
-3. Stops when budget is exhausted (monthly budget: $50)
+This runs the workflow's steps against the real model through the gateway. If
+the role's key has exhausted its budget, the gateway returns HTTP 429 and that
+step fails; the workflow's fail-back graph handles it like any other step
+failure, and the whole chain stays in the ledger.
 
 ## Audit
 
@@ -68,10 +68,10 @@ Inspect the run:
 ```
 
 Expected output includes:
-- All actions taken by the agent
-- Model costs accumulated per step
-- Budget remaining or exhausted state
-- If budget exhausted mid-task: a note that re-running will skip already-completed steps and resume from the checkpoint
+- The invoker, role, and workflow for the run
+- Every step event in order, with the agent that ran it and its execution tier
+- The artifact SHA-256 prefix and preview for each successful step
+- The integrity line: `ledger integrity: verified (N events)`
 
 ## Notes
 

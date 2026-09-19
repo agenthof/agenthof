@@ -299,7 +299,7 @@ Even though the run was refused, it is **ledgered** (recorded) in the audit trai
 
 ### 3.3 Budget enforcement via LiteLLM gateway
 
-The accountant role has a monthly budget of $20. When the role's budget is exhausted, LiteLLM returns HTTP 429 (Too Many Requests), and the run is refused.
+The accountant role has a monthly budget of $20. When the role's budget is exhausted, the model gateway returns HTTP 429 (Too Many Requests) and the step fails.
 
 Provision the role key for billing:
 
@@ -328,7 +328,7 @@ Run the workflow with the adk executor (model-backed):
   --config examples/config
 ```
 
-If the role's monthly budget has been exhausted, LiteLLM will refuse the request with HTTP 429, and Agenthof will log the refusal.
+If the role's monthly budget has been exhausted, LiteLLM rejects the request with HTTP 429. That is a step failure, not a refusal: the workflow's fail-back graph handles it, and the whole chain — including the failure — stays in the ledger.
 
 For details on provisioning and budget behavior, see [`scripts/live-smoke.md`](../scripts/live-smoke.md).
 
