@@ -60,7 +60,7 @@ func TestAppendAcrossReopens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c2.Close()
+	defer func() { _ = c2.Close() }()
 	if got, want := c2.Prev(), hashOf(l2); got != want {
 		t.Fatalf("resumed head %q, want %q", got, want)
 	}
@@ -83,7 +83,7 @@ func TestAppendAcrossReopens(t *testing.T) {
 func TestAppendRefusesForkedPrev(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "chain.jsonl")
 	c, _ := Open(p, Unlocked)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if err := c.Append(mkLine(t, c.Prev(), "a")); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestAppendRejectedProbeDoesNotPoisonSeqMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	forged, err := json.Marshal(map[string]any{"prev": "0000dead", "seq": 1, "note": "forged"})
 	if err != nil {
@@ -244,7 +244,7 @@ func TestLargeRecordRoundTrip(t *testing.T) {
 	if err := c.Append(big); err != nil {
 		t.Fatal(err)
 	}
-	c.Close()
+	_ = c.Close()
 	recs, _, err := ReadVerify(p, Unlocked)
 	if err != nil || len(recs) != 1 || !bytes.Equal(recs[0].Raw, big) {
 		t.Fatalf("large record: %v", err)

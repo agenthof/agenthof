@@ -111,19 +111,19 @@ func SetEnabled(configRoot, agentName string, enabled bool) error {
 			tmpPath := tmp.Name()
 			defer func() {
 				if tmpPath != "" {
-					os.Remove(tmpPath)
+					_ = os.Remove(tmpPath)
 				}
 			}()
 			if err := os.Chmod(tmpPath, 0o644); err != nil {
-				tmp.Close()
+				_ = tmp.Close()
 				return err
 			}
 			if _, err := tmp.Write(out); err != nil {
-				tmp.Close()
+				_ = tmp.Close()
 				return err
 			}
 			if err := tmp.Sync(); err != nil {
-				tmp.Close()
+				_ = tmp.Close()
 				return err
 			}
 			if err := tmp.Close(); err != nil {

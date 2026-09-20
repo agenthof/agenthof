@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
-			c.Close()
+			_ = c.Close()
 		}
 		os.Exit(0)
 	}
@@ -52,7 +52,7 @@ func TestLockedOpenContendsAndTimesOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open(Locked): %v", err)
 	}
-	defer c1.Close()
+	defer func() { _ = c1.Close() }()
 
 	start := time.Now()
 	_, err = Open(p, Locked)
@@ -86,7 +86,7 @@ func TestLockedReadVerifyBlocksThenSucceeds(t *testing.T) {
 	go func() {
 		defer close(done)
 		time.Sleep(150 * time.Millisecond)
-		writer.Close()
+		_ = writer.Close()
 	}()
 
 	start := time.Now()

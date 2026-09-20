@@ -32,7 +32,7 @@ func TestGeneratePreMigrationFixture(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	log.Close()
+	_ = log.Close()
 }
 
 // TestPreMigrationFixtureVerifiesRawByte asserts that the frozen

@@ -274,7 +274,7 @@ func ReadVerify(path string, mode LockMode) ([]Record, Head, error) {
 	if err != nil {
 		return nil, Head{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if mode == Locked {
 		if lerr := flockRetry(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); lerr != nil {
 			return nil, Head{}, fmt.Errorf("ledger: read %s: %w", path, lerr)
