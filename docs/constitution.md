@@ -40,8 +40,8 @@ string), and `audit` verifies the chain. The chain makes accidental
 corruption — and any edit, deletion, or reordering of committed events that
 does not recompute every later link — detectable. It does not by itself
 detect truncation of the tail or wholesale regeneration of the file; those
-are detectable only against a chain head recorded off the machine, which
-Agenthof does not store. No Agenthof document may describe the ledger as
+are detectable only against a chain head recorded off the machine; Agenthof
+prints the control-log head after each append but does not store it. No Agenthof document may describe the ledger as
 tamper-proof. Artifact bodies never enter the ledger — only a SHA-256 hash
 and a preview of at most 200 characters; bodies live in a separate,
 prunable store. Secrets and full artifact bodies are never written to an
@@ -74,7 +74,7 @@ permits — no hidden capability, no implicit behavior not traceable to a
 config file. Schema changes must be backward compatible: additive only,
 never a breaking change to an existing field's meaning. Engine capability
 may grow (e.g. linear+fail-back today, DAG execution later) behind schemas
-that do not change shape for existing users.
+that do not change shape for existing users. Control-plane actions (apply, and the enable/disable kill switch) are themselves recorded in a hash-chained control ledger.
 
 ## Article VII — Scope discipline
 

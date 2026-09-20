@@ -1,0 +1,26 @@
+# Task 6: `registry enable|disable` records an attributed event in the
+# hash-chained control ledger — spec §3.4. `audit control` is Task 8 and
+# does not exist yet, so this journey asserts via the `control head: seq=`
+# line, exit codes, and the raw control.jsonl content (per the SDD ledger's
+# Ruling 2).
+
+exec agenthof apply --config examples/config
+stdout 'registry ok: 5 agents, 2 workflows, 2 roles'
+
+exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com
+stdout 'agent coder disabled'
+stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
+grep '"action":"disable"' control.jsonl
+grep '"outcome":"success"' control.jsonl
+grep '"agent":"coder"' control.jsonl
+
+exec agenthof registry enable coder --config examples/config --control-log control.jsonl --as dana@example.com
+stdout 'agent coder enabled'
+stdout 'control head: seq=2 sha256=[0-9a-f]{64}'
+grep '"action":"enable"' control.jsonl
+
+! exec agenthof registry disable ghost --config examples/config --control-log control.jsonl --as dana@example.com
+stdout 'control head: seq=3 sha256=[0-9a-f]{64}'
+grep '"outcome":"refused"' control.jsonl
+grep '"agent_not_found"' control.jsonl
+grep '"agent":"ghost"' control.jsonl

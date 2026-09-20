@@ -1,15 +1,21 @@
 # Configuration reference
 
 This is the field-by-field reference for the YAML config Agenthof loads and
-validates. Every field name and semantic statement below is drawn from two
-files, and only those two: the struct comments in
+validates. Every field name and semantic statement in the sections below,
+up to [Control-plane CLI](#control-plane-cli), is drawn from two files, and
+only those two: the struct comments in
 [`internal/config/types.go`](../../internal/config/types.go) (what a field
 means and its default) and the rules in
 [`internal/registry/validate.go`](../../internal/registry/validate.go) (what
 `agenthof apply` accepts or rejects). Behavior that lives elsewhere — how the
 engine executes a workflow, how identity and the ledger work, why the
 execution tiers exist — is covered in [`docs/concepts.md`](../concepts.md),
-not repeated here.
+not repeated here. The [Control-plane CLI](#control-plane-cli) section is
+the one exception: it documents command-line flags and exit codes, drawn
+from [`cmd/agenthof/main.go`](../../cmd/agenthof/main.go) — these commands
+govern config, so their invocation is documented alongside it, while what
+they record and why is covered in
+[`docs/concepts.md`](../concepts.md#control-plane-audit).
 
 Examples marked "from `examples/config/`" are real files that pass `apply`
 (see the [quickstart](../quickstart.md)). Examples marked "illustrative" are
@@ -279,3 +285,89 @@ models:
 defaults:
   model: fast
 ```
+
+## Control-plane CLI
+
+`agenthof apply` and `agenthof registry enable|disable` — the kill switch —
+record every attempt to a hash-chained control log, and `agenthof audit`
+gains three verbs to read and, if needed, recover it. See
+[`docs/concepts.md`](../concepts.md#control-plane-audit) for what gets
+recorded and why; this section is the flag-by-flag and exit-code reference.
+
+| Command | Flags |
+|---|---|
+| `agenthof apply --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--as`, `--groups`, `--token` |
+| `agenthof registry enable\|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | same |
+| `agenthof audit control [--control-log <path>]` | `--control-log` |
+| `agenthof audit verify control [--control-log <path>] [--expect-head <hex>]` | `--control-log`, `--expect-head` |
+| `agenthof audit repair control [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--as`, `--groups`, `--token` |
+
+### `--control-log`
+
+Path to the control-plane ledger. Default `.agenthof/control.jsonl`,
+resolved relative to the current working directory the same way key and
+workspace paths are — run these commands from the repository root, or pass
+`--control-log` explicitly. Keep it out from under any directory passed to
+`--log-dir`: `runs prune` skips a control log and a `*.torn-*` fragment only
+by name (`control.jsonl` and anything containing `.torn-`) — a control log
+saved under a different name inside `--log-dir` has no such protection and
+can be pruned like any other aged `.jsonl` file.
+
+### `--as`, `--groups`, `--token`
+
+The same invoker-identity flags `agenthof run` takes. `--as` asserts an
+invoker identity (default: the OS user); `--groups` is a comma-separated
+list recorded alongside it — self-asserted, not verified, and not checked
+against any role's `allowed_groups` by these commands, so it authorizes
+nothing here on its own. `--token` authenticates the invoker from a raw
+OIDC ID token instead (env `AGENTHOF_TOKEN` fallback); when given, identity
+comes from the verified token rather than `--as`/`--groups`, and
+`AGENTHOF_OIDC_ISSUER` must be set in the environment or the command exits
+2 (a usage error, no control event recorded) before doing anything else. A
+`--token` that fails verification does not fail silently: it is recorded
+as a `refused` control event (reason `token_verification_failed`) and the
+command exits nonzero.
+
+### `--expect-head`
+
+`agenthof audit verify control` only. The control-ledger head hash (hex) to
+check the freshly verified chain against — a hash Agenthof printed to
+stdout after some earlier append, saved somewhere off this machine (see
+[`docs/concepts.md`](../concepts.md#control-plane-audit)). Only the hash is
+compared; the accompanying event count is informational.
+
+### Exit codes
+
+`agenthof apply` / `agenthof registry enable|disable`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
+| `1` | The attempt was rejected, refused, or errored (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed but the config hash or the append that would record it then failed — printed as `state changed; event NOT recorded`, the one case where the registry changed with no event to show for it |
+| `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set |
+
+`agenthof audit control`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code |
+| `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain — a torn or broken chain still renders whatever valid prefix was recovered, with the failure named in the trailing integrity line |
+| `2` | Usage error |
+
+`agenthof audit verify control`, checked in this order:
+
+| Exit | Meaning |
+|---|---|
+| `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain |
+| `3` | The chain is tainted — a `repair` event has ever been appended to it (checked, and reported, before `--expect-head` is) |
+| `4` | `--expect-head` was given and does not match the verified head |
+| `0` | None of the above — the chain is clean and, if given, `--expect-head` matched |
+| `2` | Usage error |
+
+`agenthof audit repair control`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | A torn tail was repaired: the damaged bytes were moved to a `<log>.torn-<timestamp>` fragment, the live log truncated to its last valid record, and a `repair` event appended — the ledger is now tainted |
+| `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; or another IO error. None of these write a control event, since the ledger being repaired may itself be the file in question |
+| `2` | Usage error |

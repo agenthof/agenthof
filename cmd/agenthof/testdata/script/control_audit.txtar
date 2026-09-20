@@ -1,0 +1,28 @@
+# Task 8: `audit control` renders the control ledger produced by apply/
+# enable/disable (Tasks 6-7) as a human-readable audit trail with a final
+# integrity line — spec §3.6.
+
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com
+stdout 'registry ok: 5 agents, 2 workflows, 2 roles'
+stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
+
+exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com
+stdout 'agent coder disabled'
+stdout 'control head: seq=2 sha256=[0-9a-f]{64}'
+
+exec agenthof registry enable coder --config examples/config --control-log control.jsonl --as dana@example.com
+stdout 'agent coder enabled'
+stdout 'control head: seq=3 sha256=[0-9a-f]{64}'
+
+exec agenthof audit control --control-log control.jsonl
+stdout 'control ledger — 3 events'
+stdout 'config applied'
+stdout 'disabled agent coder'
+stdout 'enabled agent coder'
+stdout 'dana@example.com \(asserted\)'
+stdout 'control ledger integrity: verified \(3 events\)'
+
+# A control log that was never written to reports plainly, not a raw
+# open error, and exits nonzero.
+! exec agenthof audit control --control-log never-written.jsonl
+stdout 'no control ledger at never-written.jsonl — nothing recorded yet'

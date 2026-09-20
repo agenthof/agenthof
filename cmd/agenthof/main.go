@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/audit"
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/gateway"
 	"github.com/agenthof/agenthof/internal/identity"
@@ -27,11 +29,15 @@ import (
 const usage = `agenthof — the agents' court
 
 Usage:
-  agenthof apply    --config <dir>
-  agenthof registry list|enable|disable [<agent>] --config <dir>
+  agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
+  agenthof registry list --config <dir>
+  agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--executor echo|adk] [--workspace <dir>] [--artifact-dir <dir>]
   agenthof audit <run-id> [--log-dir <dir>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
+  agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
+  agenthof audit control [--control-log <path>]
+  agenthof audit repair control [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
   agenthof gateway provision --config <dir> [--admin-base <url>]
 `
@@ -91,27 +97,195 @@ func buildRegistry(configRoot string, out io.Writer) *registry.Registry {
 	return reg
 }
 
+// hashConfigDir computes the config directory's join-key hash for
+// cmdApply and cmdRegistryFlip. It is a var (rather than a direct
+// config.HashDir call) so tests can force a hash failure independently of
+// LoadDir/Build's own read of the same files — the two read the same
+// bytes via the same enumeration, so there is no way to make one fail
+// without the other through the filesystem alone.
+var hashConfigDir = config.HashDir
+
+// cmdApply implements the audited path for `apply` (spec §3.4/§3.5/§3.7):
+// resolve invoker; pre-verify the control chain is writable before any
+// append; then LoadDir+Build as before, but a load failure now records
+// outcome "rejected"/validation_failed with a config_hash over the
+// rejected-but-readable bytes when hashConfigDir can still hash them, or
+// outcome "error"/io_error with no config_hash when it can't (the bytes
+// are genuinely unreadable); a validation failure likewise records outcome
+// "rejected"/validation_failed with a config_hash over the rejected
+// bytes. Apply never mutates files, so unlike cmdRegistryFlip there is no
+// "state changed; event NOT recorded" case — a failed success/rejected
+// Append is just reported and the process exits nonzero.
 func cmdApply(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	cfgDir := fs.String("config", "./config", "config directory")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
+	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
+	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+
+	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
+	if usageErr {
+		_, _ = fmt.Fprintln(out, "apply: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
+	}
+
+	// Verify the control chain FIRST, before any append (including a
+	// refused-token append below): a torn or broken control ledger means
+	// the ledger itself is unwritable, so the "audit repair control" hint
+	// must always be what a damaged ledger prints, regardless of which
+	// branch would otherwise have run next.
+	c, err := ledger.Open(*controlLog, ledger.Locked)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s\n", *controlLog)
+		return 1
+	}
+	_ = c.Close()
+
+	if refused {
+		// Never echo the raw token, nor the go-oidc error text, into the
+		// ledger: it can echo claim values from the (unverified) token
+		// (see resolveInvoker's doc comment) — the recorded reason is a
+		// fixed string; only the printed line below shows verifyErr.
+		_, _ = fmt.Fprintf(out, "apply: token authentication failed: %v\n", verifyErr)
+		head, appendErr := control.Append(*controlLog, control.Event{
+			Action:     "apply",
+			Outcome:    "refused",
+			Reason:     &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"},
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+
 	cfg, loadErrs := config.LoadDir(*cfgDir)
 	for _, e := range loadErrs {
 		_, _ = fmt.Fprintln(out, e)
 	}
+	if len(loadErrs) > 0 {
+		// A LoadDir failure is ambiguous by itself: it fires both when the
+		// config bytes are genuinely unreadable (I/O denial) and when they
+		// are readable but fail to parse (a rejectable config, per §3.5).
+		// hashConfigDir reads the same files as LoadDir but only cares
+		// about raw bytes, so it succeeds on readable-but-unparseable YAML
+		// and fails only on the genuine I/O case — used here to tell the
+		// two apart so a bad-but-readable config is hashed and recorded as
+		// "rejected", not hash-less "error".
+		h, hashErr := hashConfigDir(*cfgDir)
+		event := control.Event{
+			Action:     "apply",
+			Outcome:    "rejected",
+			Reason:     &control.Reason{Code: control.CodeValidationFailed, Message: truncateErr(loadErrs[0])},
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+			ConfigHash: h,
+		}
+		if hashErr != nil {
+			// The config bytes themselves are unreadable — a genuine I/O
+			// denial, not a rejectable-but-hashable config; no config_hash
+			// can be computed, so this stays "error" / io_error.
+			event.Outcome = "error"
+			event.Reason = &control.Reason{Code: control.CodeIOError, Message: truncateErr(loadErrs[0])}
+			event.ConfigHash = ""
+		}
+		head, appendErr := control.Append(*controlLog, event)
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+
 	_, valErrs := registry.Build(cfg)
 	for _, e := range valErrs {
 		_, _ = fmt.Fprintln(out, e.Error())
 	}
-	if len(loadErrs) > 0 || len(valErrs) > 0 {
+	if len(valErrs) > 0 {
+		// config_hash is a required field on a "rejected" event (spec
+		// §3.2). HashDir hashes raw file contents, so it normally
+		// succeeds even though registry.Build just failed on the same
+		// bytes — but if it can't be computed at all, the honest record
+		// is an io_error, never a hash-less "rejected".
+		h, hashErr := hashConfigDir(*cfgDir)
+		if hashErr != nil {
+			return appendApplyHashFailure(*controlLog, inv, assertedAs, hashErr, out)
+		}
+		head, appendErr := control.Append(*controlLog, control.Event{
+			Action:     "apply",
+			Outcome:    "rejected",
+			Reason:     &control.Reason{Code: control.CodeValidationFailed, Message: truncateErr(valErrs[0])},
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+			ConfigHash: h,
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
 		return 1
 	}
+
 	_, _ = fmt.Fprintf(out, "registry ok: %d agents, %d workflows, %d roles\n",
 		len(cfg.Agents), len(cfg.Workflows), len(cfg.Roles))
+	// config_hash is likewise required on a "success" event; the same
+	// rule applies here as above.
+	h, hashErr := hashConfigDir(*cfgDir)
+	if hashErr != nil {
+		return appendApplyHashFailure(*controlLog, inv, assertedAs, hashErr, out)
+	}
+	head, appendErr := control.Append(*controlLog, control.Event{
+		Action:     "apply",
+		Outcome:    "success",
+		Invoker:    inv,
+		AssertedAs: assertedAs,
+		Witness:    control.CaptureWitness(),
+		ConfigHash: h,
+	})
+	if appendErr != nil {
+		_, _ = fmt.Fprintln(out, appendErr)
+		return 1
+	}
+	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
 	return 0
+}
+
+// appendApplyHashFailure records apply's success/rejected outcome as an
+// "error"/io_error control event instead, when config.HashDir itself
+// failed after LoadDir/Build already succeeded/rejected the same bytes:
+// config_hash is required on both of those outcomes (spec §3.2), so a
+// hash that cannot be computed is itself a writable-ledger denial (spec
+// §3.7's "a denial is itself an event" rule) — the same shape as the
+// LoadDir-error branch above, never a hash-less success/rejected.
+func appendApplyHashFailure(controlLog string, inv identity.Invoker, assertedAs string, hashErr error, out io.Writer) int {
+	_, _ = fmt.Fprintln(out, hashErr)
+	head, appendErr := control.Append(controlLog, control.Event{
+		Action:     "apply",
+		Outcome:    "error",
+		Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(hashErr)},
+		Invoker:    inv,
+		AssertedAs: assertedAs,
+		Witness:    control.CaptureWitness(),
+	})
+	if appendErr != nil {
+		_, _ = fmt.Fprintln(out, appendErr)
+		return 1
+	}
+	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+	return 1
 }
 
 func cmdRegistry(args []string, out io.Writer) int {
@@ -131,6 +305,10 @@ func cmdRegistry(args []string, out io.Writer) int {
 	}
 	fs := flag.NewFlagSet("registry", flag.ContinueOnError)
 	cfgDir := fs.String("config", "./config", "config directory")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path (enable/disable only)")
+	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
+	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
+	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -146,21 +324,197 @@ func cmdRegistry(args []string, out io.Writer) int {
 		}
 		return 0
 	case "enable", "disable":
-		enabled := sub == "enable"
-		if err := registry.SetEnabled(*cfgDir, target, enabled); err != nil {
-			_, _ = fmt.Fprintln(out, err)
-			return 1
-		}
-		state := "disabled"
-		if enabled {
-			state = "enabled"
-		}
-		_, _ = fmt.Fprintf(out, "agent %s %s\n", target, state)
-		return 0
+		return cmdRegistryFlip(sub, target, *cfgDir, *controlLog, *as, *groups, *token, out)
 	default:
 		_, _ = fmt.Fprintf(out, "unknown registry subcommand %q\n", sub)
 		return 2
 	}
+}
+
+// maxRecordedErrLen bounds how much of an underlying config/IO error's
+// text is copied into a control event's reason message: config and IO
+// errors carry no secrets or invoker identity, so including the text is
+// safe, but it must still be bounded before it goes into an append-only
+// ledger.
+const maxRecordedErrLen = 200
+
+// truncateErr renders err's message, cut to at most maxRecordedErrLen
+// bytes.
+func truncateErr(err error) string {
+	s := err.Error()
+	if len(s) > maxRecordedErrLen {
+		s = s[:maxRecordedErrLen]
+	}
+	return s
+}
+
+// cmdRegistryFlip implements the audited write path for `registry
+// enable|disable` (spec §3.4). Every branch that can write a control
+// event does so before returning, once the control chain itself is
+// known writable; the only unrecorded exit is a control ledger that
+// itself cannot be opened (step 2 below) or a final append that fails
+// AFTER the agent's enabled bit already changed (the documented
+// residual risk).
+func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token string, out io.Writer) int {
+	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(as, groups, token)
+	if usageErr {
+		_, _ = fmt.Fprintln(out, "registry: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
+	}
+
+	// Verify the control chain FIRST, before any state mutation OR any
+	// append (including a refused-token append below): a torn or broken
+	// control ledger means the ledger itself is unwritable, so nothing
+	// past this point may flip state or record anything — the "audit
+	// repair control" hint must always be what a damaged ledger prints,
+	// regardless of which branch would otherwise have run next.
+	c, err := ledger.Open(controlLog, ledger.Locked)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s\n", controlLog)
+		return 1
+	}
+	_ = c.Close()
+
+	if refused {
+		// Never echo the raw token, nor the go-oidc error text, into the
+		// ledger: it can echo claim values from the (unverified) token
+		// (see resolveInvoker's doc comment) — the recorded reason is a
+		// fixed string; only the printed line below shows verifyErr.
+		_, _ = fmt.Fprintf(out, "registry %s: token authentication failed: %v\n", action, verifyErr)
+		head, err := control.Append(controlLog, control.Event{
+			Action:     action,
+			Agent:      target,
+			Outcome:    "refused",
+			Reason:     &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"},
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+		})
+		if err != nil {
+			_, _ = fmt.Fprintln(out, err)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+
+	// Unknown-agent detection is done here, independently, against the
+	// loaded config, rather than by parsing SetEnabled's own error text:
+	// that keeps the refusal's reason code stable regardless of how
+	// SetEnabled happens to word its error. The control chain is
+	// already known writable at this point (step 2 above), so a config
+	// that fails to load at all is now itself a recordable denial —
+	// outcome "error", reason io_error — rather than a silent, unlogged
+	// exit; it is still never conflated with "agent not found", which is
+	// reserved for a config that loaded cleanly and genuinely lacks the
+	// name.
+	cfg, loadErrs := config.LoadDir(cfgDir)
+	if len(loadErrs) > 0 {
+		for _, e := range loadErrs {
+			_, _ = fmt.Fprintln(out, e)
+		}
+		head, appendErr := control.Append(controlLog, control.Event{
+			Action:     action,
+			Agent:      target,
+			Outcome:    "error",
+			Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(loadErrs[0])},
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+	known := false
+	for _, a := range cfg.Agents {
+		if a.Name == target {
+			known = true
+			break
+		}
+	}
+	if !known {
+		head, appendErr := control.Append(controlLog, control.Event{
+			Action:     action,
+			Agent:      target,
+			Outcome:    "refused",
+			Reason:     &control.Reason{Code: control.CodeAgentNotFound, Message: fmt.Sprintf("agent %s not found", target)},
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+
+	enabled := action == "enable"
+	if setErr := registry.SetEnabled(cfgDir, target, enabled); setErr != nil {
+		_, _ = fmt.Fprintln(out, setErr)
+		head, appendErr := control.Append(controlLog, control.Event{
+			Action:     action,
+			Agent:      target,
+			Outcome:    "error",
+			Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(setErr)},
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+	state := "disabled"
+	if enabled {
+		state = "enabled"
+	}
+	_, _ = fmt.Fprintf(out, "agent %s %s\n", target, state)
+
+	// Test-only crash hook (spec §3.8): simulates the process dying after
+	// SetEnabled has already changed on-disk state but before the success
+	// control.Append below, so that documented residual-risk window is
+	// exercisable by a test instead of only by an unreproducible race.
+	if os.Getenv("AGENTHOF_TEST_CRASH_AT") == "after_state_before_append" {
+		_, _ = fmt.Fprintln(out, "state changed; event NOT recorded")
+		return 1
+	}
+
+	// Recompute config_hash by re-reading: SetEnabled just rewrote the
+	// agent's YAML file, so the pre-flip hash is already stale. A
+	// failure past this point means the state already changed but the
+	// event could not be built/appended — the documented residual risk.
+	// Routed through the hashConfigDir seam (the same one cmdApply uses)
+	// rather than calling config.HashDir directly, so this branch is
+	// exercisable by a test too.
+	h, hashErr := hashConfigDir(cfgDir)
+	if hashErr != nil {
+		_, _ = fmt.Fprintln(out, "state changed; event NOT recorded")
+		return 1
+	}
+	head, err := control.Append(controlLog, control.Event{
+		Action:     action,
+		Agent:      target,
+		Outcome:    "success",
+		Invoker:    inv,
+		AssertedAs: assertedAs,
+		Witness:    control.CaptureWitness(),
+		ConfigHash: h,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintln(out, "state changed; event NOT recorded")
+		return 1
+	}
+	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+	return 0
 }
 
 func cmdRun(args []string, out io.Writer) int {
@@ -192,52 +546,23 @@ func cmdRun(args []string, out io.Writer) int {
 		return 2
 	}
 
-	rawToken := *token
-	if rawToken == "" {
-		rawToken = os.Getenv("AGENTHOF_TOKEN")
+	inv, _, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
+	if usageErr {
+		_, _ = fmt.Fprintln(out, "run: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
 	}
-	var inv identity.Invoker
-	if rawToken != "" {
-		issuerURL := os.Getenv("AGENTHOF_OIDC_ISSUER")
-		if issuerURL == "" {
-			_, _ = fmt.Fprintln(out, "run: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
-			return 2
-		}
-		clientID := os.Getenv("AGENTHOF_OIDC_CLIENT_ID")
-		if clientID == "" {
-			clientID = "agenthof"
-		}
-		authInv, err := (identity.OIDC{IssuerURL: issuerURL, ClientID: clientID}).Authenticate(context.Background(), rawToken)
-		if err != nil {
-			// Never echo the raw token: it's a bearer credential. Nor do we
-			// echo the go-oidc error text into the ledger below — it can
-			// echo claim values from the (unverified) token.
-			_, _ = fmt.Fprintf(out, "run: token authentication failed: %v\n", err)
-			refusedInv := identity.Invoker{Subject: "(unverified)", Issuer: issuerURL, Method: "oidc-rejected"}
-			runID, refErr := engine.Refuse(*logDir, role, workflow, refusedInv, "token verification failed")
-			if refErr != nil {
-				_, _ = fmt.Fprintln(out, refErr)
-				return 1
-			}
-			_, _ = fmt.Fprintf(out, "run %s refused: token verification failed\n", runID)
+	if refused {
+		// Never echo the raw token: it's a bearer credential. Nor do we
+		// echo the go-oidc error text into the ledger below — it can
+		// echo claim values from the (unverified) token.
+		_, _ = fmt.Fprintf(out, "run: token authentication failed: %v\n", verifyErr)
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, "token verification failed")
+		if refErr != nil {
+			_, _ = fmt.Fprintln(out, refErr)
 			return 1
 		}
-		inv = authInv
-	} else {
-		var g []string
-		for _, raw := range strings.Split(*groups, ",") {
-			trimmed := strings.TrimSpace(raw)
-			if trimmed != "" {
-				g = append(g, trimmed)
-			}
-		}
-		// identity.Static only takes --as; it's set here rather than adding a
-		// groups parameter, since ~15 existing call sites across the engine,
-		// audit, and identity test suites call Static with a single arg.
-		// Invoker.Groups is a plain exported field, so mutating the returned
-		// value is equivalent to threading it through the constructor.
-		inv = identity.Static(*as)
-		inv.Groups = g
+		_, _ = fmt.Fprintf(out, "run %s refused: token verification failed\n", runID)
+		return 1
 	}
 
 	ws := *workspace
@@ -282,8 +607,11 @@ func cmdRun(args []string, out io.Writer) int {
 		contained = engine.EchoExecutor{}
 	}
 	exec := agentrt.MuxExecutor{Contained: contained, Fronted: agentrt.AdapterExecutor{}}
+	// A hash failure here yields an empty join key, not a run failure: the
+	// run's config already validated above, so the run proceeds regardless.
+	h, _ := config.HashDir(*cfgDir)
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
-		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, WorkspaceDir: ws})
+		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, WorkspaceDir: ws, ConfigHash: h})
 	if err != nil && status == "refused" {
 		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", runID, err)
 		return 1
@@ -369,6 +697,19 @@ func cmdAudit(args []string, out io.Writer) int {
 	if args[0] == "verify" {
 		return cmdAuditVerify(args[1:], out)
 	}
+	// "control" is likewise disambiguated up front: it, like "verify", can
+	// never collide with a run id's "r-<hex>" form.
+	if args[0] == "control" {
+		return cmdAuditControl(args[1:], out)
+	}
+	// "repair" is disambiguated the same way: a run id is always
+	// "r-<hex>" (engine.NewRunID), which "repair" can never match. Only
+	// "repair control" exists today (there is no run-log repair), so the
+	// "control" sub-dispatch lives inside cmdAuditRepairControl itself
+	// rather than a separate cmdAuditRepair layer.
+	if args[0] == "repair" {
+		return cmdAuditRepairControl(args[1:], out)
+	}
 	runID := args[0]
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
@@ -396,18 +737,26 @@ func cmdAudit(args []string, out io.Writer) int {
 	return 0
 }
 
-// cmdAuditVerify implements `audit verify <run-id> [--expect-head <hex>]`:
-// it reports the verified chain's head hash and event count, and, given
-// --expect-head, compares it against a previously recorded hash. Exit
-// codes: 0 clean (and, when given, --expect-head matches); 1 torn/broken
-// ledger or an open/IO failure; 4 --expect-head mismatch (hash only —
-// count is informational and not compared); 2 usage errors. 3 is
-// reserved for the E2 control-ledger taint verdict and is never returned
-// here.
+// cmdAuditVerify implements `audit verify <run-id> [--expect-head <hex>]`,
+// dispatching to cmdAuditVerifyControl when the next arg is "control": it
+// reports the verified chain's head hash and event count, and, given
+// --expect-head, compares it against a previously recorded hash. For a
+// run (this function's own path, unchanged from before the control
+// dispatch was added): exit codes are 0 clean (and, when given,
+// --expect-head matches); 1 torn/broken ledger or an open/IO failure; 4
+// --expect-head mismatch (hash only — count is informational and not
+// compared); 2 usage errors. 3 (the taint verdict) is returned only via
+// the "control" dispatch — see cmdAuditVerifyControl.
 func cmdAuditVerify(args []string, out io.Writer) int {
 	if len(args) < 1 {
 		_, _ = fmt.Fprintln(out, "audit verify needs a run id")
 		return 2
+	}
+	// "control" is disambiguated up front, same as cmdAudit does for its
+	// own "verify"/"control" subcommands: a run id is always "r-<hex>"
+	// (engine.NewRunID), which "control" can never match.
+	if args[0] == "control" {
+		return cmdAuditVerifyControl(args[1:], out)
 	}
 	runID := args[0]
 	fs := flag.NewFlagSet("audit verify", flag.ContinueOnError)
@@ -437,6 +786,183 @@ func cmdAuditVerify(args []string, out io.Writer) int {
 		return 4
 	}
 	return 0
+}
+
+// cmdAuditControl implements `audit control`: it renders the control
+// ledger (spec §3.6) as a human-readable audit trail via control.Render.
+// A missing control log (nothing has ever been recorded there) is
+// reported plainly rather than as a generic open error; a torn/broken
+// chain still renders whatever valid prefix ReadVerify recovered,
+// followed by the integrity line naming the failure, and exits nonzero.
+func cmdAuditControl(args []string, out io.Writer) int {
+	fs := flag.NewFlagSet("audit control", flag.ContinueOnError)
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	fs.SetOutput(out)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	records, head, err := ledger.ReadVerify(*controlLog, ledger.Locked)
+	if err != nil {
+		var te *ledger.TornError
+		var be *ledger.ChainBrokenError
+		if !errors.As(err, &te) && !errors.As(err, &be) {
+			if os.IsNotExist(err) {
+				_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
+				return 1
+			}
+			// Some other open/IO failure: no ledger to render.
+			_, _ = fmt.Fprintln(out, err)
+			return 1
+		}
+	}
+	_, _ = fmt.Fprint(out, control.Render(records, head, err))
+	if err != nil {
+		// A torn/broken chain, whether or not a valid prefix was
+		// recovered — the rendered output already names the failure, but
+		// the exit code must not lie about a corrupted ledger.
+		return 1
+	}
+	return 0
+}
+
+// cmdAuditVerifyControl implements `audit verify control [--control-log
+// <path>] [--expect-head <hex>]`: the control-ledger counterpart to
+// cmdAuditVerify, reporting the control chain's head and, given
+// --expect-head, comparing it against a previously recorded hash. Exit
+// codes, checked in this order (spec §3.6): 1 for a missing control log
+// or any other open/IO failure; 1 for a torn/broken chain; 3 when the
+// chain is tainted (control.IsTainted — a "repair" record was ever
+// appended), which takes precedence over an --expect-head mismatch; 4
+// for an --expect-head mismatch (hash only — count is informational); 0
+// otherwise.
+func cmdAuditVerifyControl(args []string, out io.Writer) int {
+	fs := flag.NewFlagSet("audit verify control", flag.ContinueOnError)
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	expectHead := fs.String("expect-head", "", "expected control ledger head hash (hex) to verify against")
+	fs.SetOutput(out)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	records, head, err := ledger.ReadVerify(*controlLog, ledger.Locked)
+	if err != nil {
+		var te *ledger.TornError
+		var be *ledger.ChainBrokenError
+		if !errors.As(err, &te) && !errors.As(err, &be) {
+			if os.IsNotExist(err) {
+				_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
+				return 1
+			}
+			// Some other open/IO failure: no ledger to report a head for.
+			_, _ = fmt.Fprintln(out, err)
+			return 1
+		}
+	}
+	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+	if err != nil {
+		_, _ = fmt.Fprintln(out, err)
+		return 1
+	}
+	if tainted, seq := control.IsTainted(records); tainted {
+		_, _ = fmt.Fprintf(out, "control ledger TAINTED: repaired at seq %d\n", seq)
+		return 3
+	}
+	if *expectHead != "" && *expectHead != head.Hash {
+		_, _ = fmt.Fprintf(out, "expect-head mismatch: want %s, got %s\n", *expectHead, head.Hash)
+		return 4
+	}
+	return 0
+}
+
+// cmdAuditRepairControl implements `audit repair control [--control-log
+// <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` (spec §3.6): it
+// resolves the repairing operator's identity exactly as apply/registry
+// do, then hands off to control.Repair to move the torn fragment aside,
+// truncate the live file, and append the chained "repair" event that
+// taints the ledger forever (control.IsTainted; reported by a later
+// `audit verify control` as exit 3).
+//
+// A missing control log is reported plainly rather than as a generic
+// open error, matching cmdAuditControl/cmdAuditVerifyControl. An
+// authentication refusal exits nonzero WITHOUT writing any control
+// event: the ledger here may be exactly the torn/unwritable file being
+// repaired, so there is no safe place to record the refusal, unlike
+// apply/registry's refusal path against an already-known-writable
+// chain.
+func cmdAuditRepairControl(args []string, out io.Writer) int {
+	if len(args) < 1 || args[0] != "control" {
+		_, _ = fmt.Fprintln(out, "audit repair needs a subcommand: control")
+		return 2
+	}
+	fs := flag.NewFlagSet("audit repair control", flag.ContinueOnError)
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
+	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
+	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	fs.SetOutput(out)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+
+	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
+	if usageErr {
+		_, _ = fmt.Fprintln(out, "audit repair control: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
+	}
+	if refused {
+		// An unauthenticated operator must not repair anything, and — since
+		// the ledger being repaired may itself be the torn/unwritable file
+		// in question — there is no known-writable chain to safely record
+		// this refusal against, unlike apply/registry's refusal path. Print
+		// and exit; do not attempt a control.Append here.
+		_, _ = fmt.Fprintf(out, "audit repair control: token authentication failed: %v\n", verifyErr)
+		return 1
+	}
+
+	if _, statErr := os.Stat(*controlLog); statErr != nil {
+		if os.IsNotExist(statErr) {
+			_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
+			return 1
+		}
+		_, _ = fmt.Fprintln(out, statErr)
+		return 1
+	}
+
+	fragLen, fragSHA, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness())
+	if err != nil {
+		_, _ = fmt.Fprintln(out, err)
+		return 1
+	}
+	_, _ = fmt.Fprintf(out, "repaired: moved %d bytes (sha256=%s) to %s; control ledger tainted\n",
+		fragLen, fragSHA, latestTornFragmentPath(*controlLog))
+	records, head, verr := ledger.ReadVerify(*controlLog, ledger.Locked)
+	if verr != nil {
+		_, _ = fmt.Fprintln(out, verr)
+		return 1
+	}
+	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+	if tainted, seq := control.IsTainted(records); tainted {
+		_, _ = fmt.Fprintf(out, "control ledger TAINTED: repaired at seq %d\n", seq)
+	}
+	return 0
+}
+
+// latestTornFragmentPath finds the most recently created
+// "<controlLog>.torn-<unix-seconds>" sibling file, for the human-readable
+// message printed after a successful control.Repair. control.Repair
+// itself only returns the fragment's length and sha256 (spec §3.6's
+// interface), not the path it chose, so this glob-and-pick-newest
+// reconstructs it; timestamps are decimal Unix seconds of equal length
+// today, so the lexicographically greatest match is also the newest. A
+// failure here never fails the repair itself — it already succeeded —
+// so this just falls back to a glob pattern if, somehow, nothing matches.
+func latestTornFragmentPath(controlLog string) string {
+	pattern := controlLog + ".torn-*"
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return pattern
+	}
+	sort.Strings(matches)
+	return matches[len(matches)-1]
 }
 
 func cmdRuns(args []string, out io.Writer) int {
@@ -521,6 +1047,14 @@ func pruneRuns(logDir string, dur time.Duration) (int, error) {
 	}
 	pruned := 0
 	for _, entry := range entries {
+		// The control ledger and its "<control-log>.torn-*" repair
+		// fragments (internal/control/log.go's writeTornFragment) must
+		// never be deleted here, even if --log-dir is misconfigured to
+		// point at the ledger's own directory instead of the default
+		// .agenthof/runs (task 11, spec §3.1).
+		if entry.Name() == "control.jsonl" || strings.Contains(entry.Name(), ".torn-") {
+			continue
+		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}

@@ -41,6 +41,7 @@ type Options struct {
 	StepTimeout  time.Duration
 	ArtifactDir  string
 	WorkspaceDir string
+	ConfigHash   string
 }
 
 const defaultMaxBounces = 2
@@ -104,7 +105,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 			role, strings.Join(ro.AllowedGroups, ", ")))
 	}
 
-	emit(Event{Type: "workflow_started"})
+	emit(Event{Type: "workflow_started", ConfigHash: opts.ConfigHash})
 	artifacts := map[string]string{}
 	bounces := map[string]int{}
 	i := 0

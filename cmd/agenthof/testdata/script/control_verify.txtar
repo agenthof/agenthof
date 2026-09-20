@@ -1,0 +1,19 @@
+# Task 9: `agenthof audit verify control` verifies the control log's
+# chain and taint status, with distinct exit codes — spec §3.6.
+
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com
+stdout 'registry ok: 5 agents, 2 workflows, 2 roles'
+stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
+
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
+
+# --expect-head mismatched against an otherwise-clean chain exits 4.
+! exec agenthof audit verify control --control-log control.jsonl --expect-head deadbeef
+stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
+stdout 'expect-head mismatch: want deadbeef, got [0-9a-f]{64}'
+
+# A control log that was never written to reports plainly, not a raw
+# open error, and exits nonzero.
+! exec agenthof audit verify control --control-log never-written.jsonl
+stdout 'no control ledger at never-written.jsonl — nothing recorded yet'

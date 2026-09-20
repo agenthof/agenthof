@@ -19,11 +19,15 @@ Pre-release, and the governed core is real and runnable today:
 - a hash-chained ledger where every action and refusal is attributed to the
   human who invoked it, with `audit verify` for integrity;
 - the kill switch, OIDC + RBAC, per-role model-gateway keys and budgets, and
-  `contained` / `fronted` execution tiers.
+  `contained` / `fronted` execution tiers;
+- a control-plane audit — every `apply` and kill-switch flip is recorded to
+  its own hash-chained control ledger, attributed to the human who invoked
+  it, with `audit control`, `audit verify control`, and `audit repair
+  control`.
 
-What's shipped versus what's coming — control-plane audit, a tool/MCP gateway,
-governed skills, multi-resource scope — is laid out in the
-[roadmap](ROADMAP.md). Only shipped items are guarantees.
+What's shipped versus what's coming — a tool/MCP gateway, governed skills,
+multi-resource scope — is laid out in the [roadmap](ROADMAP.md). Only shipped
+items are guarantees.
 
 ## Quickstart
 

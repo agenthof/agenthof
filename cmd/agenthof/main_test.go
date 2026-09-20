@@ -45,8 +45,12 @@ func writeSample(t *testing.T) string {
 
 func TestApplyOKAndFailure(t *testing.T) {
 	root := writeSample(t)
+	// --control-log keeps this test's control ledger inside root rather
+	// than the default relative ".agenthof/control.jsonl" (which would
+	// otherwise be created next to the test binary, outside t.TempDir()).
+	controlLog := filepath.Join(root, "control.jsonl")
 	var out bytes.Buffer
-	if code := cmdApply([]string{"--config", root}, &out); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out); code != 0 {
 		t.Fatalf("apply: %d\n%s", code, out.String())
 	}
 	if !strings.Contains(out.String(), "registry ok: 2 agents, 1 workflows, 1 roles") {
@@ -54,11 +58,11 @@ func TestApplyOKAndFailure(t *testing.T) {
 	}
 	// break it: disable coder, apply must fail naming fix-bug
 	out.Reset()
-	if code := cmdRegistry([]string{"disable", "coder", "--config", root}, &out); code != 0 {
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlLog}, &out); code != 0 {
 		t.Fatalf("disable: %s", out.String())
 	}
 	out.Reset()
-	if code := cmdApply([]string{"--config", root}, &out); code != 1 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out); code != 1 {
 		t.Fatal("apply must fail with a disabled dependency")
 	}
 	if !strings.Contains(out.String(), "fix-bug") || !strings.Contains(out.String(), "disabled") {
@@ -73,8 +77,9 @@ func TestApplyFailsOnFrontedAgentMissingEndpoint(t *testing.T) {
 	if err := os.WriteFile(helperPath, []byte("name: helper\nexecution: fronted\ninstruction: help\noutput: result\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	controlLog := filepath.Join(root, "control.jsonl")
 	var out bytes.Buffer
-	if code := cmdApply([]string{"--config", root}, &out); code != 1 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out); code != 1 {
 		t.Fatalf("apply must fail with fronted agent missing endpoint, got code %d\n%s", code, out.String())
 	}
 	if !strings.Contains(out.String(), "helper") {
@@ -439,6 +444,97 @@ func TestRunsPruneLogDirIsRegularFile(t *testing.T) {
 	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", notADir}, &out)
 	if code != 1 {
 		t.Fatalf("expected exit 1 when --log-dir is a regular file, got %d\n%s", code, out.String())
+	}
+}
+
+// TestRunsPruneSparesControlLogAndFragments proves the default layout is
+// safe: the control ledger lives at .agenthof/control.jsonl, a sibling of
+// (not a member of) the default --log-dir .agenthof/runs, so an aged run
+// log under --log-dir is pruned while the ledger and its .torn-* repair
+// fragment — both outside --log-dir entirely — are untouched. Task 11,
+// spec §3.1.
+func TestRunsPruneSparesControlLogAndFragments(t *testing.T) {
+	root := t.TempDir()
+	agentDir := filepath.Join(root, ".agenthof")
+	runsDir := filepath.Join(agentDir, "runs")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := filepath.Join(runsDir, "r-old.jsonl")
+	controlLog := filepath.Join(agentDir, "control.jsonl")
+	fragment := controlLog + ".torn-1"
+	for _, p := range []string{oldRun, controlLog, fragment} {
+		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	for _, p := range []string{oldRun, controlLog, fragment} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out bytes.Buffer
+	code := cmdRuns([]string{"prune", "--older-than", "24h", "--log-dir", runsDir}, &out)
+	if code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(oldRun); !os.IsNotExist(err) {
+		t.Fatalf("old run log should be pruned, err=%v", err)
+	}
+	if _, err := os.Stat(controlLog); err != nil {
+		t.Fatalf("control log must survive prune: %v", err)
+	}
+	if _, err := os.Stat(fragment); err != nil {
+		t.Fatalf("torn fragment must survive prune: %v", err)
+	}
+}
+
+// TestRunsPruneNeverDeletesControlLogEvenIfLogDirPointsAtItsDir covers the
+// misconfiguration case: an operator points --log-dir directly at the
+// control log's own directory (instead of the default .agenthof/runs).
+// pruneRuns's *.jsonl glob would otherwise match control.jsonl itself;
+// the ledger and its repair fragment must still survive. Task 11, spec
+// §3.1.
+func TestRunsPruneNeverDeletesControlLogEvenIfLogDirPointsAtItsDir(t *testing.T) {
+	agentDir := t.TempDir()
+	oldRun := filepath.Join(agentDir, "r-old.jsonl")
+	controlLog := filepath.Join(agentDir, "control.jsonl")
+	fragment := controlLog + ".torn-1"
+	for _, p := range []string{oldRun, controlLog, fragment} {
+		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	for _, p := range []string{oldRun, controlLog, fragment} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out bytes.Buffer
+	// A misconfigured --log-dir that resolves to the same directory as
+	// control.jsonl must still prune plain aged run logs (proving the
+	// guard is discriminating, not just "prune did nothing")...
+	code := cmdRuns([]string{"prune", "--older-than", "24h", "--log-dir", agentDir}, &out)
+	if code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+		t.Fatalf("out: %s", out.String())
+	}
+	if _, err := os.Stat(oldRun); !os.IsNotExist(err) {
+		t.Fatalf("old run log should still be pruned, err=%v", err)
+	}
+	// ...while the control ledger and its repair fragment survive.
+	if _, err := os.Stat(controlLog); err != nil {
+		t.Fatalf("control log must survive prune even when --log-dir points at its directory: %v", err)
+	}
+	if _, err := os.Stat(fragment); err != nil {
+		t.Fatalf("torn fragment must survive prune: %v", err)
 	}
 }
 

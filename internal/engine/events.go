@@ -30,6 +30,7 @@ type Event struct {
 	Artifact    string    `json:"artifact,omitempty"`
 	ArtifactSHA string    `json:"artifact_sha,omitempty"`
 	Execution   string    `json:"execution,omitempty"`
+	ConfigHash  string    `json:"config_hash,omitempty"`
 	Binding     Binding   `json:"binding"`
 	Prev        string    `json:"prev"`
 }

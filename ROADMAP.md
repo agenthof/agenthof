@@ -34,12 +34,14 @@ The governed core is real and runnable today:
   runtime; `fronted` agents are any external HTTP endpoint, governed at the
   doors. The tier is recorded on every ledger event.
 - **Retention** — `runs prune` ships in the core, not behind a paywall.
+- **Auditable control plane** — *who applied config* and *who flipped the
+  kill switch* is recorded to its own hash-chained control ledger, so "who
+  changed the setup on the 14th, and who approved what's running?" is
+  answerable; `audit control`, `audit verify control`, and `audit repair
+  control` read, verify, and recover it.
 
 ## Next
 
-- **Auditable control plane** — record *who applied config* and *who flipped
-  the kill switch*, in a hash-chained control ledger, so "who changed the setup
-  on the 14th, and who approved what's running?" is answerable.
 - **Tool / MCP gateway** — the reserved `tools:` surface built out: an
   allowlisted, logged catalog of capabilities an agent may call.
 

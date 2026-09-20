@@ -177,6 +177,70 @@ in the ledger:
   `workflow_finished{status: failed}`. The whole chain stays in the ledger,
   so a failed run is as legible afterwards as a successful one.
 
+### Control-plane audit
+
+`apply` and the `registry enable|disable` kill switch write to a second,
+separate ledger — the **control log** — rather than to any run's own event
+log: control actions are not tied to a run, and "who applied this config"
+or "who disabled the coder agent, and when" must stay answerable even when
+no run ever happens. It uses the same append-only, hash-chained mechanism
+described above, with the same honest limits: it catches suppression or
+alteration of a committed record, not a truncated tail or a wholesale
+re-forge from a clean point, which is detectable only against a head
+recorded off the machine. Agenthof prints that head after every successful
+append — `control head: seq=N sha256=<hex>` — but does not store it; saving
+it somewhere off-machine (a CI log, a git note, a message) is what makes
+`agenthof audit verify control --expect-head <hex>` meaningful later. See
+[`docs/reference/config.md`](reference/config.md#control-plane-cli) for the
+exact flags and exit codes.
+
+The default path is `.agenthof/control.jsonl`, resolved relative to the
+current working directory the same way key and workspace paths are — run
+these commands from the repository root, or pass `--control-log`
+explicitly. It is never written under `--log-dir`, and `runs prune` skips
+it and any `*.torn-<timestamp>` repair fragment (below) by name — a control
+log saved under a different name inside `--log-dir` is not protected this
+way. Nothing rotates or seals the control log today; it is kept in full,
+indefinitely, as the compliance record, not run ephemera. Its invoker
+subjects are personal data like any other identity the ledger records, so
+the self-hosting operator is the data controller for it, same as for the
+run ledger.
+
+Every control event carries the invoker and a witness — the local OS user
+and hostname, captured independently of the asserted identity, the same
+oidc-is-evidence / asserted-is-a-claim / witness-is-corroboration framing
+as [identity](#identity-three-identities-per-action) above. A successful
+`apply`, a rejected `apply`, and a successful flip each also carry a
+`config_hash` — over the applied or rejected bytes, or the config as it
+reads immediately after the flip — so "who approved what's running", or
+what a rejected config looked like, needs no cross-referencing. (Because
+enabling or disabling an agent rewrites that agent's YAML formatting, the
+hash on a flip event changes on every flip, even one that leaves the
+enabled bit as it was.) A denial is an event too: a failed token, a
+rejected config, and an unknown agent name are all recorded, each with a
+reason code. The one exception is a control log that itself cannot be
+written — torn or broken — where the refusal is loud (naming the repair
+command to run) but unrecorded, since there is no known-good chain left to
+safely record it against. A second, narrower exception exists on
+`enable`/`disable`: if the enabled bit is flipped but computing the fresh
+hash or appending the event then fails, the command prints "state changed;
+event NOT recorded" and exits nonzero — the one case where the registry's
+state and the control log can disagree, and it is treated as an incident
+to investigate by hand, not a bug the ledger papers over.
+
+A torn control log — the tail of an interrupted write — is recovered with
+`agenthof audit repair control`. The damaged bytes are moved, verbatim, to
+a sibling `<log>.torn-<timestamp>` file, never pruned automatically and
+kept as the sole remaining copy of what was there; the live log is
+truncated back to its last valid record; and the repair itself is appended
+as an ordinary, attributed control event. That last step **taints the
+ledger permanently** — repair restores availability, it does not erase
+what happened — and `agenthof audit verify control` reports that taint
+from then on, on every future invocation, cleared by nothing. A chain
+break (a well-formed record that disagrees with its neighbor, rather than
+an interrupted write) is not something repair can fix at all; only a torn
+tail is recoverable this way.
+
 ## Config is law
 
 Roles, workflows, and agents are declarative data, validated by `apply`

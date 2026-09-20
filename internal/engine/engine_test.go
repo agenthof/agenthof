@@ -348,6 +348,31 @@ func TestRunStepConfigErrorFailsWithoutBouncing(t *testing.T) {
 	}
 }
 
+func TestWorkflowStartedCarriesConfigHash(t *testing.T) {
+	dir := t.TempDir()
+	ex := &fakeExec{fail: map[string]int{}}
+	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "fix the login bug",
+		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts"), ConfigHash: "sha256:deadbeef"})
+	if err != nil || status != "succeeded" {
+		t.Fatalf("status=%q err=%v", status, err)
+	}
+	events, _, _ := ReadLog(dir, id)
+	found := false
+	for _, e := range events {
+		if e.Type == "workflow_started" {
+			found = true
+			if e.ConfigHash != "sha256:deadbeef" {
+				t.Fatalf("workflow_started config_hash = %q", e.ConfigHash)
+			}
+		} else if e.ConfigHash != "" {
+			t.Fatalf("%s must not carry config_hash", e.Type)
+		}
+	}
+	if !found {
+		t.Fatal("workflow_started event not found in log")
+	}
+}
+
 func TestRunEventsCarryExecutionTier(t *testing.T) {
 	dir := t.TempDir()
 	ex := &fakeExec{fail: map[string]int{}}
