@@ -103,7 +103,36 @@ func SetEnabled(configRoot, agentName string, enabled bool) error {
 			if err != nil {
 				return err
 			}
-			return os.WriteFile(p, out, 0o644)
+			// Write atomically: temp file, sync, rename.
+			tmp, err := os.CreateTemp(dir, ".enabled-*")
+			if err != nil {
+				return err
+			}
+			tmpPath := tmp.Name()
+			defer func() {
+				if tmpPath != "" {
+					os.Remove(tmpPath)
+				}
+			}()
+			if err := os.Chmod(tmpPath, 0o644); err != nil {
+				return err
+			}
+			if _, err := tmp.Write(out); err != nil {
+				tmp.Close()
+				return err
+			}
+			if err := tmp.Sync(); err != nil {
+				tmp.Close()
+				return err
+			}
+			if err := tmp.Close(); err != nil {
+				return err
+			}
+			if err := os.Rename(tmpPath, p); err != nil {
+				return err
+			}
+			tmpPath = "" // prevent cleanup
+			return nil
 		}
 	}
 	return fmt.Errorf("agent %q not found in %s", agentName, dir)
