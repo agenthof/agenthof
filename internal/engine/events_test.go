@@ -203,6 +203,35 @@ func TestChainCompatWithPreArtifactSHALogs(t *testing.T) {
 	}
 }
 
+// TestOpenLogRejectsRunIDCollision is a regression test for a bug where
+// OpenLog, via ledger.Open, RESUMED an existing run-log file instead of
+// refusing it: a colliding run ID (e.g. from a weak RunID source, or a
+// caller reusing an ID) would chain a second run's events onto the first
+// run's log, and audit would misattribute them to one run. OpenLog must
+// refuse to open a run-id whose file already has events.
+func TestOpenLogRejectsRunIDCollision(t *testing.T) {
+	dir := t.TempDir()
+	id := NewRunID()
+	bind := Binding{Invoker: identity.Static("dev@x"), Role: "se", Workflow: "fix-bug", RunID: id}
+
+	log, err := OpenLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append(Event{Time: time.Now().UTC(), Type: "workflow_started", Binding: bind}); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := OpenLog(dir, id); err == nil {
+		t.Fatal("OpenLog on a run-id whose file already has events must error")
+	} else if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("error must say the run already exists, got: %v", err)
+	}
+}
+
 // TestReadLogUnmarshalFailurePreservesHeadCountInvariant is a regression
 // test for a bug where, if a record was valid per the ledger's hash chain
 // but failed to decode as an Event (e.g. a malformed "time" field), and a

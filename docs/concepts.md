@@ -145,25 +145,22 @@ Every action an agent takes, and every refusal, is an event in the ledger,
 and every event carries the full delegation binding. The ledger is
 hash-chained: each event carries the SHA-256 of the exact bytes of its
 predecessor's line (genesis: empty string), and `audit` verifies the chain.
-The chain makes accidental corruption — and any edit, deletion, or
-reordering of committed events that does not recompute every later link —
-detectable. It does not by itself detect truncation of the tail or
-wholesale regeneration of the file; those are detectable only against a
-chain head recorded off the machine, which Agenthof does not store. No
-Agenthof document may describe the ledger as tamper-proof. Artifact bodies
-never enter the append-only ledger — only a SHA-256 hash and a preview of
-at most 200 characters, with bodies in a separate, prunable store. Secrets
-and full artifact bodies are never written to an event, under any
-circumstance.
-
 The chain's guarantee is honest but limited: it catches accidents (a disk
-error, a botched migration) and lazy tampering (editing an event in place
-without recomputing every later hash). It does not catch a careful attacker
-who truncates the tail and re-forges a new, internally consistent chain
-from that point — detecting that requires a chain head recorded somewhere
-off the machine, which Agenthof does not provide. Once an attacker has
-write access to the ledger file, nothing recorded after the point of
-compromise can be trusted on the strength of the chain alone.
+error, a botched migration) and lazy tampering — any edit, deletion, or
+reordering of committed events that does not recompute every later hash.
+It does not by itself catch a careful attacker who truncates the tail and
+re-forges a new, internally consistent chain from that point; checking for
+that requires a chain head recorded somewhere off the machine, which
+Agenthof does not store. `audit verify --expect-head` performs exactly
+that check when handed a previously recorded head — the limitation is that
+Agenthof itself keeps no such record, not that the check is unavailable.
+Once an attacker has write access to the ledger file, nothing recorded
+after the point of compromise can be trusted on the strength of the chain
+alone. No Agenthof document may describe the ledger as tamper-proof.
+Artifact bodies never enter the append-only ledger — only a SHA-256 hash
+and a preview of at most 200 characters, with bodies in a separate,
+prunable store. Secrets and full artifact bodies are never written to an
+event, under any circumstance.
 
 Refusals and failures are different things, and the distinction is visible
 in the ledger:

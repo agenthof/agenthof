@@ -115,6 +115,7 @@ func SetEnabled(configRoot, agentName string, enabled bool) error {
 				}
 			}()
 			if err := os.Chmod(tmpPath, 0o644); err != nil {
+				tmp.Close()
 				return err
 			}
 			if _, err := tmp.Write(out); err != nil {

@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package ledger implements a shared, raw-byte-verified hash-chain for
 // JSONL ledgers. Each line is a JSON object embedding "prev": the
 // lowercase-hex SHA-256 of the exact on-disk bytes of the previous

@@ -377,10 +377,14 @@ func cmdAudit(args []string, out io.Writer) int {
 		return 2
 	}
 	events, head, err := engine.ReadLog(*logDir, runID)
-	if events == nil && err != nil {
-		// Open/IO failure: no ledger at all to render.
-		_, _ = fmt.Fprintln(out, err)
-		return 1
+	if err != nil {
+		var te *ledger.TornError
+		var be *ledger.ChainBrokenError
+		if !errors.As(err, &te) && !errors.As(err, &be) {
+			// Open/IO failure: no ledger at all to render.
+			_, _ = fmt.Fprintln(out, err)
+			return 1
+		}
 	}
 	_, _ = fmt.Fprint(out, audit.Render(events, head, err))
 	if err != nil {
@@ -476,7 +480,7 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 		return 1
 	}
 
-	// Constitution Art. III keeps artifact bodies out of the immutable
+	// Constitution Art. III keeps artifact bodies out of the append-only
 	// ledger precisely so they can be pruned independently; do that here
 	// too, rather than leaving retention half-enforced. A missing
 	// artifact-dir is not an error (nothing provisioned it yet, e.g. an

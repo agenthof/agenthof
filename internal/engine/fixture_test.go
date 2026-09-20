@@ -10,17 +10,19 @@ import (
 
 // TestGeneratePreMigrationFixture is a one-shot generator, not a test that
 // runs in CI. It writes internal/engine/testdata/pre-migration.jsonl using
-// the pre-migration OpenLog/Append implementation, so the committed fixture
-// proves the new raw-byte ledger verifier stays backward compatible with
-// logs the old implementation actually produced. Run once with
-// GENERATE_FIXTURE=1; the fixture file must not change afterward.
+// the current OpenLog/Append implementation. The fixture's value doesn't
+// depend on which implementation generated it: an unmodified log's exact
+// on-disk bytes are the same regardless of which Append wrote them, so a
+// clean file produced today verifies under the raw-byte reader the same
+// way one from before the migration to internal/ledger would. Run once
+// with GENERATE_FIXTURE=1; the fixture file must not change afterward.
 func TestGeneratePreMigrationFixture(t *testing.T) {
 	if os.Getenv("GENERATE_FIXTURE") == "" {
 		t.Skip("generator; run once with GENERATE_FIXTURE=1")
 	}
 	dir := "testdata"
 	_ = os.MkdirAll(dir, 0o755)
-	log, err := OpenLog(dir, "pre-migration") // CURRENT implementation
+	log, err := OpenLog(dir, "pre-migration")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,10 +36,11 @@ func TestGeneratePreMigrationFixture(t *testing.T) {
 }
 
 // TestPreMigrationFixtureVerifiesRawByte asserts that the frozen
-// pre-migration fixture still verifies clean under the new raw-byte
-// ledger verifier — proof that the migration to internal/ledger did not
-// break backward compatibility with logs written by the old
-// implementation.
+// pre-migration fixture still verifies clean under the raw-byte ledger
+// verifier. This doesn't depend on which implementation wrote the fixture:
+// an unmodified log's exact on-disk bytes are the same regardless of which
+// Append produced them, so a clean file verifies under the new reader the
+// same way it would have under the old one.
 func TestPreMigrationFixtureVerifiesRawByte(t *testing.T) {
 	events, head, err := ReadLog("testdata", "pre-migration")
 	if err != nil {

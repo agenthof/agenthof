@@ -19,8 +19,7 @@ RBAC are implemented.
 
 ## Quickstart
 
-**Requires:** Go >= 1.27 toolchain.
-Requires: Linux or macOS.
+**Requires:** Go >= 1.27 toolchain; Linux or macOS.
 
     go build -o agenthof ./cmd/agenthof
     ./agenthof apply --config examples/config

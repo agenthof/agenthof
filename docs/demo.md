@@ -154,6 +154,19 @@ The audit trail shows:
 - **Artifact SHA**: First 8 hex chars of SHA256 hash; a fingerprint of what was computed
 - **Step attribution**: Every agent step tied to the invoker and run ID
 
+`audit` verifies the chain against itself; it can't tell a truncated tail
+or a wholesale re-forged file from a genuine short run, since both are
+internally consistent. If you recorded the head hash somewhere off the
+machine beforehand, `audit verify --expect-head` catches exactly that:
+
+```bash
+./agenthof audit verify r-9e31cf9b --expect-head <hex>
+```
+
+A mismatch here means the run's tail was truncated or the file was
+re-forged after the head was recorded; a match confirms the ledger you're
+looking at is the one whose head you saved.
+
 ### 2.2 OIDC variant: use a password-grant token from Dex
 
 This variant demonstrates identity assertion via OIDC, suitable for production (e.g., Okta, Auth0, or a local Dex instance).

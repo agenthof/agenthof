@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Store keeps artifact BODIES out of the immutable ledger (constitution
+// Store keeps artifact BODIES out of the append-only ledger (constitution
 // Art. III): the ledger carries sha + preview; bodies live here, prunable,
 // so GDPR-style erasure never breaks chain integrity.
 type Store struct{ dir string }
