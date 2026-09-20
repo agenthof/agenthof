@@ -61,6 +61,8 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   model-backed runs, retention.
 - [`docs/concepts.md`](docs/concepts.md) — the ideas behind the registry:
   planes, gateways, execution tiers, identity, the ledger.
+- [`docs/lifecycle.md`](docs/lifecycle.md) — the life of a run: how one
+  invocation flows through identity, authorization, execution, and the ledger.
 - [`docs/reference/config.md`](docs/reference/config.md) — every YAML field,
   required/optional, defaults, and validation rules.
 - [`docs/demo.md`](docs/demo.md) — the three scripted demos (CONFIG, AUDIT,
