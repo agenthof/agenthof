@@ -37,7 +37,7 @@ func newStubGateway(t *testing.T, srvURL string) config.GatewayConfig {
 // against an httptest stub speaking the OpenAI *Responses* API (not Chat
 // Completions): adk v2.3.0's openaimodel calls client.Responses.New, which
 // POSTs to "{BaseURL}/responses" and expects a "response" object back, not
-// a "chat.completion". See task-6-report.md for the discovery trail.
+// a "chat.completion".
 func TestADKExecutor_Execute_Success(t *testing.T) {
 	var (
 		gotMethod string

@@ -226,7 +226,7 @@ func TestHonestyTailDeletionInvisible(t *testing.T) {
 	}
 	if head.Hash != hashOf(l1) {
 		t.Fatal("head must be the surviving line")
-	} // --expect-head catches this in Task 4
+	} // a pinned head (audit verify --expect-head) is what catches this
 }
 
 func TestGoldenBytes(t *testing.T) {

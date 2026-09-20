@@ -159,9 +159,8 @@ func TestAuditCorruptedFirstLineReportsIntegrityFailureAndExitsNonZero(t *testin
 		t.Fatalf("a corrupted ledger must never be reported as a healthy empty run:\n%s", out.String())
 	}
 	// This truncation leaves a single, unterminated final line — genuinely
-	// torn, not chain-broken — so the integrity line must now say TORN
-	// (Task 4 gives TORN its own banner instead of the BROKEN placeholder
-	// Task 3 used as a stopgap).
+	// torn, not chain-broken — so the integrity line must say TORN, which
+	// carries its own banner distinct from the BROKEN case.
 	if !strings.Contains(out.String(), "ledger integrity: TORN") {
 		t.Fatalf("missing integrity failure line:\n%s", out.String())
 	}
