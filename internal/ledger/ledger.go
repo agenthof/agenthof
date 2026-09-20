@@ -25,9 +25,15 @@
 // Catching that needs a caller-held expected Head; this package keeps
 // none itself.
 //
-// LockMode lets callers request Locked coordination across processes,
-// but that is not implemented yet: Locked is currently a no-op,
-// identical to Unlocked. Only Unlocked is exercised by tests.
+// LockMode lets callers request Locked coordination across processes.
+// Locked uses flock(2) (via syscall.Flock) to coordinate real,
+// independent OS processes sharing a ledger file: Open takes an
+// exclusive lock (LOCK_EX) and ReadVerify takes a shared lock
+// (LOCK_SH), both non-blocking with a bounded retry loop, and Close
+// releases the lock before closing the file. Because it depends on
+// syscall.Flock, Locked mode is unix-only by design: this package
+// does not build a Windows-compatible locking path, and a Windows
+// compile failure here is the intended, recorded outcome, not a bug.
 package ledger
 
 import (
@@ -36,11 +42,52 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
+	"time"
 )
+
+// lockTimeout bounds how long Open(Locked) and ReadVerify(path, Locked)
+// will retry a contended flock before giving up. Unexported so tests can
+// override it to keep contention tests fast.
+var lockTimeout = 5 * time.Second
+
+// lockRetryInterval is the sleep between non-blocking flock attempts.
+const lockRetryInterval = 50 * time.Millisecond
+
+// errLockHeld is the pinned error returned (wrapped with the failed
+// operation's context) when a Locked Open/ReadVerify cannot acquire the
+// flock within lockTimeout.
+var errLockHeld = errors.New("another agenthof process holds the ledger lock")
+
+// flockRetry attempts a non-blocking flock(fd, how) in a loop, sleeping
+// lockRetryInterval between attempts, retrying EINTR indefinitely (it
+// never indicates real contention), and giving up once lockTimeout has
+// elapsed since the first attempt. This mirrors the retry pattern used by
+// Go's own cmd/go/internal/lockedfile for non-blocking flock attempts.
+func flockRetry(fd int, how int) error {
+	deadline := time.Now().Add(lockTimeout)
+	for {
+		err := syscall.Flock(fd, how)
+		if err == nil {
+			return nil
+		}
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return errLockHeld
+		}
+		time.Sleep(lockRetryInterval)
+	}
+}
 
 // LockMode selects how Open coordinates access to the ledger file.
 type LockMode int
@@ -48,7 +95,9 @@ type LockMode int
 const (
 	// Unlocked performs no cross-process coordination.
 	Unlocked LockMode = iota
-	// Locked is reserved for Task 2; today it behaves like Unlocked.
+	// Locked takes a flock(2) on the ledger file to coordinate real,
+	// independent OS processes: exclusive (LOCK_EX) for Open, shared
+	// (LOCK_SH) for ReadVerify. See the package doc for details.
 	Locked
 )
 
@@ -133,6 +182,12 @@ func Open(path string, mode LockMode) (*Chain, error) {
 			_ = d.Close()
 		}
 	}
+	if mode == Locked {
+		if lerr := flockRetry(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lerr != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("ledger: open %s: %w", path, lerr)
+		}
+	}
 	_, head, seqEstablished, seqMode, err := loadChain(f)
 	if err != nil {
 		_ = f.Close()
@@ -197,18 +252,33 @@ func (c *Chain) Append(line []byte) error {
 	return nil
 }
 
-// Close closes the underlying file.
-func (c *Chain) Close() error { return c.f.Close() }
+// Close releases the flock (if this Chain was opened Locked) and closes
+// the underlying file. The lock is released before the file is closed.
+func (c *Chain) Close() error {
+	if c.mode == Locked {
+		_ = syscall.Flock(int(c.f.Fd()), syscall.LOCK_UN)
+	}
+	return c.f.Close()
+}
 
 // ReadVerify loads and verifies the ledger at path read-only. On
 // failure it still returns the valid prefix and its Head alongside the
-// typed error — never just the bare error.
+// typed error — never just the bare error. With mode Locked, it takes a
+// shared flock (LOCK_SH) first, so it blocks (up to lockTimeout) while
+// another process holds the exclusive lock via Open(path, Locked), and
+// releases it before returning.
 func ReadVerify(path string, mode LockMode) ([]Record, Head, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, Head{}, err
 	}
 	defer f.Close()
+	if mode == Locked {
+		if lerr := flockRetry(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); lerr != nil {
+			return nil, Head{}, fmt.Errorf("ledger: read %s: %w", path, lerr)
+		}
+		defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	}
 	records, head, _, _, err := loadChain(f)
 	return records, head, err
 }
