@@ -367,12 +367,19 @@ func cmdAudit(args []string, out io.Writer) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
-	events, err := engine.ReadLog(*logDir, runID)
-	if err != nil {
+	events, head, err := engine.ReadLog(*logDir, runID)
+	if events == nil && err != nil {
+		// Open/IO failure: no ledger at all to render.
 		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
-	_, _ = fmt.Fprint(out, audit.Render(events))
+	_, _ = fmt.Fprint(out, audit.Render(events, head, err))
+	if err != nil {
+		// A torn/broken chain, whether or not a valid prefix was
+		// recovered — the rendered output already names the failure,
+		// but the exit code must not lie about a corrupted ledger.
+		return 1
+	}
 	return 0
 }
 

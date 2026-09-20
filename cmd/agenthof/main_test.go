@@ -111,6 +111,58 @@ func TestRunAndAuditEndToEnd(t *testing.T) {
 	}
 }
 
+// TestAuditCorruptedFirstLineReportsIntegrityFailureAndExitsNonZero is a
+// regression test for a bug where a ledger torn/broken at its very first
+// record (e.g. a crash right after the first write) — leaving ZERO
+// verified records — was misreported by `audit` as a healthy, merely
+// empty run ("no events for this run", exit 0) instead of surfacing the
+// integrity failure and a non-zero exit.
+func TestAuditCorruptedFirstLineReportsIntegrityFailureAndExitsNonZero(t *testing.T) {
+	t.Chdir(t.TempDir())
+	root := writeSample(t)
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug",
+		"--input", "fix the login bug", "--as", "dana@example.com",
+		"--config", root, "--log-dir", logs}, &out)
+	if code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+	runID := m[1]
+
+	// Simulate a crash right after the very first ledger write: truncate
+	// the file down to just the first record's bytes minus its trailing
+	// newline, leaving zero fully-verified (torn tail, at record 1) records.
+	path := filepath.Join(logs, runID+".jsonl")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstNL := bytes.IndexByte(raw, '\n')
+	if firstNL < 0 {
+		t.Fatal("expected at least one newline in a multi-event log")
+	}
+	if err := os.WriteFile(path, raw[:firstNL], 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	code = cmdAudit([]string{runID, "--log-dir", logs}, &out)
+	if code == 0 {
+		t.Fatalf("a corrupted ledger with zero valid records must exit non-zero, got 0:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "no events for this run") {
+		t.Fatalf("a corrupted ledger must never be reported as a healthy empty run:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "ledger integrity: BROKEN at event") {
+		t.Fatalf("missing integrity failure line:\n%s", out.String())
+	}
+}
+
 func TestRunFailBackOffline(t *testing.T) {
 	t.Chdir(t.TempDir())
 	root := writeSample(t)
@@ -528,7 +580,7 @@ func TestRunStaticRBAC(t *testing.T) {
 	if m == nil {
 		t.Fatalf("out must contain run id: %s", out.String())
 	}
-	events, err := engine.ReadLog(logs, m[1])
+	events, _, err := engine.ReadLog(logs, m[1])
 	if err != nil {
 		t.Fatalf("ReadLog: %v", err)
 	}
@@ -557,7 +609,7 @@ func TestRunValidationFailureIsLedgered(t *testing.T) {
 	if m == nil {
 		t.Fatalf("out must contain run id and refusal message: %s", out.String())
 	}
-	events, err := engine.ReadLog(logs, m[1])
+	events, _, err := engine.ReadLog(logs, m[1])
 	if err != nil {
 		t.Fatalf("ReadLog: %v", err)
 	}
@@ -671,7 +723,7 @@ func TestRunBadTokenIsRejectedWithoutEcho(t *testing.T) {
 	if m == nil {
 		t.Fatalf("expected a ledgered refusal with a run id: %s", out.String())
 	}
-	events, err := engine.ReadLog(logs, m[1])
+	events, _, err := engine.ReadLog(logs, m[1])
 	if err != nil {
 		t.Fatalf("ReadLog: %v", err)
 	}
@@ -733,7 +785,7 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 		t.Fatalf("audit missing invoker: %s", out.String())
 	}
 
-	events, err := engine.ReadLog(logs, m[1])
+	events, _, err := engine.ReadLog(logs, m[1])
 	if err != nil {
 		t.Fatal(err)
 	}

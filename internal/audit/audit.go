@@ -6,10 +6,40 @@ import (
 	"strings"
 
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/ledger"
 )
 
-func Render(events []engine.Event) string {
+// integrityLine renders the "ledger integrity: ..." line shared by both the
+// normal and the no-decodable-events render paths. verr is nil for a clean
+// ledger, or the typed ledger error (*ledger.TornError /
+// *ledger.ChainBrokenError) describing where verification stopped.
+func integrityLine(events []engine.Event, verr error) string {
+	if verr == nil {
+		return fmt.Sprintf("ledger integrity: verified (%d events)\n", len(events))
+	}
+	// TORN currently reuses the BROKEN branch; a dedicated TORN banner
+	// lands with the full audit-verify rework in a later task.
+	if broken, ok := errors.AsType[*ledger.ChainBrokenError](verr); ok {
+		return fmt.Sprintf("ledger integrity: BROKEN at event %d\n", broken.Line-1)
+	}
+	return "ledger integrity: BROKEN at event 0\n"
+}
+
+// Render renders the given events (the valid prefix of a run's ledger) as
+// a human-readable audit trail. head and verr are ReadLog's second and
+// third return values. head is currently unused pending the full
+// TORN-aware rework in a later task.
+//
+// A torn/broken ledger can leave zero decodable events (e.g. the ledger
+// crashed right after its very first, now-incomplete, write) — that must
+// still surface the integrity failure rather than being mistaken for a
+// genuinely empty run, so the verr check runs before the empty-events
+// short-circuit.
+func Render(events []engine.Event, head ledger.Head, verr error) string {
 	if len(events) == 0 {
+		if verr != nil {
+			return integrityLine(events, verr)
+		}
 		return "no events for this run\n"
 	}
 	b := events[0].Binding
@@ -26,15 +56,7 @@ func Render(events []engine.Event) string {
 	fmt.Fprintf(&sb, "run %s — %s (role %s)\n", b.RunID, b.Workflow, b.Role)
 	fmt.Fprintf(&sb, "invoked by %s (%s, issuer %s)\n", b.Invoker.Subject, b.Invoker.Method, b.Invoker.Issuer)
 	fmt.Fprintf(&sb, "status: %s\n", status)
-	if err := engine.VerifyChain(events); err != nil {
-		if broken, ok := errors.AsType[*engine.ChainBrokenError](err); ok {
-			fmt.Fprintf(&sb, "ledger integrity: BROKEN at event %d\n", broken.Index)
-		} else {
-			fmt.Fprintf(&sb, "ledger integrity: BROKEN at event 0\n")
-		}
-	} else {
-		fmt.Fprintf(&sb, "ledger integrity: verified (%d events)\n", len(events))
-	}
+	sb.WriteString(integrityLine(events, verr))
 	fmt.Fprint(&sb, "\n")
 	for _, e := range events {
 		t := e.Time.UTC().Format("15:04:05")
