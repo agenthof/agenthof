@@ -74,7 +74,7 @@ func TestRunHappyPath(t *testing.T) {
 	if ex.seen[1]["plan"] != "artifact-from-planner" {
 		t.Fatalf("coder must receive the planner's artifact: %v", ex.seen[1])
 	}
-	events, err := ReadLog(dir, id)
+	events, _, err := ReadLog(dir, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestRunRefusals(t *testing.T) {
 		if err == nil || status != "refused" {
 			t.Fatalf("%v: status=%q err=%v", c, status, err)
 		}
-		events, rerr := ReadLog(dir, id)
+		events, _, rerr := ReadLog(dir, id)
 		if rerr != nil || len(events) != 1 || events[0].Type != "run_refused" {
 			t.Fatalf("%v: refusals must be ledgered as exactly one run_refused event: %v %v", c, events, rerr)
 		}
@@ -132,7 +132,7 @@ func TestRunFailBackThenSucceed(t *testing.T) {
 	if len(ex.calls) != len(want) {
 		t.Fatalf("calls: %v", ex.calls)
 	}
-	events, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, id)
 	var bounced *Event
 	for i := range events {
 		if events[i].Type == "bounced_back" {
@@ -152,7 +152,7 @@ func TestRunBounceExhaustion(t *testing.T) {
 	if err != nil || status != "failed" {
 		t.Fatalf("status=%q err=%v", status, err)
 	}
-	events, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, id)
 	last := events[len(events)-1]
 	if last.Type != "workflow_finished" || last.Status != "failed" || !strings.Contains(last.Reason, "review") {
 		t.Fatalf("exhaustion must fail honestly naming the step: %+v", last)
@@ -194,7 +194,7 @@ func TestRunStoresArtifactsOutOfLedger(t *testing.T) {
 	if err != nil || status != "succeeded" {
 		t.Fatalf("%q %v", status, err)
 	}
-	events, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, id)
 	var succ []Event
 	for _, e := range events {
 		if e.Type == "step_succeeded" {
@@ -219,7 +219,7 @@ func TestRunStoresArtifactsOutOfLedger(t *testing.T) {
 			t.Fatalf("body: %s", body)
 		}
 	}
-	if err := VerifyChain(events); err != nil {
+	if _, _, err := ReadLog(dir, id); err != nil {
 		t.Fatalf("chain: %v", err)
 	}
 	// full bodies still flow to later steps in memory
@@ -258,7 +258,7 @@ func TestRunRBACRefusesWrongGroup(t *testing.T) {
 	if err == nil || status != "refused" {
 		t.Fatalf("status=%q err=%v", status, err)
 	}
-	events, rerr := ReadLog(dir, id)
+	events, _, rerr := ReadLog(dir, id)
 	if rerr != nil || len(events) != 1 || events[0].Type != "run_refused" {
 		t.Fatalf("RBAC refusal must be ledgered as exactly one run_refused event: %v %v", events, rerr)
 	}
@@ -325,7 +325,7 @@ func TestRunStepConfigErrorFailsWithoutBouncing(t *testing.T) {
 	if len(ex.calls) != 2 || ex.calls[0] != "planner" || ex.calls[1] != "coder" {
 		t.Fatalf("fail-back step must not be re-attempted after a config error: %v", ex.calls)
 	}
-	events, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, id)
 	var types []string
 	for _, e := range events {
 		types = append(types, e.Type)
@@ -356,7 +356,7 @@ func TestRunEventsCarryExecutionTier(t *testing.T) {
 	if err != nil || status != "succeeded" {
 		t.Fatalf("status=%q err=%v", status, err)
 	}
-	events, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, id)
 	seen := 0
 	for _, e := range events {
 		if e.Type == "step_started" || e.Type == "step_succeeded" {

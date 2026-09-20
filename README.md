@@ -19,6 +19,8 @@ RBAC are implemented.
 
 ## Quickstart
 
+**Requires:** Go >= 1.27 toolchain; Linux or macOS.
+
     go build -o agenthof ./cmd/agenthof
     ./agenthof apply --config examples/config
     ./agenthof run software-engineer fix-bug --input "fix the login bug" --as you@example.com --config examples/config

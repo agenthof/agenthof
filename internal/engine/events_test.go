@@ -3,11 +3,14 @@ package engine
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/identity"
+	"github.com/agenthof/agenthof/internal/ledger"
 )
 
 func TestRunIDShape(t *testing.T) {
@@ -41,7 +44,7 @@ func TestLogRoundTrip(t *testing.T) {
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ReadLog(dir, id)
+	got, _, err := ReadLog(dir, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,12 +57,12 @@ func TestLogRoundTrip(t *testing.T) {
 }
 
 func TestReadLogMissing(t *testing.T) {
-	if _, err := ReadLog(t.TempDir(), "r-00000000"); err == nil {
+	if _, _, err := ReadLog(t.TempDir(), "r-00000000"); err == nil {
 		t.Fatal("missing run must error")
 	}
 }
 
-func TestVerifyChainValid(t *testing.T) {
+func TestReadLogValidChainHasEmptyGenesisPrev(t *testing.T) {
 	dir := t.TempDir()
 	id := NewRunID()
 	log, err := OpenLog(dir, id)
@@ -80,32 +83,75 @@ func TestVerifyChainValid(t *testing.T) {
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ReadLog(dir, id)
+	got, head, err := ReadLog(dir, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("expected 3 events, got %d", len(got))
+	if len(got) != 3 || head.Count != 3 {
+		t.Fatalf("expected 3 events, got %d (head=%+v)", len(got), head)
 	}
 	if got[0].Prev != "" {
 		t.Fatalf("genesis event Prev must be empty, got %q", got[0].Prev)
 	}
-	if err := VerifyChain(got); err != nil {
-		t.Fatalf("VerifyChain on valid chain: %v", err)
+}
+
+func TestReadLogTamperedChainReturnsBrokenErrorWithValidPrefix(t *testing.T) {
+	dir := t.TempDir()
+	id := NewRunID()
+	log, err := OpenLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := Binding{Invoker: identity.Static("dev@x"), Role: "se", Workflow: "fix-bug", RunID: id}
+	events := []Event{
+		{Time: time.Now().UTC(), Type: "workflow_started", Binding: bind},
+		{Time: time.Now().UTC(), Type: "step_started", Step: "plan", Agent: "planner", Binding: bind},
+		{Time: time.Now().UTC(), Type: "workflow_finished", Status: "succeeded", Binding: bind},
+	}
+	for _, e := range events {
+		if err := log.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
 	}
 
-	// Corrupt the middle event; the successor's Prev no longer matches.
-	got[1].Reason = "tampered"
-	err = VerifyChain(got)
-	if err == nil {
-		t.Fatal("VerifyChain must fail on tampered chain")
+	// Tamper with the on-disk second line's content, leaving its own
+	// "prev" field untouched: the line still passes its own prev check,
+	// but its hash no longer matches what the following line's "prev"
+	// recorded, so the ledger surfaces the break one line later.
+	path := filepath.Join(dir, id+".jsonl")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	var broken *ChainBrokenError
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d", len(lines))
+	}
+	tampered := strings.Replace(lines[1], `"step":"plan"`, `"step":"tampered"`, 1)
+	if tampered == lines[1] {
+		t.Fatal("tamper substring not found; test fixture drifted")
+	}
+	lines[1] = tampered
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, head, err := ReadLog(dir, id)
+	var broken *ledger.ChainBrokenError
 	if !errors.As(err, &broken) {
-		t.Fatalf("error must be a *ChainBrokenError, got: %T (%v)", err, err)
+		t.Fatalf("error must be a *ledger.ChainBrokenError, got: %T (%v)", err, err)
 	}
-	if broken.Index != 2 {
-		t.Fatalf("error must name broken index 2, got: %d", broken.Index)
+	if broken.Line != 3 {
+		t.Fatalf("error must name broken line 3, got: %d", broken.Line)
+	}
+	if len(got) != 2 || head.Count != 2 {
+		t.Fatalf("must return the valid prefix (2 events): got=%d head=%+v", len(got), head)
+	}
+	if got[0].Type != "workflow_started" {
+		t.Fatalf("valid prefix must include the untampered genesis event: %+v", got[0])
 	}
 }
 
@@ -127,17 +173,17 @@ func TestChainCompatWithPreArtifactSHALogs(t *testing.T) {
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	events, err := ReadLog(dir, id)
+	events, head, err := ReadLog(dir, id)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if head.Count != len(events) {
+		t.Fatalf("head.Count must match event count: head=%+v events=%d", head, len(events))
 	}
 	for _, e := range events {
 		if e.ArtifactSHA != "" {
 			t.Fatal("no event should carry a sha here")
 		}
-	}
-	if err := VerifyChain(events); err != nil {
-		t.Fatalf("chain must verify with omitted artifact_sha: %v", err)
 	}
 
 	// Events without an execution tier must marshal without the "execution"
@@ -154,5 +200,89 @@ func TestChainCompatWithPreArtifactSHALogs(t *testing.T) {
 	}
 	if strings.Contains(string(data), "\"execution\"") {
 		t.Fatal("empty Execution must be omitted from marshaled JSON")
+	}
+}
+
+// TestOpenLogRejectsRunIDCollision is a regression test for a bug where
+// OpenLog, via ledger.Open, RESUMED an existing run-log file instead of
+// refusing it: a colliding run ID (e.g. from a weak RunID source, or a
+// caller reusing an ID) would chain a second run's events onto the first
+// run's log, and audit would misattribute them to one run. OpenLog must
+// refuse to open a run-id whose file already has events.
+func TestOpenLogRejectsRunIDCollision(t *testing.T) {
+	dir := t.TempDir()
+	id := NewRunID()
+	bind := Binding{Invoker: identity.Static("dev@x"), Role: "se", Workflow: "fix-bug", RunID: id}
+
+	log, err := OpenLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append(Event{Time: time.Now().UTC(), Type: "workflow_started", Binding: bind}); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := OpenLog(dir, id); err == nil {
+		t.Fatal("OpenLog on a run-id whose file already has events must error")
+	} else if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("error must say the run already exists, got: %v", err)
+	}
+}
+
+// TestReadLogUnmarshalFailurePreservesHeadCountInvariant is a regression
+// test for a bug where, if a record was valid per the ledger's hash chain
+// but failed to decode as an Event (e.g. a malformed "time" field), and a
+// later record in the same file was ALSO ledger-valid, ReadLog returned
+// ledger.ReadVerify's full chain Head — whose Count could exceed
+// len(events) — instead of a Head scoped to what was actually decoded.
+// Every other ReadLog return path holds head.Count == len(events); this
+// asserts the same invariant on the undecodable-record path.
+func TestReadLogUnmarshalFailurePreservesHeadCountInvariant(t *testing.T) {
+	dir := t.TempDir()
+	id := NewRunID()
+	path := filepath.Join(dir, id+".jsonl")
+	c, err := ledger.Open(path, ledger.Unlocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := []byte(`{"time":"2026-09-19T00:00:00Z","type":"workflow_started","binding":{"invoker":{"subject":"x","issuer":"local","method":"asserted"},"role":"r","workflow":"w","run_id":"` + id + `"},"prev":""}`)
+	if err := c.Append(first); err != nil {
+		t.Fatal(err)
+	}
+	// Ledger-valid (correct "prev", well-formed JSON) but NOT decodable as
+	// an Event: "time" is a bare number, and time.Time.UnmarshalJSON
+	// requires a quoted string.
+	second := []byte(`{"time":123,"type":"step_started","binding":{"invoker":{"subject":"x","issuer":"local","method":"asserted"},"role":"r","workflow":"w","run_id":"` + id + `"},"prev":"` + c.Prev() + `"}`)
+	if err := c.Append(second); err != nil {
+		t.Fatal(err)
+	}
+	// A third, fully valid record after the undecodable one: this is what
+	// makes ledger.ReadVerify's own Head.Count (3, chain-valid throughout)
+	// diverge from the number of Events ReadLog can actually decode (1).
+	third := []byte(`{"time":"2026-09-19T00:00:02Z","type":"workflow_finished","status":"succeeded","binding":{"invoker":{"subject":"x","issuer":"local","method":"asserted"},"role":"r","workflow":"w","run_id":"` + id + `"},"prev":"` + c.Prev() + `"}`)
+	if err := c.Append(third); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events, head, err := ReadLog(dir, id)
+	var broken *ledger.ChainBrokenError
+	if !errors.As(err, &broken) {
+		t.Fatalf("error must be a *ledger.ChainBrokenError, got: %T (%v)", err, err)
+	}
+	if broken.Line != 2 {
+		t.Fatalf("error must name the undecodable record's line (2), got: %d", broken.Line)
+	}
+	if len(events) != 1 {
+		t.Fatalf("only the first record decodes as an Event, got %d", len(events))
+	}
+	if head.Count != len(events) {
+		t.Fatalf("head.Count must match len(events) even when a later ledger-valid record fails to decode: head=%+v events=%d", head, len(events))
 	}
 }

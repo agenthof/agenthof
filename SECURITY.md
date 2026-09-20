@@ -13,9 +13,10 @@ hours.
 ## Scope of interest
 
 Jail escapes (path confinement, symlinks, dotfiles), ledger integrity bypass
-(hash-chain forgery, event suppression), identity spoofing (invoker method or
-subject), secret leakage into ledger/logs/errors, and adapter-boundary abuse
-(SSRF, resource exhaustion).
+(hash-chain forgery, event suppression, beyond the limits documented in
+docs/concepts.md), identity spoofing (invoker method or subject), secret
+leakage into ledger/logs/errors, and adapter-boundary abuse (SSRF, resource
+exhaustion).
 
 ## Supported versions
 

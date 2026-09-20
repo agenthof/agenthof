@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/gateway"
 	"github.com/agenthof/agenthof/internal/identity"
+	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/registry"
 )
 
@@ -29,6 +31,7 @@ Usage:
   agenthof registry list|enable|disable [<agent>] --config <dir>
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--executor echo|adk] [--workspace <dir>] [--artifact-dir <dir>]
   agenthof audit <run-id> [--log-dir <dir>]
+  agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
   agenthof gateway provision --config <dir> [--admin-base <url>]
 `
@@ -360,6 +363,12 @@ func cmdAudit(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, "audit needs a run id")
 		return 2
 	}
+	// "verify" is disambiguated from a run id up front: run ids are always
+	// of the form "r-<hex>" (see engine.NewRunID), which "verify" can never
+	// match, so there's no ambiguity to parse around.
+	if args[0] == "verify" {
+		return cmdAuditVerify(args[1:], out)
+	}
 	runID := args[0]
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
@@ -367,12 +376,66 @@ func cmdAudit(args []string, out io.Writer) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
-	events, err := engine.ReadLog(*logDir, runID)
+	events, head, err := engine.ReadLog(*logDir, runID)
+	if err != nil {
+		var te *ledger.TornError
+		var be *ledger.ChainBrokenError
+		if !errors.As(err, &te) && !errors.As(err, &be) {
+			// Open/IO failure: no ledger at all to render.
+			_, _ = fmt.Fprintln(out, err)
+			return 1
+		}
+	}
+	_, _ = fmt.Fprint(out, audit.Render(events, head, err))
+	if err != nil {
+		// A torn/broken chain, whether or not a valid prefix was
+		// recovered — the rendered output already names the failure,
+		// but the exit code must not lie about a corrupted ledger.
+		return 1
+	}
+	return 0
+}
+
+// cmdAuditVerify implements `audit verify <run-id> [--expect-head <hex>]`:
+// it reports the verified chain's head hash and event count, and, given
+// --expect-head, compares it against a previously recorded hash. Exit
+// codes: 0 clean (and, when given, --expect-head matches); 1 torn/broken
+// ledger or an open/IO failure; 4 --expect-head mismatch (hash only —
+// count is informational and not compared); 2 usage errors. 3 is
+// reserved for the E2 control-ledger taint verdict and is never returned
+// here.
+func cmdAuditVerify(args []string, out io.Writer) int {
+	if len(args) < 1 {
+		_, _ = fmt.Fprintln(out, "audit verify needs a run id")
+		return 2
+	}
+	runID := args[0]
+	fs := flag.NewFlagSet("audit verify", flag.ContinueOnError)
+	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
+	expectHead := fs.String("expect-head", "", "expected ledger head hash (hex) to verify against")
+	fs.SetOutput(out)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	_, head, err := engine.ReadLog(*logDir, runID)
+	if err != nil {
+		var te *ledger.TornError
+		var be *ledger.ChainBrokenError
+		if !errors.As(err, &te) && !errors.As(err, &be) {
+			// Open/IO failure: no ledger at all to report a head for.
+			_, _ = fmt.Fprintln(out, err)
+			return 1
+		}
+	}
+	_, _ = fmt.Fprintf(out, "head: %s (%d events)\n", head.Hash, head.Count)
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
-	_, _ = fmt.Fprint(out, audit.Render(events))
+	if *expectHead != "" && *expectHead != head.Hash {
+		_, _ = fmt.Fprintf(out, "expect-head mismatch: want %s, got %s\n", *expectHead, head.Hash)
+		return 4
+	}
 	return 0
 }
 
@@ -417,7 +480,7 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 		return 1
 	}
 
-	// Constitution Art. III keeps artifact bodies out of the immutable
+	// Constitution Art. III keeps artifact bodies out of the append-only
 	// ledger precisely so they can be pruned independently; do that here
 	// too, rather than leaving retention half-enforced. A missing
 	// artifact-dir is not an error (nothing provisioned it yet, e.g. an
