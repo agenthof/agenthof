@@ -12,10 +12,18 @@ and attributed to the human who asked for it.
 
 ## Status
 
-Pre-release. The core is real: config → validated registry → event-sourced
-engine (linear + fail-back) → invoker-attributed audit trail, running offline
-with a built-in echo executor. Model-backed agents (ADK), gateways, OIDC, and
-RBAC are implemented.
+Pre-release, and the governed core is real and runnable today:
+
+- config → validated registry → event-sourced engine (linear + fail-back),
+  runnable offline with a built-in echo executor;
+- a hash-chained ledger where every action and refusal is attributed to the
+  human who invoked it, with `audit verify` for integrity;
+- the kill switch, OIDC + RBAC, per-role model-gateway keys and budgets, and
+  `contained` / `fronted` execution tiers.
+
+What's shipped versus what's coming — control-plane audit, a tool/MCP gateway,
+governed skills, multi-resource scope — is laid out in the
+[roadmap](ROADMAP.md). Only shipped items are guarantees.
 
 ## Quickstart
 
@@ -48,6 +56,7 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 
 ## Documentation
 
+- [`ROADMAP.md`](ROADMAP.md) — what's shipped, next, later, and exploratory.
 - [`docs/quickstart.md`](docs/quickstart.md) — build, run, kill switch,
   model-backed runs, retention.
 - [`docs/concepts.md`](docs/concepts.md) — the ideas behind the registry:
