@@ -35,11 +35,17 @@ upgrades, never prerequisites for a release.
 Every action an agent takes, and every refusal (invalid identity, exceeded
 budget, disabled agent), is an event in the ledger. Every event carries the
 full delegation binding. The ledger is hash-chained: each event carries the
-SHA-256 of its predecessor's serialized line (genesis: empty string), so
-tamper-evidence is a provable property, not a claim. Artifact bodies never
-enter the immutable ledger — only a SHA-256 hash and a preview of at most 200
-characters; bodies live in a separate, prunable store. Secrets and full
-artifact bodies are never written to an event, under any circumstance.
+SHA-256 of the exact bytes of its predecessor's line (genesis: empty
+string), and `audit` verifies the chain. The chain makes accidental
+corruption — and any edit, deletion, or reordering of committed events that
+does not recompute every later link — detectable. It does not by itself
+detect truncation of the tail or wholesale regeneration of the file; those
+are detectable only against a chain head recorded off the machine, which
+Agenthof does not store. No Agenthof document may describe the ledger as
+tamper-proof. Artifact bodies never enter the ledger — only a SHA-256 hash
+and a preview of at most 200 characters; bodies live in a separate,
+prunable store. Secrets and full artifact bodies are never written to an
+event, under any circumstance.
 
 ## Article IV — Compliance floors (US / AU / EU)
 
