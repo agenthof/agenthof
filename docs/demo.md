@@ -151,7 +151,7 @@ The audit trail shows:
 - **Invoker**: Identity asserted via --as (method: asserted, issuer: local)
 - **Status**: Final outcome (succeeded/refused/error)
 - **Ledger Integrity**: Cryptographic verification of event chain integrity
-- **Artifact SHA**: First 8 hex chars of SHA256 hash; immutable proof of what was computed
+- **Artifact SHA**: First 8 hex chars of SHA256 hash; a fingerprint of what was computed
 - **Step attribution**: Every agent step tied to the invoker and run ID
 
 ### 2.2 OIDC variant: use a password-grant token from Dex
@@ -295,7 +295,7 @@ ledger integrity: verified (1 events)
   08:58:04  run refused — role "accountant" requires membership in one of its allowed groups (finance); the invoker's groups don't qualify
 ```
 
-Even though the run was refused, it is **ledgered** (recorded) in the audit trail for compliance. The refusal reason is immutable and cryptographically verified.
+Even though the run was refused, it is **ledgered** (recorded) in the audit trail for compliance. The refusal is chained into the run's ledger like every other event.
 
 ### 3.3 Budget enforcement via LiteLLM gateway
 
