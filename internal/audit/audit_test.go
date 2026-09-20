@@ -107,6 +107,51 @@ func TestRenderRefuseHelper(t *testing.T) {
 	}
 }
 
+func TestRenderLedgerIntegrityTorn(t *testing.T) {
+	dir := t.TempDir()
+	id := "r-1a2b3c4d"
+	log, err := engine.OpenLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "software-engineer", Workflow: "fix-bug", RunID: id}
+	events := []engine.Event{
+		{Time: ts(5), Type: "workflow_started", Binding: bind},
+		{Time: ts(6), Type: "step_started", Step: "plan", Agent: "planner", Binding: bind},
+	}
+	for _, e := range events {
+		if err := log.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a crash mid-write: append an incomplete trailing record with
+	// no terminating newline — a torn tail, not a broken chain.
+	path := filepath.Join(dir, id+".jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(`{"type":"workflow_finished","prev":"`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, head, rerr := engine.ReadLog(dir, id)
+	out := Render(got, head, rerr)
+	if !strings.Contains(out, "ledger integrity: TORN — last record incomplete") {
+		t.Fatalf("missing torn integrity line in:\n%s", out)
+	}
+	if !strings.Contains(out, "workflow started") || !strings.Contains(out, "step plan (agent planner) started") {
+		t.Fatalf("torn render must still show the valid prefix:\n%s", out)
+	}
+}
+
 func TestRenderLedgerIntegrityBroken(t *testing.T) {
 	dir := t.TempDir()
 	id := "r-1a2b3c4d"

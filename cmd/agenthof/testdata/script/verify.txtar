@@ -1,0 +1,9 @@
+# Demo: `audit verify` reports the ledger head hash and event count for a
+# finished run — docs/demo.md §2.1 companion.
+
+exec agenthof run software-engineer fix-bug --input 'fix the login bug' --as dana@example.com --executor echo --config examples/config --log-dir logs --artifact-dir artifacts --workspace ws
+stdout 'finished: succeeded'
+
+lastrun logs
+exec agenthof audit verify $RUNID --log-dir logs
+stdout 'head: [0-9a-f]{64} \(8 events\)'

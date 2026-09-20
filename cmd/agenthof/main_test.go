@@ -158,8 +158,124 @@ func TestAuditCorruptedFirstLineReportsIntegrityFailureAndExitsNonZero(t *testin
 	if strings.Contains(out.String(), "no events for this run") {
 		t.Fatalf("a corrupted ledger must never be reported as a healthy empty run:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "ledger integrity: BROKEN at event") {
+	// This truncation leaves a single, unterminated final line — genuinely
+	// torn, not chain-broken — so the integrity line must now say TORN
+	// (Task 4 gives TORN its own banner instead of the BROKEN placeholder
+	// Task 3 used as a stopgap).
+	if !strings.Contains(out.String(), "ledger integrity: TORN") {
 		t.Fatalf("missing integrity failure line:\n%s", out.String())
+	}
+}
+
+func TestAuditVerifyCleanAndExpectHead(t *testing.T) {
+	root := writeSample(t)
+	logs := t.TempDir()
+	var out bytes.Buffer
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--executor", "echo", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
+		t.Fatalf("run: %s", out.String())
+	}
+	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
+
+	out.Reset()
+	if code := cmdAudit([]string{"verify", id, "--log-dir", logs}, &out); code != 0 {
+		t.Fatalf("verify: %d %s", code, out.String())
+	}
+	m := regexp.MustCompile(`head: ([0-9a-f]{64}) \((\d+) events\)`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("no head line: %s", out.String())
+	}
+
+	out.Reset()
+	if code := cmdAudit([]string{"verify", id, "--log-dir", logs, "--expect-head", m[1]}, &out); code != 0 {
+		t.Fatal("matching expect-head must pass")
+	}
+	out.Reset()
+	if code := cmdAudit([]string{"verify", id, "--log-dir", logs, "--expect-head", strings.Repeat("0", 64)}, &out); code != 4 {
+		t.Fatalf("mismatch must exit 4, got %d", code)
+	}
+}
+
+func TestAuditTornExitsOne(t *testing.T) {
+	root := writeSample(t)
+	logs := t.TempDir()
+	var out bytes.Buffer
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--executor", "echo", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
+		t.Fatalf("run: %s", out.String())
+	}
+	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
+
+	// Simulate a crash mid-write: append an incomplete trailing record with
+	// no terminating newline — a torn tail, not a broken chain.
+	path := filepath.Join(logs, id+".jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("{torn")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	code := cmdAudit([]string{id, "--log-dir", logs}, &out)
+	if code != 1 {
+		t.Fatalf("torn ledger must exit 1, got %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "TORN") {
+		t.Fatalf("output must mention TORN: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "workflow started") {
+		t.Fatalf("output must still render the valid prefix: %s", out.String())
+	}
+}
+
+func TestAuditDeletedTailPassesButExpectHeadFails(t *testing.T) {
+	root := writeSample(t)
+	logs := t.TempDir()
+	var out bytes.Buffer
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--executor", "echo", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
+		t.Fatalf("run: %s", out.String())
+	}
+	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
+
+	out.Reset()
+	if code := cmdAudit([]string{"verify", id, "--log-dir", logs}, &out); code != 0 {
+		t.Fatalf("verify: %d %s", code, out.String())
+	}
+	m := regexp.MustCompile(`head: ([0-9a-f]{64}) \((\d+) events\)`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("no head line: %s", out.String())
+	}
+	oldHead := m[1]
+
+	// Truncate the last line and its trailing newline — an honest deletion
+	// leaves the remaining chain internally consistent (documented
+	// limitation: ReadVerify cannot detect a deleted tail on its own), so
+	// verify without --expect-head must still pass.
+	path := filepath.Join(logs, id+".jsonl")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimmed := strings.TrimRight(string(raw), "\n")
+	lastNL := strings.LastIndexByte(trimmed, '\n')
+	if lastNL < 0 {
+		t.Fatal("expected at least two lines in a multi-event log")
+	}
+	if err := os.WriteFile(path, []byte(trimmed[:lastNL+1]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	if code := cmdAudit([]string{"verify", id, "--log-dir", logs}, &out); code != 0 {
+		t.Fatalf("verify on a deleted tail must still pass (documented limitation): %d %s", code, out.String())
+	}
+
+	out.Reset()
+	if code := cmdAudit([]string{"verify", id, "--log-dir", logs, "--expect-head", oldHead}, &out); code != 4 {
+		t.Fatalf("expect-head against the pre-deletion head must catch the truncation, got %d\n%s", code, out.String())
 	}
 }
 
