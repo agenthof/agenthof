@@ -85,5 +85,9 @@ Every change is held to the invariants in
 ledger, compliance floors, the license, and scope discipline. They change
 only by an explicit commit that amends that file.
 
+How the project is maintained — and why trust rests on the license, the
+constitution, and the DCO rather than on any identity — is in
+[GOVERNANCE.md](GOVERNANCE.md).
+
 Contributions are welcome under the DCO — see [CONTRIBUTING.md](CONTRIBUTING.md).
 Security reports: see [SECURITY.md](SECURITY.md).
