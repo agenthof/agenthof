@@ -23,7 +23,10 @@ Pre-release, and the governed core is real and runnable today:
 - a control-plane audit — every `apply` and kill-switch flip is recorded to
   its own hash-chained control ledger, attributed to the human who invoked
   it, with `audit control`, `audit verify control`, and `audit repair
-  control`.
+  control`;
+- incident investigation — `agenthof investigate` merges the control log and
+  every run log into one filterable, time-ordered timeline (human or `--json`),
+  and `audit <run-id>` names the exact `apply` that put a run's config on record.
 
 What's shipped versus what's coming — a tool/MCP gateway, governed skills,
 multi-resource scope — is laid out in the [roadmap](ROADMAP.md). Only shipped
@@ -57,6 +60,19 @@ agenthof run software-engineer fix-bug --input "..."
 agenthof audit <run-id>      # who asked → what ran → what it touched → what it cost
 ```
 
+## Investigate an incident
+
+```
+agenthof investigate --since 24h --agent coder --outcome refused
+agenthof investigate --json | jq          # the stable investigate/1 contract
+```
+
+One filterable, time-ordered timeline across the control plane and every run —
+who changed what, which `apply` authorized each run's config, and whether the
+record can be trusted. Integrity is always shown, never assumed. See
+[`docs/reference/config.md`](docs/reference/config.md) for the flags, exit codes,
+and the `investigate/1` JSON contract.
+
 ## The three demos
 
 Walk through CONFIG (registry management), AUDIT (run traceability), and GOVERNANCE (RBAC + budgeting) with scripted end-to-end examples.
@@ -72,6 +88,8 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   planes, gateways, execution tiers, identity, the ledger.
 - [`docs/lifecycle.md`](docs/lifecycle.md) — the life of a run: how one
   invocation flows through identity, authorization, execution, and the ledger.
+- [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md) — the
+  life of a control action: apply, the kill switch, and the control ledger.
 - [`docs/reference/config.md`](docs/reference/config.md) — every YAML field,
   required/optional, defaults, and validation rules.
 - [`docs/demo.md`](docs/demo.md) — the three scripted demos (CONFIG, AUDIT,
