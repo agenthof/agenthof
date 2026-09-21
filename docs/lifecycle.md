@@ -239,6 +239,7 @@ Only shipped behavior is a guarantee.
 
 ## See also
 
+- [`control-plane-lifecycle.md`](control-plane-lifecycle.md) — the life of a control action (the governance plane that decides what may run).
 - [`concepts.md`](concepts.md) — the pieces and why they're arranged this way.
 - [`constitution.md`](constitution.md) — the invariants every run must honor.
 - [`reference/config.md`](reference/config.md) — every field that shapes a run.
