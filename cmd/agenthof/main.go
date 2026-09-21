@@ -22,6 +22,7 @@ import (
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/gateway"
 	"github.com/agenthof/agenthof/internal/identity"
+	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/registry"
 )
@@ -40,6 +41,7 @@ Usage:
   agenthof audit repair control [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
   agenthof gateway provision --config <dir> [--admin-base <url>]
+  agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>]
 `
 
 func main() {
@@ -67,6 +69,8 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 		return cmdRuns(argv[1:], stdout)
 	case "gateway":
 		return cmdGateway(argv[1:], stdout)
+	case "investigate":
+		return cmdInvestigate(argv[1:], stdout)
 	default:
 		_, _ = fmt.Fprint(stderr, usage)
 		return 2
@@ -713,6 +717,7 @@ func cmdAudit(args []string, out io.Writer) int {
 	runID := args[0]
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
 	fs.SetOutput(out)
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
@@ -728,6 +733,13 @@ func cmdAudit(args []string, out io.Writer) int {
 		}
 	}
 	_, _ = fmt.Fprint(out, audit.Render(events, head, err))
+	for _, e := range events {
+		if e.Type == "workflow_started" && e.ConfigHash != "" {
+			cev, verdict, _ := investigate.LoadControl(*controlLog)
+			_, _ = fmt.Fprintln(out, investigate.ConfigJoin(cev, verdict, e.ConfigHash, e.Time))
+			break
+		}
+	}
 	if err != nil {
 		// A torn/broken chain, whether or not a valid prefix was
 		// recovered — the rendered output already names the failure,
@@ -1083,4 +1095,87 @@ func parseRetentionDuration(s string) (time.Duration, error) {
 		return time.Duration(n) * 24 * time.Hour, nil
 	}
 	return time.ParseDuration(s)
+}
+
+// cmdInvestigate implements `agenthof investigate`: it builds an
+// investigate.Filter from the flags, asks investigate.Timeline to merge and
+// normalize every run log under --log-dir plus --control-log into one
+// timeline, then renders it as text or (with --json) the investigate/1 JSON
+// contract. The exit code always comes from investigate.ExitCode — --json
+// changes only the rendering, never the exit code.
+func cmdInvestigate(args []string, out io.Writer) int {
+	fs := flag.NewFlagSet("investigate", flag.ContinueOnError)
+	since := fs.String("since", "", "only events at/after this time: a duration (e.g. 1h, 30d) meaning \"ago\", or an RFC3339 timestamp")
+	until := fs.String("until", "", "only events before this time: a duration (e.g. 1h, 30d) meaning \"ago\", or an RFC3339 timestamp")
+	invoker := fs.String("invoker", "", "filter: exact invoker subject")
+	agent := fs.String("agent", "", "filter: exact agent name")
+	outcome := fs.String("outcome", "", "filter: exact outcome")
+	run := fs.String("run", "", "filter: exact run id")
+	configHash := fs.String("config-hash", "", "filter: exact config hash")
+	jsonOut := fs.Bool("json", false, "render as the investigate/1 JSON contract instead of text")
+	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	fs.SetOutput(out)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	f := investigate.Filter{
+		Invoker:    *invoker,
+		Agent:      *agent,
+		Outcome:    *outcome,
+		Run:        *run,
+		ConfigHash: *configHash,
+	}
+	if *since != "" {
+		t, err := parseTimeBound(*since)
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "investigate: invalid --since %q: %v\n", *since, err)
+			return 2
+		}
+		f.Since = &t
+	}
+	if *until != "" {
+		t, err := parseTimeBound(*until)
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "investigate: invalid --until %q: %v\n", *until, err)
+			return 2
+		}
+		f.Until = &t
+	}
+
+	res, err := investigate.Timeline(*logDir, *controlLog, f)
+	if err != nil {
+		_, _ = fmt.Fprintln(out, err)
+		return 1
+	}
+
+	var s string
+	if *jsonOut {
+		s, err = investigate.RenderJSON(res, f)
+		if err != nil {
+			_, _ = fmt.Fprintln(out, err)
+			return 1
+		}
+	} else {
+		s = investigate.RenderText(res)
+	}
+	_, _ = fmt.Fprint(out, s)
+	return investigate.ExitCode(res)
+}
+
+// parseTimeBound parses a --since/--until value the same way runs prune
+// interprets --older-than: try a Go duration (plus the "d" suffix) first, and
+// when that succeeds treat it as "this long ago" — mirroring runs prune's
+// cutoff := time.Now().Add(-dur) at pruneRuns above. On failure, fall back to
+// an absolute RFC3339 timestamp. Both results are normalized to UTC.
+func parseTimeBound(s string) (time.Time, error) {
+	if dur, err := parseRetentionDuration(s); err == nil {
+		return time.Now().Add(-dur).UTC(), nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("not a valid duration or RFC3339 timestamp: %q", s)
+	}
+	return t.UTC(), nil
 }

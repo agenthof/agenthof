@@ -301,6 +301,7 @@ recorded and why; this section is the flag-by-flag and exit-code reference.
 | `agenthof audit control [--control-log <path>]` | `--control-log` |
 | `agenthof audit verify control [--control-log <path>] [--expect-head <hex>]` | `--control-log`, `--expect-head` |
 | `agenthof audit repair control [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--as`, `--groups`, `--token` |
+| `agenthof investigate [--since <dur\|ts>] [--until <dur\|ts>] [--invoker <id>] [--agent <name>] [--outcome <value>] [--run <run-id>] [--config-hash <sha256:…>] [--json] [--log-dir <dir>] [--control-log <path>]` | `--since`, `--until`, `--invoker`, `--agent`, `--outcome`, `--run`, `--config-hash`, `--json`, `--log-dir`, `--control-log` |
 
 ### `--control-log`
 
@@ -335,6 +336,53 @@ check the freshly verified chain against — a hash Agenthof printed to
 stdout after some earlier append, saved somewhere off this machine (see
 [`docs/concepts.md`](../concepts.md#control-plane-audit)). Only the hash is
 compared; the accompanying event count is informational.
+
+### `--since`, `--until`
+
+`agenthof investigate` only. Each takes either a bare duration — a Go
+duration string, or one suffixed `d` for days (`1h`, `720h`, `180d`), the
+same grammar `runs prune --older-than` uses — meaning "this long ago,
+relative to now", or an absolute RFC3339 timestamp; either form is
+normalized to UTC. A value that parses as neither exits 2. `--since` is
+**inclusive** (an event at exactly that time is included); `--until` is
+**exclusive** (an event at exactly that time is not). Omit either to leave
+that end of the window open.
+
+### `--invoker`, `--agent`, `--outcome`, `--run`, `--config-hash`
+
+`agenthof investigate` only. Each is an **exact-match** filter — no
+normalization, no substring matching:
+
+- `--invoker <subject>` matches the invoker's subject exactly as recorded.
+- `--agent <name>` matches the agent name exactly.
+- `--run <run-id>` narrows the timeline to a single run's log.
+- `--config-hash <sha256:…>` matches the full `config_hash` string exactly.
+- `--outcome <value>` matches an event's outcome exactly — and **the literal
+  you need depends on which kind of event you're after**, because run
+  events and control events were never recorded with the same outcome
+  vocabulary: a **run** event's outcome is one of
+  `succeeded | failed | refused`; a **control** event's (`apply`,
+  `enable`/`disable`, `repair`) outcome is one of
+  `success | refused | rejected | error`. `--outcome succeeded` selects only
+  successfully finished runs, `--outcome failed` selects only failed runs,
+  and `--outcome refused` selects refused **runs and refused control
+  events together** — `refused` is the one literal both vocabularies share.
+  `--outcome success` selects successful control actions only — note
+  "succeeded" (run) vs "success" (control). Run `investigate` twice (once
+  per vocabulary) to see both kinds of outcome.
+
+### `--json`
+
+`agenthof investigate` only. Renders the `investigate/1` JSON contract
+(below) on stdout instead of the plain-text timeline. It changes only the
+rendering — never the exit code.
+
+### `--log-dir`
+
+`agenthof investigate` only, in this section (`agenthof run` also takes it,
+documented alongside the engine). Default `.agenthof/runs`. `investigate`
+reads every `<log-dir>/r-*.jsonl` run log it finds there, in addition to
+`--control-log`.
 
 ### Exit codes
 
@@ -371,3 +419,104 @@ compared; the accompanying event count is informational.
 | `0` | A torn tail was repaired: the damaged bytes were moved to a `<log>.torn-<timestamp>` fragment, the live log truncated to its last valid record, and a `repair` event appended — the ledger is now tainted |
 | `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; or another IO error. None of these write a control event, since the ledger being repaired may itself be the file in question |
 | `2` | Usage error |
+
+`agenthof investigate`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Every source (each run log under `--log-dir`, plus `--control-log`) verified clean, or nothing was recorded at all (no logs found) |
+| `1` | Any source is torn or broken, or an open/IO error was hit reading a source that does exist |
+| `3` | Tainted only — the control log carries a `repair` record and every source is otherwise clean (no source torn or broken) |
+| `2` | Usage error — a bad flag, or a `--since`/`--until` value that isn't a duration or an RFC3339 timestamp |
+
+`--json` never changes this exit code — it only changes the rendering — and
+the JSON envelope's `integrity.ok` always equals `(exit == 0)`.
+
+### The `investigate/1` JSON contract
+
+`--json` renders this envelope instead of the text timeline:
+
+```jsonc
+{
+  "v": "investigate/1",
+  "query": {
+    // only the filters that were actually set, e.g.:
+    "since": "2026-09-20T00:00:00Z",
+    "outcome": "refused"
+  },
+  "sources": [
+    { "path": ".agenthof/runs/r-a1b2c3.jsonl", "kind": "run", "integrity": "verified", "count": 6 },
+    { "path": ".agenthof/control.jsonl", "kind": "control", "integrity": "verified", "count": 3 }
+  ],
+  "events": [
+    {
+      "time": "2026-09-20T18:04:11Z",
+      "source": "run",
+      "run_id": "r-a1b2c3",
+      "kind": "run_refused",
+      "invoker": { "subject": "dana@example.com", "issuer": "asserted", "method": "asserted" },
+      "role": "software-engineer",
+      "workflow": "fix-bug",
+      "outcome": "refused",
+      "reason": "configuration invalid: ..."
+    }
+  ],
+  "integrity": { "ok": true, "issues": [] }
+}
+```
+
+Field notes:
+
+- `v` is the contract's version string, `"investigate/1"`. The contract is
+  **additive**: future fields may appear, existing ones will not change
+  meaning or be repurposed.
+- `query` echoes back only the filters you actually passed (`since`, `until`,
+  `invoker`, `agent`, `outcome`, `run`, `config_hash`); an unset filter is
+  omitted, not rendered as an empty string.
+- `sources[]` lists every source `investigate` read: `path`, `kind`
+  (`"run"` or `"control"`), `integrity` (`"verified"`, `"torn"`, `"broken"`,
+  `"tainted"`, or `"error"` for an open/IO failure), and `count` — the
+  number of valid-prefix records parsed from it, before any filter is
+  applied.
+- `events[]` is the merged, filtered timeline, time-ordered (ties broken by
+  source, then run id, then in-source position — the line index within a run
+  log, or `seq` within the control log — so 8 steps recorded in the same
+  second still come out in a stable order). Each event carries whichever of
+  `run_id`, `role`, `workflow`, `agent`, `outcome`, `reason`, `config_hash`,
+  `artifact_sha`, or `seq` applies to it (all `omitempty`); `invoker` is
+  always present, with `subject`, `issuer`, `method`, and — for a control
+  event recorded with `--as` — `asserted_as`. All timestamps are RFC3339
+  UTC. There is **no `witness` field** — it is deliberately left out of this
+  contract.
+- `integrity.ok` mirrors the exit code exactly: `true` iff the exit code is
+  `0`. `integrity.issues[]` is **operator-facing prose** (e.g. `"control
+  ledger TORN at .agenthof/control.jsonl"`) meant for a human reading the
+  output — a program should key off `integrity.ok` and whether `issues` is
+  empty, not parse the issue strings themselves; their wording is not part
+  of the stable contract the way the field names are.
+
+### Config-join on `audit <run-id>`
+
+`agenthof audit <run-id>` prints a config-join line right after the run's own
+timeline, for a run whose `workflow_started` event carries a `config_hash`:
+it names the control-plane `apply` that put that exact config in place,
+drawn from `--control-log` (default `.agenthof/control.jsonl`). Four forms,
+verbatim:
+
+- A matching, successful `apply` at or before the run started:
+  `config sha256:<hash> — applied by <subject> (<method>) at <RFC3339 time>`
+- The hash instead matches a later `enable`/`disable` rather than any
+  `apply`: `config sha256:<hash> — no successful apply on record (matches a
+  later enable/disable, not an apply)`
+- No control event at all matches the hash:
+  `config sha256:<hash> — no successful apply on record`
+- The control log is missing, torn, broken, or otherwise unreadable:
+  `config sha256:<hash> — control ledger unavailable`
+
+A run recorded before `config_hash` existed omits the join line entirely.
+
+**Guarantee:** `audit <run-id>`'s own exit code (`0` clean, `1`
+torn/broken/IO error) is computed from the run's own log alone. The control
+log's health — missing, torn, broken, or fine — never changes `audit
+<run-id>`'s exit code; at worst it changes the join line's wording to
+"control ledger unavailable".

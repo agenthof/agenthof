@@ -202,7 +202,27 @@ events)`, or `TORN` (the last record was cut off mid-write), or `BROKEN at event
 N` (a link doesn't match). Then it lists the timeline: workflow started, each
 step started/succeeded/failed, any bounces, and how the run finished. That is
 the full loop — *who asked → what ran → what it touched → whether the record can
-be trusted* — with no cross-referencing required.
+be trusted* — with no cross-referencing required. When the run's
+`workflow_started` carries a config hash, `audit <run-id>` also prints one
+more line naming the control-plane `apply` that put that config in place (or
+saying plainly that none is on record, or that the control ledger isn't
+available right now) — see
+[`reference/config.md`](reference/config.md#control-plane-cli) for the exact
+wording.
+
+### Investigating across runs
+
+A single run's audit trail answers "what happened in this run." For "what
+happened across everything, in this window" — an incident spanning several
+runs and the control plane together — there's `agenthof investigate`. It
+merges the control log and every run log under `--log-dir` into one
+time-ordered timeline, filterable by time window, invoker, agent, outcome,
+run, or config hash, rendered as plain text or (`--json`) the stable
+`investigate/1` contract. Each source's own integrity is surfaced right
+alongside the events it contributed — a torn or broken log still contributes
+its valid prefix rather than silently dropping evidence. See
+[`reference/config.md`](reference/config.md#control-plane-cli) for the full
+flag and exit-code reference.
 
 ## What ships today vs what is reserved
 
@@ -213,6 +233,7 @@ be trusted* — with no cross-referencing required.
 | `contained` and `fronted` execution tiers | enforced capabilities for fronted agents |
 | hash-chained ledger + `audit` / `audit verify` | multi-resource / cross-repo scope |
 | RBAC by group; linear workflow + fail-back | DAG workflows |
+| cross-run + control incident timeline (`investigate`) + config-join on `audit <run-id>` | SIEM / multi-org investigation at scale |
 
 Only shipped behavior is a guarantee.
 
