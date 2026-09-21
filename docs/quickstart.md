@@ -3,13 +3,18 @@
 ## Build and run with the echo executor
 
     go build -o agenthof ./cmd/agenthof
-    ./agenthof apply --config examples/config
+    ./agenthof apply --as you@example.com --config examples/config
     ./agenthof run software-engineer fix-bug --input "fix the login bug" --as you@example.com --config examples/config
     ./agenthof audit <run-id>
 
 Expected output from `apply`:
 
     registry ok: 5 agents, 2 workflows, 2 roles
+    control head: seq=1 sha256=<hex>
+
+The `control head` line is the control ledger recording the apply (see the
+control-plane audit below); the `seq` increments with each control action and
+the hash varies.
 
 `run` prints the run id it assigned (`run <run-id> finished: ...`); pass that
 id to `audit` to see the trace rendered from the run's event log — who
@@ -21,10 +26,16 @@ demos, including budget refusals).
 
 Try the kill switch:
 
-    ./agenthof registry disable coder --config examples/config
-    ./agenthof apply --config examples/config   # fails, naming every dependent workflow
+    ./agenthof registry disable coder --as you@example.com --config examples/config
+    ./agenthof apply --as you@example.com --config examples/config   # fails, naming every dependent workflow
 
-Retention (compliance floor, free forever):
+The disable is itself recorded in the control ledger, attributed to `--as`.
+See who flipped the kill switch and when:
+
+    ./agenthof audit control
+
+Retention (compliance floor, free forever) — leaves the control ledger and its
+repair fragments untouched:
 
     ./agenthof runs prune --older-than 180d
 

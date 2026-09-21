@@ -34,13 +34,18 @@ items are guarantees.
 **Requires:** Go >= 1.27 toolchain; Linux or macOS.
 
     go build -o agenthof ./cmd/agenthof
-    ./agenthof apply --config examples/config
+    ./agenthof apply --as you@example.com --config examples/config
     ./agenthof run software-engineer fix-bug --input "fix the login bug" --as you@example.com --config examples/config
     ./agenthof audit <run-id>
 
 Expected output from `apply`:
 
     registry ok: 5 agents, 2 workflows, 2 roles
+    control head: seq=1 sha256=<hex>
+
+The `control head` line is the control ledger recording the apply, attributed
+to `--as` (or your OS user if omitted); the hash varies per run. See
+[`ROADMAP.md`](ROADMAP.md) and `audit control` for the control-plane audit.
 
 See [`docs/quickstart.md`](docs/quickstart.md) for the kill switch, model-backed runs (LiteLLM), retention, and the full walkthrough.
 

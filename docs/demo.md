@@ -11,15 +11,19 @@ Demonstrates how roles, workflows, and agents are defined in YAML and validated 
 
 ```bash
 cd <path-to-your-clone>
-./agenthof apply --config examples/config
+./agenthof apply --as dana@example.com --config examples/config
 ```
 
 Expected output:
 ```
 registry ok: 5 agents, 2 workflows, 2 roles
+control head: seq=1 sha256=<hex>
 ```
 
-The registry now includes:
+The `control head` line is the control ledger recording this apply, attributed
+to `--as` (read it with `audit control`, shown at the end of Part 1); `seq`
+increments with each control action and the hash varies. The registry now
+includes:
 - 5 agents: planner, coder, reviewer, categorizer, reconciler
 - 2 workflows: fix-bug, reconcile-lite
 - 2 roles: software-engineer, accountant
@@ -41,12 +45,13 @@ Edit `examples/config/agents/reviewer.yaml` and change the instruction:
 Then re-apply:
 
 ```bash
-./agenthof apply --config examples/config
+./agenthof apply --as dana@example.com --config examples/config
 ```
 
-Expected output:
+Expected output (the `seq` has advanced — this is the second control action):
 ```
 registry ok: 5 agents, 2 workflows, 2 roles
+control head: seq=2 sha256=<hex>
 ```
 
 Configuration changes are validated immediately; no stale configs can propagate.
@@ -56,18 +61,20 @@ Configuration changes are validated immediately; no stale configs can propagate.
 Disable the coder agent:
 
 ```bash
-./agenthof registry disable coder --config examples/config
+./agenthof registry disable coder --as dana@example.com --config examples/config
 ```
 
-Expected output:
+Expected output (the kill-switch flip is recorded in the control ledger,
+attributed to `--as`):
 ```
 agent coder disabled
+control head: seq=3 sha256=<hex>
 ```
 
 Now try to apply:
 
 ```bash
-./agenthof apply --config examples/config
+./agenthof apply --as dana@example.com --config examples/config
 ```
 
 Expected output:
@@ -75,29 +82,67 @@ Expected output:
 workflows/fix-bug.yaml: fix-bug: workflow "fix-bug" depends on agent "coder", which is disabled in the registry
 ```
 
-The registry refuses to load because fix-bug depends on coder, which is now disabled. The error names the broken workflow immediately.
+The registry refuses to load because fix-bug depends on coder, which is now disabled. The error names the broken workflow immediately. The rejected apply is itself recorded in the control ledger (outcome `rejected`, with the hash of the rejected config) — denials are audit events too.
 
 Re-enable the agent:
 
 ```bash
-./agenthof registry enable coder --config examples/config
+./agenthof registry enable coder --as dana@example.com --config examples/config
 ```
 
 Expected output:
 ```
 agent coder enabled
+control head: seq=5 sha256=<hex>
 ```
 
 Verify the registry is healthy again:
 
 ```bash
-./agenthof apply --config examples/config
+./agenthof apply --as dana@example.com --config examples/config
 ```
 
 Expected output:
 ```
 registry ok: 5 agents, 2 workflows, 2 roles
+control head: seq=6 sha256=<hex>
 ```
+
+### 1.4 Read the control ledger: who changed what, and when
+
+Every `apply` and kill-switch flip above was recorded, attributed, and
+chained. Read the control-plane audit trail:
+
+```bash
+./agenthof audit control
+```
+
+Expected output (abbreviated):
+```
+control ledger — 6 events
+
+  seq 1  <ts>  config applied — dana@example.com (asserted)
+  seq 2  <ts>  config applied — dana@example.com (asserted)
+  seq 3  <ts>  disabled agent coder — dana@example.com (asserted)
+  seq 4  <ts>  config rejected — dana@example.com (asserted)
+  seq 5  <ts>  enabled agent coder — dana@example.com (asserted)
+  seq 6  <ts>  config applied — dana@example.com (asserted)
+control ledger integrity: verified (6 events)
+```
+
+Verify the control chain, and pin it against a head you recorded off the
+machine (the head is printed after each control action but never stored —
+paste it into CI logs, a git note, or a message):
+
+```bash
+./agenthof audit verify control --expect-head <hex>
+```
+
+Exit codes: `0` clean · `1` torn/broken/missing · `3` tainted (a repair
+happened) · `4` head mismatch. The chain is append-only and tamper-evident,
+not tamper-proof — it detects alteration of committed records, and, against a
+recorded head, truncation or re-forge; see
+[`docs/concepts.md`](concepts.md#the-ledger) for the honest limits.
 
 ---
 
