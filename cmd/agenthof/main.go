@@ -1063,7 +1063,7 @@ func pruneRuns(logDir string, dur time.Duration) (int, error) {
 		// fragments (internal/control/log.go's writeTornFragment) must
 		// never be deleted here, even if --log-dir is misconfigured to
 		// point at the ledger's own directory instead of the default
-		// .agenthof/runs (task 11, spec §3.1).
+		// .agenthof/runs (spec §3.1).
 		if entry.Name() == "control.jsonl" || strings.Contains(entry.Name(), ".torn-") {
 			continue
 		}

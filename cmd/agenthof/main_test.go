@@ -451,8 +451,7 @@ func TestRunsPruneLogDirIsRegularFile(t *testing.T) {
 // safe: the control ledger lives at .agenthof/control.jsonl, a sibling of
 // (not a member of) the default --log-dir .agenthof/runs, so an aged run
 // log under --log-dir is pruned while the ledger and its .torn-* repair
-// fragment — both outside --log-dir entirely — are untouched. Task 11,
-// spec §3.1.
+// fragment — both outside --log-dir entirely — are untouched (spec §3.1).
 func TestRunsPruneSparesControlLogAndFragments(t *testing.T) {
 	root := t.TempDir()
 	agentDir := filepath.Join(root, ".agenthof")
@@ -496,8 +495,7 @@ func TestRunsPruneSparesControlLogAndFragments(t *testing.T) {
 // misconfiguration case: an operator points --log-dir directly at the
 // control log's own directory (instead of the default .agenthof/runs).
 // pruneRuns's *.jsonl glob would otherwise match control.jsonl itself;
-// the ledger and its repair fragment must still survive. Task 11, spec
-// §3.1.
+// the ledger and its repair fragment must still survive (spec §3.1).
 func TestRunsPruneNeverDeletesControlLogEvenIfLogDirPointsAtItsDir(t *testing.T) {
 	agentDir := t.TempDir()
 	oldRun := filepath.Join(agentDir, "r-old.jsonl")

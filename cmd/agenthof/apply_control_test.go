@@ -11,8 +11,8 @@ import (
 	"github.com/agenthof/agenthof/internal/config"
 )
 
-// TestApplyRecordsSuccessEvent covers apply's happy path (spec §3.4/§3.7,
-// Task 7): a valid config records a "success" control/1 event carrying
+// TestApplyRecordsSuccessEvent covers apply's happy path (spec §3.4/§3.7):
+// a valid config records a "success" control/1 event carrying
 // the invoker and a config_hash, and prints the control head.
 func TestApplyRecordsSuccessEvent(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")

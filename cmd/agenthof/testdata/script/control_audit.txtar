@@ -1,5 +1,5 @@
-# Task 8: `audit control` renders the control ledger produced by apply/
-# enable/disable (Tasks 6-7) as a human-readable audit trail with a final
+# `audit control` renders the control ledger produced by apply/
+# enable/disable as a human-readable audit trail with a final
 # integrity line — spec §3.6.
 
 exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com

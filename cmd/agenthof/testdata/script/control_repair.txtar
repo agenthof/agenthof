@@ -1,4 +1,4 @@
-# Task 10: `agenthof audit repair control` recovers a torn-tail control
+# `agenthof audit repair control` recovers a torn-tail control
 # log by moving the damaged fragment aside, truncating to the last valid
 # record, and appending an attributed "repair" event that taints the
 # ledger forever — spec §3.6.

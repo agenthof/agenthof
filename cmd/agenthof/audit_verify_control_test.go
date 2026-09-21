@@ -121,10 +121,10 @@ func TestAuditVerifyControlTornExitsOne(t *testing.T) {
 }
 
 // TestAuditVerifyControlTaintedExitsThree covers the taint verdict: a
-// control log carrying a "repair" record (built directly with
-// control.Append, since Task 10's `audit repair control` is not built
-// yet) must verify (chain is otherwise clean) but exit 3, taking
-// precedence over any --expect-head check.
+// control log carrying a "repair" record (appended directly with
+// control.Append so the chain is otherwise clean, isolating the taint
+// check from the torn-tail recovery of `audit repair control`) must
+// verify but exit 3, taking precedence over any --expect-head check.
 func TestAuditVerifyControlTaintedExitsThree(t *testing.T) {
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestAuditControlMissingLogExitsOne covers Task 8's honest missing-log
+// TestAuditControlMissingLogExitsOne covers the honest missing-log
 // message: a control log that has never been written to must be reported
 // plainly, not as a raw os.Open error, and the process must exit nonzero.
 func TestAuditControlMissingLogExitsOne(t *testing.T) {

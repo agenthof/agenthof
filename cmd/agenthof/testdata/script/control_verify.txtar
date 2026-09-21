@@ -1,4 +1,4 @@
-# Task 9: `agenthof audit verify control` verifies the control log's
+# `agenthof audit verify control` verifies the control log's
 # chain and taint status, with distinct exit codes — spec §3.6.
 
 exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com

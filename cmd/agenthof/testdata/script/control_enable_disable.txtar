@@ -1,8 +1,7 @@
-# Task 6: `registry enable|disable` records an attributed event in the
-# hash-chained control ledger — spec §3.4. `audit control` is Task 8 and
-# does not exist yet, so this journey asserts via the `control head: seq=`
-# line, exit codes, and the raw control.jsonl content (per the SDD ledger's
-# Ruling 2).
+# `registry enable|disable` records an attributed event in the
+# hash-chained control ledger — spec §3.4. This journey asserts via the
+# `control head: seq=` line, exit codes, and the raw control.jsonl
+# content.
 
 exec agenthof apply --config examples/config
 stdout 'registry ok: 5 agents, 2 workflows, 2 roles'

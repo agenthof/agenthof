@@ -9,7 +9,7 @@ import (
 	"github.com/agenthof/agenthof/internal/ledger"
 )
 
-// rec builds a hand-crafted control/1 wire record (Task 8's Render reads
+// rec builds a hand-crafted control/1 wire record (Render reads
 // records straight off ledger.ReadVerify's raw bytes, so tests build that
 // exact wire shape rather than going through Append/a real chain).
 func rec(seq int, action, agent, outcome, subject, method string) ledger.Record {

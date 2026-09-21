@@ -91,7 +91,7 @@ func TestControlSuccessOmitsReason(t *testing.T) {
 	}
 }
 
-// TestAppendNonSuccessRequiresReason is the Task 4 review's folded-in
+// TestAppendNonSuccessRequiresReason covers the centrally enforced
 // condition: Append must enforce, in one place, that a non-"success"
 // outcome always carries an explanation — never scattered across call
 // sites that might forget it.
