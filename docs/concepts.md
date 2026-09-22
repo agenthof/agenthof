@@ -83,7 +83,11 @@ applicable — gateway machinery every agent is subject to. Put differently, a
 fronted agent's internals are *attested*, not *enforced*. Agenthof governs
 what crosses the boundary — the call in, the result out, and the identity
 and ledger entries around it — not what the external service does
-internally. A fronted agent may not declare `tools` (tools are a
+internally. Concretely, the call in carries the run's identity as
+`X-Agenthof-*` request headers (see
+[`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers) for
+the list) — attested like the rest of the boundary, not enforced. A fronted
+agent may not declare `tools` (tools are a
 contained-runtime capability), and its `model` routing is not checked, since
 it is not calling through Agenthof's model gateway the way a contained agent
 does (see

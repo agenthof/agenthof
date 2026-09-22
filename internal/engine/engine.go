@@ -52,7 +52,7 @@ type StepResult struct {
 }
 
 type StepExecutor interface {
-	Execute(ctx context.Context, agent config.AgentDef, input string, artifacts map[string]string) (StepResult, error)
+	Execute(ctx context.Context, binding Binding, agent config.AgentDef, input string, artifacts map[string]string) (StepResult, error)
 }
 
 type Options struct {
@@ -138,7 +138,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		emit(Event{Type: "step_started", Step: step.Name, Agent: agent.Name, Execution: execTier})
 
 		stepCtx, cancel := context.WithTimeout(ctx, opts.StepTimeout)
-		res, execErr := exec.Execute(stepCtx, agent, input, artifacts)
+		res, execErr := exec.Execute(stepCtx, bind, agent, input, artifacts)
 		cancel()
 		if execErr != nil {
 			if errors.Is(execErr, ErrStepConfig) {

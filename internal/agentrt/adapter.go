@@ -46,13 +46,9 @@ var adapterClient = &http.Client{
 // step input to the agent's HTTP endpoint and maps the adapter's JSON
 // response onto a StepResult. It implements engine.StepExecutor.
 //
-// Known limitation (deferred to V2): the engine.StepExecutor interface does
-// not give executors the engine.Binding for the current run, so the
-// adapter cannot forward binding/identity headers (invoker, role, workflow,
-// run ID) to the fronted agent over HTTP. The ledger still records the
-// binding for every step regardless; only the outbound request to the
-// fronted agent lacks it. Forwarding it requires widening StepExecutor to
-// carry the Binding.
+// It forwards the run's delegation binding (invoker, role, workflow, run ID)
+// to the agent as X-Agenthof-* headers. This is attested, not enforced: a
+// non-conforming agent can ignore the headers.
 type AdapterExecutor struct {
 	// Timeout bounds the whole request/response round trip. Zero means
 	// defaultAdapterTimeout.
@@ -66,6 +62,10 @@ type adapterRequest struct {
 	Agent     string            `json:"agent"`
 }
 
+// Reserved for later (additive, not implemented here): a signed
+// binding header (X-Agenthof-Binding-Signature) for authenticity, and a
+// run_id echo field on the response for attestability.
+
 // adapterResponse is the JSON body expected back from the fronted agent's
 // endpoint on a 200 response.
 type adapterResponse struct {
@@ -75,7 +75,8 @@ type adapterResponse struct {
 }
 
 // Execute POSTs {"input", "artifacts", "agent"} as JSON to a.Endpoint, with
-// header X-Agenthof-Agent set to a.Name, using a client that does not follow
+// the X-Agenthof-Agent header and the X-Agenthof-* identity headers (invoker,
+// issuer, method, role, workflow, run id), using a client that does not follow
 // redirects (a fronted agent is a trust boundary; a 3xx is reported as a
 // failed step like any other non-200). A 200 response is decoded and mapped
 // onto StepResult, except that an endpoint-supplied failure reason
@@ -86,7 +87,7 @@ type adapterResponse struct {
 // with the engine driving it. An empty endpoint — which validation should
 // already have rejected — is a configuration error wrapping
 // engine.ErrStepConfig.
-func (x AdapterExecutor) Execute(ctx context.Context, a config.AgentDef, input string, artifacts map[string]string) (engine.StepResult, error) {
+func (x AdapterExecutor) Execute(ctx context.Context, binding engine.Binding, a config.AgentDef, input string, artifacts map[string]string) (engine.StepResult, error) {
 	if a.Endpoint == "" {
 		return engine.StepResult{}, fmt.Errorf("agent %q has no endpoint: %w", a.Name, engine.ErrStepConfig)
 	}
@@ -109,6 +110,15 @@ func (x AdapterExecutor) Execute(ctx context.Context, a config.AgentDef, input s
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Agenthof-Agent", a.Name)
+	// Forward the delegation binding as the identity envelope for this gateway
+	// call (Article II). Attested, not enforced: a non-conforming agent can
+	// ignore these; Agenthof records the call as fronted regardless.
+	req.Header.Set("X-Agenthof-Invoker", binding.Invoker.Subject)
+	req.Header.Set("X-Agenthof-Invoker-Issuer", binding.Invoker.Issuer)
+	req.Header.Set("X-Agenthof-Invoker-Method", binding.Invoker.Method)
+	req.Header.Set("X-Agenthof-Role", binding.Role)
+	req.Header.Set("X-Agenthof-Workflow", binding.Workflow)
+	req.Header.Set("X-Agenthof-Run-Id", binding.RunID)
 
 	resp, err := adapterClient.Do(req)
 	if err != nil {

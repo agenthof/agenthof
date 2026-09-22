@@ -13,7 +13,7 @@ import (
 // model. The ADK executor implements the same interface.
 type EchoExecutor struct{}
 
-func (EchoExecutor) Execute(_ context.Context, agent config.AgentDef, input string, _ map[string]string) (StepResult, error) {
+func (EchoExecutor) Execute(_ context.Context, _ Binding, agent config.AgentDef, input string, _ map[string]string) (StepResult, error) {
 	if strings.Contains(input, "FAIL:"+agent.Name) {
 		return StepResult{Success: false,
 			Reason: fmt.Sprintf("input requested a synthetic failure for %s", agent.Name)}, nil

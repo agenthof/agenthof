@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/engine"
 )
 
 // newStubGateway builds a config.GatewayConfig routing the logical model
@@ -83,7 +84,7 @@ func TestADKExecutor_Execute_Success(t *testing.T) {
 		Instruction: "You are a test agent. Reply with whatever the tool result says.",
 	}
 
-	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected engine error: %v", err)
 	}
@@ -129,7 +130,7 @@ func TestADKExecutor_Execute_BudgetRefusal(t *testing.T) {
 		Instruction: "You are a test agent.",
 	}
 
-	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected engine error: %v", err)
 	}
@@ -254,7 +255,7 @@ func TestADKExecutor_Execute_ToolDispatchRoundTrip(t *testing.T) {
 		Tools:       []string{"read_file"},
 	}
 
-	res, err := x.Execute(context.Background(), agentDef, "read the seed file", nil)
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "read the seed file", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected engine error: %v", err)
 	}

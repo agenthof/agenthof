@@ -14,6 +14,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity"
 )
 
 // TestAdapterExecutor_Execute_Success proves the happy-path wire contract:
@@ -42,7 +43,7 @@ func TestAdapterExecutor_Execute_Success(t *testing.T) {
 	x := AdapterExecutor{}
 	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: srv.URL}
 
-	res, err := x.Execute(context.Background(), agentDef, "hello", map[string]string{})
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", map[string]string{})
 	if err != nil {
 		t.Fatalf("Execute: unexpected error: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestAdapterExecutor_Execute_SuccessFalse(t *testing.T) {
 	x := AdapterExecutor{}
 	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: srv.URL}
 
-	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected error: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestAdapterExecutor_Execute_NonOK(t *testing.T) {
 	x := AdapterExecutor{}
 	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: srv.URL}
 
-	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected error: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestAdapterExecutor_Execute_Timeout(t *testing.T) {
 	x := AdapterExecutor{Timeout: 100 * time.Millisecond}
 	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: srv.URL}
 
-	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected error: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestAdapterExecutor_Execute_ArtifactsTransmitted(t *testing.T) {
 	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: srv.URL}
 	artifacts := map[string]string{"prior_step": "prior value"}
 
-	_, err := x.Execute(context.Background(), agentDef, "hello", artifacts)
+	_, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", artifacts)
 	if err != nil {
 		t.Fatalf("Execute: unexpected error: %v", err)
 	}
@@ -197,7 +198,7 @@ func TestAdapterExecutor_Execute_OversizedResponse(t *testing.T) {
 	x := AdapterExecutor{}
 	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: srv.URL}
 
-	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected error: %v", err)
 	}
@@ -222,7 +223,7 @@ func TestAdapterExecutor_Execute_MalformedJSON(t *testing.T) {
 	x := AdapterExecutor{}
 	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: srv.URL}
 
-	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected error: %v", err)
 	}
@@ -257,7 +258,7 @@ func TestAdapterExecutor_Execute_DoesNotFollowRedirects(t *testing.T) {
 	x := AdapterExecutor{}
 	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: first.URL}
 
-	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected error: %v", err)
 	}
@@ -291,7 +292,7 @@ func TestAdapterExecutor_Execute_ReasonTruncated(t *testing.T) {
 	x := AdapterExecutor{}
 	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: srv.URL}
 
-	res, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	res, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected error: %v", err)
 	}
@@ -306,6 +307,72 @@ func TestAdapterExecutor_Execute_ReasonTruncated(t *testing.T) {
 	}
 }
 
+// TestAdapterExecutor_ForwardsIdentityHeaders proves the adapter forwards
+// the run's delegation binding to the fronted agent as X-Agenthof-* identity
+// headers.
+func TestAdapterExecutor_ForwardsIdentityHeaders(t *testing.T) {
+	var h http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"artifact":"out","success":true}`))
+	}))
+	defer srv.Close()
+
+	x := AdapterExecutor{}
+	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: srv.URL}
+	bind := engine.Binding{
+		Invoker:  identity.Invoker{Subject: "dana@example.com", Issuer: "https://idp.example", Method: "oidc"},
+		Role:     "se",
+		Workflow: "fix-bug",
+		RunID:    "run-xyz",
+	}
+
+	if _, err := x.Execute(context.Background(), bind, agentDef, "hello", map[string]string{}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	cases := map[string]string{
+		"X-Agenthof-Invoker":        "dana@example.com",
+		"X-Agenthof-Invoker-Issuer": "https://idp.example",
+		"X-Agenthof-Invoker-Method": "oidc",
+		"X-Agenthof-Role":           "se",
+		"X-Agenthof-Workflow":       "fix-bug",
+		"X-Agenthof-Run-Id":         "run-xyz",
+	}
+	for k, want := range cases {
+		if got := h.Get(k); got != want {
+			t.Errorf("header %s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// TestAdapterExecutor_EmptyIdentityHeadersPresent proves an empty binding
+// still sends the identity headers, present with empty values, rather than
+// omitting them.
+func TestAdapterExecutor_EmptyIdentityHeadersPresent(t *testing.T) {
+	var h http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"artifact":"out","success":true}`))
+	}))
+	defer srv.Close()
+
+	x := AdapterExecutor{}
+	agentDef := config.AgentDef{Name: "a", Execution: "fronted", Endpoint: srv.URL}
+	if _, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hi", nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	// An empty binding still sends the headers, present with empty values.
+	if _, ok := h["X-Agenthof-Role"]; !ok {
+		t.Errorf("X-Agenthof-Role header missing; empty identity must still send a present header")
+	}
+	if got := h.Get("X-Agenthof-Role"); got != "" {
+		t.Errorf("X-Agenthof-Role = %q, want empty", got)
+	}
+}
+
 // TestAdapterExecutor_Execute_EmptyEndpoint proves a missing endpoint (a
 // configuration problem that validation should have already caught) is
 // reported as an engine.ErrStepConfig-wrapping error.
@@ -313,7 +380,7 @@ func TestAdapterExecutor_Execute_EmptyEndpoint(t *testing.T) {
 	x := AdapterExecutor{}
 	agentDef := config.AgentDef{Name: "fronted_agent", Execution: "fronted", Endpoint: ""}
 
-	_, err := x.Execute(context.Background(), agentDef, "hello", nil)
+	_, err := x.Execute(context.Background(), engine.Binding{}, agentDef, "hello", nil)
 	if err == nil {
 		t.Fatalf("Execute: want error for empty endpoint, got nil")
 	}

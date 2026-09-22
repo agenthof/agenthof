@@ -119,8 +119,24 @@ step event**, so an audit shows exactly what guarantee applied:
 - **`fronted`** — the agent is an external HTTP service Agenthof calls out to.
   Its internal code runs outside Agenthof, so it cannot be contained; instead it
   is **governed at the doors it must pass through** — the call in, the result
-  out, and the identity and ledger entries around it. A fronted agent is
-  *attested, not enforced*.
+  out, and the identity and ledger entries around it. As part of the call in,
+  Agenthof forwards the run's delegation binding — the invoker's subject,
+  issuer, and method, the role, the workflow, and the run id — to the agent as
+  request headers, so the agent can see who and what it is acting for. The
+  six headers, and what each carries, are:
+
+  | Header | Carries |
+  | --- | --- |
+  | `X-Agenthof-Invoker` | the invoker's subject |
+  | `X-Agenthof-Invoker-Issuer` | the invoker's issuer |
+  | `X-Agenthof-Invoker-Method` | the invoker's authentication method |
+  | `X-Agenthof-Role` | the role the run is acting under |
+  | `X-Agenthof-Workflow` | the name of the running workflow |
+  | `X-Agenthof-Run-Id` | the run's id |
+
+  A fronted agent is *attested, not enforced*: it can read those headers,
+  ignore them, or do anything else it likes with the request, and Agenthof
+  records the call as `fronted` either way.
 
 Two executors ship for the contained tier: the default **`echo`** executor,
 which runs fully offline with no model and no credentials (great for trying the

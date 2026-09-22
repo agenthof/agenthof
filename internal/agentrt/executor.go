@@ -31,7 +31,7 @@ type ADKExecutor struct {
 // artifacts. A model or transport failure is reported as a failed step
 // (Success: false) rather than an engine error, since it reflects the
 // agent's own run, not a problem with the engine driving it.
-func (x ADKExecutor) Execute(ctx context.Context, a config.AgentDef, input string, artifacts map[string]string) (engine.StepResult, error) {
+func (x ADKExecutor) Execute(ctx context.Context, _ engine.Binding, a config.AgentDef, input string, artifacts map[string]string) (engine.StepResult, error) {
 	route, err := gateway.Resolve(x.Gateway, a.Model, x.RoleKey)
 	if err != nil {
 		return engine.StepResult{}, err

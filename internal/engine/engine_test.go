@@ -21,7 +21,7 @@ type fakeExec struct {
 	seen  []map[string]string
 }
 
-func (f *fakeExec) Execute(ctx context.Context, agent config.AgentDef, input string, artifacts map[string]string) (StepResult, error) {
+func (f *fakeExec) Execute(ctx context.Context, _ Binding, agent config.AgentDef, input string, artifacts map[string]string) (StepResult, error) {
 	f.calls = append(f.calls, agent.Name)
 	cp := map[string]string{}
 	maps.Copy(cp, artifacts)
@@ -171,7 +171,7 @@ func TestRunFirstStepFailureFails(t *testing.T) {
 
 type hangExec struct{}
 
-func (hangExec) Execute(ctx context.Context, agent config.AgentDef, input string, artifacts map[string]string) (StepResult, error) {
+func (hangExec) Execute(ctx context.Context, _ Binding, agent config.AgentDef, input string, artifacts map[string]string) (StepResult, error) {
 	<-ctx.Done()
 	return StepResult{}, ctx.Err()
 }
@@ -225,6 +225,38 @@ func TestRunStoresArtifactsOutOfLedger(t *testing.T) {
 	// full bodies still flow to later steps in memory
 	if ex.seen[1]["plan"] != "artifact-from-planner" {
 		t.Fatalf("in-memory chain broke: %v", ex.seen[1])
+	}
+}
+
+// bindingSpy records the binding passed to Execute for the first step.
+type bindingSpy struct {
+	got Binding
+}
+
+func (b *bindingSpy) Execute(_ context.Context, binding Binding, agent config.AgentDef, _ string, _ map[string]string) (StepResult, error) {
+	b.got = binding
+	return StepResult{Success: true, Artifact: "ok-" + agent.Name}, nil
+}
+
+func TestRunThreadsBindingToExecutor(t *testing.T) {
+	dir := t.TempDir()
+	spy := &bindingSpy{}
+	runID, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+		identity.Static("dev@x"), spy, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if status != "succeeded" {
+		t.Fatalf("status = %q, want succeeded", status)
+	}
+	if spy.got.RunID != runID {
+		t.Errorf("binding.RunID = %q, want %q", spy.got.RunID, runID)
+	}
+	if spy.got.Role != "se" || spy.got.Workflow != "fix-bug" {
+		t.Errorf("binding role/workflow = %q/%q, want se/fix-bug", spy.got.Role, spy.got.Workflow)
+	}
+	if spy.got.Invoker.Subject != "dev@x" {
+		t.Errorf("binding.Invoker.Subject = %q, want dev@x", spy.got.Invoker.Subject)
 	}
 }
 
@@ -306,7 +338,7 @@ type configErrExec struct {
 	calls []string
 }
 
-func (f *configErrExec) Execute(_ context.Context, agent config.AgentDef, _ string, _ map[string]string) (StepResult, error) {
+func (f *configErrExec) Execute(_ context.Context, _ Binding, agent config.AgentDef, _ string, _ map[string]string) (StepResult, error) {
 	f.calls = append(f.calls, agent.Name)
 	if agent.Name == "coder" {
 		return StepResult{}, fmt.Errorf("no route: %w", ErrStepConfig)

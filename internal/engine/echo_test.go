@@ -9,7 +9,7 @@ import (
 )
 
 func TestEchoSucceeds(t *testing.T) {
-	res, err := EchoExecutor{}.Execute(context.Background(),
+	res, err := EchoExecutor{}.Execute(context.Background(), Binding{},
 		config.AgentDef{Name: "planner"}, "fix the login bug\nmore detail", nil)
 	if err != nil || !res.Success {
 		t.Fatalf("%+v %v", res, err)
@@ -20,7 +20,7 @@ func TestEchoSucceeds(t *testing.T) {
 }
 
 func TestEchoSyntheticFailure(t *testing.T) {
-	res, err := EchoExecutor{}.Execute(context.Background(),
+	res, err := EchoExecutor{}.Execute(context.Background(), Binding{},
 		config.AgentDef{Name: "coder"}, "do the thing FAIL:coder", nil)
 	if err != nil || res.Success {
 		t.Fatalf("%+v %v", res, err)
