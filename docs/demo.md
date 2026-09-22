@@ -29,7 +29,9 @@ increments with each control action and the hash varies. The registry now
 includes:
 - 5 agents: planner, coder, reviewer, categorizer, reconciler
 - 2 workflows: fix-bug, reconcile-lite
-- 2 roles: software-engineer, accountant
+- 2 roles: software-engineer, accountant — `software-engineer` declares
+  `allowed_groups: ["*"]` (open to any authenticated invoker), while
+  `accountant` declares `allowed_groups: [finance]` (gated to that group)
 
 ### 1.2 Edit an agent instruction and re-apply
 

@@ -28,7 +28,7 @@ func writeSample(t *testing.T) string {
 		"agents/planner.yaml":    "name: planner\nmodel: fast\ninstruction: plan\noutput: plan\n",
 		"agents/coder.yaml":      "name: coder\nmodel: fast\ninstruction: code\noutput: patch\n",
 		"workflows/fix-bug.yaml": "name: fix-bug\nsteps:\n  - name: plan\n    agent: planner\n  - name: code\n    agent: coder\n    on_failure: plan\n",
-		"roles/se.yaml":          "name: software-engineer\nworkflows: [fix-bug]\n",
+		"roles/se.yaml":          "name: software-engineer\nworkflows: [fix-bug]\nallowed_groups: [\"*\"]\n",
 		"gateway.yaml":           "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\n",
 	}
 	for rel, content := range files {
@@ -566,7 +566,7 @@ func TestGatewayProvisionEndToEnd(t *testing.T) {
 	root := writeSample(t)
 	// writeSample's role has no budget; add one so the provisioner acts.
 	rolePath := filepath.Join(root, "roles", "se.yaml")
-	if err := os.WriteFile(rolePath, []byte("name: software-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 50\n"), 0o644); err != nil {
+	if err := os.WriteFile(rolePath, []byte("name: software-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 50\nallowed_groups: [\"*\"]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -629,7 +629,7 @@ func TestRunADKExecutorEndToEnd(t *testing.T) {
 		"agents/planner.yaml":    "name: planner\nmodel: fast\ninstruction: plan\noutput: plan\n",
 		"agents/coder.yaml":      "name: coder\nmodel: fast\ninstruction: code\noutput: patch\n",
 		"workflows/fix-bug.yaml": "name: fix-bug\nsteps:\n  - name: plan\n    agent: planner\n  - name: code\n    agent: coder\n    on_failure: plan\n",
-		"roles/se.yaml":          "name: software-engineer\nworkflows: [fix-bug]\n",
+		"roles/se.yaml":          "name: software-engineer\nworkflows: [fix-bug]\nallowed_groups: [\"*\"]\n",
 		"gateway.yaml":           "models:\n  fast:\n    endpoint: " + srv.URL + "\n    model: stub-model\n    api_key_env: " + envVar + "\n",
 	}
 	for rel, content := range files {
@@ -963,7 +963,7 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 	files := map[string]string{
 		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\n",
 		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
-		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\n",
+		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
 	}
 	for rel, content := range files {
 		p := filepath.Join(root, rel)

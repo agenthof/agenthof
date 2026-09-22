@@ -71,7 +71,14 @@ by removing rights the core already grants.
 Roles, workflows, and agents are declarative data, validated by `apply`
 before anything runs. The engine executes only what validated config
 permits — no hidden capability, no implicit behavior not traceable to a
-config file. Schema changes must be backward compatible: additive only,
+config file.
+
+Authorization is default-deny: a role grants access only to invokers whose
+groups appear in its declared `allowed_groups`; the value `["*"]` is the
+explicit marker for a role open to any authenticated invoker; a role that
+declares no access floor at all is rejected at `apply`, never treated as open.
+
+Schema changes must be backward compatible: additive only,
 never a breaking change to an existing field's meaning. Engine capability
 may grow (e.g. linear+fail-back today, DAG execution later) behind schemas
 that do not change shape for existing users. Control-plane actions (apply, and the enable/disable kill switch) are themselves recorded in a hash-chained control ledger.

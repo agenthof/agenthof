@@ -2,3 +2,4 @@ name: software-engineer
 description: An engineering teammate that plans, codes, and reviews
 workflows: [fix-bug]
 budget_usd_month: 50
+allowed_groups: ["*"]

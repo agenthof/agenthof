@@ -23,7 +23,7 @@ func baseCfg() config.Config {
 				{Name: "code", Agent: "coder", OnFailure: "plan"},
 			},
 		}},
-		Roles: []config.RoleDef{{Name: "se", Workflows: []string{"fix-bug"}, SourceFile: "roles/se.yaml"}},
+		Roles: []config.RoleDef{{Name: "se", Workflows: []string{"fix-bug"}, AllowedGroups: []string{"*"}, SourceFile: "roles/se.yaml"}},
 		Gateway: config.GatewayConfig{Models: map[string]config.ModelRoute{
 			"fast": {Endpoint: "https://x/v1", Model: "m", APIKeyEnv: "K"},
 		}},
@@ -36,6 +36,15 @@ func codes(errs []ValidationError) map[string]int {
 		m[e.Code]++
 	}
 	return m
+}
+
+func hasCode(errs []ValidationError, code string) bool {
+	for _, e := range errs {
+		if e.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func TestValidateHappyPath(t *testing.T) {
@@ -104,10 +113,33 @@ func TestValidateDuplicatesAndEmptiness(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Agents = append(cfg.Agents, config.AgentDef{Name: "planner", Model: "fast", SourceFile: "agents/dup.yaml"})
 	cfg.Workflows = append(cfg.Workflows, config.WorkflowDef{Name: "empty", SourceFile: "workflows/empty.yaml"})
-	cfg.Roles = append(cfg.Roles, config.RoleDef{Name: "idle", SourceFile: "roles/idle.yaml"})
+	cfg.Roles = append(cfg.Roles, config.RoleDef{Name: "idle", AllowedGroups: []string{"*"}, SourceFile: "roles/idle.yaml"})
 	c := codes(Validate(cfg))
 	if c["duplicate-name"] != 1 || c["no-steps"] != 1 || c["no-workflows"] != 1 {
 		t.Fatalf("codes: %v", c)
+	}
+}
+
+func TestValidateRejectsRoleWithNoAccessFloor(t *testing.T) {
+	cfg := config.Config{
+		Workflows: []config.WorkflowDef{{Name: "fix-bug", Steps: []config.Step{{Name: "s", Agent: "a"}}, SourceFile: "workflows/fix-bug.yaml"}},
+		Agents:    []config.AgentDef{{Name: "a", Instruction: "x", Output: "o", SourceFile: "agents/a.yaml"}},
+		Roles:     []config.RoleDef{{Name: "se", Workflows: []string{"fix-bug"}, SourceFile: "roles/se.yaml"}},
+	}
+	errs := Validate(cfg)
+	if !hasCode(errs, "no-access-floor") {
+		t.Fatalf("expected no-access-floor error, got %v", errs)
+	}
+}
+
+func TestValidateAcceptsPublicMarker(t *testing.T) {
+	cfg := config.Config{
+		Workflows: []config.WorkflowDef{{Name: "fix-bug", Steps: []config.Step{{Name: "s", Agent: "a"}}, SourceFile: "workflows/fix-bug.yaml"}},
+		Agents:    []config.AgentDef{{Name: "a", Instruction: "x", Output: "o", SourceFile: "agents/a.yaml"}},
+		Roles:     []config.RoleDef{{Name: "se", Workflows: []string{"fix-bug"}, AllowedGroups: []string{"*"}, SourceFile: "roles/se.yaml"}},
+	}
+	if hasCode(Validate(cfg), "no-access-floor") {
+		t.Fatalf("public role [\"*\"] must not trigger no-access-floor")
 	}
 }
 

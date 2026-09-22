@@ -29,6 +29,7 @@ steps:
 -- config/roles/se.yaml --
 name: software-engineer
 workflows: [plan-only]
+allowed_groups: ["*"]
 -- config/gateway.yaml --
 models:
   fast:

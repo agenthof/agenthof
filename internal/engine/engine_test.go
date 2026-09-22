@@ -48,7 +48,7 @@ func engCfg() *registry.Registry {
 				{Name: "review", Agent: "reviewer", OnFailure: "code", MaxBounces: 1},
 			},
 		}},
-		Roles: []config.RoleDef{{Name: "se", Workflows: []string{"fix-bug"}, SourceFile: "r"}},
+		Roles: []config.RoleDef{{Name: "se", Workflows: []string{"fix-bug"}, AllowedGroups: []string{"*"}, SourceFile: "r"}},
 		Gateway: config.GatewayConfig{Models: map[string]config.ModelRoute{
 			"fast": {Endpoint: "https://x/v1", Model: "m", APIKeyEnv: "K"},
 		}},
@@ -288,16 +288,16 @@ func TestRunRBACAllowsMatchingGroup(t *testing.T) {
 	}
 }
 
-func TestRunRBACEmptyAllowedGroupsAllowsAnyInvoker(t *testing.T) {
-	dir := t.TempDir()
-	ex := &fakeExec{fail: map[string]int{}}
-	// engCfg's "se" role has nil AllowedGroups: backward compat, any invoker runs.
-	_, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "fix the login bug",
-		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("status=%q err=%v", status, err)
-	}
-}
+// Note: an earlier version of this file had
+// TestRunRBACEmptyAllowedGroupsDeniesAnyInvoker, which built a role with nil
+// AllowedGroups and asserted registry.Build succeeded so it could reach Run
+// and be refused there. Apply-time validation (internal/registry's
+// "no-access-floor" check) now rejects that config at registry.Build itself,
+// making the case unreachable through any real code path, so the test was
+// removed rather than repurposed: the run-time default-deny behavior it
+// exercised is still covered by TestRoleAllows's "empty allowed denies"
+// cases (unit level), and the end-to-end non-matching-group refusal it also
+// implicitly covered is equivalent to TestRunRBACRefusesWrongGroup below.
 
 // configErrExec fails the "coder" step with an error wrapping ErrStepConfig,
 // and records every call so the test can assert the fail-back step ("plan")

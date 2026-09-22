@@ -78,18 +78,21 @@ questions, in order:
 1. Is the role in the registry?
 2. Is the workflow in the registry?
 3. Does the role own that workflow?
-4. If the role restricts access (`allowed_groups`), do the invoker's groups
-   include one of them?
+4. Do the role's `allowed_groups` admit the invoker — either the public
+   marker `"*"`, or one of the invoker's actual groups?
 
 The config must also be valid — `apply`-style validation runs first, and
 invalid config is itself a refusal. Any "no" produces a single **`run_refused`**
 event and the run stops. Refusals are audit events, not silent exits: a denial
 is as visible in the ledger as a success.
 
-> Note (today's behavior): a role with **no** `allowed_groups` is invokable by
-> anyone. If you want a role gated, give it an `allowed_groups` list. Making
-> unlisted roles fail-closed by default is a planned change, not current
-> behavior.
+> Authorization is **default-deny**: every role must declare
+> `allowed_groups`, and a role with none — the key omitted, or an empty
+> list — is rejected at `apply` before it can ever be invoked, not treated
+> as open. To make a role invokable by any authenticated invoker, declare
+> that on purpose with the explicit public marker, `allowed_groups: ["*"]`;
+> anything else in the list is a real group name checked against the
+> invoker's groups. There is no config that grants access by omission.
 
 If every check passes, the engine mints the **run-id** and the **delegation
 binding** — `invoker → role → workflow → agent → run-id` — and from here on

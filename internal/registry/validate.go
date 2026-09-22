@@ -128,6 +128,10 @@ func Validate(cfg config.Config) []ValidationError {
 		if len(r.Workflows) == 0 {
 			add(r.SourceFile, r.Name, "no-workflows", "role owns no workflows")
 		}
+		if len(r.AllowedGroups) == 0 {
+			add(r.SourceFile, r.Name, "no-access-floor",
+				`role has no allowed_groups; list real groups or ["*"] to declare it public`)
+		}
 		for _, wf := range r.Workflows {
 			if _, ok := workflows[wf]; !ok {
 				add(r.SourceFile, r.Name, "dangling-workflow-ref",

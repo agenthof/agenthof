@@ -206,7 +206,7 @@ steps:
 | Name | `name` | string | yes | — |
 | Description | `description` | string | no | — |
 | Workflows | `workflows` | list of strings | yes (non-empty) | — |
-| AllowedGroups | `allowed_groups` | list of strings | no | none |
+| AllowedGroups | `allowed_groups` | list of strings | yes (non-empty) | — |
 | BudgetUSDMonth | `budget_usd_month` | float | no | — |
 
 ### `name` / `description`
@@ -223,9 +223,16 @@ Required to be non-empty: a role owning zero workflows is rejected with
 
 ### `allowed_groups`
 
-Optional list of strings. `apply` does not check its contents (see
-[`docs/concepts.md`](../concepts.md) for how identity and groups are used
-outside of `apply`).
+Required, non-empty list of strings. Authorization is **default-deny**: a
+role with no `allowed_groups` — the key omitted, or present but empty — is
+rejected by `apply` with `no-access-floor` ("role has no allowed_groups;
+list real groups or `["*"]` to declare it public"). There is no config that
+grants access by omission. To open a role to any authenticated invoker,
+list the literal string `"*"` as its own entry — `allowed_groups: ["*"]` —
+the explicit marker for "public"; anything else in the list is treated as a
+real group name and `apply` does not otherwise check group names against an
+external source (see [`docs/concepts.md`](../concepts.md) for how identity
+and groups are used outside of `apply`).
 
 ### `budget_usd_month`
 
