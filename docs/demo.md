@@ -1,7 +1,10 @@
-# The Three Demos
+# The Demos
 
-This document walks through three scripted demonstrations of Agenthof's core governance capabilities:
-CONFIG (agent registry management), AUDIT (run traceability and integrity), and GOVERNANCE (role-based access control and budgeting).
+This document walks through four scripted demonstrations of Agenthof's core
+governance capabilities: CONFIG (agent registry management), AUDIT (run
+traceability and integrity), GOVERNANCE (role-based access control and
+budgeting), and INVESTIGATE (incident investigation across the control plane
+and every run).
 
 ## Part 1: CONFIG Moment — Registry Management & Kill Switches
 
@@ -392,8 +395,136 @@ For details on provisioning and budget behavior, see [`scripts/live-smoke.md`](.
 
 ---
 
+## Part 4: INVESTIGATE Moment — Incident Investigation
+
+Ties the other three together: when something goes wrong, `agenthof investigate`
+merges the control log and every run log into one time-ordered timeline — so you
+can see who changed what and which run it affected, without cross-referencing
+files by hand.
+
+### 4.1 Reproduce a small incident
+
+One identity pulls an agent's kill switch; another tries to run:
+
+```bash
+# run in a fresh working directory (or after `rm -rf .agenthof`) for the output shown
+./agenthof apply --as dana@example.com --config examples/config
+./agenthof run software-engineer fix-bug --input "fix the login bug" --as dana@example.com --executor echo --config examples/config
+./agenthof registry disable coder --as ops@example.com --config examples/config
+./agenthof run software-engineer fix-bug --input "urgent prod bug" --as dana@example.com --executor echo --config examples/config
+```
+
+The last run is refused:
+```
+run r-<id> refused: configuration invalid
+```
+
+### 4.2 Investigate the timeline
+
+```bash
+./agenthof investigate
+```
+
+Expected output (timestamps and run ids vary; the sequence is the point):
+```
+investigation timeline: 11 event(s) across 3 source(s)
+source: run .agenthof/runs/r-<healthy>.jsonl integrity=verified count=8
+source: run .agenthof/runs/r-<refused>.jsonl integrity=verified count=1
+source: control .agenthof/control.jsonl integrity=verified count=2
+<ts> control apply — dana@example.com (asserted) [outcome=success]
+<ts> run workflow_started — dana@example.com (asserted)
+<ts> run step_started — dana@example.com (asserted) [agent=planner]
+<ts> run step_succeeded — dana@example.com (asserted) [agent=planner]
+<ts> run step_started — dana@example.com (asserted) [agent=coder]
+<ts> run step_succeeded — dana@example.com (asserted) [agent=coder]
+<ts> run step_started — dana@example.com (asserted) [agent=reviewer]
+<ts> run step_succeeded — dana@example.com (asserted) [agent=reviewer]
+<ts> run workflow_finished — dana@example.com (asserted) [outcome=succeeded]
+<ts> control disable — ops@example.com (asserted) [agent=coder outcome=success]
+<ts> run run_refused — dana@example.com (asserted) [outcome=refused reason=configuration invalid: workflows/fix-bug.yaml: fix-bug: workflow "fix-bug" depends on agent "coder", which is disabled in the registry]
+integrity: OK
+```
+
+The story reads top to bottom: dana applied the config and ran a workflow
+cleanly; ops disabled `coder`; dana's next run refused because the workflow
+depends on the disabled agent. Two identities, control plane and runs, one
+timeline — and every source's integrity is stated.
+
+### 4.3 Filter the timeline
+
+Narrow by outcome, agent, invoker, run, config hash, or time window:
+
+```bash
+./agenthof investigate --outcome refused
+./agenthof investigate --agent coder
+./agenthof investigate --since 1h
+```
+
+`--outcome refused` returns just the refusal:
+```
+<ts> run run_refused — dana@example.com (asserted) [outcome=refused reason=... "coder", which is disabled in the registry]
+integrity: OK
+```
+
+Outcome literals are source-specific: **run** events use `succeeded|failed|refused`;
+**control** events use `success|refused|rejected|error`. A duration passed to
+`--since`/`--until` (e.g. `1h`, `720h`) is relative to now; an RFC3339 timestamp
+is absolute (`--since` inclusive, `--until` exclusive).
+
+### 4.4 The stable JSON contract
+
+```bash
+./agenthof investigate --json
+```
+
+Emits the versioned `investigate/1` object — the set `query`, per-source
+`sources`, the `events`, and an `integrity` block:
+```jsonc
+{
+  "v": "investigate/1",
+  "query": {},
+  "sources": [
+    { "path": ".agenthof/runs/r-<healthy>.jsonl", "kind": "run", "integrity": "verified", "count": 8 },
+    { "path": ".agenthof/control.jsonl", "kind": "control", "integrity": "verified", "count": 2 }
+  ],
+  "events": [
+    { "time": "…", "source": "control", "kind": "apply",
+      "invoker": { "subject": "dana@example.com", "issuer": "local", "method": "asserted" },
+      "outcome": "success", "seq": 1 }
+  ],
+  "integrity": { "ok": true, "issues": [] }
+}
+```
+
+`integrity.ok` equals `(exit code == 0)`, and `--json` never changes the exit
+code. Exit codes: `0` all clean · `1` any source torn/broken (or an I/O error on
+a source that exists) · `3` tainted only (a repair is on record) · `2` usage.
+
+### 4.5 The config-join: which apply authorized a run
+
+`audit <run-id>` closes the loop back to the control plane:
+
+```bash
+./agenthof audit r-<healthy>
+```
+
+The last line names the `apply` that put the config the run executed under:
+```
+config sha256:<hex> — applied by dana@example.com (asserted) at <ts>
+```
+
+If the control log is missing or damaged, this degrades to `control ledger
+unavailable` — and it never changes the run audit's own exit code. Integrity is
+always shown, never assumed; as everywhere in Agenthof, the ledger is
+tamper-evident, not tamper-proof — see
+[`docs/control-plane-lifecycle.md`](control-plane-lifecycle.md) for the full life
+of a control action.
+
+---
+
 ## Summary
 
 - **CONFIG**: Registry applies instantly; dependencies are validated; kill switches (disable/enable) are atomic.
 - **AUDIT**: Every run is attributed to an invoker (asserted or OIDC-verified); artifacts are SHA256-hashed for integrity; refused runs are still ledgered.
 - **GOVERNANCE**: Role-based access (allowed_groups) and role-based budgeting (via LiteLLM) control who can run what and at what cost.
+- **INVESTIGATE**: One time-ordered timeline across the control plane and every run — filterable, with a stable `investigate/1` JSON contract, per-source integrity, and a config-join from each run back to the apply that authorized it.

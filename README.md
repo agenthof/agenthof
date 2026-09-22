@@ -73,9 +73,9 @@ record can be trusted. Integrity is always shown, never assumed. See
 [`docs/reference/config.md`](docs/reference/config.md) for the flags, exit codes,
 and the `investigate/1` JSON contract.
 
-## The three demos
+## The demos
 
-Walk through CONFIG (registry management), AUDIT (run traceability), and GOVERNANCE (RBAC + budgeting) with scripted end-to-end examples.
+Walk through CONFIG (registry management), AUDIT (run traceability), GOVERNANCE (RBAC + budgeting), and INVESTIGATE (incident investigation across the control plane and every run) with scripted end-to-end examples.
 
 See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 
@@ -92,8 +92,8 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   life of a control action: apply, the kill switch, and the control ledger.
 - [`docs/reference/config.md`](docs/reference/config.md) — every YAML field,
   required/optional, defaults, and validation rules.
-- [`docs/demo.md`](docs/demo.md) — the three scripted demos (CONFIG, AUDIT,
-  GOVERNANCE).
+- [`docs/demo.md`](docs/demo.md) — the scripted demos (CONFIG, AUDIT,
+  GOVERNANCE, INVESTIGATE).
 - [`docs/constitution.md`](docs/constitution.md) — the binding invariants
   every change must honor.
 
