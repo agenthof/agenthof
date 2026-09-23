@@ -1,13 +1,17 @@
 // Package gateway resolves logical model names to concrete LLM gateway
-// routes and manages per-role API keys.
+// routes and manages per-role API keys. Credentials are resolved through
+// the broker seam (internal/broker), never read directly from the
+// environment.
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
 )
 
@@ -20,8 +24,8 @@ type Route struct {
 
 // Resolve looks up the gateway route for a logical model name. An empty
 // logical name falls back to cfg.Defaults.Model. The returned route's
-// APIKey is roleKey when non-empty, otherwise the value of the route's
-// configured environment variable.
+// APIKey is roleKey when non-empty, otherwise the value resolved through
+// the broker for the route's configured environment variable.
 func Resolve(cfg config.GatewayConfig, logical string, roleKey string) (Route, error) {
 	name := logical
 	if name == "" {
@@ -35,10 +39,11 @@ func Resolve(cfg config.GatewayConfig, logical string, roleKey string) (Route, e
 
 	apiKey := roleKey
 	if apiKey == "" {
-		apiKey = os.Getenv(route.APIKeyEnv)
-	}
-	if apiKey == "" {
-		return Route{}, fmt.Errorf("gateway route %q: environment variable %s is not set and no role key is provisioned", name, route.APIKeyEnv)
+		v, err := broker.StaticEnv{}.Resolve(context.Background(), broker.CredentialRef{Mode: "static_env", EnvVar: route.APIKeyEnv})
+		if err != nil {
+			return Route{}, fmt.Errorf("gateway route %q: %w; no role key provisioned", name, err)
+		}
+		apiKey = v
 	}
 
 	return Route{

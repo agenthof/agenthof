@@ -101,7 +101,7 @@ func TestResolveMissingBothErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when neither role key nor env var is set")
 	}
-	want := `gateway route "fast": environment variable FAST_API_KEY is not set and no role key is provisioned`
+	want := `gateway route "fast": broker: environment variable FAST_API_KEY is not set; no role key provisioned`
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err.Error(), want)
 	}
