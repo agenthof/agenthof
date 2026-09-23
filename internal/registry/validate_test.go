@@ -168,14 +168,17 @@ func TestValidateExecutionTiers(t *testing.T) {
 		t.Fatalf("contained with endpoint must be contained-has-endpoint: %v", c)
 	}
 
-	// Test fronted agent with tools
+	// Test fronted agent with a declared gateway tool resource - should be valid
 	cfg = baseCfg()
 	cfg.Agents[0].Execution = "fronted"
 	cfg.Agents[0].Endpoint = "https://example.com/agent"
-	cfg.Agents[0].Tools = []string{"read_file", "write_file"}
+	cfg.Agents[0].Tools = []string{"github"}
+	cfg.Gateway.Tools = map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
+	}
 	c = codes(Validate(cfg))
-	if c["bad-execution"] != 1 {
-		t.Fatalf("fronted with tools must be bad-execution: %v", c)
+	if c["unknown-tool"] != 0 || c["bad-execution"] != 0 {
+		t.Fatalf("fronted agent with declared gateway tool must be valid: %v", c)
 	}
 
 	// Test fronted agent with endpoint, no model, no tools - should pass
@@ -202,5 +205,38 @@ func TestValidateExecutionTiers(t *testing.T) {
 	cfg.Agents[0].Endpoint = ""
 	if errs := Validate(cfg); len(errs) != 0 {
 		t.Fatalf("agent with empty execution should default to contained: %v", errs)
+	}
+}
+
+func TestFrontedAgentDeclaredToolValid(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Agents[0].Execution = "fronted"
+	cfg.Agents[0].Endpoint = "https://x"
+	cfg.Agents[0].Tools = []string{"github"}
+	cfg.Gateway.Tools = map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
+	}
+	if c := codes(Validate(cfg)); c["unknown-tool"] != 0 || c["bad-execution"] != 0 {
+		t.Fatalf("declared fronted tool must be valid: %v", c)
+	}
+}
+
+func TestFrontedAgentUndeclaredToolRejected(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Agents[0].Execution = "fronted"
+	cfg.Agents[0].Endpoint = "https://x"
+	cfg.Agents[0].Tools = []string{"nope"}
+	if codes(Validate(cfg))["unknown-tool"] != 1 {
+		t.Fatalf("undeclared tool must be unknown-tool")
+	}
+}
+
+func TestBadCredentialSourceRejected(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Gateway.Tools = map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "client_credentials"},
+	}
+	if codes(Validate(cfg))["bad-tool-resource"] != 1 {
+		t.Fatalf("unimplemented credential_source must be bad-tool-resource")
 	}
 }

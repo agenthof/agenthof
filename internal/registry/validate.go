@@ -44,10 +44,15 @@ func Validate(cfg config.Config) []ValidationError {
 				"endpoint is only valid on fronted agents")
 		}
 
-		// Fronted agents cannot declare tools
-		if effectiveExec == "fronted" && len(a.Tools) > 0 {
-			add(a.SourceFile, a.Name, "bad-execution",
-				"fronted agents cannot declare tools; tools are contained-runtime capabilities")
+		// A fronted agent's tools are gateway tool-resource ids (reached via the
+		// tool proxy). Each must be a declared gateway.tools resource.
+		if effectiveExec == "fronted" {
+			for _, t := range a.Tools {
+				if _, ok := cfg.Gateway.Tools[t]; !ok {
+					add(a.SourceFile, a.Name, "unknown-tool",
+						fmt.Sprintf("agent references tool %q, which is not a declared gateway tool resource", t))
+				}
+			}
 		}
 
 		// Skip model routing check for fronted agents
@@ -60,6 +65,17 @@ func Validate(cfg config.Config) []ValidationError {
 				add(a.SourceFile, a.Name, "unroutable-model",
 					fmt.Sprintf("model %q has no route in gateway.yaml and no default is set", a.Model))
 			}
+		}
+	}
+
+	for id, r := range cfg.Gateway.Tools {
+		if r.Kind != "mcp" || r.URL == "" {
+			add("gateway.yaml", id, "bad-tool-resource",
+				fmt.Sprintf("tool resource %q must set kind: mcp and a url", id))
+		}
+		if r.CredentialSource != "static_env" {
+			add("gateway.yaml", id, "bad-tool-resource",
+				fmt.Sprintf("tool resource %q: credential_source %q is not implemented (only static_env)", id, r.CredentialSource))
 		}
 	}
 
