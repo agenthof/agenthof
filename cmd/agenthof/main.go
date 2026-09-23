@@ -35,7 +35,7 @@ Usage:
   agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
-  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--executor echo|adk] [--workspace <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>]
+  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--workspace <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>]
   agenthof audit <run-id> [--log-dir <dir>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
@@ -536,7 +536,6 @@ func cmdRun(args []string, out io.Writer) int {
 	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	cfgDir := fs.String("config", "./config", "config directory")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
-	executorName := fs.String("executor", "echo", `step executor: "echo" or "adk"`)
 	workspace := fs.String("workspace", "", "workspace directory (default: .agenthof/workspaces/<unix-nano>)")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
 	// Accepted for forward-compat: the tool proxy always binds 127.0.0.1:0
@@ -548,10 +547,6 @@ func cmdRun(args []string, out io.Writer) int {
 	}
 	if *input == "" {
 		_, _ = fmt.Fprintln(out, "run needs --input")
-		return 2
-	}
-	if *executorName != "echo" && *executorName != "adk" {
-		_, _ = fmt.Fprintf(out, "run: invalid --executor %q, want \"echo\" or \"adk\"\n", *executorName)
 		return 2
 	}
 
@@ -607,15 +602,7 @@ func cmdRun(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
-	var contained engine.StepExecutor
-	switch *executorName {
-	case "adk":
-		key := gateway.LoadRoleKey(".", role)
-		contained = agentrt.ADKExecutor{Gateway: cfg.Gateway, RoleKey: key, WorkspaceDir: ws}
-	default:
-		contained = engine.EchoExecutor{}
-	}
-	exec := agentrt.MuxExecutor{Contained: contained, Fronted: agentrt.AdapterExecutor{}}
+	exec := agentrt.AdapterExecutor{}
 	// A hash failure here yields an empty join key, not a run failure: the
 	// run's config already validated above, so the run proceeds regardless.
 	h, _ := config.HashDir(*cfgDir)

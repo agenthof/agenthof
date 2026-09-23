@@ -209,7 +209,7 @@ func TestAuditVerifyCleanAndExpectHead(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--executor", "echo", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -237,7 +237,7 @@ func TestAuditTornExitsOne(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--executor", "echo", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -273,7 +273,7 @@ func TestAuditDeletedTailPassesButExpectHeadFails(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--executor", "echo", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -567,20 +567,6 @@ func TestRunsPruneNeverDeletesControlLogEvenIfLogDirPointsAtItsDir(t *testing.T)
 	}
 	if _, err := os.Stat(fragment); err != nil {
 		t.Fatalf("torn fragment must survive prune: %v", err)
-	}
-}
-
-func TestRunInvalidExecutorRejected(t *testing.T) {
-	root := writeSample(t)
-	var out bytes.Buffer
-	code := cmdRun([]string{"software-engineer", "fix-bug",
-		"--input", "fix the login bug", "--as", "dana@example.com",
-		"--config", root, "--log-dir", t.TempDir(), "--executor", "bogus"}, &out)
-	if code != 2 {
-		t.Fatalf("expected exit 2 for invalid --executor, got %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "executor") {
-		t.Fatalf("error must mention executor: %s", out.String())
 	}
 }
 
@@ -960,10 +946,8 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 	for _, e := range events {
 		if e.Type == "step_succeeded" && e.Execution == "fronted" {
 			found = true
-			// The artifact must be the stub adapter's response, not an
-			// echo-executor artifact — proof the mux actually routed this
-			// step to the HTTP adapter rather than falling through to the
-			// contained (echo) executor.
+			// The artifact must be the stub adapter's response, proof this
+			// step was handed to the fronted agent.
 			if e.Artifact != "front result" {
 				t.Fatalf("expected artifact from the fronted stub, got %q", e.Artifact)
 			}
