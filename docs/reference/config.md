@@ -285,7 +285,7 @@ for the runtime flow):
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
 | Kind | `kind` | string | yes | — |
-| URL | `url` | string | yes | — |
+| URL | `url` | string | yes; must be `https`, or `http` to a loopback host | — |
 | CredentialSource | `credential_source` | string | yes | — |
 | TokenEnv | `token_env` | string | yes for the direct-bearer grant (`grant_type: ""`) | — |
 | GrantType | `grant_type` | string | no | `""` (direct-bearer) |
@@ -296,9 +296,13 @@ for the runtime flow):
 | ClientSecretEnv | `client_secret_env` | string | yes for `client_credentials` | — |
 | Scope | `scope` | string | no (not checked by `apply`) | — |
 
-`apply` requires `kind` to be exactly `"mcp"` and `url` to be non-empty,
-rejecting a resource that fails either with `bad-tool-resource` ("tool
-resource ... must set kind: mcp and a url"); it separately requires
+`apply` requires `kind` to be exactly `"mcp"` and `url` to be set and
+`https` (or `http` only to a loopback host — `localhost`, `127.0.0.1`, or
+`::1`). The gateway injects a credential on every call to that url, so a
+plaintext url on a remote host is rejected at apply time, the same rule as
+`token_endpoint`. A resource that fails either check is rejected with
+`bad-tool-resource` ("tool resource ... must set kind: mcp", or "url must be
+set and https (or loopback http)"). `apply` separately requires
 `credential_source` to be exactly `"static_env"`, rejecting anything else
 (including empty) with `bad-tool-resource` ("credential_source ... is not
 implemented (only static_env)"). `apply` also validates `grant_type`: the

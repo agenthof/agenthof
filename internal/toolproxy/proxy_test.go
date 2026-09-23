@@ -2,6 +2,8 @@ package toolproxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -172,7 +174,7 @@ func TestProxyRoundTripNoPassthrough(t *testing.T) {
 	defer mu.Unlock()
 	var tc *engine.Event
 	for i := range events {
-		if events[i].Type == "tool_call" {
+		if events[i].Type == "tool_call" && events[i].Status == "succeeded" {
 			tc = &events[i]
 		}
 	}
@@ -551,5 +553,149 @@ func TestProxyDirectBearerRegression(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no tool_call event recorded")
+	}
+}
+
+func TestProxyForwardRecordsToolAndArgsSHA(t *testing.T) {
+	const upstreamToken = "up-tok"
+	ts, _ := newStubUpstream(t, upstreamToken)
+	defer ts.Close()
+	t.Setenv("UP_TOKEN", upstreamToken)
+
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
+	p := New(map[string]config.ToolResource{"up": res}, broker.StaticEnv{})
+
+	var events []engine.Event
+	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hi"}}); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+
+	var tc *engine.Event
+	for i := range events {
+		if events[i].Type == "tool_call" {
+			tc = &events[i]
+		}
+	}
+	if tc == nil {
+		t.Fatal("no tool_call event")
+	}
+	if tc.Tool != "echo" {
+		t.Fatalf("Tool = %q, want echo", tc.Tool)
+	}
+	// The wire arguments are the JSON encoding of map[string]any{"text":"hi"};
+	// encoding/json marshals a single-key map deterministically, so the exact
+	// wire bytes (and therefore ArgsSHA) are stable — assert the precise
+	// value, not just its shape, so a change to what actually reaches the
+	// upstream (not merely its length) fails this test.
+	wantArgs := []byte(`{"text":"hi"}`)
+	wantSum := sha256.Sum256(wantArgs)
+	wantSHA := hex.EncodeToString(wantSum[:])
+	if tc.ArgsSHA != wantSHA {
+		t.Fatalf("ArgsSHA = %q, want %q (sha256 of %s)", tc.ArgsSHA, wantSHA, wantArgs)
+	}
+}
+
+func TestProxyDeniedToolRecordsRefusedEvent(t *testing.T) {
+	const upstreamToken = "up-tok"
+	ts, _ := newStubUpstream(t, upstreamToken) // exposes only "echo"
+	defer ts.Close()
+	t.Setenv("UP_TOKEN", upstreamToken)
+
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
+	p := New(map[string]config.ToolResource{"up": res}, broker.StaticEnv{})
+
+	var events []engine.Event
+	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	// A tool the proxy does NOT expose: the call must error AND be recorded.
+	// The argument carries a distinctive marker so we can assert below that
+	// the raw argument value never enters the recorded event — only its hash.
+	const marker = "zzz-marker-9137"
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "not-a-real-tool", Arguments: map[string]any{"secretish": marker}}); err == nil {
+		t.Fatal("expected an error calling an unexposed tool")
+	}
+
+	var refused *engine.Event
+	for i := range events {
+		if events[i].Type == "tool_call" && events[i].Status == "refused" {
+			refused = &events[i]
+		}
+	}
+	if refused == nil {
+		t.Fatal("denied attempt left no refused tool_call event")
+	}
+	if refused.Tool != "not-a-real-tool" {
+		t.Fatalf("refused.Tool = %q, want not-a-real-tool", refused.Tool)
+	}
+	if refused.ArgsSHA == "" {
+		t.Fatal("refused event should carry an args fingerprint")
+	}
+
+	marshaled, err := json.Marshal(refused)
+	if err != nil {
+		t.Fatalf("marshal refused event: %v", err)
+	}
+	if strings.Contains(string(marshaled), marker) {
+		t.Fatalf("refused event carries the raw argument value: %s", marshaled)
+	}
+}
+
+func TestProxyExposedToolEmitsExactlyOneEvent(t *testing.T) {
+	const upstreamToken = "up-tok"
+	ts, _ := newStubUpstream(t, upstreamToken)
+	defer ts.Close()
+	t.Setenv("UP_TOKEN", upstreamToken)
+
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
+	p := New(map[string]config.ToolResource{"up": res}, broker.StaticEnv{})
+
+	var events []engine.Event
+	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hi"}}); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+
+	n := 0
+	for _, e := range events {
+		if e.Type == "tool_call" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("exposed-tool call produced %d tool_call events, want exactly 1 (middleware must not double-emit)", n)
 	}
 }

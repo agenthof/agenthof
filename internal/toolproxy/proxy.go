@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -125,6 +126,8 @@ func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent fu
 		}
 	}
 
+	inbound.AddReceivingMiddleware(p.refusedTraceMiddleware(mirroredBy, bind, agent, appendEvent))
+
 	handler := authMiddleware(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil), token)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -196,6 +199,10 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 		p.mu.Unlock()
 		defer p.inflight.Done()
 
+		// Defense-in-depth: only allowlisted resources are ever mirrored, so
+		// the receiving middleware (refusedTraceMiddleware) is the real denial
+		// path and this branch is unreachable in normal operation. It stays as
+		// a per-resource second gate in case mirroring logic ever changes.
 		if !allow[resourceID] {
 			denyReason := fmt.Sprintf("tool %q on resource %q is not allowlisted for this run", req.Params.Name, resourceID)
 			appendEvent(engine.Event{
@@ -204,6 +211,8 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 				AuthMode:         authModeFor(p.tools[resourceID]),
 				Status:           "refused",
 				Reason:           denyReason,
+				Tool:             req.Params.Name,
+				ArgsSHA:          argsSHA(req.Params.Arguments),
 				ResourcesTouched: []string{resourceID},
 				Binding:          bind,
 			})
@@ -235,6 +244,8 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 			AuthMode:         authModeFor(p.tools[resourceID]),
 			Status:           status,
 			Reason:           reason,
+			Tool:             req.Params.Name,
+			ArgsSHA:          argsSHA(req.Params.Arguments),
 			ResourcesTouched: []string{resourceID},
 			Binding:          bind,
 			ArtifactSHA:      sha,
@@ -303,11 +314,12 @@ func (t *injectingTransport) RoundTrip(req *http.Request) (*http.Response, error
 
 // authMiddleware gates the inbound MCP handler behind the run token: a
 // missing or mismatched Authorization header is rejected before any MCP
-// message is parsed.
+// message is parsed. The comparison is constant-time, so a wrong token
+// cannot be distinguished from a right one by how long the check takes.
 func authMiddleware(next http.Handler, expectedToken string) http.Handler {
 	want := "Bearer " + expectedToken
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != want {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) != 1 {
 			http.Error(w, "unauthorized: missing or invalid run token", http.StatusUnauthorized)
 			return
 		}
@@ -345,6 +357,65 @@ func hashResult(result *mcp.CallToolResult, callErr error) (sha, preview string)
 		preview = string(r[:200])
 	}
 	return sha, preview
+}
+
+// mcpMethodToolsCall is the MCP method name for a tool invocation.
+const mcpMethodToolsCall = "tools/call"
+
+// refusedTraceMiddleware records a tool_call the proxy does not expose as a
+// refused event. Off-allowlist tools are never mirrored onto the inbound
+// server, so the server would reject them as "unknown tool" with no ledger
+// trace; this middleware runs before dispatch, names the attempted tool, and
+// records it — turning a previously-invisible denial into first-hand evidence.
+// It only ADDS a refused event for unexposed tools; exposed tools pass through
+// untouched (forward emits their event), so there is no double emit.
+//
+// It is a method on *Proxy (not a free function) so its appendEvent call can
+// share forward's closing/inflight bookkeeping: without that, an in-flight
+// appendEvent here could run after Stop() returns and race the run's
+// log.Close(), violating Stop()'s documented invariant.
+func (p *Proxy) refusedTraceMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == mcpMethodToolsCall {
+				if params, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok {
+					if _, exposed := mirrored[params.Name]; !exposed {
+						// Bracket the ledger append with the same closing/inflight
+						// bookkeeping forward uses, so Stop() waits for it and no
+						// append races the run's log.Close() after teardown. If the
+						// proxy is already closing, skip the emit and still delegate.
+						p.mu.Lock()
+						if p.closing {
+							p.mu.Unlock()
+						} else {
+							p.inflight.Add(1)
+							p.mu.Unlock()
+							appendEvent(engine.Event{
+								Type:    "tool_call",
+								Agent:   agent.Name,
+								Status:  "refused",
+								Reason:  "tool is not available to this run",
+								Tool:    params.Name,
+								ArgsSHA: argsSHA(params.Arguments),
+								Binding: bind,
+							})
+							p.inflight.Done()
+						}
+					}
+				}
+			}
+			return next(ctx, method, req)
+		}
+	}
+}
+
+// argsSHA returns the hex sha256 of a tool call's raw arguments, a fingerprint
+// of what a call tried without ever putting the arguments (which may carry data
+// outside Agenthof's control) into the ledger. A nil/empty message hashes the
+// empty input; no special-casing.
+func argsSHA(raw json.RawMessage) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 // authModeFor reports the ledger AuthMode string for a resource: the grant used
