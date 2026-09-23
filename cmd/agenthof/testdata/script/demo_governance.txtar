@@ -1,11 +1,10 @@
 # Demo Part 3: accountant role allows finance, refuses engineering — and the
 # refusal is ledgered — docs/demo.md §3.
 
-exec agenthof run accountant reconcile-lite --input 'reconcile Q3 expenses' --as finance-lead@example.com --groups finance --config examples/config --log-dir logs --artifact-dir artifacts --workspace ws
+exec agenthof run accountant reconcile-lite --input 'reconcile Q3 expenses' --as finance-lead@example.com --groups finance --config examples/config --log-dir logs --artifact-dir artifacts
 stdout 'finished: succeeded'
 
-! exec agenthof run accountant reconcile-lite --input 'reconcile Q3 expenses' --as engineer@example.com --groups engineering --config examples/config --log-dir logs --artifact-dir artifacts --workspace ws2
-stdout 'workspace: ws2'
+! exec agenthof run accountant reconcile-lite --input 'reconcile Q3 expenses' --as engineer@example.com --groups engineering --config examples/config --log-dir logs --artifact-dir artifacts
 stdout 'allowed groups \(finance\)'
 
 lastrun logs

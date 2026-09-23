@@ -8,7 +8,7 @@ stderr 'Usage:'
 
 # run + audit exercises lastrun for real: it must find the just-written run
 # log (skipping anything else that may live under logs/) and expose its id.
-exec agenthof run software-engineer plan-only --input hello --as tester --config config --log-dir logs --artifact-dir artifacts --workspace ws
+exec agenthof run software-engineer plan-only --input hello --as tester --config config --log-dir logs --artifact-dir artifacts
 stdout 'finished: succeeded'
 
 lastrun logs

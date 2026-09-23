@@ -26,6 +26,11 @@ type Route struct {
 // logical name falls back to cfg.Defaults.Model. The returned route's
 // APIKey is roleKey when non-empty, otherwise the value resolved through
 // the broker for the route's configured environment variable.
+//
+// Resolve is currently uncalled by the run path: with the contained tier
+// removed, the model gateway has no live consumer. It is retained as the
+// reserved engine for the planned fronted model proxy (a fronted agent calling
+// into Agenthof for inference, credential injected here). Do not remove.
 func Resolve(cfg config.GatewayConfig, logical string, roleKey string) (Route, error) {
 	name := logical
 	if name == "" {

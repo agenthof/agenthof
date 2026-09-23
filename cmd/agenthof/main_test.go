@@ -209,7 +209,7 @@ func TestAuditVerifyCleanAndExpectHead(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -237,7 +237,7 @@ func TestAuditTornExitsOne(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -273,7 +273,7 @@ func TestAuditDeletedTailPassesButExpectHeadFails(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir(), "--workspace", t.TempDir()}, &out); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]

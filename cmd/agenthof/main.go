@@ -35,14 +35,14 @@ Usage:
   agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
-  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--workspace <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>]
+  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>]
   agenthof audit <run-id> [--log-dir <dir>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
-  agenthof gateway provision --config <dir> [--admin-base <url>]
+  agenthof gateway provision --config <dir> [--admin-base <url>]  (provisions a per-role model key for the reserved model gateway; no run consumes it)
   agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>]
 `
 
@@ -536,7 +536,6 @@ func cmdRun(args []string, out io.Writer) int {
 	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	cfgDir := fs.String("config", "./config", "config directory")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
-	workspace := fs.String("workspace", "", "workspace directory (default: .agenthof/workspaces/<unix-nano>)")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
 	// Accepted for forward-compat: the tool proxy always binds 127.0.0.1:0
 	// regardless of this flag's value today.
@@ -569,10 +568,6 @@ func cmdRun(args []string, out io.Writer) int {
 		return 1
 	}
 
-	ws := *workspace
-	if ws == "" {
-		ws = filepath.Join(".agenthof", "workspaces", strconv.FormatInt(time.Now().UnixNano(), 10))
-	}
 	cfg, loadErrs := config.LoadDir(*cfgDir)
 	for _, e := range loadErrs {
 		_, _ = fmt.Fprintln(out, e)
@@ -595,11 +590,6 @@ func cmdRun(args []string, out io.Writer) int {
 			return 1
 		}
 		_, _ = fmt.Fprintf(out, "run %s refused: configuration invalid\n", runID)
-		return 1
-	}
-	_, _ = fmt.Fprintf(out, "workspace: %s\n", ws)
-	if err := os.MkdirAll(ws, 0o755); err != nil {
-		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
 	exec := agentrt.AdapterExecutor{}
@@ -631,7 +621,7 @@ func cmdRun(args []string, out io.Writer) int {
 		})
 	}
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
-		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, WorkspaceDir: ws, ConfigHash: h, ToolProxy: toolProxy})
+		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, ToolProxy: toolProxy})
 	if err != nil && status == "refused" {
 		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", runID, err)
 		return 1
@@ -698,7 +688,7 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 			return 1
 		}
 		if created {
-			_, _ = fmt.Fprintf(out, "provisioned key for role %s (budget $%g)\n", role.Name, role.BudgetUSDMonth)
+			_, _ = fmt.Fprintf(out, "provisioned key for role %s (budget $%g); reserved model gateway, not consumed by a run\n", role.Name, role.BudgetUSDMonth)
 		} else {
 			_, _ = fmt.Fprintf(out, "role %s: key ok\n", role.Name)
 		}

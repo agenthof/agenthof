@@ -56,12 +56,11 @@ type StepExecutor interface {
 }
 
 type Options struct {
-	LogDir       string
-	StepTimeout  time.Duration
-	ArtifactDir  string
-	WorkspaceDir string
-	ConfigHash   string
-	ToolProxy    ToolProxy
+	LogDir      string
+	StepTimeout time.Duration
+	ArtifactDir string
+	ConfigHash  string
+	ToolProxy   ToolProxy
 }
 
 const defaultMaxBounces = 2
