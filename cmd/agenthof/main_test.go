@@ -1086,6 +1086,88 @@ func TestRunWiresToolProxyForFrontedToolAgent(t *testing.T) {
 	}
 }
 
+// TestRunWiresClientCredentialsBrokerForFrontedToolAgent proves `run` wires
+// the dispatching broker (broker.Dispatch), not a bare broker.StaticEnv, into
+// the tool proxy: a gateway tool resource declaring grant_type:
+// client_credentials only resolves at all if Dispatch routes it to a
+// ClientCredentials broker. The client id/secret env vars are deliberately
+// left unset, so the mint fails fast inside ClientCredentials itself, before
+// any request reaches the token endpoint — same no-network-call shape as
+// TestRunWiresToolProxyForFrontedToolAgent. The failure text ("client id
+// env") only comes from ClientCredentials.mint; a bare StaticEnv given the
+// same ref would fail with a different message ("handles the direct-bearer
+// grant only"), so this also regression-guards against the wiring reverting
+// to broker.StaticEnv{} alone.
+func TestRunWiresClientCredentialsBrokerForFrontedToolAgent(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_TOKEN", "")
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"artifact":"front result"}`))
+	}))
+	defer stub.Close()
+
+	root := t.TempDir()
+	files := map[string]string{
+		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\ntools: [github]\n",
+		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
+		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
+		"gateway.yaml": "tools:\n  github:\n    kind: mcp\n    url: https://mcp.example.test/\n" +
+			"    credential_source: static_env\n    grant_type: client_credentials\n" +
+			"    client_auth: client_secret_basic\n    issuer: https://issuer.example.test/\n" +
+			"    token_endpoint: https://token.example.test/\n" +
+			"    client_id_env: AGENTHOF_TEST_UNSET_CLIENT_ID\n" +
+			"    client_secret_env: AGENTHOF_TEST_UNSET_CLIENT_SECRET\n",
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Deliberately left unset (test-scoped, not process-global) so the mint
+	// fails fast inside ClientCredentials, without any network call.
+	t.Setenv("AGENTHOF_TEST_UNSET_CLIENT_ID", "")
+	t.Setenv("AGENTHOF_TEST_UNSET_CLIENT_SECRET", "")
+
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
+		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:0"}, &out)
+	if code != 1 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "finished: failed") {
+		t.Fatalf("expected the step to fail via the tool proxy, got: %s", out.String())
+	}
+
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: failed`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+	events, _, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stepFailed *engine.Event
+	for i := range events {
+		if events[i].Type == "step_failed" {
+			stepFailed = &events[i]
+		}
+	}
+	if stepFailed == nil || !strings.HasPrefix(stepFailed.Reason, "tool proxy: ") {
+		t.Fatalf("expected a step_failed event naming the tool proxy, got %+v", events)
+	}
+	// Discriminates the ClientCredentials path from a bare StaticEnv broker,
+	// which would fail with "handles the direct-bearer grant only" instead.
+	if !strings.Contains(stepFailed.Reason, "client id env") {
+		t.Fatalf("expected the ClientCredentials broker's own failure text, got %+v", stepFailed)
+	}
+}
+
 // TestRunToolProxyAddrFlagParsesButIsUnused confirms --tool-proxy-addr is
 // accepted (forward-compat) on an ordinary run that declares no gateway
 // tools at all, and that such a run is unaffected: Options.ToolProxy stays
