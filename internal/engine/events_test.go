@@ -354,3 +354,33 @@ func TestEventToolFieldsRoundTrip(t *testing.T) {
 		t.Fatalf("omitempty violated: %s", empty)
 	}
 }
+
+func TestEventExecFieldsRoundTrip(t *testing.T) {
+	zero := 0
+	e := Event{Type: "exec", Command: []string{"go", "test"}, ExitCode: &zero, OutputSHA: "abc", Mode: "attested"}
+	data, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// exit 0 must be PRESENT (pointer), not omitted.
+	if !strings.Contains(string(data), `"exit_code":0`) {
+		t.Fatalf("exit 0 should be present: %s", data)
+	}
+	if !strings.Contains(string(data), `"command":["go","test"]`) || !strings.Contains(string(data), `"mode":"attested"`) {
+		t.Fatalf("exec fields missing: %s", data)
+	}
+	var got Event
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 0 || len(got.Command) != 2 || got.Mode != "attested" || got.OutputSHA != "abc" {
+		t.Fatalf("round-trip lost fields: %+v", got)
+	}
+	// omitempty: a non-exec event carries none of them.
+	empty, _ := json.Marshal(Event{Type: "step"})
+	for _, k := range []string{`"command":`, `"exit_code":`, `"output_sha":`, `"mode":`} {
+		if strings.Contains(string(empty), k) {
+			t.Fatalf("omitempty violated for %s: %s", k, empty)
+		}
+	}
+}
