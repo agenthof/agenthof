@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -128,7 +129,11 @@ func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent fu
 
 	inbound.AddReceivingMiddleware(p.refusedTraceMiddleware(mirroredBy, bind, agent, appendEvent))
 
-	handler := authMiddleware(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil), token)
+	mux := http.NewServeMux()
+	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil))
+	mux.HandleFunc("/exec/authorize", p.execAuthorizeHandler(bind, agent, appendEvent))
+	mux.HandleFunc("/exec/attest", p.execAttestHandler(bind, agent, appendEvent))
+	handler := authMiddleware(mux, token)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -147,6 +152,70 @@ func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent fu
 	go func() { _ = srv.Serve(ln) }()
 
 	return "http://" + ln.Addr().String() + "/", token, nil
+}
+
+// guardedAppend appends a ledger event under the same closing/inflight
+// bookkeeping forward uses, so Stop() waits for it and no append races the
+// run's log.Close() after teardown. If the proxy is already closing, the event
+// is dropped rather than racing the close.
+func (p *Proxy) guardedAppend(appendEvent func(engine.Event), e engine.Event) {
+	p.mu.Lock()
+	if p.closing {
+		p.mu.Unlock()
+		return
+	}
+	p.inflight.Add(1)
+	p.mu.Unlock()
+	appendEvent(e)
+	p.inflight.Done()
+}
+
+func (p *Proxy) execAuthorizeHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Command []string `json:"command"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		allowed := agent.Exec.Allows(req.Command)
+		if !allowed {
+			p.guardedAppend(appendEvent, engine.Event{
+				Type: "exec", Agent: agent.Name, Status: "refused",
+				Reason:  "command is not on the exec allowlist",
+				Command: req.Command,
+				Mode:    "attested", Binding: bind,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"allowed": allowed})
+	}
+}
+
+func (p *Proxy) execAttestHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Command   []string `json:"command"`
+			Exit      int      `json:"exit"`
+			OutputSHA string   `json:"output_sha"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		status := "succeeded"
+		if req.Exit != 0 {
+			status = "failed"
+		}
+		exit := req.Exit
+		p.guardedAppend(appendEvent, engine.Event{
+			Type: "exec", Agent: agent.Name, Status: status,
+			Command: req.Command, ExitCode: &exit, OutputSHA: req.OutputSHA,
+			Mode: "attested", Binding: bind,
+		})
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 // Stop tears down the inbound listener and closes every upstream session. It
