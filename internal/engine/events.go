@@ -32,8 +32,8 @@ type Event struct {
 	ArtifactSHA      string    `json:"artifact_sha,omitempty"`
 	Execution        string    `json:"execution,omitempty"`
 	ConfigHash       string    `json:"config_hash,omitempty"`
-	AuthMode         string    `json:"auth_mode,omitempty"`         // e.g. "static_env"; reserved auth-mode axis
-	ResourcesTouched []string  `json:"resources_touched,omitempty"` // reserved: multi-resource
+	AuthMode         string    `json:"auth_mode,omitempty"`         // set by tool_call to the resource's credential mode, e.g. "static_env"
+	ResourcesTouched []string  `json:"resources_touched,omitempty"` // set by tool_call to the touched tool resource's id; still reserved for a future multi-resource call
 	Actor            string    `json:"actor,omitempty"`             // reserved: delegation — the acting agent
 	Principal        string    `json:"principal,omitempty"`         // reserved: delegation — the initiating human/system
 	Binding          Binding   `json:"binding"`

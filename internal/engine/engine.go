@@ -143,8 +143,8 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		// this one agent's allowlist for the duration of the dispatch.
 		frontedWithTools := opts.ToolProxy != nil && agent.EffectiveExecution() == "fronted" && len(agent.Tools) > 0
 		if frontedWithTools {
-			// appendEvent writes tool_call events on the SAME serialized log
-			// (3.0) but must NOT touch the engine-goroutine logErr var.
+			// appendEvent writes tool_call events on the same serialized
+			// ledger writer but must NOT touch the engine-goroutine logErr var.
 			appendEvent := func(e Event) {
 				e.Time = now()
 				e.Binding = bind

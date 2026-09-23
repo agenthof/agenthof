@@ -162,13 +162,15 @@ step event**, so an audit shows exactly what guarantee applied:
      gated behind the run token: a request without the matching
      `Authorization: Bearer <token>` header is rejected before any tool
      call is even parsed;
-  4. when the agent calls a tool through the proxy, Agenthof re-checks the
-     call against the agent's declared tools, forwards it to the real MCP
-     server over the credentialed connection from step 2, and appends a
-     `tool_call` event to the run's ledger recording which resource was
-     touched, whether the call succeeded, failed, or was refused as
-     off-allowlist, and a SHA-256 hash plus a short preview of the result —
-     never the call's arguments, the full result body, or any credential;
+  4. a tool outside the agent's declared allowlist is never exposed by the
+     proxy in the first place — the agent simply can't see it. When the
+     agent calls a tool it can see, Agenthof re-checks the call against the
+     agent's declared tools, forwards it to the real MCP server over the
+     credentialed connection from step 2, and appends a `tool_call` event to
+     the run's ledger recording which resource was touched, whether the call
+     succeeded or failed, and a SHA-256 hash plus a short preview of the
+     result — never the call's arguments, the full result body, or any
+     credential;
   5. once the step finishes, Agenthof shuts the proxy down and closes its
      upstream connections; the run token stops working and is never written
      to the ledger or placed on the delegation binding — it exists only in

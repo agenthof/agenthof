@@ -64,7 +64,7 @@ func New(tools map[string]config.ToolResource, b broker.Broker) *Proxy {
 func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) (string, string, error) {
 	token, err := mintToken()
 	if err != nil {
-		return "", "", fmt.Errorf("tool proxy: mint run token: %w", err)
+		return "", "", fmt.Errorf("mint run token: %w", err)
 	}
 
 	allow := map[string]bool{}
@@ -104,7 +104,7 @@ func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent fu
 		sess, err := p.connectUpstream(res)
 		if err != nil {
 			closeSessions()
-			return "", "", fmt.Errorf("tool proxy: connect upstream %q: %w", id, err)
+			return "", "", fmt.Errorf("connect upstream %q: %w", id, err)
 		}
 		sessions = append(sessions, sess)
 
@@ -113,12 +113,12 @@ func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent fu
 		cancel()
 		if err != nil {
 			closeSessions()
-			return "", "", fmt.Errorf("tool proxy: list tools for %q: %w", id, err)
+			return "", "", fmt.Errorf("list tools for %q: %w", id, err)
 		}
 		for _, tool := range list.Tools {
 			if owner, dup := mirroredBy[tool.Name]; dup {
 				closeSessions()
-				return "", "", fmt.Errorf("tool proxy: tool %q is exposed by both resource %q and %q", tool.Name, owner, id)
+				return "", "", fmt.Errorf("tool %q is exposed by both resource %q and %q", tool.Name, owner, id)
 			}
 			mirroredBy[tool.Name] = id
 			inbound.AddTool(tool, p.forward(bind, agent, id, allow, sess, appendEvent))
@@ -130,7 +130,7 @@ func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent fu
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		closeSessions()
-		return "", "", fmt.Errorf("tool proxy: listen: %w", err)
+		return "", "", fmt.Errorf("listen: %w", err)
 	}
 
 	srv := &http.Server{Handler: handler}
@@ -197,19 +197,19 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 		defer p.inflight.Done()
 
 		if !allow[resourceID] {
+			denyReason := fmt.Sprintf("tool %q on resource %q is not allowlisted for this run", req.Params.Name, resourceID)
 			appendEvent(engine.Event{
 				Type:             "tool_call",
 				Agent:            agent.Name,
 				AuthMode:         "static_env",
 				Status:           "refused",
+				Reason:           denyReason,
 				ResourcesTouched: []string{resourceID},
 				Binding:          bind,
 			})
 			return &mcp.CallToolResult{
 				IsError: true,
-				Content: []mcp.Content{&mcp.TextContent{
-					Text: fmt.Sprintf("tool %q on resource %q is not allowlisted for this run", req.Params.Name, resourceID),
-				}},
+				Content: []mcp.Content{&mcp.TextContent{Text: denyReason}},
 			}, nil
 		}
 
@@ -219,8 +219,13 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 		})
 
 		status := "succeeded"
-		if callErr != nil || (result != nil && result.IsError) {
+		var reason string
+		if callErr != nil {
 			status = "failed"
+			reason = callErr.Error()
+		} else if result != nil && result.IsError {
+			status = "failed"
+			reason = resultErrorText(result)
 		}
 		sha, preview := hashResult(result, callErr)
 
@@ -229,6 +234,7 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 			Agent:            agent.Name,
 			AuthMode:         "static_env",
 			Status:           status,
+			Reason:           reason,
 			ResourcesTouched: []string{resourceID},
 			Binding:          bind,
 			ArtifactSHA:      sha,
@@ -328,4 +334,26 @@ func hashResult(result *mcp.CallToolResult, callErr error) (sha, preview string)
 		preview = string(r[:200])
 	}
 	return sha, preview
+}
+
+// resultErrorText extracts a short failure message from an upstream
+// CallToolResult flagged IsError, for the tool_call event's Reason. It
+// carries no Agenthof credential — the text comes from the upstream MCP
+// server's own error content, no more than the preview hashResult already
+// puts in the ledger.
+func resultErrorText(result *mcp.CallToolResult) string {
+	var parts []string
+	for _, c := range result.Content {
+		if t, ok := c.(*mcp.TextContent); ok {
+			parts = append(parts, t.Text)
+		}
+	}
+	text := strings.Join(strings.Fields(strings.Join(parts, " ")), " ")
+	if text == "" {
+		return "upstream tool call reported an error"
+	}
+	if r := []rune(text); len(r) > 200 {
+		text = string(r[:200])
+	}
+	return text
 }

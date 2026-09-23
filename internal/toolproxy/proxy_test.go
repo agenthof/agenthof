@@ -257,6 +257,9 @@ func TestProxyForwardDeniesNonAllowlistedResource(t *testing.T) {
 	if !reflect.DeepEqual(ev.Binding, bind) {
 		t.Fatalf("event.Binding = %+v, want %+v", ev.Binding, bind)
 	}
+	if ev.Reason == "" {
+		t.Fatal("event.Reason must be set on a refused tool_call")
+	}
 }
 
 // TestProxyStopWaitsForInFlightForward confirms Stop() does not return until
@@ -357,4 +360,58 @@ func TestProxyStopWaitsForInFlightForward(t *testing.T) {
 	// A second Stop() (the engine never issues one, but defense in depth)
 	// must not panic or hang.
 	p.Stop()
+}
+
+// TestProxyForwardSetsReasonOnUpstreamFailure exercises forward's "failed"
+// path directly: an upstream call that comes back IsError must produce a
+// tool_call event with Status "failed" and a non-empty Reason describing the
+// failure (spec §3g: Reason on refusal/failure), same as the "refused" path.
+func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
+	const upstreamToken = "upstream-secret-xyz"
+	ts, _ := newStubUpstream(t, upstreamToken)
+
+	// Connect the upstream session with the WRONG credential so the stub
+	// upstream's own auth check returns an IsError result — the same shape a
+	// real upstream tool failure would produce.
+	httpClient := &http.Client{Transport: &injectingTransport{base: http.DefaultTransport, token: "wrong-token"}}
+	client := mcp.NewClient(&mcp.Implementation{Name: "toolproxy-test", Version: "v0.1.0"}, nil)
+	upstream, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: ts.URL, HTTPClient: httpClient}, nil)
+	if err != nil {
+		t.Fatalf("connect upstream: %v", err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	tools := map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
+	}
+	p := New(tools, broker.StaticEnv{})
+
+	var events []engine.Event
+	appendEvent := func(e engine.Event) { events = append(events, e) }
+
+	bind := testBinding()
+	agent := testAgentDef("github")
+	allow := map[string]bool{"github": true}
+
+	handler := p.forward(bind, agent, "github", allow, upstream, appendEvent)
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("forward: unexpected transport error %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("expected an IsError result from the failing upstream call, got %+v", result)
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one tool_call event, got %d: %+v", len(events), events)
+	}
+	ev := events[0]
+	if ev.Type != "tool_call" || ev.Status != "failed" {
+		t.Fatalf("event = %+v, want Type=tool_call Status=failed", ev)
+	}
+	if ev.Reason == "" {
+		t.Fatal("event.Reason must be set on a failed tool_call")
+	}
 }
