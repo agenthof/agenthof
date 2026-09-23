@@ -4,8 +4,10 @@
 a privilege set, a kill switch, and a ledger of who ran it.**
 
 Define your AI workforce as roles in YAML — a role owns workflows, a workflow
-composes agents, and every action any agent takes is contained by construction
-and attributed to the human who asked for it.
+composes agents, and every action any agent takes is governed at the doors
+and attributed to the human who asked for it. The agent runs in an
+operator-provided sandbox. That sandbox's network and exec confinement is
+required, and Agenthof does not verify it.
 
 > *Agenthof* — from the German **Hof**: the court. Where your agents are
 > housed, and what they answer to.
@@ -14,12 +16,14 @@ and attributed to the human who asked for it.
 
 Pre-release, and the governed core is real and runnable today:
 
-- config → validated registry → event-sourced engine (linear + fail-back),
-  runnable offline with a built-in echo executor;
+- config → validated registry → event-sourced engine (linear + fail-back).
+  Every agent is an external HTTP service; a minimal reference agent ships
+  in `examples/echo-agent`;
 - a hash-chained ledger where every action and refusal is attributed to the
   human who invoked it, with `audit verify` for integrity;
-- the kill switch, OIDC + RBAC, per-role model-gateway keys and budgets, and
-  `contained` / `fronted` execution tiers;
+- the kill switch, OIDC + RBAC, and agents governed at the tool/MCP and exec
+  doors. The model gateway is reserved until fronted agents reach models
+  through Agenthof;
 - a control-plane audit — every `apply` and kill-switch flip is recorded to
   its own hash-chained control ledger, attributed to the human who invoked
   it, with `audit control`, `audit verify control`, and `audit repair
@@ -50,14 +54,14 @@ The `control head` line is the control ledger recording the apply, attributed
 to `--as` (or your OS user if omitted); the hash varies per run. See
 [`ROADMAP.md`](ROADMAP.md) and `audit control` for the control-plane audit.
 
-See [`docs/quickstart.md`](docs/quickstart.md) for the kill switch, model-backed runs (LiteLLM), retention, and the full walkthrough.
+See [`docs/quickstart.md`](docs/quickstart.md) for the kill switch, retention, and the full walkthrough.
 
 ## The idea in three commands
 
 ```
 agenthof apply ./config      # roles, workflows, agents — validated, governed
 agenthof run software-engineer fix-bug --input "..."
-agenthof audit <run-id>      # who asked → what ran → what it touched → what it cost
+agenthof audit <run-id>      # who asked → what ran → what it touched
 ```
 
 ## Investigate an incident
@@ -75,7 +79,7 @@ and the `investigate/1` JSON contract.
 
 ## The demos
 
-Walk through CONFIG (registry management), AUDIT (run traceability), GOVERNANCE (RBAC + budgeting), and INVESTIGATE (incident investigation across the control plane and every run) with scripted end-to-end examples.
+Walk through CONFIG (registry management), AUDIT (run traceability), GOVERNANCE (RBAC), and INVESTIGATE (incident investigation across the control plane and every run) with scripted end-to-end examples.
 
 See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 
@@ -83,9 +87,9 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 
 - [`ROADMAP.md`](ROADMAP.md) — what's shipped, next, later, and exploratory.
 - [`docs/quickstart.md`](docs/quickstart.md) — build, run, kill switch,
-  model-backed runs, retention.
+  retention.
 - [`docs/concepts.md`](docs/concepts.md) — the ideas behind the registry:
-  planes, gateways, execution tiers, identity, the ledger.
+  planes, gateways, identity, the ledger.
 - [`docs/lifecycle.md`](docs/lifecycle.md) — the life of a run: how one
   invocation flows through identity, authorization, execution, and the ledger.
 - [`docs/lifecycle-exec.md`](docs/lifecycle-exec.md) — the life of an exec:

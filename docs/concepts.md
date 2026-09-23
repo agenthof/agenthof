@@ -34,100 +34,87 @@ The runtime separates a control plane from a data plane.
   and read). This is the layer that decides what is allowed to run, and
   records what did.
 - **Data plane** — `gateway/`, which resolves logical model names to real
-  endpoints and provisions per-role keys and budgets; and `toolproxy/`, the
-  inbound MCP proxy a fronted agent's declared tools are reached through
-  (see [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers)).
+  endpoints and can provision per-role keys. No run consumes that path
+  today; it is retained for the reserved fronted model proxy. `toolproxy/`
+  is the inbound MCP proxy an agent's declared tools are reached through
+  (see [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs)).
 
-The agent runtime in `agentrt/` — which materializes ADK-Go agents from
-registry entries, exposes the jailed tool catalog, and fronts external
-agents through the adapter — is driven by the control plane, and is where
-an agent's actual work happens.
+The agent runtime in `agentrt/` is the HTTP adapter that hands each step to
+the agent's endpoint. It is driven by the control plane. The agent's own
+work happens in the operator's process, outside Agenthof.
 
 ## The governed surfaces
 
 These doors are first-class in the design. Designing one in is not the same
 as building every mode of it now:
 
-1. **Model gateway** — the data plane for model calls. It is a
-   LiteLLM-class facade: something to run, not to rebuild. It holds
-   per-role virtual keys with budgets.
-2. **Tool/MCP gateway** — the inbound MCP proxy a fronted agent's declared
-   tools (`tools:` entries naming `gateway.yaml` tool resources) are reached
-   through, with the same hold-and-inject credential shape as the model
-   gateway (see [`lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers)).
+1. **Model gateway** — reserved. The engine that resolves a logical model
+   name and provisions a per-role key still exists, and `gateway.models`,
+   `gateway.defaults.model`, and `roles[].budget_usd_month` are accepted and
+   shape-validated. No run calls it. It returns when a fronted agent reaches
+   models through Agenthof, with the credential injected at that door and
+   never handed to the agent. Until then, model access is the operator's
+   arrangement outside Agenthof.
+2. **Tool/MCP gateway** — the inbound MCP proxy an agent's declared tools
+   (`tools:` entries naming `gateway.yaml` tool resources) are reached
+   through (see [`lifecycle.md`](lifecycle.md#how-an-agent-actually-runs)).
    The broker behind it gets that credential one of two ways: a static
    bearer token read straight from an environment variable, or, for an
    OAuth-protected resource, a separate upstream token it mints itself via
    the `client_credentials` grant and reuses until shortly before it
    expires. Either way the gateway injects the value outbound; the agent
    never holds it, and its own inbound run token is never forwarded upstream
-   in its place. A contained agent has no use for it: it works instead
-   through the jailed tool catalog below — list, search, read, edit, write,
-   and no exec tool — as part of the agent runtime.
-3. **Exec gateway** — the door a fronted agent uses to run an allowlisted
-   command in the operator's sandbox and report the result. Agenthof checks
-   the reported argv against the agent's config allowlist and records the
+   in its place.
+3. **Exec gateway** — the door an agent uses to run an allowlisted command
+   in the operator's sandbox and report the result. Agenthof checks the
+   reported argv against the agent's config allowlist and records the
    agent's attestation. It does not run the command and does not contain it.
    Allowlisting an executable trusts that program's full capability surface.
-   A contained agent has no exec door. See
-   [`lifecycle-exec.md`](lifecycle-exec.md).
+   See [`lifecycle-exec.md`](lifecycle-exec.md).
 4. **Control tower** — the platform itself: the config directory, `apply`,
    and the registry. Unlike the network doors this is not a facade; it is
    the config, validation, and registry path described above.
 
-## Execution tiers
+## How an agent runs
 
-Every agent runs under one of two execution tiers, chosen by its registry
-entry's `execution` field: `contained` (the default — an empty `execution`
-means `contained`) or `fronted`.
+Every agent is an external HTTP service reachable at its registry entry's
+`endpoint` — any agent, in any language or framework, that serves one HTTP
+route. `execution` is `fronted`, or empty, which means the same thing. The
+value `contained` is rejected at apply: that tier was removed. Set
+`execution: fronted` (or leave it empty) and declare an `endpoint`.
 
-**`contained`** is the `agentrt/` path: the agent is materialized as an
-ADK-Go agent node running inside Agenthof's own runtime, behind the jailed
-tool catalog. This is containment *by construction* — a jailed workspace
-(path-confined, symlink-hardened, no dotfile or VCS-metadata access) and no
-exec tool, so there is nothing for the agent to escape through. A contained
-agent may not declare an `endpoint`, and its `model` is resolved and checked
-against `gateway.yaml` the normal way (see
-[`docs/reference/config.md`](reference/config.md#model)).
+Because the agent's own code runs outside Agenthof, Agenthof does not
+confine that process. The agent is **governed at the doors it has to pass
+through to act as an agent of the platform**: identity, the ledger, and —
+where declared — the tool and exec gateways. Its internals are *attested*,
+not *enforced*. Agenthof governs what crosses the boundary — the call in,
+the result out, and the identity and ledger entries around it — not what
+the external service does internally. The call in carries the run's
+identity as `X-Agenthof-*` request headers (see
+[`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs) for the list)
+— attested like the rest of the boundary, not enforced. The agent runs in
+an operator-provided sandbox. That sandbox's network and exec confinement
+is required, and Agenthof does not verify it.
 
-**`fronted`** is the adapter path: the agent is an external HTTP service
-reachable at its registry entry's `endpoint` — any agent, in any language or
-framework, that serves one HTTP route. Because the agent's own code runs
-outside Agenthof, its internals cannot be contained the way a contained
-agent's can. Instead it is **governed at the doors it has to pass through to
-act as an agent of the platform**: the same identity, ledger, and — where
-applicable — gateway machinery every agent is subject to. Put differently, a
-fronted agent's internals are *attested*, not *enforced*. Agenthof governs
-what crosses the boundary — the call in, the result out, and the identity
-and ledger entries around it — not what the external service does
-internally. Concretely, the call in carries the run's identity as
-`X-Agenthof-*` request headers (see
-[`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers) for
-the list) — attested like the rest of the boundary, not enforced. A fronted
-agent may declare `tools`, each naming a `gateway.yaml` tool resource; for
-the duration of its step it reaches those tools only through Agenthof's
+An agent may declare `tools`, each naming a `gateway.yaml` tool resource;
+for the duration of its step it reaches those tools only through Agenthof's
 inbound MCP proxy, which authorizes each call against that allowlist and
 injects the resource's credential, so the agent itself never holds one (see
-[`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers) for
-the full flow). It may also declare `exec`, an allowlist of commands it may
-run in the operator's sandbox; that door lives on the same per-run listener,
-and Agenthof records what the agent attests without running or containing the
-command (see [`lifecycle-exec.md`](lifecycle-exec.md)). Its `model` routing is not checked, since
-it is not calling through Agenthof's model gateway the way a contained agent
-does (see
-[`docs/reference/config.md`](reference/config.md#execution) for the exact
-rules `execution` and `endpoint` interact under). A fronted agent's failure
-is not special-cased: a timeout or error is an ordinary step failure with
-the same fail-back semantics as any other step.
+[`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs) for the full
+flow). It may also declare `exec`, an allowlist of commands it may run in
+the operator's sandbox; that door lives on the same per-run listener, and
+Agenthof records what the agent attests without running or containing the
+command (see [`lifecycle-exec.md`](lifecycle-exec.md)). `model` is not
+checked against `gateway.yaml`: model routing waits on the reserved fronted
+model proxy (see [`docs/reference/config.md`](reference/config.md#execution)
+for how `execution` and `endpoint` interact). A timeout or error from the
+endpoint is an ordinary step failure with the same fail-back semantics as
+any other step.
 
-The tier is not only a validation-time concept. It is **recorded on the
-registry entry** (the agent's `execution` field, as loaded from config) and
-**stamped on every step event the engine writes to the ledger** — the same
-value, carried on `step_started`, `step_succeeded`, and `step_failed`. That
-means `audit` can show, for each step of a run, which guarantee applied to
-it: whether the step ran inside Agenthof's own containment, or was handed
-off to an externally fronted, doors-governed agent. No cross-referencing
-against the config required.
+`execution` is **stamped on every step event the engine writes to the
+ledger** — `fronted`, on `step_started`, `step_succeeded`, and
+`step_failed`. An audit shows that the step was handed to the agent's
+endpoint. No cross-referencing against the config is required.
 
 ## Identity: three identities per action
 
@@ -158,24 +145,25 @@ prerequisites for a release.
 
 ## Containment
 
-Agents get no raw network access and no ambient credentials, and run no
-commands except those on the config allowlist. Capability reaches an agent
-only through governed, logged doors: the model gateway (metered and budgeted),
-the jailed tool catalog for a contained agent or the inbound MCP proxy for a
-fronted one's declared tools (both allowlisted and logged), the exec gateway
-for a fronted agent's allowlisted commands, and a jailed workspace
-(path-confined, symlink-hardened, with no dotfile or VCS-metadata access). A
-call that reaches the proxy for a tool the run cannot reach is recorded as a
-refusal too — the tool name and a fingerprint of the arguments, never the
-arguments themselves. A command the exec allowlist does not match is recorded
-as a refused `exec` event carrying the argv. An allowlisted command the agent
-then reports is recorded as an `exec` event tagged `attested`: the argv, the
-exit code, and a hash of the output the agent supplies, never the output body.
-Agenthof records that report. It does not run the command and does not contain
-it; the command runs in the operator's sandbox. Enforced execution, where
-Agenthof would run the command itself, is reserved. Every one of those doors
-writes to the ledger. No change may add an unmediated network call, or a
-credential stored where an agent's config or runtime can read its value.
+Capability reaches an agent only through governed, logged doors: the tool/MCP
+gateway for declared tools, and the exec gateway for allowlisted commands.
+The model gateway is reserved and is not on the run path today. Agents hold
+no raw model or resource credentials in Agenthof config; tool credentials
+are injected by the proxy, and model credentials are not issued by a run.
+Allowlisted commands run in the operator's sandbox and each is recorded —
+attested by the agent. Agenthof records the report and does not run or
+contain the command. Enforced execution, where Agenthof would run the
+command itself, is reserved. The agent runs in an operator-provided sandbox.
+That sandbox's network and exec confinement is required, and Agenthof does
+not verify it. A call that reaches the proxy for a tool the run cannot reach
+is recorded as a refusal too — the tool name and a fingerprint of the
+arguments, never the arguments themselves. A command the exec allowlist does
+not match is recorded as a refused `exec` event carrying the argv. An
+allowlisted command the agent then reports is recorded as an `exec` event
+tagged `attested`: the argv, the exit code, and a hash of the output the
+agent supplies, never the output body. Every one of those doors writes to
+the ledger. No change may add an unmediated network call, or a credential
+stored where an agent's config or runtime can read its value.
 
 ## The ledger
 
@@ -209,8 +197,8 @@ in the ledger:
   configuration are all refusals — denials are audit events too, not silent
   exits.
 - A **step failure** is ordinary execution that did not succeed, including
-  a fronted agent's timeout and a model-gateway rejection such as an
-  exceeded budget. It is handled by the workflow's fail-back graph rather
+  a timeout or a non-success response from the agent's endpoint. It is
+  handled by the workflow's fail-back graph rather
   than refused; only once bounces are exhausted does the run finish with
   `workflow_finished{status: failed}`. The whole chain stays in the ledger,
   so a failed run is as legible afterwards as a successful one.
@@ -233,7 +221,7 @@ it somewhere off-machine (a CI log, a git note, a message) is what makes
 exact flags and exit codes.
 
 The default path is `.agenthof/control.jsonl`, resolved relative to the
-current working directory the same way key and workspace paths are — run
+current working directory — run
 these commands from the repository root, or pass `--control-log`
 explicitly. It is never written under `--log-dir`, and `runs prune` skips
 it and any `*.torn-<timestamp>` repair fragment (below) by name — a control
