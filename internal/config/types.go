@@ -8,18 +8,18 @@ type AgentDef struct {
 	Instruction string     `yaml:"instruction"`
 	Tools       []string   `yaml:"tools"`
 	Output      string     `yaml:"output"`
-	Execution   string     `yaml:"execution"` // "", "contained", or "fronted"; "" means contained
-	Endpoint    string     `yaml:"endpoint"`  // fronted only: the agent's HTTP endpoint
+	Execution   string     `yaml:"execution"` // "", or "fronted"; "" means fronted
+	Endpoint    string     `yaml:"endpoint"`  // required: the agent's HTTP endpoint
 	Exec        ExecConfig `yaml:"exec"`      // fronted only: allowlisted attested exec
 	SourceFile  string     `yaml:"-"`
 }
 
 func (a AgentDef) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
-// EffectiveExecution normalizes the execution tier: empty means contained.
+// EffectiveExecution normalizes the execution tier: empty means fronted.
 func (a AgentDef) EffectiveExecution() string {
 	if a.Execution == "" {
-		return "contained"
+		return "fronted"
 	}
 	return a.Execution
 }

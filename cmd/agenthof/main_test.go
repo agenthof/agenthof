@@ -21,12 +21,46 @@ import (
 	"github.com/agenthof/agenthof/internal/engine"
 )
 
+func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Input string `json:"input"`
+		Agent string `json:"agent"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if strings.Contains(req.Input, "FAIL:"+req.Agent) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"reason":  fmt.Sprintf("input requested a synthetic failure for %s", req.Agent),
+		})
+		return
+	}
+	line := req.Input
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	runes := []rune(line)
+	if len(runes) > 80 {
+		line = string(runes[:80])
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success":  true,
+		"artifact": "[" + req.Agent + "] " + line,
+	})
+}
+
 func writeSample(t *testing.T) string {
 	t.Helper()
+	stub := httptest.NewServer(http.HandlerFunc(echoCompatHandler))
+	t.Cleanup(stub.Close)
+	ep := "endpoint: " + stub.URL + "\n"
 	root := t.TempDir()
 	files := map[string]string{
-		"agents/planner.yaml":    "name: planner\nmodel: fast\ninstruction: plan\noutput: plan\n",
-		"agents/coder.yaml":      "name: coder\nmodel: fast\ninstruction: code\noutput: patch\n",
+		"agents/planner.yaml":    "name: planner\nmodel: fast\ninstruction: plan\noutput: plan\n" + ep,
+		"agents/coder.yaml":      "name: coder\nmodel: fast\ninstruction: code\noutput: patch\n" + ep,
 		"workflows/fix-bug.yaml": "name: fix-bug\nsteps:\n  - name: plan\n    agent: planner\n  - name: code\n    agent: coder\n    on_failure: plan\n",
 		"roles/se.yaml":          "name: software-engineer\nworkflows: [fix-bug]\nallowed_groups: [\"*\"]\n",
 		"gateway.yaml":           "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\n",
@@ -593,82 +627,6 @@ func TestGatewayProvisionEndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); err != nil {
 		t.Fatalf("key file not written under ./.agenthof/keys/: %v", err)
-	}
-}
-
-func TestRunADKExecutorEndToEnd(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"id": "resp_1",
-			"object": "response",
-			"created_at": 0,
-			"model": "stub-model",
-			"status": "completed",
-			"output": [
-				{
-					"id": "msg_1",
-					"type": "message",
-					"role": "assistant",
-					"status": "completed",
-					"content": [
-						{"type": "output_text", "text": "stub answer", "annotations": []}
-					]
-				}
-			],
-			"usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
-		}`))
-	}))
-	defer srv.Close()
-
-	const envVar = "AGENTHOF_CLI_TEST_STUB_KEY"
-	t.Setenv(envVar, "sk-test-stub-key")
-
-	root := t.TempDir()
-	files := map[string]string{
-		"agents/planner.yaml":    "name: planner\nmodel: fast\ninstruction: plan\noutput: plan\n",
-		"agents/coder.yaml":      "name: coder\nmodel: fast\ninstruction: code\noutput: patch\n",
-		"workflows/fix-bug.yaml": "name: fix-bug\nsteps:\n  - name: plan\n    agent: planner\n  - name: code\n    agent: coder\n    on_failure: plan\n",
-		"roles/se.yaml":          "name: software-engineer\nworkflows: [fix-bug]\nallowed_groups: [\"*\"]\n",
-		"gateway.yaml":           "models:\n  fast:\n    endpoint: " + srv.URL + "\n    model: stub-model\n    api_key_env: " + envVar + "\n",
-	}
-	for rel, content := range files {
-		p := filepath.Join(root, rel)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	t.Chdir(t.TempDir())
-	const logs = "runs"
-
-	var out bytes.Buffer
-	code := cmdRun([]string{"software-engineer", "fix-bug",
-		"--input", "fix the login bug", "--as", "dana@example.com",
-		"--config", root, "--log-dir", logs, "--executor", "adk"}, &out)
-	if code != 0 {
-		t.Fatalf("run: %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "finished: succeeded") {
-		t.Fatalf("out: %s", out.String())
-	}
-	if !strings.Contains(out.String(), "workspace: ") {
-		t.Fatalf("run must print the chosen workspace: %s", out.String())
-	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
-	if m == nil {
-		t.Fatalf("out: %s", out.String())
-	}
-
-	out.Reset()
-	if code := cmdAudit([]string{m[1], "--log-dir", logs}, &out); code != 0 {
-		t.Fatalf("audit: %s", out.String())
-	}
-	if !regexp.MustCompile(`succeeded — artifact [0-9a-f]{8}:`).MatchString(out.String()) {
-		t.Fatalf("audit missing artifact sha8 line: %s", out.String())
 	}
 }
 

@@ -29,30 +29,34 @@ func Validate(cfg config.Config) []ValidationError {
 		}
 		agents[a.Name] = a
 
-		// Validate execution tier and endpoint
-		if a.Execution != "" && a.Execution != "contained" && a.Execution != "fronted" {
+		// Validate execution tier and endpoint. "contained" is rejected: the
+		// tier was removed, and every agent is fronted.
+		if a.Execution == "contained" {
 			add(a.SourceFile, a.Name, "bad-execution",
-				fmt.Sprintf("execution %q must be \"contained\" or \"fronted\"", a.Execution))
+				"execution \"contained\" was removed; set execution: fronted and an endpoint")
+		} else if a.Execution != "" && a.Execution != "fronted" {
+			add(a.SourceFile, a.Name, "bad-execution",
+				fmt.Sprintf("execution %q must be \"fronted\"", a.Execution))
 		}
 
 		effectiveExec := a.EffectiveExecution()
-		if effectiveExec == "fronted" && a.Endpoint == "" {
-			add(a.SourceFile, a.Name, "fronted-needs-endpoint",
-				"fronted agents must have an endpoint")
-		}
-		if effectiveExec == "contained" && a.Endpoint != "" {
-			add(a.SourceFile, a.Name, "contained-has-endpoint",
-				"endpoint is only valid on fronted agents")
+		if a.Endpoint == "" {
+			msg := "fronted agents must have an endpoint"
+			if a.Execution == "" {
+				msg = "agents are fronted and must declare an endpoint (the contained tier was removed)"
+			}
+			add(a.SourceFile, a.Name, "fronted-needs-endpoint", msg)
+		} else if !validSecureEndpoint(a.Endpoint) {
+			add(a.SourceFile, a.Name, "bad-endpoint",
+				"endpoint must be https (or loopback http)")
 		}
 
-		// A fronted agent's tools are gateway tool-resource ids (reached via the
-		// tool proxy). Each must be a declared gateway.tools resource.
-		if effectiveExec == "fronted" {
-			for _, t := range a.Tools {
-				if _, ok := cfg.Gateway.Tools[t]; !ok {
-					add(a.SourceFile, a.Name, "unknown-tool",
-						fmt.Sprintf("agent references tool %q, which is not a declared gateway tool resource", t))
-				}
+		// Tools are gateway tool-resource ids. Each must be a declared
+		// gateway.tools resource.
+		for _, t := range a.Tools {
+			if _, ok := cfg.Gateway.Tools[t]; !ok {
+				add(a.SourceFile, a.Name, "unknown-tool",
+					fmt.Sprintf("agent references tool %q, which is not a declared gateway tool resource", t))
 			}
 		}
 
@@ -71,18 +75,6 @@ func Validate(cfg config.Config) []ValidationError {
 				if e.Exe == "" {
 					add(a.SourceFile, a.Name, "bad-exec-config", "exec.allow entry has an empty exe")
 				}
-			}
-		}
-
-		// Skip model routing check for fronted agents
-		if effectiveExec != "fronted" {
-			model := a.Model
-			if model == "" {
-				model = cfg.Gateway.Defaults.Model
-			}
-			if _, ok := cfg.Gateway.Models[model]; !ok {
-				add(a.SourceFile, a.Name, "unroutable-model",
-					fmt.Sprintf("model %q has no route in gateway.yaml and no default is set", a.Model))
 			}
 		}
 	}

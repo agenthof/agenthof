@@ -35,7 +35,7 @@ func TestBuildAndLookups(t *testing.T) {
 
 func TestBuildRefusesInvalidConfig(t *testing.T) {
 	cfg := baseCfg()
-	cfg.Agents[0].Model = "unknown"
+	cfg.Agents[0].Endpoint = ""
 	reg, errs := Build(cfg)
 	if reg != nil || len(errs) == 0 {
 		t.Fatal("invalid config must not produce a registry")

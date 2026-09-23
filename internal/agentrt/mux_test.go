@@ -21,14 +21,15 @@ func (f *fakeExecutor) Execute(ctx context.Context, _ engine.Binding, a config.A
 	return f.result, f.err
 }
 
-// TestMuxExecutor_Execute_Contained proves the default ("") execution tier
-// dispatches to Contained and never touches Fronted.
+// TestMuxExecutor_Execute_Contained proves an explicit "contained" tier
+// still dispatches to Contained. Validation rejects that tier; the arm
+// remains until the mux itself is removed.
 func TestMuxExecutor_Execute_Contained(t *testing.T) {
 	contained := &fakeExecutor{result: engine.StepResult{Success: true, Artifact: "contained out"}}
 	fronted := &fakeExecutor{result: engine.StepResult{Success: true, Artifact: "fronted out"}}
 	mux := MuxExecutor{Contained: contained, Fronted: fronted}
 
-	agentDef := config.AgentDef{Name: "a", Execution: ""}
+	agentDef := config.AgentDef{Name: "a", Execution: "contained"}
 	res, err := mux.Execute(context.Background(), engine.Binding{}, agentDef, "in", nil)
 	if err != nil {
 		t.Fatalf("Execute: unexpected error: %v", err)

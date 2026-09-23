@@ -4,3 +4,5 @@ model: fast
 instruction: |
   You are a coding agent. Implement the plan with the smallest change.
 output: patch
+execution: fronted
+endpoint: http://127.0.0.1:8080/
