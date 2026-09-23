@@ -60,10 +60,9 @@ path. `gofmt`, `go vet`, and golangci-lint are gates, not suggestions.
 
 **Secure by construction.** Prefer designs where the bad outcome is impossible
 over designs where it is merely forbidden — a jailed path beats a path check.
-Validate at the boundary, once,
-and trust the validated value inward. Never log or persist secrets, tokens, or
-raw credentials. Bound anything an outside party controls: response sizes,
-string lengths written to the ledger, retries.
+Validate at the boundary, once, and trust the validated value inward. Never log
+or persist secrets, tokens, or raw credentials. Bound anything an outside party
+controls: response sizes, string lengths written to the ledger, retries.
 
 When these conflict, correctness wins, then clarity. An optimisation that makes
 the ledger harder to verify, or a clever abstraction that makes a security
