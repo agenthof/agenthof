@@ -373,6 +373,50 @@ func TestAdapterExecutor_EmptyIdentityHeadersPresent(t *testing.T) {
 	}
 }
 
+// TestAdapterForwardsProxyCoordinatesWhenPresent proves the adapter reads
+// the tool-proxy URL and run token from ctx (engine.WithProxyCoordinates)
+// and forwards them to the fronted agent as X-Agenthof-Proxy-URL and
+// X-Agenthof-Run-Token headers.
+func TestAdapterForwardsProxyCoordinatesWhenPresent(t *testing.T) {
+	var h http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"artifact":"out","success":true}`))
+	}))
+	defer srv.Close()
+
+	x := AdapterExecutor{}
+	a := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: srv.URL}
+	ctx := engine.WithProxyCoordinates(context.Background(), "http://127.0.0.1:9/mcp", "tok-xyz")
+	if _, err := x.Execute(ctx, engine.Binding{}, a, "hi", nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if h.Get("X-Agenthof-Proxy-URL") != "http://127.0.0.1:9/mcp" || h.Get("X-Agenthof-Run-Token") != "tok-xyz" {
+		t.Fatalf("proxy headers = %q / %q", h.Get("X-Agenthof-Proxy-URL"), h.Get("X-Agenthof-Run-Token"))
+	}
+}
+
+// TestAdapterOmitsProxyCoordinatesWhenAbsent proves the proxy headers are
+// absent (not sent as empty strings) when the ctx carries no coordinates.
+func TestAdapterOmitsProxyCoordinatesWhenAbsent(t *testing.T) {
+	var h http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"artifact":"out","success":true}`))
+	}))
+	defer srv.Close()
+	x := AdapterExecutor{}
+	a := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: srv.URL}
+	if _, err := x.Execute(context.Background(), engine.Binding{}, a, "hi", nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if _, ok := h["X-Agenthof-Proxy-Url"]; ok { // canonicalized form
+		t.Fatal("proxy URL header must be absent when no coordinates in ctx")
+	}
+}
+
 // TestAdapterExecutor_Execute_EmptyEndpoint proves a missing endpoint (a
 // configuration problem that validation should have already caught) is
 // reported as an engine.ErrStepConfig-wrapping error.
