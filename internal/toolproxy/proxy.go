@@ -101,7 +101,7 @@ func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent fu
 			continue
 		}
 
-		sess, err := p.connectUpstream(res)
+		sess, err := p.connectUpstream(id, res)
 		if err != nil {
 			closeSessions()
 			return "", "", fmt.Errorf("connect upstream %q: %w", id, err)
@@ -201,7 +201,7 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 			appendEvent(engine.Event{
 				Type:             "tool_call",
 				Agent:            agent.Name,
-				AuthMode:         "static_env",
+				AuthMode:         authModeFor(p.tools[resourceID]),
 				Status:           "refused",
 				Reason:           denyReason,
 				ResourcesTouched: []string{resourceID},
@@ -232,7 +232,7 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 		appendEvent(engine.Event{
 			Type:             "tool_call",
 			Agent:            agent.Name,
-			AuthMode:         "static_env",
+			AuthMode:         authModeFor(p.tools[resourceID]),
 			Status:           status,
 			Reason:           reason,
 			ResourcesTouched: []string{resourceID},
@@ -248,20 +248,24 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 	}
 }
 
-// connectUpstream connects to res as an MCP client, injecting the resource's
-// broker-resolved credential into every outbound request via a RoundTripper.
-// The credential is resolved once at connect time and never logged; only the
-// env-var NAME (res.TokenEnv) ever appears in an error.
-func (p *Proxy) connectUpstream(res config.ToolResource) (*mcp.ClientSession, error) {
-	cred, err := p.broker.Resolve(context.Background(), broker.CredentialRef{
-		Mode:   "static_env",
-		EnvVar: res.TokenEnv,
-	})
-	if err != nil {
-		return nil, err
+// connectUpstream connects to res as an MCP client. The resource's credential
+// is resolved per outbound request by injectingTransport (the broker caches),
+// not once here — a client_credentials token is short-lived and a step may run
+// for minutes, so a token captured at connect could expire mid-step.
+func (p *Proxy) connectUpstream(id string, res config.ToolResource) (*mcp.ClientSession, error) {
+	ref := broker.CredentialRef{
+		ResourceID:      id,
+		Source:          res.CredentialSource,
+		Grant:           res.GrantType,
+		ClientAuth:      res.ClientAuth,
+		Issuer:          res.Issuer,
+		TokenURL:        res.TokenEndpoint,
+		Scope:           res.Scope,
+		TokenEnv:        res.TokenEnv,
+		ClientIDEnv:     res.ClientIDEnv,
+		ClientSecretEnv: res.ClientSecretEnv,
 	}
-
-	httpClient := &http.Client{Transport: &injectingTransport{base: http.DefaultTransport, token: cred}}
+	httpClient := &http.Client{Transport: &injectingTransport{base: http.DefaultTransport, broker: p.broker, ref: ref}}
 	client := mcp.NewClient(&mcp.Implementation{Name: "agenthof-tool-proxy", Version: "v0.1.0"}, nil)
 
 	// The connect context only bounds the initialize/discover handshake, not
@@ -276,17 +280,24 @@ func (p *Proxy) connectUpstream(res config.ToolResource) (*mcp.ClientSession, er
 	}, nil)
 }
 
-// injectingTransport sets a bearer credential on every outbound request. It
-// is the no-passthrough seam: the credential it carries is never the agent's
-// run token, and the agent-facing side of the proxy never has access to it.
+// injectingTransport resolves the resource's credential through the broker on
+// every outbound request and sets it as the bearer. It is the no-passthrough
+// seam: the credential it carries is never the agent's run token, and the
+// agent-facing side of the proxy never has access to it. Resolving per request
+// (the broker caches) lets a short-lived minted token be refreshed mid-step.
 type injectingTransport struct {
-	base  http.RoundTripper
-	token string
+	base   http.RoundTripper
+	broker broker.Broker
+	ref    broker.CredentialRef
 }
 
 func (t *injectingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	cred, err := t.broker.Resolve(req.Context(), t.ref)
+	if err != nil {
+		return nil, err
+	}
 	req = req.Clone(req.Context())
-	req.Header.Set("Authorization", "Bearer "+t.token)
+	req.Header.Set("Authorization", "Bearer "+cred)
 	return t.base.RoundTrip(req)
 }
 
@@ -334,6 +345,15 @@ func hashResult(result *mcp.CallToolResult, callErr error) (sha, preview string)
 		preview = string(r[:200])
 	}
 	return sha, preview
+}
+
+// authModeFor reports the ledger AuthMode string for a resource: the grant used
+// to obtain the upstream credential. Kept in lockstep with the broker's grants.
+func authModeFor(res config.ToolResource) string {
+	if res.GrantType == "client_credentials" {
+		return "client_credentials"
+	}
+	return "static_env"
 }
 
 // resultErrorText extracts a short failure message from an upstream

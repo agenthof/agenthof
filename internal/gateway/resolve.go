@@ -39,7 +39,7 @@ func Resolve(cfg config.GatewayConfig, logical string, roleKey string) (Route, e
 
 	apiKey := roleKey
 	if apiKey == "" {
-		v, err := broker.StaticEnv{}.Resolve(context.Background(), broker.CredentialRef{Mode: "static_env", EnvVar: route.APIKeyEnv})
+		v, err := broker.StaticEnv{}.Resolve(context.Background(), broker.CredentialRef{Source: "static_env", Grant: "", TokenEnv: route.APIKeyEnv})
 		if err != nil {
 			return Route{}, fmt.Errorf("gateway route %q: %w; no role key provisioned", name, err)
 		}

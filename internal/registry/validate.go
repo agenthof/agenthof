@@ -2,6 +2,7 @@ package registry
 
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/agenthof/agenthof/internal/config"
 )
@@ -76,6 +77,37 @@ func Validate(cfg config.Config) []ValidationError {
 		if r.CredentialSource != "static_env" {
 			add("gateway.yaml", id, "bad-tool-resource",
 				fmt.Sprintf("tool resource %q: credential_source %q is not implemented (only static_env)", id, r.CredentialSource))
+		}
+		switch r.GrantType {
+		case "":
+			if r.TokenEnv == "" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: token_env is required for the direct-bearer grant", id))
+			}
+		case "client_credentials":
+			if r.ClientAuth != "client_secret_basic" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: client_auth %q is not implemented (only client_secret_basic)", id, r.ClientAuth))
+			}
+			if r.Issuer == "" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: issuer is required for client_credentials", id))
+			}
+			if r.ClientIDEnv == "" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: client_id_env is required for client_credentials", id))
+			}
+			if r.ClientSecretEnv == "" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: client_secret_env is required for client_credentials", id))
+			}
+			if !validTokenEndpoint(r.TokenEndpoint) {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: token_endpoint must be set and https (or loopback http)", id))
+			}
+		default:
+			add("gateway.yaml", id, "bad-tool-resource",
+				fmt.Sprintf("tool resource %q: grant_type %q is not implemented (only client_credentials)", id, r.GrantType))
 		}
 	}
 
@@ -156,4 +188,25 @@ func Validate(cfg config.Config) []ValidationError {
 		}
 	}
 	return errs
+}
+
+// validTokenEndpoint requires an https URL, or http only to a loopback host
+// (for tests). A client secret over plaintext http to a remote host is exactly
+// the leak Article I guards against, so it is rejected at apply time.
+func validTokenEndpoint(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	if u.Scheme == "http" {
+		host := u.Hostname()
+		return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	}
+	return false
 }

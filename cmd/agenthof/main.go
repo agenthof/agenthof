@@ -626,7 +626,14 @@ func cmdRun(args []string, out io.Writer) int {
 	// != nil bracketing check would then wrongly treat as present).
 	var toolProxy engine.ToolProxy
 	if len(cfg.Gateway.Tools) > 0 {
-		toolProxy = toolproxy.New(cfg.Gateway.Tools, broker.StaticEnv{})
+		toolProxy = toolproxy.New(cfg.Gateway.Tools, broker.Dispatch{
+			StaticEnv: broker.StaticEnv{},
+			// A hung upstream token endpoint must not block the outbound call
+			// forever: an explicit client with a timeout is required here,
+			// mirroring the proxy's own connectTimeout, rather than nil (which
+			// falls back to http.DefaultClient, which has no timeout).
+			ClientCredentials: broker.NewClientCredentials(&http.Client{Timeout: 30 * time.Second}),
+		})
 	}
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, WorkspaceDir: ws, ConfigHash: h, ToolProxy: toolProxy})

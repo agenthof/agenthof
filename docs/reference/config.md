@@ -287,28 +287,37 @@ for the runtime flow):
 | Kind | `kind` | string | yes | — |
 | URL | `url` | string | yes | — |
 | CredentialSource | `credential_source` | string | yes | — |
-| TokenEnv | `token_env` | string | no (not checked by `apply`) | — |
-| GrantType | `grant_type` | string | no (not checked by `apply`; reserved) | — |
-| ClientAuth | `client_auth` | string | no (not checked by `apply`; reserved) | — |
-| Issuer | `issuer` | string | no (not checked by `apply`; reserved) | — |
-| TokenEndpoint | `token_endpoint` | string | no (not checked by `apply`; reserved) | — |
-| ClientIDEnv | `client_id_env` | string | no (not checked by `apply`; reserved) | — |
-| Scope | `scope` | string | no (not checked by `apply`; reserved) | — |
+| TokenEnv | `token_env` | string | yes for the direct-bearer grant (`grant_type: ""`) | — |
+| GrantType | `grant_type` | string | no | `""` (direct-bearer) |
+| ClientAuth | `client_auth` | string | yes for `client_credentials` (must be `client_secret_basic`) | — |
+| Issuer | `issuer` | string | yes for `client_credentials` | — |
+| TokenEndpoint | `token_endpoint` | string | yes for `client_credentials`; must be `https`, or `http` to a loopback host | — |
+| ClientIDEnv | `client_id_env` | string | yes for `client_credentials` | — |
+| ClientSecretEnv | `client_secret_env` | string | yes for `client_credentials` | — |
+| Scope | `scope` | string | no (not checked by `apply`) | — |
 
 `apply` requires `kind` to be exactly `"mcp"` and `url` to be non-empty,
 rejecting a resource that fails either with `bad-tool-resource` ("tool
 resource ... must set kind: mcp and a url"); it separately requires
 `credential_source` to be exactly `"static_env"`, rejecting anything else
 (including empty) with `bad-tool-resource` ("credential_source ... is not
-implemented (only static_env)"). `token_env` is **not** checked by `apply` —
-it is read only at the moment a fronted step starts, when the proxy resolves
-the named environment variable to a credential; naming a variable that isn't
-set fails that step (not `apply`) with a broker error. `grant_type`,
-`client_auth`, `issuer`, `token_endpoint`, `client_id_env`, and `scope` are
-parsed and accepted today but read by no runtime path yet — reserved for a
-credential source other than `static_env` (an IdP-issued, per-call
-credential) without a breaking schema change. `TokenEnv` and `ClientIDEnv`
-hold the *name* of an environment variable, never a credential value.
+implemented (only static_env)"). `apply` also validates `grant_type`: the
+empty value is the direct-bearer grant and requires `token_env` (read at the
+moment a fronted step starts, when the proxy resolves the named environment
+variable to a credential; naming a variable that isn't set fails that step,
+not `apply`, with a broker error); `"client_credentials"` requires
+`client_auth` to be exactly `"client_secret_basic"`, plus `issuer`,
+`token_endpoint`, `client_id_env`, and `client_secret_env` all set, with
+`token_endpoint` required to be `https` (or `http` only to a loopback host —
+a client secret over plaintext http to a remote host is rejected at apply
+time); any other `grant_type` is rejected as not implemented. `scope` is
+optional and not validated or required by `apply`; when set on a
+`client_credentials` resource, the broker forwards it verbatim, as a single
+space-delimited string, in the token request's `scope` parameter (empty
+means the request omits `scope` entirely and the authorization server's own
+default applies). `TokenEnv`,
+`ClientIDEnv`, and `ClientSecretEnv` hold the *name* of an environment
+variable, never a credential value.
 
 ### `models`
 
@@ -360,6 +369,38 @@ tools:
     credential_source: static_env
     token_env: TICKETS_MCP_TOKEN
 ```
+
+**Example (illustrative, a `client_credentials` tool resource): an
+OAuth-protected MCP resource, where the credential the proxy injects is not
+read verbatim from an environment variable but a separate token the broker
+mints itself from a generic OAuth identity provider:**
+
+```yaml
+tools:
+  billing-mcp:
+    kind: mcp
+    url: https://billing.internal/mcp
+    credential_source: static_env
+    grant_type: client_credentials
+    client_auth: client_secret_basic
+    issuer: https://idp.example.com/
+    token_endpoint: https://idp.example.com/oauth2/token
+    client_id_env: BILLING_MCP_CLIENT_ID
+    client_secret_env: BILLING_MCP_CLIENT_SECRET
+    scope: billing.read
+```
+
+`client_id_env` and `client_secret_env` name the environment variables
+holding the client's id and secret; the broker reads them and calls
+`token_endpoint` (HTTP Basic per RFC 6749 §2.3.1) at the moment a call to
+this resource is actually due, never at `apply` time, and caches the minted
+token until shortly before it expires rather than minting one per call.
+
+**Okta note:** an Okta authorization server's `token_endpoint` has the shape
+`https://<your-okta-domain>/oauth2/<authorization-server-id>/v1/token` (the
+org's default authorization server uses the literal segment `default` in
+place of an id). Okta custom scopes are declared on that authorization
+server and requested the same way, as a space-delimited `scope` string.
 
 ## Control-plane CLI
 

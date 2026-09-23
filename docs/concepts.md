@@ -55,9 +55,15 @@ principle that designing them in is not the same as building them now:
    tools (`tools:` entries naming `gateway.yaml` tool resources) are reached
    through, with the same hold-and-inject credential shape as the model
    gateway (see [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers)).
-   A contained agent has no use for it: it works instead through the jailed
-   tool catalog below — list, search, read, edit, write, and no exec — as
-   part of the agent runtime.
+   The broker behind it gets that credential one of two ways: a static
+   bearer token read straight from an environment variable, or, for an
+   OAuth-protected resource, a separate upstream token it mints itself via
+   the `client_credentials` grant and reuses until shortly before it
+   expires. Either way the gateway injects the value outbound; the agent
+   never holds it, and its own inbound run token is never forwarded upstream
+   in its place. A contained agent has no use for it: it works instead
+   through the jailed tool catalog below — list, search, read, edit, write,
+   and no exec — as part of the agent runtime.
 3. **Control tower** — the platform itself: the config directory, `apply`,
    and the registry. Unlike the other two this is not a network facade; it
    is the config, validation, and registry path described above.

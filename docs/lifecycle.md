@@ -157,7 +157,15 @@ step event**, so an audit shows exactly what guarantee applied:
   2. it connects, as an MCP client, to each of the agent's declared tools
      (each one a `gateway.yaml` tool resource) and injects that resource's
      broker-resolved credential into its own outbound calls — a credential
-     the agent never sees;
+     the agent never sees. For a resource declared with `grant_type:
+     client_credentials`, that credential is not read verbatim from the
+     environment: the broker mints a separate upstream OAuth token from the
+     resource's token endpoint on the first outbound call, reuses it until
+     shortly before it expires, and mints a fresh one once it's due to. The
+     run token from step 1 is a different token, scoped to this step only,
+     and it is never forwarded upstream in the minted token's place — the
+     agent's inbound credential and the tool's outbound credential never mix
+     (no-passthrough);
   3. it mirrors those upstream tools onto the proxy's inbound MCP server,
      gated behind the run token: a request without the matching
      `Authorization: Bearer <token>` header is rejected before any tool
@@ -211,12 +219,16 @@ credential is held and injected by Agenthof, resolved from an environment
 variable named in `gateway.yaml` (never a value stored in config), and the
 human is attributed through the ledger rather than through the credential.
 
-> Reserved for later: today a tool resource's credential is always a static
-> bearer token from an environment variable (`credential_source: static_env`).
-> `gateway.yaml`'s tool-resource schema reserves additional fields for
-> IdP-issued, per-call credentials (client-credentials grants, token exchange)
-> — parsed today, not yet implemented — so a resource can move onto that
-> stronger footing later without a breaking schema change.
+> Shipped: a tool resource's credential is either a static bearer token read
+> from an environment variable (`credential_source: static_env`, the
+> default `grant_type: ""`), or a separate upstream OAuth token the broker
+> mints itself via the `client_credentials` grant
+> (`grant_type: client_credentials`) — see
+> [`reference/config.md`](reference/config.md) for the field-by-field
+> rules and a worked example. Reserved for later: token exchange and other
+> IdP-issued, per-call credential shapes beyond `client_credentials` — parsed
+> as reserved schema fields today, not yet implemented — so a resource can
+> move onto that footing later without a breaking schema change.
 
 ### Success, artifacts, and handoff
 
@@ -304,10 +316,10 @@ flag and exit-code reference.
 
 | Shipped today | Reserved for later |
 |---|---|
-| `echo` (offline) and `adk` (model-backed) executors | agent auth to IdP-protected resources (M2M / on-behalf-of; today's tool credentials are static bearer tokens only) |
+| `echo` (offline) and `adk` (model-backed) executors | on-behalf-of / token-exchange agent auth to IdP-protected resources (RFC 8693) |
 | model gateway with per-role keys + budgets | enforced capabilities for fronted agents (the proxy allowlists which tools a fronted agent may reach; it does not otherwise constrain what the agent's own code does) |
 | `contained` and `fronted` execution tiers | multi-resource / cross-repo scope |
-| inbound MCP proxy for a fronted agent's declared tools — allowlisted, credential-injecting, ledgered | DAG workflows |
+| inbound MCP proxy for a fronted agent's declared tools — allowlisted, credential-injecting, ledgered, and able to mint its own upstream token via the `client_credentials` grant | DAG workflows |
 | hash-chained ledger + `audit` / `audit verify` | SIEM / multi-org investigation at scale |
 | RBAC by group; linear workflow + fail-back | |
 | cross-run + control incident timeline (`investigate`) + config-join on `audit <run-id>` | |
