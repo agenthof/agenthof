@@ -5,12 +5,15 @@ Where it and any other document disagree, this constitution wins.
 
 ## Article I — Containment by construction
 
-Agents get no raw network access, no shell, and no ambient credentials.
-Capability reaches an agent only through governed, logged doors: the model
-gateway, the tool catalog (tool gateway in V2), and a jailed workspace
-(path-confined, symlink-hardened, no dotfile or VCS-metadata access). No
-change may add an agent-reachable exec tool, an unmediated network call, or a
-credential stored where an agent's config or runtime can read its value.
+Agents get no raw network access and no ambient credentials, and run no
+commands except those on the config allowlist. Capability reaches an agent
+only through governed, logged doors: the model gateway, the tool catalog
+(tool gateway in V2), the exec gateway, and a jailed workspace (path-confined,
+symlink-hardened, no dotfile or VCS-metadata access). Allowlisted commands run
+in the operator's sandbox and each is recorded — attested by the agent today;
+Agenthof records but does not run or contain them, and enforced execution is
+reserved. No change may add an unmediated network call, or a credential stored
+where an agent's config or runtime can read its value.
 
 ## Article II — Identity
 
