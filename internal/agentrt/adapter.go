@@ -13,8 +13,11 @@ import (
 	"github.com/agenthof/agenthof/internal/engine"
 )
 
-// defaultAdapterTimeout is used when AdapterExecutor.Timeout is zero.
-const defaultAdapterTimeout = 60 * time.Second
+// defaultAdapterTimeout is used when AdapterExecutor.Timeout is zero. It is
+// generous because a tool-using agent makes several proxied round-trips
+// (through the tool proxy named by X-Agenthof-Proxy-URL) within this one
+// POST, not a single quick call.
+const defaultAdapterTimeout = 5 * time.Minute
 
 // maxAdapterResponseBytes caps how much of a fronted agent's response body
 // Execute will read. The adapter is a trust boundary: a misbehaving or
@@ -47,8 +50,10 @@ var adapterClient = &http.Client{
 // response onto a StepResult. It implements engine.StepExecutor.
 //
 // It forwards the run's delegation binding (invoker, role, workflow, run ID)
-// to the agent as X-Agenthof-* headers. This is attested, not enforced: a
-// non-conforming agent can ignore the headers.
+// to the agent as X-Agenthof-* headers, and, when the step ctx carries
+// tool-proxy coordinates, the X-Agenthof-Proxy-URL and X-Agenthof-Run-Token
+// headers too. This is attested, not enforced: a non-conforming agent can
+// ignore the headers.
 type AdapterExecutor struct {
 	// Timeout bounds the whole request/response round trip. Zero means
 	// defaultAdapterTimeout.
@@ -75,12 +80,14 @@ type adapterResponse struct {
 }
 
 // Execute POSTs {"input", "artifacts", "agent"} as JSON to a.Endpoint, with
-// the X-Agenthof-Agent header and the X-Agenthof-* identity headers (invoker,
-// issuer, method, role, workflow, run id), using a client that does not follow
-// redirects (a fronted agent is a trust boundary; a 3xx is reported as a
-// failed step like any other non-200). A 200 response is decoded and mapped
-// onto StepResult, except that an endpoint-supplied failure reason
-// (success:false) is capped at maxAdapterReasonChars. A non-200 response, a
+// the X-Agenthof-Agent header, the X-Agenthof-* identity headers (invoker,
+// issuer, method, role, workflow, run id), and, when the step ctx carries
+// tool-proxy coordinates (engine.WithProxyCoordinates), the
+// X-Agenthof-Proxy-URL and X-Agenthof-Run-Token headers, using a client that
+// does not follow redirects (a fronted agent is a trust boundary; a 3xx is
+// reported as a failed step like any other non-200). A 200 response is
+// decoded and mapped onto StepResult, except that an endpoint-supplied
+// failure reason (success:false) is capped at maxAdapterReasonChars. A non-200 response, a
 // transport error, a timeout, or a response body over maxAdapterResponseBytes
 // is reported as a failed step (Success: false) with a nil error, since those
 // reflect the fronted agent's own availability or behavior, not a problem
@@ -119,6 +126,13 @@ func (x AdapterExecutor) Execute(ctx context.Context, binding engine.Binding, a 
 	req.Header.Set("X-Agenthof-Role", binding.Role)
 	req.Header.Set("X-Agenthof-Workflow", binding.Workflow)
 	req.Header.Set("X-Agenthof-Run-Id", binding.RunID)
+	if purl, ptok, ok := engine.ProxyCoordinatesFrom(ctx); ok {
+		// The tool-proxy endpoint + this step's run token, for the agent to
+		// route its gated tool calls through (credential-starvation). The token
+		// is a secret handed to the agent only — never logged or ledgered.
+		req.Header.Set("X-Agenthof-Proxy-URL", purl)
+		req.Header.Set("X-Agenthof-Run-Token", ptok)
+	}
 
 	resp, err := adapterClient.Do(req)
 	if err != nil {

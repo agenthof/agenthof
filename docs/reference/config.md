@@ -67,10 +67,17 @@ Optional free text. Not checked by `apply`.
 
 ### `tools`
 
-Optional list of tool names. Not checked by `apply` for a `contained` agent.
-For a `fronted` agent, any non-empty `tools` list is rejected with
-`bad-execution` ("fronted agents cannot declare tools; tools are
-contained-runtime capabilities").
+Optional list of tool names. Not checked by `apply` for a `contained` agent
+(a contained agent works through its jailed tool catalog instead — see
+[`docs/concepts.md`](../concepts.md) — and this list has no effect on it).
+For a `fronted` agent, each entry must be the id of a tool resource declared
+under `gateway.yaml`'s `tools` map (see [`tools`](#tools-1) under Gateway,
+below); an entry that names no such resource is rejected with `unknown-tool`
+("agent references tool ..., which is not a declared gateway tool
+resource"). A fronted agent reaches its declared tools only through
+Agenthof's inbound MCP proxy for the duration of its step — see
+[`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs-two-tiers)
+for the runtime flow; this reference only covers what `apply` checks.
 
 ### `output`
 
@@ -105,15 +112,18 @@ instruction: |
 output: plan
 ```
 
-**Example (illustrative, `fronted`):**
+**Example (illustrative, `fronted`, with a declared tool):**
 
 ```yaml
 name: legacy-triage
 description: Fronts an existing HTTP agent behind the registry
 execution: fronted
 endpoint: https://legacy.internal/agents/triage
-# model and tools are not set: model routing is skipped for fronted agents,
-# and a non-empty `tools` list here would fail apply with bad-execution.
+tools: [ticket-search]
+# model is not set: model routing is skipped for fronted agents. `tools`
+# entries must each name a resource under gateway.yaml's `tools` map (see
+# `ticket-search` in the Gateway example below), or apply rejects the agent
+# with unknown-tool.
 ```
 
 ## Workflows (`config/workflows/*.yaml` → `WorkflowDef` / `Step`)
@@ -248,7 +258,7 @@ allowed_groups: [finance]
 budget_usd_month: 20
 ```
 
-## Gateway (`config/gateway.yaml` → `GatewayConfig` / `ModelRoute`)
+## Gateway (`config/gateway.yaml` → `GatewayConfig` / `ModelRoute` / `ToolResource`)
 
 `GatewayConfig` fields:
 
@@ -266,24 +276,39 @@ budget_usd_month: 20
 | Model | `model` | string | no (not checked by `apply`) | — |
 | APIKeyEnv | `api_key_env` | string | no (not checked by `apply`) | — |
 
-`ToolResource` fields — the reserved tool/MCP gateway schema slot described in
-`docs/concepts.md` (parsed, but not yet read by `apply` or any runtime path):
+`ToolResource` fields — a declared tool/MCP resource, reached through
+Agenthof's inbound MCP proxy by any fronted agent that lists its id under
+`tools` (see [`tools`](#tools) under Agents, above, and
+[`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs-two-tiers)
+for the runtime flow):
 
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
-| Kind | `kind` | string | no (not checked by `apply`) | — |
-| URL | `url` | string | no (not checked by `apply`) | — |
-| CredentialSource | `credential_source` | string | no (not checked by `apply`) | — |
+| Kind | `kind` | string | yes | — |
+| URL | `url` | string | yes | — |
+| CredentialSource | `credential_source` | string | yes | — |
 | TokenEnv | `token_env` | string | no (not checked by `apply`) | — |
-| GrantType | `grant_type` | string | no (not checked by `apply`) | — |
-| ClientAuth | `client_auth` | string | no (not checked by `apply`) | — |
-| Issuer | `issuer` | string | no (not checked by `apply`) | — |
-| TokenEndpoint | `token_endpoint` | string | no (not checked by `apply`) | — |
-| ClientIDEnv | `client_id_env` | string | no (not checked by `apply`) | — |
-| Scope | `scope` | string | no (not checked by `apply`) | — |
+| GrantType | `grant_type` | string | no (not checked by `apply`; reserved) | — |
+| ClientAuth | `client_auth` | string | no (not checked by `apply`; reserved) | — |
+| Issuer | `issuer` | string | no (not checked by `apply`; reserved) | — |
+| TokenEndpoint | `token_endpoint` | string | no (not checked by `apply`; reserved) | — |
+| ClientIDEnv | `client_id_env` | string | no (not checked by `apply`; reserved) | — |
+| Scope | `scope` | string | no (not checked by `apply`; reserved) | — |
 
-`TokenEnv` and `ClientIDEnv` hold the *name* of an environment variable, never
-a credential value.
+`apply` requires `kind` to be exactly `"mcp"` and `url` to be non-empty,
+rejecting a resource that fails either with `bad-tool-resource` ("tool
+resource ... must set kind: mcp and a url"); it separately requires
+`credential_source` to be exactly `"static_env"`, rejecting anything else
+(including empty) with `bad-tool-resource` ("credential_source ... is not
+implemented (only static_env)"). `token_env` is **not** checked by `apply` —
+it is read only at the moment a fronted step starts, when the proxy resolves
+the named environment variable to a credential; naming a variable that isn't
+set fails that step (not `apply`) with a broker error. `grant_type`,
+`client_auth`, `issuer`, `token_endpoint`, `client_id_env`, and `scope` are
+parsed and accepted today but read by no runtime path yet — reserved for a
+credential source other than `static_env` (an IdP-issued, per-call
+credential) without a breaking schema change. `TokenEnv` and `ClientIDEnv`
+hold the *name* of an environment variable, never a credential value.
 
 ### `models`
 
@@ -296,10 +321,14 @@ validated by `apply`.
 
 ### `tools`
 
-A map from a logical tool-resource name to a `ToolResource`. This is the
-reserved tool/MCP gateway schema slot (see "Tool/MCP gateway" in
-`docs/concepts.md`): it is parsed today, but `apply` does not validate it and
-no runtime path reads it yet.
+A map from a tool-resource id to a `ToolResource` (fields above). A fronted
+agent's `tools` list (see [`tools`](#tools) under Agents) names ids from this
+map; `apply` rejects an agent entry that doesn't resolve here with
+`unknown-tool`, and validates every declared resource itself against the
+`ToolResource` rules above (`bad-tool-resource`). At runtime, a fronted
+step whose agent declares tools reaches them only through Agenthof's inbound
+MCP proxy, never directly — see
+[`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs-two-tiers).
 
 ### `defaults` / `defaults.model`
 
@@ -318,6 +347,18 @@ models:
     api_key_env: AGENTHOF_GATEWAY_KEY
 defaults:
   model: fast
+```
+
+**Example (illustrative, a `tools` entry for the `legacy-triage` agent
+above):**
+
+```yaml
+tools:
+  ticket-search:
+    kind: mcp
+    url: https://tickets.internal/mcp
+    credential_source: static_env
+    token_env: TICKETS_MCP_TOKEN
 ```
 
 ## Control-plane CLI

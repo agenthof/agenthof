@@ -1015,3 +1015,114 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 		t.Fatalf("expected step_succeeded event with Execution=fronted, got %+v", events)
 	}
 }
+
+// TestRunWiresToolProxyForFrontedToolAgent proves `run` actually constructs
+// and wires a real toolproxy.Proxy into engine.Options when the config
+// declares a gateway tool resource that a fronted agent references: the
+// resource's credential env var is deliberately left unset, so the wired
+// proxy's Start call fails fast at the broker (no network involved), and
+// that failure — prefixed "tool proxy: " by the engine's own bracketing
+// code — can only appear if Options.ToolProxy was actually non-nil. Before
+// the proxy is wired, this same config runs the fronted step directly
+// through the adapter (bypassing the tool proxy entirely) and succeeds
+// instead — the regression this test guards against.
+func TestRunWiresToolProxyForFrontedToolAgent(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_TOKEN", "")
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"artifact":"front result"}`))
+	}))
+	defer stub.Close()
+
+	root := t.TempDir()
+	files := map[string]string{
+		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\ntools: [github]\n",
+		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
+		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
+		"gateway.yaml": "tools:\n  github:\n    kind: mcp\n    url: https://mcp.example.test/\n" +
+			"    credential_source: static_env\n    token_env: AGENTHOF_TEST_UNSET_TOOL_TOKEN\n",
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Deliberately left unset (test-scoped, not process-global) so the wired
+	// proxy's broker resolve fails fast, without any network call.
+	t.Setenv("AGENTHOF_TEST_UNSET_TOOL_TOKEN", "")
+
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
+		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:0"}, &out)
+	if code != 1 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "finished: failed") {
+		t.Fatalf("expected the step to fail via the tool proxy, got: %s", out.String())
+	}
+
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: failed`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+	events, _, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stepFailed *engine.Event
+	for i := range events {
+		if events[i].Type == "step_failed" {
+			stepFailed = &events[i]
+		}
+	}
+	if stepFailed == nil || !strings.HasPrefix(stepFailed.Reason, "tool proxy: ") {
+		t.Fatalf("expected a step_failed event naming the tool proxy, got %+v", events)
+	}
+}
+
+// TestRunToolProxyAddrFlagParsesButIsUnused confirms --tool-proxy-addr is
+// accepted (forward-compat) on an ordinary run that declares no gateway
+// tools at all, and that such a run is unaffected: Options.ToolProxy stays
+// nil, so the fronted step still executes directly through the adapter
+// (proof: the stub's own artifact comes back unchanged).
+func TestRunToolProxyAddrFlagParsesButIsUnused(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_TOKEN", "")
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"artifact":"front result"}`))
+	}))
+	defer stub.Close()
+
+	root := t.TempDir()
+	files := map[string]string{
+		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\n",
+		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
+		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
+		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:9999"}, &out)
+	if code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "finished: succeeded") {
+		t.Fatalf("run with no gateway tools must be unaffected by the flag: %s", out.String())
+	}
+}

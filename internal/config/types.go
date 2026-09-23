@@ -61,12 +61,13 @@ type GatewayConfig struct {
 	} `yaml:"defaults"`
 }
 
-// ToolResource is a declared tool/MCP resource in the gateway catalog.
-// Reserved shape: parsed, not yet read by any runtime path. The first
-// consumer will read only Kind/URL/CredentialSource=="static_env"/TokenEnv;
-// the remaining fields are the three-axis (grant × client-auth × source) +
-// multi-IdP shape, present so later additions to this catalog stay additive.
-// Credential coordinates are env-var NAMES, never values (Article II).
+// ToolResource is a declared tool/MCP resource in the gateway catalog. Kind
+// and CredentialSource=="static_env" are validated at config load; the tool
+// proxy itself reads URL and TokenEnv to connect to the upstream MCP server
+// and inject its credential. The remaining fields are the three-axis
+// (grant × client-auth × source) + multi-IdP shape, reserved so later
+// additions to this catalog stay additive. Credential coordinates are
+// env-var NAMES, never values (Article II).
 type ToolResource struct {
 	Kind             string `yaml:"kind"` // "mcp"
 	URL              string `yaml:"url"`

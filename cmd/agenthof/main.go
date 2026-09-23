@@ -17,6 +17,7 @@ import (
 	"github.com/agenthof/agenthof/internal/agentrt"
 	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/audit"
+	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
@@ -25,6 +26,7 @@ import (
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/registry"
+	"github.com/agenthof/agenthof/internal/toolproxy"
 )
 
 const usage = `agenthof — the agents' court
@@ -33,7 +35,7 @@ Usage:
   agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
-  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--executor echo|adk] [--workspace <dir>] [--artifact-dir <dir>]
+  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--executor echo|adk] [--workspace <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>]
   agenthof audit <run-id> [--log-dir <dir>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
@@ -537,6 +539,9 @@ func cmdRun(args []string, out io.Writer) int {
 	executorName := fs.String("executor", "echo", `step executor: "echo" or "adk"`)
 	workspace := fs.String("workspace", "", "workspace directory (default: .agenthof/workspaces/<unix-nano>)")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
+	// Accepted for forward-compat: the tool proxy always binds 127.0.0.1:0
+	// regardless of this flag's value today.
+	fs.String("tool-proxy-addr", "127.0.0.1:0", "tool-proxy bind address (currently always binds 127.0.0.1:0; reserved for future use)")
 	fs.SetOutput(out)
 	if err := fs.Parse(args[2:]); err != nil {
 		return 2
@@ -614,8 +619,17 @@ func cmdRun(args []string, out io.Writer) int {
 	// A hash failure here yields an empty join key, not a run failure: the
 	// run's config already validated above, so the run proceeds regardless.
 	h, _ := config.HashDir(*cfgDir)
+	// Only wire a real tool proxy when the config actually declares gateway
+	// tool resources; otherwise leave Options.ToolProxy nil (a *toolproxy.Proxy
+	// assigned into the interface even when unused would make it a non-nil
+	// interface holding a nil pointer, which the engine's own opts.ToolProxy
+	// != nil bracketing check would then wrongly treat as present).
+	var toolProxy engine.ToolProxy
+	if len(cfg.Gateway.Tools) > 0 {
+		toolProxy = toolproxy.New(cfg.Gateway.Tools, broker.StaticEnv{})
+	}
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
-		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, WorkspaceDir: ws, ConfigHash: h})
+		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, WorkspaceDir: ws, ConfigHash: h, ToolProxy: toolProxy})
 	if err != nil && status == "refused" {
 		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", runID, err)
 		return 1
