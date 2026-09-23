@@ -234,9 +234,54 @@ func TestFrontedAgentUndeclaredToolRejected(t *testing.T) {
 func TestBadCredentialSourceRejected(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Gateway.Tools = map[string]config.ToolResource{
-		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "client_credentials"},
+		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "client_credentials", TokenEnv: "T"},
 	}
 	if codes(Validate(cfg))["bad-tool-resource"] != 1 {
 		t.Fatalf("unimplemented credential_source must be bad-tool-resource")
+	}
+}
+
+func TestValidateClientCredentialsToolResource(t *testing.T) {
+	base := func(mut func(*config.ToolResource)) config.Config {
+		r := config.ToolResource{
+			Kind: "mcp", URL: "https://mcp.example.com/", CredentialSource: "static_env",
+			GrantType: "client_credentials", ClientAuth: "client_secret_basic",
+			Issuer: "https://id.example.com", TokenEndpoint: "https://id.example.com/token",
+			ClientIDEnv: "CC_ID", ClientSecretEnv: "CC_SECRET",
+		}
+		mut(&r)
+		return config.Config{Gateway: config.GatewayConfig{Tools: map[string]config.ToolResource{"t": r}}}
+	}
+	hasFinding := func(errs []ValidationError, code string) bool {
+		for _, e := range errs {
+			if e.Code == code {
+				return true
+			}
+		}
+		return false
+	}
+
+	cases := []struct {
+		name string
+		mut  func(*config.ToolResource)
+		want bool // want a bad-tool-resource finding
+	}{
+		{"valid", func(*config.ToolResource) {}, false},
+		{"loopback http ok", func(r *config.ToolResource) { r.TokenEndpoint = "http://127.0.0.1:9/token" }, false},
+		{"reserved grant", func(r *config.ToolResource) { r.GrantType = "token_exchange" }, true},
+		{"reserved client_auth", func(r *config.ToolResource) { r.ClientAuth = "private_key_jwt" }, true},
+		{"missing issuer", func(r *config.ToolResource) { r.Issuer = "" }, true},
+		{"missing token_endpoint", func(r *config.ToolResource) { r.TokenEndpoint = "" }, true},
+		{"missing client_id_env", func(r *config.ToolResource) { r.ClientIDEnv = "" }, true},
+		{"missing client_secret_env", func(r *config.ToolResource) { r.ClientSecretEnv = "" }, true},
+		{"plaintext non-loopback endpoint", func(r *config.ToolResource) { r.TokenEndpoint = "http://id.example.com/token" }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := Validate(base(tc.mut))
+			if got := hasFinding(errs, "bad-tool-resource"); got != tc.want {
+				t.Fatalf("bad-tool-resource finding = %v, want %v (errs: %v)", got, tc.want, errs)
+			}
+		})
 	}
 }

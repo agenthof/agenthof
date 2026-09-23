@@ -61,23 +61,25 @@ type GatewayConfig struct {
 	} `yaml:"defaults"`
 }
 
-// ToolResource is a declared tool/MCP resource in the gateway catalog. Kind
-// and CredentialSource=="static_env" are validated at config load; the tool
-// proxy itself reads URL and TokenEnv to connect to the upstream MCP server
-// and inject its credential. The remaining fields are the three-axis
-// (grant × client-auth × source) + multi-IdP shape, reserved so later
-// additions to this catalog stay additive. Credential coordinates are
-// env-var NAMES, never values (Article II).
+// ToolResource is a declared tool/MCP resource in the gateway catalog. Kind,
+// CredentialSource=="static_env", and the direct-bearer and client_credentials
+// grants are validated at config load; the tool proxy reads URL and TokenEnv
+// (or mints an upstream token via GrantType=="client_credentials") to connect
+// to the upstream MCP server and inject its credential. The remaining fields
+// are the three-axis (grant × client-auth × source) + multi-IdP shape,
+// reserved so later additions to this catalog stay additive. Credential
+// coordinates are env-var NAMES, never values (Article II).
 type ToolResource struct {
 	Kind             string `yaml:"kind"` // "mcp"
 	URL              string `yaml:"url"`
 	CredentialSource string `yaml:"credential_source"` // "static_env" | vault|spiffe|sts (reserved)
 	TokenEnv         string `yaml:"token_env"`         // static_env bearer env NAME
-	GrantType        string `yaml:"grant_type"`        // reserved
-	ClientAuth       string `yaml:"client_auth"`       // reserved
-	Issuer           string `yaml:"issuer"`            // reserved: (resource,issuer) key
-	TokenEndpoint    string `yaml:"token_endpoint"`    // reserved
-	ClientIDEnv      string `yaml:"client_id_env"`     // reserved: env NAME
+	GrantType        string `yaml:"grant_type"`        // "" (direct-bearer) | "client_credentials" | other (reserved)
+	ClientAuth       string `yaml:"client_auth"`       // client_credentials: "client_secret_basic" (other values reserved)
+	Issuer           string `yaml:"issuer"`            // client_credentials: (resource,issuer) key
+	TokenEndpoint    string `yaml:"token_endpoint"`    // client_credentials: https, or http to loopback only
+	ClientIDEnv      string `yaml:"client_id_env"`     // client_credentials: env NAME
+	ClientSecretEnv  string `yaml:"client_secret_env"` // client_credentials: client secret env NAME
 	Scope            string `yaml:"scope"`             // reserved
 }
 

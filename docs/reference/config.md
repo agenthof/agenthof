@@ -287,12 +287,13 @@ for the runtime flow):
 | Kind | `kind` | string | yes | — |
 | URL | `url` | string | yes | — |
 | CredentialSource | `credential_source` | string | yes | — |
-| TokenEnv | `token_env` | string | no (not checked by `apply`) | — |
-| GrantType | `grant_type` | string | no (not checked by `apply`; reserved) | — |
-| ClientAuth | `client_auth` | string | no (not checked by `apply`; reserved) | — |
-| Issuer | `issuer` | string | no (not checked by `apply`; reserved) | — |
-| TokenEndpoint | `token_endpoint` | string | no (not checked by `apply`; reserved) | — |
-| ClientIDEnv | `client_id_env` | string | no (not checked by `apply`; reserved) | — |
+| TokenEnv | `token_env` | string | yes for the direct-bearer grant (`grant_type: ""`) | — |
+| GrantType | `grant_type` | string | no | `""` (direct-bearer) |
+| ClientAuth | `client_auth` | string | yes for `client_credentials` (must be `client_secret_basic`) | — |
+| Issuer | `issuer` | string | yes for `client_credentials` | — |
+| TokenEndpoint | `token_endpoint` | string | yes for `client_credentials`; must be `https`, or `http` to a loopback host | — |
+| ClientIDEnv | `client_id_env` | string | yes for `client_credentials` | — |
+| ClientSecretEnv | `client_secret_env` | string | yes for `client_credentials` | — |
 | Scope | `scope` | string | no (not checked by `apply`; reserved) | — |
 
 `apply` requires `kind` to be exactly `"mcp"` and `url` to be non-empty,
@@ -300,15 +301,20 @@ rejecting a resource that fails either with `bad-tool-resource` ("tool
 resource ... must set kind: mcp and a url"); it separately requires
 `credential_source` to be exactly `"static_env"`, rejecting anything else
 (including empty) with `bad-tool-resource` ("credential_source ... is not
-implemented (only static_env)"). `token_env` is **not** checked by `apply` —
-it is read only at the moment a fronted step starts, when the proxy resolves
-the named environment variable to a credential; naming a variable that isn't
-set fails that step (not `apply`) with a broker error. `grant_type`,
-`client_auth`, `issuer`, `token_endpoint`, `client_id_env`, and `scope` are
+implemented (only static_env)"). `apply` also validates `grant_type`: the
+empty value is the direct-bearer grant and requires `token_env` (read at the
+moment a fronted step starts, when the proxy resolves the named environment
+variable to a credential; naming a variable that isn't set fails that step,
+not `apply`, with a broker error); `"client_credentials"` requires
+`client_auth` to be exactly `"client_secret_basic"`, plus `issuer`,
+`token_endpoint`, `client_id_env`, and `client_secret_env` all set, with
+`token_endpoint` required to be `https` (or `http` only to a loopback host —
+a client secret over plaintext http to a remote host is rejected at apply
+time); any other `grant_type` is rejected as not implemented. `scope` is
 parsed and accepted today but read by no runtime path yet — reserved for a
-credential source other than `static_env` (an IdP-issued, per-call
-credential) without a breaking schema change. `TokenEnv` and `ClientIDEnv`
-hold the *name* of an environment variable, never a credential value.
+future credential source without a breaking schema change. `TokenEnv`,
+`ClientIDEnv`, and `ClientSecretEnv` hold the *name* of an environment
+variable, never a credential value.
 
 ### `models`
 
