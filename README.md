@@ -88,6 +88,8 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   planes, gateways, execution tiers, identity, the ledger.
 - [`docs/lifecycle.md`](docs/lifecycle.md) — the life of a run: how one
   invocation flows through identity, authorization, execution, and the ledger.
+- [`docs/lifecycle-exec.md`](docs/lifecycle-exec.md) — the life of an exec:
+  allowlist, the operator's sandbox, and the attested record.
 - [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md) — the
   life of a control action: apply, the kill switch, and the control ledger.
 - [`docs/reference/config.md`](docs/reference/config.md) — every YAML field,

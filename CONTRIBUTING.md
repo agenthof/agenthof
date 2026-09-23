@@ -23,7 +23,8 @@ relicense your contribution out from under you.
 - Format with `gofmt`; CI enforces it, plus `go vet`, golangci-lint,
   govulncheck, gitleaks, and a FIPS build gate (`GOFIPS140=latest`).
 - The constitution (`docs/constitution.md`) is binding: additive-only ledger
-  schema, no exec in agent runtimes, no secrets in config or logs.
+  schema, commands only on the config allowlist (attested; Agenthof does not
+  run them), no secrets in config or logs.
 - Every feature, and every new event type, must trace to a specific
   constitution article or to a concept documented in `docs/concepts.md`. If
   it can't be traced, it doesn't ship.
@@ -58,8 +59,8 @@ values useful. Avoid reflection and cleverness in anything on a correctness
 path. `gofmt`, `go vet`, and golangci-lint are gates, not suggestions.
 
 **Secure by construction.** Prefer designs where the bad outcome is impossible
-over designs where it is merely forbidden — no exec tool at all beats an exec
-allowlist, and a jailed path beats a path check. Validate at the boundary, once,
+over designs where it is merely forbidden — a jailed path beats a path check.
+Validate at the boundary, once,
 and trust the validated value inward. Never log or persist secrets, tokens, or
 raw credentials. Bound anything an outside party controls: response sizes,
 string lengths written to the ledger, retries.
