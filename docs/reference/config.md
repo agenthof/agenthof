@@ -367,6 +367,38 @@ tools:
     token_env: TICKETS_MCP_TOKEN
 ```
 
+**Example (illustrative, a `client_credentials` tool resource): an
+OAuth-protected MCP resource, where the credential the proxy injects is not
+read verbatim from an environment variable but a separate token the broker
+mints itself from a generic OAuth identity provider:**
+
+```yaml
+tools:
+  billing-mcp:
+    kind: mcp
+    url: https://billing.internal/mcp
+    credential_source: static_env
+    grant_type: client_credentials
+    client_auth: client_secret_basic
+    issuer: https://idp.example.com/
+    token_endpoint: https://idp.example.com/oauth2/token
+    client_id_env: BILLING_MCP_CLIENT_ID
+    client_secret_env: BILLING_MCP_CLIENT_SECRET
+    scope: billing.read
+```
+
+`client_id_env` and `client_secret_env` name the environment variables
+holding the client's id and secret; the broker reads them and calls
+`token_endpoint` (HTTP Basic per RFC 6749 §2.3.1) at the moment a call to
+this resource is actually due, never at `apply` time, and caches the minted
+token until shortly before it expires rather than minting one per call.
+
+**Okta note:** an Okta authorization server's `token_endpoint` has the shape
+`https://<your-okta-domain>/oauth2/<authorization-server-id>/v1/token` (the
+org's default authorization server uses the literal segment `default` in
+place of an id). Okta custom scopes are declared on that authorization
+server and requested the same way, as a space-delimited `scope` string.
+
 ## Control-plane CLI
 
 `agenthof apply` and `agenthof registry enable|disable` — the kill switch —
