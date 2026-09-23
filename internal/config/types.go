@@ -80,7 +80,7 @@ type ToolResource struct {
 	TokenEndpoint    string `yaml:"token_endpoint"`    // client_credentials: https, or http to loopback only
 	ClientIDEnv      string `yaml:"client_id_env"`     // client_credentials: env NAME
 	ClientSecretEnv  string `yaml:"client_secret_env"` // client_credentials: client secret env NAME
-	Scope            string `yaml:"scope"`             // reserved
+	Scope            string `yaml:"scope"`             // client_credentials: optional, space-delimited
 }
 
 type Config struct {

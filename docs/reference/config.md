@@ -294,7 +294,7 @@ for the runtime flow):
 | TokenEndpoint | `token_endpoint` | string | yes for `client_credentials`; must be `https`, or `http` to a loopback host | — |
 | ClientIDEnv | `client_id_env` | string | yes for `client_credentials` | — |
 | ClientSecretEnv | `client_secret_env` | string | yes for `client_credentials` | — |
-| Scope | `scope` | string | no (not checked by `apply`; reserved) | — |
+| Scope | `scope` | string | no (not checked by `apply`) | — |
 
 `apply` requires `kind` to be exactly `"mcp"` and `url` to be non-empty,
 rejecting a resource that fails either with `bad-tool-resource` ("tool
@@ -311,8 +311,11 @@ not `apply`, with a broker error); `"client_credentials"` requires
 `token_endpoint` required to be `https` (or `http` only to a loopback host —
 a client secret over plaintext http to a remote host is rejected at apply
 time); any other `grant_type` is rejected as not implemented. `scope` is
-parsed and accepted today but read by no runtime path yet — reserved for a
-future credential source without a breaking schema change. `TokenEnv`,
+optional and not validated or required by `apply`; when set on a
+`client_credentials` resource, the broker forwards it verbatim, as a single
+space-delimited string, in the token request's `scope` parameter (empty
+means the request omits `scope` entirely and the authorization server's own
+default applies). `TokenEnv`,
 `ClientIDEnv`, and `ClientSecretEnv` hold the *name* of an environment
 variable, never a credential value.
 
