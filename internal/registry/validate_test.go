@@ -252,15 +252,6 @@ func TestValidateClientCredentialsToolResource(t *testing.T) {
 		mut(&r)
 		return config.Config{Gateway: config.GatewayConfig{Tools: map[string]config.ToolResource{"t": r}}}
 	}
-	hasFinding := func(errs []ValidationError, code string) bool {
-		for _, e := range errs {
-			if e.Code == code {
-				return true
-			}
-		}
-		return false
-	}
-
 	cases := []struct {
 		name string
 		mut  func(*config.ToolResource)
@@ -279,8 +270,34 @@ func TestValidateClientCredentialsToolResource(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			errs := Validate(base(tc.mut))
-			if got := hasFinding(errs, "bad-tool-resource"); got != tc.want {
+			if got := hasCode(errs, "bad-tool-resource"); got != tc.want {
 				t.Fatalf("bad-tool-resource finding = %v, want %v (errs: %v)", got, tc.want, errs)
+			}
+		})
+	}
+}
+
+func TestValidateToolResourceURLMustBeSecure(t *testing.T) {
+	cfg := func(u string) config.Config {
+		return config.Config{Gateway: config.GatewayConfig{Tools: map[string]config.ToolResource{
+			"t": {Kind: "mcp", URL: u, CredentialSource: "static_env", TokenEnv: "T"},
+		}}}
+	}
+	cases := []struct {
+		url string
+		bad bool
+	}{
+		{"https://mcp.example.com/", false},
+		{"http://127.0.0.1:8080/", false}, // loopback ok (tests/local)
+		{"http://localhost:8080/", false},
+		{"http://[::1]:8080/", false},     // ::1 is loopback too
+		{"http://mcp.example.com/", true}, // plaintext remote → rejected
+		{"", true},                        // empty → rejected (as today)
+	}
+	for _, tc := range cases {
+		t.Run(tc.url, func(t *testing.T) {
+			if got := hasCode(Validate(cfg(tc.url)), "bad-tool-resource"); got != tc.bad {
+				t.Fatalf("url %q: bad-tool-resource = %v, want %v", tc.url, got, tc.bad)
 			}
 		})
 	}

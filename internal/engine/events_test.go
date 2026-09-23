@@ -331,3 +331,26 @@ func TestReadLogUnmarshalFailurePreservesHeadCountInvariant(t *testing.T) {
 		t.Fatalf("head.Count must match len(events) even when a later ledger-valid record fails to decode: head=%+v events=%d", head, len(events))
 	}
 }
+
+func TestEventToolFieldsRoundTrip(t *testing.T) {
+	e := Event{Type: "tool_call", Tool: "echo", ArgsSHA: "deadbeef"}
+	data, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"tool":"echo"`) || !strings.Contains(string(data), `"args_sha":"deadbeef"`) {
+		t.Fatalf("expected tool/args_sha in JSON, got %s", data)
+	}
+	var got Event
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Tool != "echo" || got.ArgsSHA != "deadbeef" {
+		t.Fatalf("round-trip lost fields: %+v", got)
+	}
+	// omitempty: a non-tool_call event carries neither key.
+	empty, _ := json.Marshal(Event{Type: "step"})
+	if strings.Contains(string(empty), `"tool":`) || strings.Contains(string(empty), `"args_sha":`) {
+		t.Fatalf("omitempty violated: %s", empty)
+	}
+}

@@ -70,9 +70,13 @@ func Validate(cfg config.Config) []ValidationError {
 	}
 
 	for id, r := range cfg.Gateway.Tools {
-		if r.Kind != "mcp" || r.URL == "" {
+		if r.Kind != "mcp" {
 			add("gateway.yaml", id, "bad-tool-resource",
-				fmt.Sprintf("tool resource %q must set kind: mcp and a url", id))
+				fmt.Sprintf("tool resource %q must set kind: mcp", id))
+		}
+		if !validSecureEndpoint(r.URL) {
+			add("gateway.yaml", id, "bad-tool-resource",
+				fmt.Sprintf("tool resource %q: url must be set and https (or loopback http)", id))
 		}
 		if r.CredentialSource != "static_env" {
 			add("gateway.yaml", id, "bad-tool-resource",
@@ -101,7 +105,7 @@ func Validate(cfg config.Config) []ValidationError {
 				add("gateway.yaml", id, "bad-tool-resource",
 					fmt.Sprintf("tool resource %q: client_secret_env is required for client_credentials", id))
 			}
-			if !validTokenEndpoint(r.TokenEndpoint) {
+			if !validSecureEndpoint(r.TokenEndpoint) {
 				add("gateway.yaml", id, "bad-tool-resource",
 					fmt.Sprintf("tool resource %q: token_endpoint must be set and https (or loopback http)", id))
 			}
@@ -190,10 +194,13 @@ func Validate(cfg config.Config) []ValidationError {
 	return errs
 }
 
-// validTokenEndpoint requires an https URL, or http only to a loopback host
-// (for tests). A client secret over plaintext http to a remote host is exactly
-// the leak Article I guards against, so it is rejected at apply time.
-func validTokenEndpoint(raw string) bool {
+// validSecureEndpoint requires an https URL, or http only to a loopback host
+// (for tests and local development). It guards any endpoint that receives a
+// gateway-injected credential — both a client_credentials token endpoint and
+// a tool resource's upstream url. A credential over plaintext http to a
+// remote host is exactly the leak Article I guards against, so it is
+// rejected at apply time.
+func validSecureEndpoint(raw string) bool {
 	if raw == "" {
 		return false
 	}

@@ -28,12 +28,14 @@ type Event struct {
 	Agent            string    `json:"agent,omitempty"`
 	Status           string    `json:"status,omitempty"`
 	Reason           string    `json:"reason,omitempty"`
-	Artifact         string    `json:"artifact,omitempty"`
-	ArtifactSHA      string    `json:"artifact_sha,omitempty"`
+	Artifact         string    `json:"artifact,omitempty"`     // for tool_call, reused to carry a short preview of the tool result
+	ArtifactSHA      string    `json:"artifact_sha,omitempty"` // for tool_call, reused to carry the sha256 of the tool result
 	Execution        string    `json:"execution,omitempty"`
 	ConfigHash       string    `json:"config_hash,omitempty"`
 	AuthMode         string    `json:"auth_mode,omitempty"`         // set by tool_call to the resource's credential mode, e.g. "static_env"
 	ResourcesTouched []string  `json:"resources_touched,omitempty"` // set by tool_call to the touched tool resource's id; still reserved for a future multi-resource call
+	Tool             string    `json:"tool,omitempty"`              // set by tool_call: the tool name invoked (or attempted)
+	ArgsSHA          string    `json:"args_sha,omitempty"`          // set by tool_call: sha256 of the raw call arguments (never the args themselves)
 	Actor            string    `json:"actor,omitempty"`             // reserved: delegation — the acting agent
 	Principal        string    `json:"principal,omitempty"`         // reserved: delegation — the initiating human/system
 	Binding          Binding   `json:"binding"`

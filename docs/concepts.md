@@ -151,12 +151,14 @@ prerequisites for a release.
 Agents get no raw network access, no shell, and no ambient credentials.
 Capability reaches an agent only through governed, logged doors: the model
 gateway (metered and budgeted), the jailed tool catalog for a contained agent
-or the inbound MCP proxy for a fronted one's declared tools (both
-allowlisted and logged), and a jailed workspace (path-confined,
-symlink-hardened, with no dotfile or VCS-metadata access). Every one of
-those doors writes to the ledger. No change may add an agent-reachable exec
-tool, an unmediated network call, or a credential stored where an agent's
-config or runtime can read its value.
+or the inbound MCP proxy for a fronted one's declared tools (both allowlisted
+and logged), and a jailed workspace (path-confined, symlink-hardened, with no
+dotfile or VCS-metadata access). A call that reaches the proxy for a tool the
+run cannot reach is recorded as a refusal too — the tool name and a fingerprint
+of the arguments, never the arguments themselves. Every one of those doors
+writes to the ledger. No change may add an agent-reachable exec tool, an
+unmediated network call, or a credential stored where an agent's config or
+runtime can read its value.
 
 ## The ledger
 
