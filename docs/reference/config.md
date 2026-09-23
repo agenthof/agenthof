@@ -8,8 +8,8 @@ only those two: the struct comments in
 means and its default) and the rules in
 [`internal/registry/validate.go`](../../internal/registry/validate.go) (what
 `agenthof apply` accepts or rejects). Behavior that lives elsewhere — how the
-engine executes a workflow, how identity and the ledger work, why the
-execution tiers exist — is covered in [`docs/concepts.md`](../concepts.md),
+engine executes a workflow, how identity and the ledger work, how an
+agent runs — is covered in [`docs/concepts.md`](../concepts.md),
 not repeated here. The [Control-plane CLI](#control-plane-cli) section is
 the one exception: it documents command-line flags and exit codes, drawn
 from [`cmd/agenthof/main.go`](../../cmd/agenthof/main.go) — these commands
@@ -29,12 +29,12 @@ not present in `examples/config/` — they exist to show a rule from
 | Name | `name` | string | yes | — |
 | Description | `description` | string | no | — |
 | Enabled | `enabled` | bool | no | `true` |
-| Model | `model` | string | conditionally | falls back to `gateway.yaml`'s `defaults.model` |
+| Model | `model` | string | no | — |
 | Instruction | `instruction` | string | no | — |
 | Tools | `tools` | list of strings | no | none |
 | Output | `output` | string | no | — |
-| Execution | `execution` | string | no | `contained` |
-| Endpoint | `endpoint` | string | conditionally (fronted only) | — |
+| Execution | `execution` | string | no | `fronted` |
+| Endpoint | `endpoint` | string | yes | — |
 | Exec | `exec` | object | no | none |
 
 ### `name`
@@ -55,12 +55,10 @@ A workflow step whose agent resolves to a disabled agent fails `apply` with
 
 ### `model`
 
-Optional string naming a key under `gateway.yaml`'s `models` map. This check
-is skipped entirely for `fronted` agents (see `execution` below). For every
-other agent, `apply` resolves the effective model as: `model` if set,
-otherwise `gateway.yaml`'s `defaults.model`; if that resolved name is not a
-key in `gateway.yaml`'s `models` map, `apply` rejects it with
-`unroutable-model`.
+Optional string. `apply` does not check it, and a run does not resolve it.
+Together with `gateway.yaml`'s `models` and `defaults.model`, and a role's
+`budget_usd_month`, it is configuration for the reserved model door (see
+[`models`](#models)). No run consumes that door.
 
 ### `instruction`
 
@@ -68,16 +66,13 @@ Optional free text. Not checked by `apply`.
 
 ### `tools`
 
-Optional list of tool names. Not checked by `apply` for a `contained` agent
-(a contained agent works through its jailed tool catalog instead — see
-[`docs/concepts.md`](../concepts.md) — and this list has no effect on it).
-For a `fronted` agent, each entry must be the id of a tool resource declared
-under `gateway.yaml`'s `tools` map (see [`tools`](#tools-1) under Gateway,
-below); an entry that names no such resource is rejected with `unknown-tool`
-("agent references tool ..., which is not a declared gateway tool
-resource"). A fronted agent reaches its declared tools only through
-Agenthof's inbound MCP proxy for the duration of its step — see
-[`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs-two-tiers)
+Optional list of tool-resource ids. Each entry must be the id of a tool
+resource declared under `gateway.yaml`'s `tools` map (see
+[`tools`](#tools-1) under Gateway, below); an entry that names no such
+resource is rejected with `unknown-tool` ("agent references tool ..., which
+is not a declared gateway tool resource"). The agent reaches its declared
+tools only through Agenthof's inbound MCP proxy for the duration of its
+step — see [`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs)
 for the runtime flow; this reference only covers what `apply` checks.
 
 ### `output`
@@ -87,19 +82,22 @@ Optional string. Not checked by `apply`.
 ### `execution`
 
 Optional string; per the comment on `AgentDef.Execution`, the accepted
-values are `""`, `"contained"`, or `"fronted"`, and `""` means `contained`
-(see `AgentDef.EffectiveExecution`). Any other value is rejected by `apply`
-with `bad-execution` ("execution ... must be \"contained\" or \"fronted\"").
+values are `""` or `"fronted"`, and `""` means `fronted` (see
+`AgentDef.EffectiveExecution`). `apply` rejects `"contained"` with
+`bad-execution` ("execution \"contained\" was removed; set execution:
+fronted and an endpoint"). Any other value is rejected with `bad-execution`
+("execution ... must be \"fronted\"").
 
 ### `endpoint`
 
-Per the comment on `AgentDef.Endpoint`, this is fronted-only: "the agent's
-HTTP endpoint". `apply` enforces both directions:
-
-- effective execution `fronted` and `endpoint` empty → rejected,
-  `fronted-needs-endpoint` ("fronted agents must have an endpoint").
-- effective execution `contained` and `endpoint` non-empty → rejected,
-  `contained-has-endpoint` ("endpoint is only valid on fronted agents").
+Required; per the comment on `AgentDef.Endpoint`, "the agent's HTTP
+endpoint". `apply` rejects an empty endpoint with `fronted-needs-endpoint`.
+The message is "agents are fronted and must declare an endpoint (the
+contained tier was removed)" when `execution` is empty, and "fronted agents
+must have an endpoint" when `execution` is `fronted`. A non-empty endpoint
+must be `https`, or `http` whose host is `localhost`, `127.0.0.1`, or `::1`;
+anything else is rejected with `bad-endpoint` ("endpoint must be https (or
+loopback http)").
 
 ### `exec`
 
@@ -159,8 +157,7 @@ exec:
     - exe: rg
 ```
 
-**Example (from `examples/config/agents/planner.yaml`, a `contained` agent —
-`execution` and `endpoint` omitted, so they default):**
+**Example (from `examples/config/agents/planner.yaml`):**
 
 ```yaml
 name: planner
@@ -169,9 +166,11 @@ model: fast
 instruction: |
   You are a planning agent. Produce a short numbered plan for the task.
 output: plan
+execution: fronted
+endpoint: http://127.0.0.1:8080/
 ```
 
-**Example (illustrative, `fronted`, with a declared tool):**
+**Example (illustrative, with a declared tool):**
 
 ```yaml
 name: legacy-triage
@@ -179,10 +178,9 @@ description: Fronts an existing HTTP agent behind the registry
 execution: fronted
 endpoint: https://legacy.internal/agents/triage
 tools: [ticket-search]
-# model is not set: model routing is skipped for fronted agents. `tools`
-# entries must each name a resource under gateway.yaml's `tools` map (see
-# `ticket-search` in the Gateway example below), or apply rejects the agent
-# with unknown-tool.
+# `model` is not checked. `tools` entries must each name a resource under
+# gateway.yaml's `tools` map (see `ticket-search` in the Gateway example
+# below), or apply rejects the agent with unknown-tool.
 ```
 
 ## Workflows (`config/workflows/*.yaml` → `WorkflowDef` / `Step`)
@@ -305,7 +303,9 @@ and groups are used outside of `apply`).
 
 ### `budget_usd_month`
 
-Optional float. `apply` does not check its value.
+Optional float. `apply` does not check its value. It is a declaration for
+the reserved model door: `gateway provision` can mint a per-role key from
+it, and no run consumes that key. See [`models`](#models).
 
 **Example (from `examples/config/roles/accountant.yaml`):**
 
@@ -323,7 +323,7 @@ budget_usd_month: 20
 
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
-| Models | `models` | map of string → `ModelRoute` | conditionally | — |
+| Models | `models` | map of string → `ModelRoute` | no | — |
 | Tools | `tools` | map of string → `ToolResource` | no | — |
 | Defaults.Model | `defaults.model` | string | no | — |
 
@@ -336,9 +336,9 @@ budget_usd_month: 20
 | APIKeyEnv | `api_key_env` | string | no (not checked by `apply`) | — |
 
 `ToolResource` fields — a declared tool/MCP resource, reached through
-Agenthof's inbound MCP proxy by any fronted agent that lists its id under
+Agenthof's inbound MCP proxy by any agent that lists its id under
 `tools` (see [`tools`](#tools) under Agents, above, and
-[`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs-two-tiers)
+[`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs)
 for the runtime flow):
 
 | Field | YAML key | Type | Required | Default |
@@ -384,30 +384,30 @@ variable, never a credential value.
 
 ### `models`
 
-A map from a logical model name to a `ModelRoute`. `apply` uses the map's
-keys as the set of routable model names when resolving each non-`fronted`
-agent's effective `model` (see `model` under Agents, above) — a name not
-present as a key here fails with `unroutable-model`. The contents of each
-`ModelRoute` entry (`endpoint`, `model`, `api_key_env`) are not themselves
-validated by `apply`.
+A map from a logical model name to a `ModelRoute`. `apply` accepts the map
+and does not validate its keys or the contents of each entry (`endpoint`,
+`model`, `api_key_env`). Nothing on the run path reads `models`,
+`defaults.model`, an agent's `model`, or a role's `budget_usd_month`. Those
+fields are declarations for the reserved model door — a fronted agent
+reaching models through Agenthof, with the credential injected and not
+passed through to the agent. `gateway.Resolve` still implements the lookup,
+and `gateway provision` can still mint a per-role key; no run calls either.
 
 ### `tools`
 
-A map from a tool-resource id to a `ToolResource` (fields above). A fronted
-agent's `tools` list (see [`tools`](#tools) under Agents) names ids from this
-map; `apply` rejects an agent entry that doesn't resolve here with
-`unknown-tool`, and validates every declared resource itself against the
-`ToolResource` rules above (`bad-tool-resource`). At runtime, a fronted
-step whose agent declares tools reaches them only through Agenthof's inbound
-MCP proxy, never directly — see
-[`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs-two-tiers).
+A map from a tool-resource id to a `ToolResource` (fields above). An agent's
+`tools` list (see [`tools`](#tools) under Agents) names ids from this map;
+`apply` rejects an agent entry that doesn't resolve here with `unknown-tool`,
+and validates every declared resource itself against the `ToolResource` rules
+above (`bad-tool-resource`). At runtime, a step whose agent declares tools
+reaches them only through Agenthof's inbound MCP proxy, never directly — see
+[`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs).
 
 ### `defaults` / `defaults.model`
 
 `defaults` is a nested object holding one field, `model` (optional string).
-`GatewayConfig.Defaults.Model` is used as the fallback effective `model` for
-any non-`fronted` agent that leaves its own `model` empty (see `model` under
-Agents, above).
+`apply` does not read it. It is part of the reserved model-door declaration
+described under [`models`](#models).
 
 **Example (from `examples/config/gateway.yaml`):**
 
@@ -485,8 +485,8 @@ recorded and why; this section is the flag-by-flag and exit-code reference.
 ### `--control-log`
 
 Path to the control-plane ledger. Default `.agenthof/control.jsonl`,
-resolved relative to the current working directory the same way key and
-workspace paths are — run these commands from the repository root, or pass
+resolved relative to the current working directory — run these commands
+from the repository root, or pass
 `--control-log` explicitly. Keep it out from under any directory passed to
 `--log-dir`: `runs prune` skips a control log and a `*.torn-*` fragment only
 by name (`control.jsonl` and anything containing `.torn-`) — a control log
