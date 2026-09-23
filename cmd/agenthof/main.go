@@ -619,13 +619,21 @@ func cmdRun(args []string, out io.Writer) int {
 	// A hash failure here yields an empty join key, not a run failure: the
 	// run's config already validated above, so the run proceeds regardless.
 	h, _ := config.HashDir(*cfgDir)
-	// Only wire a real tool proxy when the config actually declares gateway
-	// tool resources; otherwise leave Options.ToolProxy nil (a *toolproxy.Proxy
-	// assigned into the interface even when unused would make it a non-nil
-	// interface holding a nil pointer, which the engine's own opts.ToolProxy
-	// != nil bracketing check would then wrongly treat as present).
+	// Wire the run listener when the config declares gateway tool resources
+	// or any agent declares exec. Otherwise leave Options.ToolProxy nil (a
+	// *toolproxy.Proxy assigned into the interface even when unused would
+	// make it a non-nil interface holding a nil pointer, which the engine's
+	// own opts.ToolProxy != nil bracketing check would then wrongly treat as
+	// present).
+	anyExec := false
+	for _, a := range cfg.Agents {
+		if a.Exec.Declared() {
+			anyExec = true
+			break
+		}
+	}
 	var toolProxy engine.ToolProxy
-	if len(cfg.Gateway.Tools) > 0 {
+	if len(cfg.Gateway.Tools) > 0 || anyExec {
 		toolProxy = toolproxy.New(cfg.Gateway.Tools, broker.Dispatch{
 			StaticEnv: broker.StaticEnv{},
 			// A hung upstream token endpoint must not block the outbound call

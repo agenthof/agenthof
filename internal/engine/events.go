@@ -36,6 +36,10 @@ type Event struct {
 	ResourcesTouched []string  `json:"resources_touched,omitempty"` // set by tool_call to the touched tool resource's id; still reserved for a future multi-resource call
 	Tool             string    `json:"tool,omitempty"`              // set by tool_call: the tool name invoked (or attempted)
 	ArgsSHA          string    `json:"args_sha,omitempty"`          // set by tool_call: sha256 of the raw call arguments (never the args themselves)
+	Command          []string  `json:"command,omitempty"`           // set by exec: the reported argv
+	ExitCode         *int      `json:"exit_code,omitempty"`         // set by exec attest: pointer so 0 (success) is distinct from absent
+	OutputSHA        string    `json:"output_sha,omitempty"`        // set by exec attest: sha256 of the reported command output (never the output)
+	Mode             string    `json:"mode,omitempty"`              // set by exec: "attested" (enforced reserved)
 	Actor            string    `json:"actor,omitempty"`             // reserved: delegation — the acting agent
 	Principal        string    `json:"principal,omitempty"`         // reserved: delegation — the initiating human/system
 	Binding          Binding   `json:"binding"`

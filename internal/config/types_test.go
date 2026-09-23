@@ -128,3 +128,37 @@ defaults:
 		t.Fatalf("tool resource mismatch: %+v", r)
 	}
 }
+
+func TestExecConfigAllows(t *testing.T) {
+	ec := ExecConfig{Mode: "attested", Allow: []ExecEntry{
+		{Exe: "go", ArgsPrefix: []string{"test"}},
+		{Exe: "rg"},
+	}}
+	cases := []struct {
+		argv []string
+		want bool
+	}{
+		{[]string{"go", "test", "./..."}, true},
+		{[]string{"go", "test"}, true},
+		{[]string{"go", "build"}, false},
+		{[]string{"go"}, false}, // too short for the [test] prefix
+		{[]string{"gofmt", "-w", "."}, false},
+		{[]string{"rg"}, true},
+		{[]string{"rg", "foo", "-n"}, true},
+		{nil, false},
+	}
+	for _, c := range cases {
+		if got := ec.Allows(c.argv); got != c.want {
+			t.Errorf("Allows(%v) = %v, want %v", c.argv, got, c.want)
+		}
+	}
+}
+
+func TestExecConfigDeclared(t *testing.T) {
+	if (ExecConfig{}).Declared() {
+		t.Error("zero ExecConfig should not be declared")
+	}
+	if !(ExecConfig{Mode: "attested", Allow: []ExecEntry{{Exe: "go"}}}).Declared() {
+		t.Error("populated ExecConfig should be declared")
+	}
+}

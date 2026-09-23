@@ -199,9 +199,11 @@ step event**, so an audit shows exactly what guarantee applied:
   then `workflow_finished{failed}`) rather than bouncing back to a prior
   step, the same treatment as a configuration error.
 
-  A fronted agent that declares no `tools` never sees these two headers or
-  any proxy at all — the whole mechanism above only exists for the duration
-  of a step whose agent has at least one declared tool.
+  The same listener, and the same two headers, also serve the exec door when
+  the agent declares `exec`, including an agent that declares exec and no
+  tools. See [`lifecycle-exec.md`](lifecycle-exec.md). A fronted agent that
+  declares neither `tools` nor `exec` never sees these two headers or any
+  listener at all.
 
 Two executors ship for the contained tier: the default **`echo`** executor,
 which runs fully offline with no model and no credentials (great for trying the
@@ -326,6 +328,7 @@ flag and exit-code reference.
 | model gateway with per-role keys + budgets | enforced capabilities for fronted agents (the proxy allowlists which tools a fronted agent may reach; it does not otherwise constrain what the agent's own code does) |
 | `contained` and `fronted` execution tiers | multi-resource / cross-repo scope |
 | inbound MCP proxy for a fronted agent's declared tools — allowlisted, credential-injecting, ledgered, and able to mint its own upstream token via the `client_credentials` grant | DAG workflows |
+| attested exec for a fronted agent: an allowlist check, then an agent-reported outcome recorded as `exec` with `mode: attested`. Agenthof records the report and does not run or contain the command | enforced execution, where Agenthof would run the command |
 | hash-chained ledger + `audit` / `audit verify` | SIEM / multi-org investigation at scale |
 | RBAC by group; linear workflow + fail-back | |
 | cross-run + control incident timeline (`investigate`) + config-join on `audit <run-id>` | |
@@ -334,6 +337,7 @@ Only shipped behavior is a guarantee.
 
 ## See also
 
+- [`lifecycle-exec.md`](lifecycle-exec.md) — the life of an exec: authorize, the operator's sandbox, attest, the ledger.
 - [`control-plane-lifecycle.md`](control-plane-lifecycle.md) — the life of a control action (the governance plane that decides what may run).
 - [`concepts.md`](concepts.md) — the pieces and why they're arranged this way.
 - [`constitution.md`](constitution.md) — the invariants every run must honor.

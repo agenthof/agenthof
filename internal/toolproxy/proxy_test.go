@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -698,4 +699,224 @@ func TestProxyExposedToolEmitsExactlyOneEvent(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("exposed-tool call produced %d tool_call events, want exactly 1 (middleware must not double-emit)", n)
 	}
+}
+
+func execPost(t *testing.T, base, path, runToken, body string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, base+path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+runToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("exec post: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+func startExecProxy(t *testing.T, allow []config.ExecEntry, record func(engine.Event)) (string, string, func()) {
+	t.Helper()
+	agent := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
+		Exec: config.ExecConfig{Mode: "attested", Allow: allow}}
+	p := New(map[string]config.ToolResource{}, broker.StaticEnv{})
+	url, token, err := p.Start(testBinding(), agent, record)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return url, token, p.Stop
+}
+
+func TestExecAuthorizeAllows(t *testing.T) {
+	var ev []engine.Event
+	base, token, stop := startExecProxy(t, []config.ExecEntry{{Exe: "go", ArgsPrefix: []string{"test"}}}, func(e engine.Event) { ev = append(ev, e) })
+	defer stop()
+	code, body := execPost(t, base, "exec/authorize", token, `{"command":["go","test","./..."]}`)
+	if code != 200 || !strings.Contains(body, `"allowed":true`) {
+		t.Fatalf("authorize allow: code=%d body=%s", code, body)
+	}
+	for _, e := range ev {
+		if e.Type == "exec" {
+			t.Fatalf("an allowed authorize must emit no event, got %+v", e)
+		}
+	}
+}
+
+func TestExecAuthorizeDeniesAndRecords(t *testing.T) {
+	var ev []engine.Event
+	base, token, stop := startExecProxy(t, []config.ExecEntry{{Exe: "go", ArgsPrefix: []string{"test"}}}, func(e engine.Event) { ev = append(ev, e) })
+	defer stop()
+	code, body := execPost(t, base, "exec/authorize", token, `{"command":["rm","-rf","/"]}`)
+	if code != 200 || !strings.Contains(body, `"allowed":false`) {
+		t.Fatalf("authorize deny: code=%d body=%s", code, body)
+	}
+	var refused *engine.Event
+	for i := range ev {
+		if ev[i].Type == "exec" && ev[i].Status == "refused" {
+			refused = &ev[i]
+		}
+	}
+	if refused == nil || len(refused.Command) == 0 || refused.Command[0] != "rm" || refused.Mode != "attested" {
+		t.Fatalf("expected a refused exec event naming the command, got %+v", refused)
+	}
+}
+
+func TestExecAttestRecords(t *testing.T) {
+	var ev []engine.Event
+	base, token, stop := startExecProxy(t, []config.ExecEntry{{Exe: "go"}}, func(e engine.Event) { ev = append(ev, e) })
+	defer stop()
+	code, _ := execPost(t, base, "exec/attest", token, `{"command":["go","test"],"exit":0,"output_sha":"deadbeef"}`)
+	if code != 204 {
+		t.Fatalf("attest code=%d", code)
+	}
+	var rec *engine.Event
+	for i := range ev {
+		if ev[i].Type == "exec" && ev[i].Status == "succeeded" {
+			rec = &ev[i]
+		}
+	}
+	if rec == nil || rec.ExitCode == nil || *rec.ExitCode != 0 || rec.OutputSHA != "deadbeef" || rec.Mode != "attested" {
+		t.Fatalf("attest event wrong: %+v", rec)
+	}
+}
+
+func TestExecAttestRequiresExit(t *testing.T) {
+	var ev []engine.Event
+	base, token, stop := startExecProxy(t, []config.ExecEntry{{Exe: "go"}}, func(e engine.Event) { ev = append(ev, e) })
+	defer stop()
+	code, body := execPost(t, base, "exec/attest", token, `{"command":["go","test"],"output_sha":"deadbeef"}`)
+	if code != 400 {
+		t.Fatalf("attest missing exit: code=%d body=%s", code, body)
+	}
+	for _, e := range ev {
+		if e.Type == "exec" {
+			t.Fatalf("a missing exit must record no exec event, got %+v", e)
+		}
+	}
+}
+
+func TestExecEndpointRejectsBadRunToken(t *testing.T) {
+	base, _, stop := startExecProxy(t, []config.ExecEntry{{Exe: "go"}}, func(engine.Event) {})
+	defer stop()
+	req, _ := http.NewRequest(http.MethodPost, base+"exec/authorize", strings.NewReader(`{"command":["go"]}`))
+	req.Header.Set("Authorization", "Bearer wrong")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != 401 {
+		t.Fatalf("bad token exec code=%d, want 401", resp.StatusCode)
+	}
+}
+
+func TestExecAndToolCallRecordInCallOrder(t *testing.T) {
+	const upstreamToken = "up-tok"
+	ts, _ := newStubUpstream(t, upstreamToken)
+	defer ts.Close()
+	t.Setenv("UP_TOKEN", upstreamToken)
+
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
+	p := New(map[string]config.ToolResource{"up": res}, broker.StaticEnv{})
+	agent := config.AgentDef{
+		Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
+		Tools: []string{"up"},
+		Exec:  config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "go"}}},
+	}
+	var mu sync.Mutex
+	var ev []engine.Event
+	base, token, err := p.Start(testBinding(), agent, func(e engine.Event) {
+		mu.Lock()
+		ev = append(ev, e)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	if code, body := execPost(t, base, "exec/attest", token, `{"command":["go","test"],"exit":0,"output_sha":"aa"}`); code != 204 {
+		t.Fatalf("first attest: code=%d body=%s", code, body)
+	}
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, base, token)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hi"}}); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if code, body := execPost(t, base, "exec/attest", token, `{"command":["go","test"],"exit":1,"output_sha":"bb"}`); code != 204 {
+		t.Fatalf("second attest: code=%d body=%s", code, body)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var kinds []string
+	for _, e := range ev {
+		if e.Type == "exec" || e.Type == "tool_call" {
+			kinds = append(kinds, e.Type)
+		}
+	}
+	want := []string{"exec", "tool_call", "exec"}
+	if !reflect.DeepEqual(kinds, want) {
+		t.Fatalf("event order = %v, want %v", kinds, want)
+	}
+}
+
+func TestExecStopWaitsForInFlightAttest(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	appendEvent := func(engine.Event) {
+		close(entered)
+		<-release
+	}
+	agent := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
+		Exec: config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "go"}}}}
+	p := New(map[string]config.ToolResource{}, broker.StaticEnv{})
+	base, token, err := p.Start(testBinding(), agent, appendEvent)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	callDone := make(chan struct{})
+	go func() {
+		defer close(callDone)
+		req, _ := http.NewRequest(http.MethodPost, base+"exec/attest", strings.NewReader(`{"command":["go","test"],"exit":0,"output_sha":"aa"}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("attest never reached the ledger append")
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		p.Stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-stopDone:
+		t.Fatal("Stop() returned while an attest append was still in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return after the in-flight attest finished")
+	}
+	<-callDone
+	p.Stop()
 }

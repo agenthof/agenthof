@@ -43,10 +43,10 @@ registry entries, exposes the jailed tool catalog, and fronts external
 agents through the adapter — is driven by the control plane, and is where
 an agent's actual work happens.
 
-## The three governed surfaces
+## The governed surfaces
 
-Three gateways are first-class in the design from the start, on the
-principle that designing them in is not the same as building them now:
+These doors are first-class in the design. Designing one in is not the same
+as building every mode of it now:
 
 1. **Model gateway** — the data plane for model calls. It is a
    LiteLLM-class facade: something to run, not to rebuild. It holds
@@ -54,7 +54,7 @@ principle that designing them in is not the same as building them now:
 2. **Tool/MCP gateway** — the inbound MCP proxy a fronted agent's declared
    tools (`tools:` entries naming `gateway.yaml` tool resources) are reached
    through, with the same hold-and-inject credential shape as the model
-   gateway (see [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers)).
+   gateway (see [`lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers)).
    The broker behind it gets that credential one of two ways: a static
    bearer token read straight from an environment variable, or, for an
    OAuth-protected resource, a separate upstream token it mints itself via
@@ -63,10 +63,17 @@ principle that designing them in is not the same as building them now:
    never holds it, and its own inbound run token is never forwarded upstream
    in its place. A contained agent has no use for it: it works instead
    through the jailed tool catalog below — list, search, read, edit, write,
-   and no exec — as part of the agent runtime.
-3. **Control tower** — the platform itself: the config directory, `apply`,
-   and the registry. Unlike the other two this is not a network facade; it
-   is the config, validation, and registry path described above.
+   and no exec tool — as part of the agent runtime.
+3. **Exec gateway** — the door a fronted agent uses to run an allowlisted
+   command in the operator's sandbox and report the result. Agenthof checks
+   the reported argv against the agent's config allowlist and records the
+   agent's attestation. It does not run the command and does not contain it.
+   Allowlisting an executable trusts that program's full capability surface.
+   A contained agent has no exec door. See
+   [`lifecycle-exec.md`](lifecycle-exec.md).
+4. **Control tower** — the platform itself: the config directory, `apply`,
+   and the registry. Unlike the network doors this is not a facade; it is
+   the config, validation, and registry path described above.
 
 ## Execution tiers
 
@@ -102,7 +109,10 @@ the duration of its step it reaches those tools only through Agenthof's
 inbound MCP proxy, which authorizes each call against that allowlist and
 injects the resource's credential, so the agent itself never holds one (see
 [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers) for
-the full flow). Its `model` routing is not checked, since
+the full flow). It may also declare `exec`, an allowlist of commands it may
+run in the operator's sandbox; that door lives on the same per-run listener,
+and Agenthof records what the agent attests without running or containing the
+command (see [`lifecycle-exec.md`](lifecycle-exec.md)). Its `model` routing is not checked, since
 it is not calling through Agenthof's model gateway the way a contained agent
 does (see
 [`docs/reference/config.md`](reference/config.md#execution) for the exact
@@ -148,17 +158,24 @@ prerequisites for a release.
 
 ## Containment
 
-Agents get no raw network access, no shell, and no ambient credentials.
-Capability reaches an agent only through governed, logged doors: the model
-gateway (metered and budgeted), the jailed tool catalog for a contained agent
-or the inbound MCP proxy for a fronted one's declared tools (both allowlisted
-and logged), and a jailed workspace (path-confined, symlink-hardened, with no
-dotfile or VCS-metadata access). A call that reaches the proxy for a tool the
-run cannot reach is recorded as a refusal too — the tool name and a fingerprint
-of the arguments, never the arguments themselves. Every one of those doors
-writes to the ledger. No change may add an agent-reachable exec tool, an
-unmediated network call, or a credential stored where an agent's config or
-runtime can read its value.
+Agents get no raw network access and no ambient credentials, and run no
+commands except those on the config allowlist. Capability reaches an agent
+only through governed, logged doors: the model gateway (metered and budgeted),
+the jailed tool catalog for a contained agent or the inbound MCP proxy for a
+fronted one's declared tools (both allowlisted and logged), the exec gateway
+for a fronted agent's allowlisted commands, and a jailed workspace
+(path-confined, symlink-hardened, with no dotfile or VCS-metadata access). A
+call that reaches the proxy for a tool the run cannot reach is recorded as a
+refusal too — the tool name and a fingerprint of the arguments, never the
+arguments themselves. A command the exec allowlist does not match is recorded
+as a refused `exec` event carrying the argv. An allowlisted command the agent
+then reports is recorded as an `exec` event tagged `attested`: the argv, the
+exit code, and a hash of the output the agent supplies, never the output body.
+Agenthof records that report. It does not run the command and does not contain
+it; the command runs in the operator's sandbox. Enforced execution, where
+Agenthof would run the command itself, is reserved. Every one of those doors
+writes to the ledger. No change may add an unmediated network call, or a
+credential stored where an agent's config or runtime can read its value.
 
 ## The ledger
 
