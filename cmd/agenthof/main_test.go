@@ -1016,6 +1016,94 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 	}
 }
 
+// TestRunStartsListenerForFrontedExecWithoutTools proves a fronted agent
+// that declares exec and no tools still gets the per-run listener: the
+// stub sees the proxy coordinates, authorizes and attests a command, and
+// the ledger records that exec. Without the widened gate the stub is
+// dispatched with no coordinates and no exec event is written.
+func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_TOKEN", "")
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyURL := r.Header.Get("X-Agenthof-Proxy-URL")
+		token := r.Header.Get("X-Agenthof-Run-Token")
+		if proxyURL != "" && token != "" {
+			body := `{"command":["go","test"]}`
+			req, err := http.NewRequest(http.MethodPost, proxyURL+"exec/authorize", strings.NewReader(body))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			_ = resp.Body.Close()
+			attest, err := http.NewRequest(http.MethodPost, proxyURL+"exec/attest",
+				strings.NewReader(`{"command":["go","test"],"exit":0,"output_sha":"abc"}`))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			attest.Header.Set("Authorization", "Bearer "+token)
+			attest.Header.Set("Content-Type", "application/json")
+			aresp, err := http.DefaultClient.Do(attest)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			_ = aresp.Body.Close()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"artifact":"front result"}`))
+	}))
+	defer stub.Close()
+
+	root := t.TempDir()
+	files := map[string]string{
+		"agents/helper.yaml": "name: helper\nexecution: fronted\nendpoint: " + stub.URL +
+			"\ninstruction: help\noutput: result\nexec:\n  mode: attested\n  allow:\n    - exe: go\n      args_prefix: [test]\n",
+		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
+		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
+		"--config", root, "--log-dir", logs}, &out)
+	if code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+	events, _, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var execEvent *engine.Event
+	for i := range events {
+		if events[i].Type == "exec" {
+			execEvent = &events[i]
+		}
+	}
+	if execEvent == nil || execEvent.Status != "succeeded" || execEvent.Mode != "attested" {
+		t.Fatalf("expected an attested exec event, got %+v", events)
+	}
+}
+
 // TestRunWiresToolProxyForFrontedToolAgent proves `run` actually constructs
 // and wires a real toolproxy.Proxy into engine.Options when the config
 // declares a gateway tool resource that a fronted agent references: the
