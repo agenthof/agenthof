@@ -254,8 +254,9 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 // env-var NAME (res.TokenEnv) ever appears in an error.
 func (p *Proxy) connectUpstream(res config.ToolResource) (*mcp.ClientSession, error) {
 	cred, err := p.broker.Resolve(context.Background(), broker.CredentialRef{
-		Mode:   "static_env",
-		EnvVar: res.TokenEnv,
+		Source:   "static_env",
+		Grant:    "",
+		TokenEnv: res.TokenEnv,
 	})
 	if err != nil {
 		return nil, err

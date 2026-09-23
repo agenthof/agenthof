@@ -6,51 +6,65 @@ import (
 	"testing"
 )
 
-func TestStaticEnvResolves(t *testing.T) {
-	t.Setenv("MY_SECRET", "sk-123")
-	got, err := StaticEnv{}.Resolve(context.Background(), CredentialRef{Mode: "static_env", EnvVar: "MY_SECRET"})
+func TestStaticEnvReturnsDirectBearer(t *testing.T) {
+	t.Setenv("AGENTHOF_TEST_TOKEN", "s3cret-bearer")
+	got, err := StaticEnv{}.Resolve(context.Background(), CredentialRef{
+		Source: "static_env", Grant: "", TokenEnv: "AGENTHOF_TEST_TOKEN",
+	})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
-	if got != "sk-123" {
-		t.Fatalf("got %q, want sk-123", got)
-	}
-}
-
-func TestStaticEnvUnsetErrorsNamesVarNotValue(t *testing.T) {
-	t.Setenv("MY_SECRET", "")
-	_, err := StaticEnv{}.Resolve(context.Background(), CredentialRef{Mode: "static_env", EnvVar: "MY_SECRET"})
-	if err == nil {
-		t.Fatal("expected error for unset env var")
-	}
-	if !strings.Contains(err.Error(), "MY_SECRET") {
-		t.Fatalf("error should name the env var, got %q", err.Error())
+	if got != "s3cret-bearer" {
+		t.Fatalf("token = %q, want %q", got, "s3cret-bearer")
 	}
 }
 
-func TestStaticEnvNeverLeaksValueInError(t *testing.T) {
-	t.Setenv("MY_SECRET", "super-secret-value")
-	// Force an error path (unsupported mode) while the value IS set, and assert
-	// the value never appears in the error (Article III).
-	_, err := StaticEnv{}.Resolve(context.Background(), CredentialRef{Mode: "bogus", EnvVar: "MY_SECRET"})
+func TestStaticEnvRejectsNonEmptyGrant(t *testing.T) {
+	_, err := StaticEnv{}.Resolve(context.Background(), CredentialRef{
+		Source: "static_env", Grant: "client_credentials", TokenEnv: "X",
+	})
 	if err == nil {
-		t.Fatal("expected error for unsupported mode")
-	}
-	if strings.Contains(err.Error(), "super-secret-value") {
-		t.Fatalf("error leaked the secret value: %q", err.Error())
+		t.Fatal("expected error for non-direct grant, got nil")
 	}
 }
 
-func TestStaticEnvEmptyEnvVarErrors(t *testing.T) {
-	_, err := StaticEnv{}.Resolve(context.Background(), CredentialRef{Mode: "static_env", EnvVar: ""})
+func TestStaticEnvErrorNamesVarNotValue(t *testing.T) {
+	_, err := StaticEnv{}.Resolve(context.Background(), CredentialRef{
+		Source: "static_env", TokenEnv: "AGENTHOF_MISSING_VAR",
+	})
 	if err == nil {
-		t.Fatal("expected error for empty EnvVar")
+		t.Fatal("expected error for missing var")
+	}
+	if got := err.Error(); !strings.Contains(got, "AGENTHOF_MISSING_VAR") {
+		t.Fatalf("error %q should name the env var", got)
 	}
 }
 
-func TestStaticEnvUnsupportedModeErrors(t *testing.T) {
-	_, err := StaticEnv{}.Resolve(context.Background(), CredentialRef{Mode: "client_credentials", EnvVar: "X"})
-	if err == nil {
-		t.Fatal("expected error for unsupported mode")
+// fakeBroker records which ref it saw and returns a fixed token.
+type fakeBroker struct {
+	last  CredentialRef
+	token string
+}
+
+func (f *fakeBroker) Resolve(_ context.Context, ref CredentialRef) (string, error) {
+	f.last = ref
+	return f.token, nil
+}
+
+func TestDispatchRoutesOnGrant(t *testing.T) {
+	static := &fakeBroker{token: "static-tok"}
+	cc := &fakeBroker{token: "minted-tok"}
+	d := Dispatch{StaticEnv: static, ClientCredentials: cc}
+
+	got, err := d.Resolve(context.Background(), CredentialRef{Grant: ""})
+	if err != nil || got != "static-tok" {
+		t.Fatalf("empty grant routed wrong: got %q err %v", got, err)
+	}
+	got, err = d.Resolve(context.Background(), CredentialRef{Grant: "client_credentials"})
+	if err != nil || got != "minted-tok" {
+		t.Fatalf("client_credentials routed wrong: got %q err %v", got, err)
+	}
+	if _, err := d.Resolve(context.Background(), CredentialRef{Grant: "token_exchange"}); err == nil {
+		t.Fatal("unknown grant should error")
 	}
 }
