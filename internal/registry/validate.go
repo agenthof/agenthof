@@ -56,6 +56,24 @@ func Validate(cfg config.Config) []ValidationError {
 			}
 		}
 
+		if a.Exec.Declared() {
+			if effectiveExec != "fronted" {
+				add(a.SourceFile, a.Name, "bad-exec-config", "exec is only valid on fronted agents")
+			}
+			if a.Exec.Mode != "attested" {
+				add(a.SourceFile, a.Name, "bad-exec-config",
+					fmt.Sprintf("exec.mode %q is not implemented (only attested)", a.Exec.Mode))
+			}
+			if len(a.Exec.Allow) == 0 {
+				add(a.SourceFile, a.Name, "bad-exec-config", "exec.mode is set but exec.allow is empty")
+			}
+			for _, e := range a.Exec.Allow {
+				if e.Exe == "" {
+					add(a.SourceFile, a.Name, "bad-exec-config", "exec.allow entry has an empty exe")
+				}
+			}
+		}
+
 		// Skip model routing check for fronted agents
 		if effectiveExec != "fronted" {
 			model := a.Model

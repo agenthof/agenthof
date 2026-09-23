@@ -35,6 +35,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Output | `output` | string | no | — |
 | Execution | `execution` | string | no | `contained` |
 | Endpoint | `endpoint` | string | conditionally (fronted only) | — |
+| Exec | `exec` | object | no | none |
 
 ### `name`
 
@@ -99,6 +100,64 @@ HTTP endpoint". `apply` enforces both directions:
   `fronted-needs-endpoint` ("fronted agents must have an endpoint").
 - effective execution `contained` and `endpoint` non-empty → rejected,
   `contained-has-endpoint` ("endpoint is only valid on fronted agents").
+
+### `exec`
+
+Optional, and only on a `fronted` agent. Declares commands the agent may
+report running in the operator's sandbox. Agenthof checks the reported argv
+against `allow` and records the result. It does not run the command and does
+not contain it. The operator's sandbox is what confines execution.
+
+| Field | YAML key | Type | Required | Default |
+|---|---|---|---|---|
+| Mode | `mode` | string | yes when `exec` is set | — |
+| Allow | `allow` | list of objects | yes, non-empty, when `mode` is set | — |
+
+`mode` accepts only `attested`. `enforced` (Agenthof running the command) is
+reserved and rejected at `apply` with `bad-exec-config`. Any other value,
+including an empty `mode` on a block that still lists `allow`, is rejected
+the same way.
+
+Each `allow` entry:
+
+| Field | YAML key | Type | Required | Default |
+|---|---|---|---|---|
+| Exe | `exe` | string | yes | — |
+| ArgsPrefix | `args_prefix` | list of strings | no | empty (any arguments) |
+
+A reported argv matches an entry when `argv[0]` equals `exe` exactly (no
+glob) and `args_prefix` is a prefix of the arguments that follow. The rest of
+the argv is unconstrained. An empty `args_prefix` matches any invocation of
+that `exe`. An argv shorter than the prefix does not match.
+
+`apply` rejects, all with `bad-exec-config`:
+
+- `exec` on an agent whose effective execution is not `fronted`;
+- `mode` set to anything other than `attested`;
+- `mode` set with an empty `allow`;
+- an `allow` entry whose `exe` is empty.
+
+Allowlisting an executable trusts that program's whole capability surface.
+`exe: go` with `args_prefix: [test]` still permits `go test` with whatever
+flags that program accepts. An entry whose `exe` is a shell or interpreter
+and whose prefix is an eval flag (`sh -c`, `python -c`, and the like) makes
+the allowlist match arbitrary commands while the ledger still records them as
+allowlisted. Agenthof does not detect or reject those entries. Writing a
+safe allowlist is the operator's obligation, the same way the sandbox is.
+
+**Example:**
+
+```yaml
+name: builder
+execution: fronted
+endpoint: https://builder.internal/run
+exec:
+  mode: attested
+  allow:
+    - exe: go
+      args_prefix: [test]
+    - exe: rg
+```
 
 **Example (from `examples/config/agents/planner.yaml`, a `contained` agent —
 `execution` and `endpoint` omitted, so they default):**

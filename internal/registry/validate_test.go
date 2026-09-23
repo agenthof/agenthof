@@ -302,3 +302,31 @@ func TestValidateToolResourceURLMustBeSecure(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateExecConfig(t *testing.T) {
+	agent := func(mut func(*config.AgentDef)) config.Config {
+		a := config.AgentDef{Name: "a", Execution: "fronted", Endpoint: "https://a.internal/run",
+			Exec: config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "go", ArgsPrefix: []string{"test"}}}}}
+		mut(&a)
+		return config.Config{Agents: []config.AgentDef{a}}
+	}
+	cases := []struct {
+		name string
+		mut  func(*config.AgentDef)
+		bad  bool
+	}{
+		{"valid", func(*config.AgentDef) {}, false},
+		{"enforced reserved", func(a *config.AgentDef) { a.Exec.Mode = "enforced" }, true},
+		{"empty mode", func(a *config.AgentDef) { a.Exec.Mode = "" }, true},
+		{"empty allow", func(a *config.AgentDef) { a.Exec.Allow = nil }, true},
+		{"empty exe", func(a *config.AgentDef) { a.Exec.Allow = []config.ExecEntry{{Exe: ""}} }, true},
+		{"exec on contained", func(a *config.AgentDef) { a.Execution = "contained"; a.Endpoint = "" }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasCode(Validate(agent(tc.mut)), "bad-exec-config"); got != tc.bad {
+				t.Fatalf("bad-exec-config = %v, want %v", got, tc.bad)
+			}
+		})
+	}
+}

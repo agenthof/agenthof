@@ -1,16 +1,17 @@
 package config
 
 type AgentDef struct {
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description"`
-	Enabled     *bool    `yaml:"enabled"` // nil means true
-	Model       string   `yaml:"model"`
-	Instruction string   `yaml:"instruction"`
-	Tools       []string `yaml:"tools"`
-	Output      string   `yaml:"output"`
-	Execution   string   `yaml:"execution"` // "", "contained", or "fronted"; "" means contained
-	Endpoint    string   `yaml:"endpoint"`  // fronted only: the agent's HTTP endpoint
-	SourceFile  string   `yaml:"-"`
+	Name        string     `yaml:"name"`
+	Description string     `yaml:"description"`
+	Enabled     *bool      `yaml:"enabled"` // nil means true
+	Model       string     `yaml:"model"`
+	Instruction string     `yaml:"instruction"`
+	Tools       []string   `yaml:"tools"`
+	Output      string     `yaml:"output"`
+	Execution   string     `yaml:"execution"` // "", "contained", or "fronted"; "" means contained
+	Endpoint    string     `yaml:"endpoint"`  // fronted only: the agent's HTTP endpoint
+	Exec        ExecConfig `yaml:"exec"`      // fronted only: allowlisted attested exec
+	SourceFile  string     `yaml:"-"`
 }
 
 func (a AgentDef) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
@@ -21,6 +22,50 @@ func (a AgentDef) EffectiveExecution() string {
 		return "contained"
 	}
 	return a.Execution
+}
+
+// ExecConfig declares the commands a fronted agent may run in its operator
+// sandbox. Only Mode "attested" is implemented; "enforced" (Agenthof-run) is
+// reserved. Attested: the agent runs the command and reports it; Agenthof
+// authorizes against Allow and records it, but does not run or contain it.
+type ExecConfig struct {
+	Mode  string      `yaml:"mode"`  // "attested"; "enforced" reserved
+	Allow []ExecEntry `yaml:"allow"` // non-empty when Mode is set
+}
+
+// ExecEntry allowlists an executable and a required leading-argument prefix.
+type ExecEntry struct {
+	Exe        string   `yaml:"exe"`         // exact executable name/path (no glob)
+	ArgsPrefix []string `yaml:"args_prefix"` // required leading args; empty = any args
+}
+
+// Declared reports whether an agent declares exec at all.
+func (e ExecConfig) Declared() bool { return e.Mode != "" || len(e.Allow) > 0 }
+
+// Allows reports whether a reported argv matches any allowlist entry: argv[0]
+// equals the entry's Exe and the entry's ArgsPrefix is a prefix of argv[1:].
+// It matches the argv the agent reports; the operator's sandbox is what
+// actually confines execution.
+func (e ExecConfig) Allows(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	for _, entry := range e.Allow {
+		if argv[0] != entry.Exe || len(argv) < 1+len(entry.ArgsPrefix) {
+			continue
+		}
+		match := true
+		for i, p := range entry.ArgsPrefix {
+			if argv[1+i] != p {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 type Step struct {
