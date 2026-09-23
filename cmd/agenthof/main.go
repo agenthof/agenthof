@@ -1027,8 +1027,8 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 	// Constitution Art. III keeps artifact bodies out of the append-only
 	// ledger precisely so they can be pruned independently; do that here
 	// too, rather than leaving retention half-enforced. A missing
-	// artifact-dir is not an error (nothing provisioned it yet, e.g. an
-	// echo-executor-only deployment) — mirror the missing-log-dir case
+	// artifact-dir is not an error (no run has written one yet) — mirror the
+	// missing-log-dir case
 	// instead of having artifact.NewStore create it just to prune nothing.
 	artifactsPruned := 0
 	if _, statErr := os.Stat(*artifactDir); statErr == nil {
