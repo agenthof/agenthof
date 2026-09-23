@@ -6,7 +6,7 @@ the project changes, and why you do not have to take anyone's word for it.
 
 ## Who maintains Agenthof
 
-Agenthof is maintained under the pseudonym **rojaneer**. It is independent — not
+Agenthof is maintained under the pseudonym **rojaneerdev**. It is independent — not
 owned by, funded by, or steering toward any vendor's product. The pseudonym is
 deliberate; the project's credibility is meant to come from the guarantees
 below, all of which you can check for yourself.
@@ -57,6 +57,6 @@ Security handling does not depend on the maintainer's legal identity.
 
 ## "Who's behind this?"
 
-Maintained under the pseudonym **rojaneer**, independently, under Apache-2.0
+Maintained under the pseudonym **rojaneerdev**, independently, under Apache-2.0
 forever. Trust is anchored in the license, the constitution, and the DCO — all
 public and checkable — not in a name. Contributions and scrutiny are welcome.
