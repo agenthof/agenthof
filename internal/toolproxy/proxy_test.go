@@ -64,10 +64,26 @@ func newStubUpstream(t *testing.T, wantToken string) (*httptest.Server, func() s
 	return ts, readLastAuth
 }
 
+// bearerTransport sets a fixed bearer token on every outbound request. It
+// stands in for whatever presents a static credential in these tests — the
+// agent's run token, or a test dialing an upstream directly — a concern
+// separate from injectingTransport, which resolves a resource credential
+// through the broker on the proxy's own upstream leg.
+type bearerTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(req)
+}
+
 // stubAgentSession connects to the proxy as a fronted agent would: it
 // presents ONLY a run token and never sees the upstream credential.
 func stubAgentSession(ctx context.Context, proxyURL, runToken string) (*mcp.ClientSession, error) {
-	httpClient := &http.Client{Transport: &injectingTransport{base: http.DefaultTransport, token: runToken}}
+	httpClient := &http.Client{Transport: &bearerTransport{base: http.DefaultTransport, token: runToken}}
 	client := mcp.NewClient(&mcp.Implementation{Name: "agent-stub", Version: "v0.1.0"}, nil)
 	return client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: proxyURL, HTTPClient: httpClient}, nil)
 }
@@ -373,7 +389,7 @@ func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 	// Connect the upstream session with the WRONG credential so the stub
 	// upstream's own auth check returns an IsError result — the same shape a
 	// real upstream tool failure would produce.
-	httpClient := &http.Client{Transport: &injectingTransport{base: http.DefaultTransport, token: "wrong-token"}}
+	httpClient := &http.Client{Transport: &bearerTransport{base: http.DefaultTransport, token: "wrong-token"}}
 	client := mcp.NewClient(&mcp.Implementation{Name: "toolproxy-test", Version: "v0.1.0"}, nil)
 	upstream, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: ts.URL, HTTPClient: httpClient}, nil)
 	if err != nil {
@@ -413,5 +429,127 @@ func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 	}
 	if ev.Reason == "" {
 		t.Fatal("event.Reason must be set on a failed tool_call")
+	}
+}
+
+// TestProxyClientCredentialsMintsSeparateUpstreamToken exercises the
+// client_credentials grant end-to-end: the proxy mints an upstream token from
+// a fake OAuth token endpoint and injects THAT into the upstream call, never
+// the agent's inbound run token (no-passthrough) — and the tool_call event
+// records AuthMode "client_credentials".
+func TestProxyClientCredentialsMintsSeparateUpstreamToken(t *testing.T) {
+	const upstreamToken = "minted-upstream"
+	// Fake OAuth token endpoint mints upstreamToken.
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.Form.Get("grant_type") != "client_credentials" {
+			t.Errorf("grant_type = %q", r.Form.Get("grant_type"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"` + upstreamToken + `","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+	t.Setenv("CC_ID", "client-abc")
+	t.Setenv("CC_SECRET", "client-secret")
+
+	// Upstream MCP stub requires Authorization: Bearer <upstreamToken>.
+	ts, lastAuth := newStubUpstream(t, upstreamToken)
+	defer ts.Close()
+
+	res := config.ToolResource{
+		Kind: "mcp", URL: ts.URL, CredentialSource: "static_env",
+		GrantType: "client_credentials", ClientAuth: "client_secret_basic",
+		Issuer: "https://id.example.com", TokenEndpoint: tokenSrv.URL,
+		ClientIDEnv: "CC_ID", ClientSecretEnv: "CC_SECRET",
+	}
+	b := broker.Dispatch{StaticEnv: broker.StaticEnv{}, ClientCredentials: broker.NewClientCredentials(nil)}
+	p := New(map[string]config.ToolResource{"up": res}, b)
+
+	var events []engine.Event
+	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) {
+		events = append(events, e)
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hi"}}); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+
+	if got := lastAuth(); got != "Bearer "+upstreamToken {
+		t.Fatalf("upstream Authorization = %q, want the minted token", got)
+	}
+	if lastAuth() == "Bearer "+runToken {
+		t.Fatal("no-passthrough violated: upstream saw the inbound run token")
+	}
+	var found bool
+	for _, e := range events {
+		if e.Type == "tool_call" {
+			found = true
+			if e.AuthMode != "client_credentials" {
+				t.Fatalf("AuthMode = %q, want client_credentials", e.AuthMode)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no tool_call event recorded")
+	}
+}
+
+// TestProxyDirectBearerRegression confirms the direct-bearer (static_env)
+// path still injects the env value as-is and still logs AuthMode
+// "static_env".
+func TestProxyDirectBearerRegression(t *testing.T) {
+	const upstreamToken = "direct-bearer"
+	t.Setenv("UP_TOKEN", upstreamToken)
+
+	ts, lastAuth := newStubUpstream(t, upstreamToken)
+	defer ts.Close()
+
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
+	p := New(map[string]config.ToolResource{"up": res}, broker.StaticEnv{})
+
+	var events []engine.Event
+	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) {
+		events = append(events, e)
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hi"}}); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+
+	if got := lastAuth(); got != "Bearer "+upstreamToken {
+		t.Fatalf("upstream Authorization = %q, want %q", got, "Bearer "+upstreamToken)
+	}
+
+	var found bool
+	for _, e := range events {
+		if e.Type == "tool_call" {
+			found = true
+			if e.AuthMode != "static_env" {
+				t.Fatalf("AuthMode = %q, want static_env", e.AuthMode)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no tool_call event recorded")
 	}
 }
