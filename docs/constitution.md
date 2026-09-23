@@ -3,17 +3,18 @@
 This document states the invariants every change to Agenthof must honor.
 Where it and any other document disagree, this constitution wins.
 
-## Article I — Containment by construction
+## Article I — Containment by governance
 
-Agents get no raw network access and no ambient credentials, and run no
-commands except those on the config allowlist. Capability reaches an agent
-only through governed, logged doors: the model gateway, the tool catalog
-(tool gateway in V2), the exec gateway, and a jailed workspace (path-confined,
-symlink-hardened, no dotfile or VCS-metadata access). Allowlisted commands run
-in the operator's sandbox and each is recorded — attested by the agent today;
-Agenthof records but does not run or contain them, and enforced execution is
-reserved. No change may add an unmediated network call, or a credential stored
-where an agent's config or runtime can read its value.
+Capability reaches an agent only through governed, logged doors: the model
+gateway, the tool/MCP gateway, and the exec gateway. Agents hold no raw
+model or resource credentials; they obtain access only through those
+gateways. Allowlisted commands run in the operator's sandbox and each is
+recorded — attested by the agent today; Agenthof records but does not run
+or contain them, and enforced execution is reserved. The agent runs in an
+operator-provided sandbox. That sandbox's network and exec confinement is
+required, and Agenthof does not verify it. No change may add an unmediated
+network call, or a credential stored where an agent's config or runtime can
+read its value.
 
 ## Article II — Identity
 
