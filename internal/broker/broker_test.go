@@ -56,14 +56,30 @@ func TestDispatchRoutesOnGrant(t *testing.T) {
 	cc := &fakeBroker{token: "minted-tok"}
 	d := Dispatch{StaticEnv: static, ClientCredentials: cc}
 
-	got, err := d.Resolve(context.Background(), CredentialRef{Grant: ""})
+	staticRef := CredentialRef{Grant: "", ResourceID: "static-resource"}
+	got, err := d.Resolve(context.Background(), staticRef)
 	if err != nil || got != "static-tok" {
 		t.Fatalf("empty grant routed wrong: got %q err %v", got, err)
 	}
-	got, err = d.Resolve(context.Background(), CredentialRef{Grant: "client_credentials"})
+	if static.last != staticRef {
+		t.Fatalf("static broker got ref %+v, want %+v (ref must reach it unmodified)", static.last, staticRef)
+	}
+	if cc.last != (CredentialRef{}) {
+		t.Fatalf("client_credentials broker should not have been called yet, got %+v", cc.last)
+	}
+
+	ccGrantRef := CredentialRef{Grant: "client_credentials", ResourceID: "cc-resource"}
+	got, err = d.Resolve(context.Background(), ccGrantRef)
 	if err != nil || got != "minted-tok" {
 		t.Fatalf("client_credentials routed wrong: got %q err %v", got, err)
 	}
+	if cc.last != ccGrantRef {
+		t.Fatalf("client_credentials broker got ref %+v, want %+v (ref must reach it unmodified)", cc.last, ccGrantRef)
+	}
+	if static.last != staticRef {
+		t.Fatalf("static broker's last ref changed unexpectedly: got %+v, want %+v", static.last, staticRef)
+	}
+
 	if _, err := d.Resolve(context.Background(), CredentialRef{Grant: "token_exchange"}); err == nil {
 		t.Fatal("unknown grant should error")
 	}

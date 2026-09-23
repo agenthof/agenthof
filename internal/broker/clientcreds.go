@@ -15,7 +15,10 @@ import (
 )
 
 // refreshMargin re-mints a token slightly before its stated expiry so a call
-// never uses a token that expires in flight.
+// never uses a token that expires in flight. The margin actually applied to a
+// given token is the SMALLER of this ceiling and 10% of that token's own
+// lifetime, so a short-lived token (e.g. expires_in <= 30) is still cacheable
+// instead of missing the cache on every resolve.
 const refreshMargin = 30 * time.Second
 
 // ClientCredentials mints upstream OAuth tokens via the client_credentials
@@ -33,8 +36,11 @@ type ClientCredentials struct {
 }
 
 type cachedToken struct {
-	token  string
-	expiry time.Time // zero => not cacheable (mint every resolve)
+	token string
+	// refreshAt is the time at which the token must be re-minted: mint time +
+	// lifetime - margin, where margin = min(refreshMargin, 10% of lifetime).
+	// Zero => not cacheable (mint every resolve).
+	refreshAt time.Time
 }
 
 var _ Broker = (*ClientCredentials)(nil)
@@ -55,7 +61,8 @@ func (c *ClientCredentials) now() time.Time {
 }
 
 // Resolve returns a valid upstream bearer for ref, minting one if the cache has
-// none or the cached one is within refreshMargin of expiry.
+// none or the cached one is within its refresh margin of expiry (see
+// refreshMargin).
 func (c *ClientCredentials) Resolve(ctx context.Context, ref CredentialRef) (string, error) {
 	if ref.Grant != "client_credentials" {
 		return "", fmt.Errorf("broker: client_credentials broker got grant %q", ref.Grant)
@@ -67,7 +74,7 @@ func (c *ClientCredentials) Resolve(ctx context.Context, ref CredentialRef) (str
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if ent, ok := c.cache[key]; ok && !ent.expiry.IsZero() && c.now().Before(ent.expiry.Add(-refreshMargin)) {
+	if ent, ok := c.cache[key]; ok && !ent.refreshAt.IsZero() && c.now().Before(ent.refreshAt) {
 		return ent.token, nil
 	}
 
@@ -76,7 +83,12 @@ func (c *ClientCredentials) Resolve(ctx context.Context, ref CredentialRef) (str
 		return "", err
 	}
 	if expiresIn > 0 {
-		c.cache[key] = cachedToken{token: tok, expiry: c.now().Add(time.Duration(expiresIn) * time.Second)}
+		lifetime := time.Duration(expiresIn) * time.Second
+		margin := refreshMargin
+		if m := lifetime / 10; m < margin {
+			margin = m
+		}
+		c.cache[key] = cachedToken{token: tok, refreshAt: c.now().Add(lifetime - margin)}
 	} else {
 		// No usable lifetime: do not cache; mint on every resolve.
 		delete(c.cache, key)
@@ -134,6 +146,12 @@ func (c *ClientCredentials) mint(ctx context.Context, ref CredentialRef) (string
 	}
 	if tr.AccessToken == "" {
 		return "", 0, fmt.Errorf("broker: token endpoint for resource %q returned no access_token", ref.ResourceID)
+	}
+	// RFC 6749 §7.1: a client must not use a token type it doesn't understand.
+	// Empty token_type is accepted (treated as bearer).
+	if tr.TokenType != "" && !strings.EqualFold(tr.TokenType, "bearer") {
+		return "", 0, fmt.Errorf("broker: token endpoint for resource %q returned unsupported token_type %q",
+			ref.ResourceID, tr.TokenType)
 	}
 	return tr.AccessToken, tr.ExpiresIn, nil
 }

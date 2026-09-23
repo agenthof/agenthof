@@ -2,7 +2,6 @@ package broker
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -72,8 +71,6 @@ func TestClientCredentialsMint(t *testing.T) {
 	if got != "minted-xyz" {
 		t.Fatalf("token = %q, want minted-xyz", got)
 	}
-	// Sanity: our own Basic header round-trips through url encoding.
-	_ = base64.StdEncoding
 }
 
 func TestClientCredentialsCacheHit(t *testing.T) {
@@ -117,6 +114,30 @@ func TestClientCredentialsRefreshOnExpiry(t *testing.T) {
 	}
 }
 
+func TestClientCredentialsShortLifetimeStillCaches(t *testing.T) {
+	// expires_in = 10 is well under the 30s refreshMargin ceiling; the
+	// effective margin must fall back to 10% of lifetime (1s) so the token is
+	// still cacheable instead of missing the cache on every resolve.
+	t.Setenv("CC_ID", "client-abc")
+	t.Setenv("CC_SECRET", "shh secret")
+	var mints int32
+	srv := newTokenEndpoint(t, &mints, "minted-xyz", 10)
+	defer srv.Close()
+
+	now := time.Unix(1_000_000, 0)
+	b := NewClientCredentials(srv.Client())
+	b.Now = func() time.Time { return now }
+
+	for i := 0; i < 2; i++ {
+		if _, err := b.Resolve(context.Background(), ccRef(srv.URL)); err != nil {
+			t.Fatalf("Resolve #%d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&mints); got != 1 {
+		t.Fatalf("mints = %d, want 1 (short-lived token should still cache within its margin)", got)
+	}
+}
+
 func TestClientCredentialsNoCacheWhenExpiresInAbsent(t *testing.T) {
 	t.Setenv("CC_ID", "client-abc")
 	t.Setenv("CC_SECRET", "shh secret")
@@ -156,5 +177,32 @@ func TestClientCredentialsErrorHidesSecrets(t *testing.T) {
 	}
 	if !strings.Contains(msg, "invalid_client") || !strings.Contains(msg, "github-mcp") {
 		t.Fatalf("error should name the RFC error code and resource: %q", msg)
+	}
+}
+
+func TestClientCredentialsRejectsNonBearerTokenType(t *testing.T) {
+	// RFC 6749 §7.1: a client must not use a token type it doesn't understand.
+	t.Setenv("CC_ID", "client-abc")
+	t.Setenv("CC_SECRET", "shh secret")
+	const secretToken = "should-never-appear-in-error-xyz"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": secretToken, "token_type": "mac", "expires_in": 3600,
+		})
+	}))
+	defer srv.Close()
+
+	b := NewClientCredentials(srv.Client())
+	_, err := b.Resolve(context.Background(), ccRef(srv.URL))
+	if err == nil {
+		t.Fatal("expected error for unsupported token_type")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, secretToken) {
+		t.Fatalf("error leaked the access token: %q", msg)
+	}
+	if !strings.Contains(msg, "mac") || !strings.Contains(msg, "github-mcp") {
+		t.Fatalf("error should name the unexpected token_type and resource: %q", msg)
 	}
 }
