@@ -61,6 +61,7 @@ type Options struct {
 	ArtifactDir  string
 	WorkspaceDir string
 	ConfigHash   string
+	ToolProxy    ToolProxy
 }
 
 const defaultMaxBounces = 2
@@ -138,8 +139,34 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		emit(Event{Type: "step_started", Step: step.Name, Agent: agent.Name, Execution: execTier})
 
 		stepCtx, cancel := context.WithTimeout(ctx, opts.StepTimeout)
+		// Bracket a fronted, tool-declaring step with the tool proxy: it serves
+		// this one agent's allowlist for the duration of the dispatch.
+		frontedWithTools := opts.ToolProxy != nil && agent.EffectiveExecution() == "fronted" && len(agent.Tools) > 0
+		if frontedWithTools {
+			// appendEvent writes tool_call events on the SAME serialized log
+			// (3.0) but must NOT touch the engine-goroutine logErr var.
+			appendEvent := func(e Event) {
+				e.Time = now()
+				e.Binding = bind
+				_ = log.Append(e)
+			}
+			url, token, perr := opts.ToolProxy.Start(bind, agent, appendEvent)
+			if perr != nil {
+				cancel()
+				emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: "tool proxy: " + perr.Error(), Execution: execTier})
+				emit(Event{Type: "workflow_finished", Status: "failed", Reason: "tool proxy: " + perr.Error()})
+				if logErr != nil {
+					return runID, "failed", fmt.Errorf("ledger write failed: %w", logErr)
+				}
+				return runID, "failed", nil
+			}
+			stepCtx = WithProxyCoordinates(stepCtx, url, token)
+		}
 		res, execErr := exec.Execute(stepCtx, bind, agent, input, artifacts)
 		cancel()
+		if frontedWithTools {
+			opts.ToolProxy.Stop()
+		}
 		if execErr != nil {
 			if errors.Is(execErr, ErrStepConfig) {
 				// Configuration errors can't be fixed by retrying: fail the
