@@ -197,18 +197,22 @@ func (p *Proxy) execAttestHandler(bind engine.Binding, agent config.AgentDef, ap
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Command   []string `json:"command"`
-			Exit      int      `json:"exit"`
+			Exit      *int     `json:"exit"`
 			OutputSHA string   `json:"output_sha"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+		if req.Exit == nil {
+			http.Error(w, "exit is required", http.StatusBadRequest)
+			return
+		}
 		status := "succeeded"
-		if req.Exit != 0 {
+		if *req.Exit != 0 {
 			status = "failed"
 		}
-		exit := req.Exit
+		exit := *req.Exit
 		p.guardedAppend(appendEvent, engine.Event{
 			Type: "exec", Agent: agent.Name, Status: status,
 			Command: req.Command, ExitCode: &exit, OutputSHA: req.OutputSHA,

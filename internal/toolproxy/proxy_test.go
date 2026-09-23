@@ -780,6 +780,21 @@ func TestExecAttestRecords(t *testing.T) {
 	}
 }
 
+func TestExecAttestRequiresExit(t *testing.T) {
+	var ev []engine.Event
+	base, token, stop := startExecProxy(t, []config.ExecEntry{{Exe: "go"}}, func(e engine.Event) { ev = append(ev, e) })
+	defer stop()
+	code, body := execPost(t, base, "exec/attest", token, `{"command":["go","test"],"output_sha":"deadbeef"}`)
+	if code != 400 {
+		t.Fatalf("attest missing exit: code=%d body=%s", code, body)
+	}
+	for _, e := range ev {
+		if e.Type == "exec" {
+			t.Fatalf("a missing exit must record no exec event, got %+v", e)
+		}
+	}
+}
+
 func TestExecEndpointRejectsBadRunToken(t *testing.T) {
 	base, _, stop := startExecProxy(t, []config.ExecEntry{{Exe: "go"}}, func(engine.Event) {})
 	defer stop()
