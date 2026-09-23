@@ -33,9 +33,10 @@ The runtime separates a control plane from a data plane.
   (authenticators and the delegation binding), and `audit/` (ledger write
   and read). This is the layer that decides what is allowed to run, and
   records what did.
-- **Data plane** — `gateway/`: it resolves logical model names to real
-  endpoints and provisions per-role keys and budgets, and it carries the
-  schema slot reserved for a V2 `tools:` block.
+- **Data plane** — `gateway/`, which resolves logical model names to real
+  endpoints and provisions per-role keys and budgets; and `toolproxy/`, the
+  inbound MCP proxy a fronted agent's declared tools are reached through
+  (see [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers)).
 
 The agent runtime in `agentrt/` — which materializes ADK-Go agents from
 registry entries, exposes the jailed tool catalog, and fronts external
@@ -50,10 +51,13 @@ principle that designing them in is not the same as building them now:
 1. **Model gateway** — the data plane for model calls. It is a
    LiteLLM-class facade: something to run, not to rebuild. It holds
    per-role virtual keys with budgets.
-2. **Tool/MCP gateway (V2)** — reserved as a schema slot (`tools:` in
-   `gateway.yaml`) but not built in V1. V1 ships a jailed tool catalog
-   instead — list, search, read, edit, write, and no exec — as part of the
-   agent runtime.
+2. **Tool/MCP gateway** — the inbound MCP proxy a fronted agent's declared
+   tools (`tools:` entries naming `gateway.yaml` tool resources) are reached
+   through, with the same hold-and-inject credential shape as the model
+   gateway (see [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers)).
+   A contained agent has no use for it: it works instead through the jailed
+   tool catalog below — list, search, read, edit, write, and no exec — as
+   part of the agent runtime.
 3. **Control tower** — the platform itself: the config directory, `apply`,
    and the registry. Unlike the other two this is not a network facade; it
    is the config, validation, and registry path described above.
@@ -87,8 +91,12 @@ internally. Concretely, the call in carries the run's identity as
 `X-Agenthof-*` request headers (see
 [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers) for
 the list) — attested like the rest of the boundary, not enforced. A fronted
-agent may not declare `tools` (tools are a
-contained-runtime capability), and its `model` routing is not checked, since
+agent may declare `tools`, each naming a `gateway.yaml` tool resource; for
+the duration of its step it reaches those tools only through Agenthof's
+inbound MCP proxy, which authorizes each call against that allowlist and
+injects the resource's credential, so the agent itself never holds one (see
+[`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs-two-tiers) for
+the full flow). Its `model` routing is not checked, since
 it is not calling through Agenthof's model gateway the way a contained agent
 does (see
 [`docs/reference/config.md`](reference/config.md#execution) for the exact
@@ -136,8 +144,9 @@ prerequisites for a release.
 
 Agents get no raw network access, no shell, and no ambient credentials.
 Capability reaches an agent only through governed, logged doors: the model
-gateway (metered and budgeted), the tool catalog (allowlisted and logged;
-the tool gateway in V2), and a jailed workspace (path-confined,
+gateway (metered and budgeted), the jailed tool catalog for a contained agent
+or the inbound MCP proxy for a fronted one's declared tools (both
+allowlisted and logged), and a jailed workspace (path-confined,
 symlink-hardened, with no dotfile or VCS-metadata access). Every one of
 those doors writes to the ledger. No change may add an agent-reachable exec
 tool, an unmediated network call, or a credential stored where an agent's

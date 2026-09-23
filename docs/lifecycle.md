@@ -138,6 +138,55 @@ step event**, so an audit shows exactly what guarantee applied:
   ignore them, or do anything else it likes with the request, and Agenthof
   records the call as `fronted` either way.
 
+  When a fronted agent's registry entry also declares `tools`, two more
+  headers ride along on that one call, present only for the duration of this
+  step:
+
+  | Header | Carries |
+  | --- | --- |
+  | `X-Agenthof-Proxy-URL` | the address of a proxy started just for this step |
+  | `X-Agenthof-Run-Token` | a token minted just for this step |
+
+  Those two headers point the agent at Agenthof's own **inbound MCP proxy**
+  rather than at the tools directly — the agent holds no credential for any
+  tool it uses. For the life of the step:
+
+  1. Agenthof mints a fresh run token and starts a proxy bound to
+     `127.0.0.1` on an ephemeral port — reachable only from the same host
+     Agenthof itself runs on;
+  2. it connects, as an MCP client, to each of the agent's declared tools
+     (each one a `gateway.yaml` tool resource) and injects that resource's
+     broker-resolved credential into its own outbound calls — a credential
+     the agent never sees;
+  3. it mirrors those upstream tools onto the proxy's inbound MCP server,
+     gated behind the run token: a request without the matching
+     `Authorization: Bearer <token>` header is rejected before any tool
+     call is even parsed;
+  4. when the agent calls a tool through the proxy, Agenthof re-checks the
+     call against the agent's declared tools, forwards it to the real MCP
+     server over the credentialed connection from step 2, and appends a
+     `tool_call` event to the run's ledger recording which resource was
+     touched, whether the call succeeded, failed, or was refused as
+     off-allowlist, and a SHA-256 hash plus a short preview of the result —
+     never the call's arguments, the full result body, or any credential;
+  5. once the step finishes, Agenthof shuts the proxy down and closes its
+     upstream connections; the run token stops working and is never written
+     to the ledger or placed on the delegation binding — it exists only in
+     the `Authorization` header of the agent's proxied calls, for as long as
+     the step runs.
+
+  This is governed and recorded, not a guarantee about the upstream MCP
+  server's own behavior: what that server does with a call, once Agenthof has
+  forwarded it, is outside Agenthof's control. And a proxy that fails to
+  start — its upstream unreachable, or two of the agent's declared tools
+  exposing a tool of the same name — fails the step outright (`step_failed`
+  then `workflow_finished{failed}`) rather than bouncing back to a prior
+  step, the same treatment as a configuration error.
+
+  A fronted agent that declares no `tools` never sees these two headers or
+  any proxy at all — the whole mechanism above only exists for the duration
+  of a step whose agent has at least one declared tool.
+
 Two executors ship for the contained tier: the default **`echo`** executor,
 which runs fully offline with no model and no credentials (great for trying the
 flow), and the **`adk`** executor, which runs a real model-backed agent.
@@ -154,15 +203,18 @@ Instead:
 3. the agent uses the model — and **never sees the key**. No tool returns it,
    there is no shell or env access, and it is never placed in the agent's prompt.
 
-The credential lives in the door, not in the agent. This is the same pattern
-every future external resource will use: the credential is held and injected by
-a governed gateway, and the human is attributed through the ledger rather than
-through the credential.
+The credential lives in the door, not in the agent. The inbound MCP proxy
+described above uses the same shape for a fronted agent's declared tools: the
+credential is held and injected by Agenthof, resolved from an environment
+variable named in `gateway.yaml` (never a value stored in config), and the
+human is attributed through the ledger rather than through the credential.
 
-> Reserved for later: reaching **other** secured resources (databases, APIs,
-> MCP servers) goes through a **tool/MCP gateway** with the same
-> hold-and-inject shape. It is a reserved slot in the schema, **not built in the
-> current version**. The model gateway is the only resource door today.
+> Reserved for later: today a tool resource's credential is always a static
+> bearer token from an environment variable (`credential_source: static_env`).
+> `gateway.yaml`'s tool-resource schema reserves additional fields for
+> IdP-issued, per-call credentials (client-credentials grants, token exchange)
+> — parsed today, not yet implemented — so a resource can move onto that
+> stronger footing later without a breaking schema change.
 
 ### Success, artifacts, and handoff
 
@@ -180,7 +232,10 @@ the previous step), up to a bounce cap (default 2). Each bounce is a
 `bounced_back` event. When the bounces are exhausted — or there is nowhere to
 bounce — the run ends as `workflow_finished { failed }`. A *configuration* error
 is different: it can't be fixed by retrying, so it fails the run immediately
-without bouncing.
+without bouncing. A fronted-with-tools step whose proxy itself fails to start
+— its declared upstream unreachable, or two of its declared tools exposing a
+tool of the same name — is treated the same way: the step and the run fail
+immediately, with no bounce.
 
 Note the distinction the ledger preserves: a **refusal** happens *before*
 execution (bad identity, failed authorization, invalid config); a **failure** is
@@ -247,12 +302,13 @@ flag and exit-code reference.
 
 | Shipped today | Reserved for later |
 |---|---|
-| `echo` (offline) and `adk` (model-backed) executors | tool/MCP gateway for non-model resources |
-| model gateway with per-role keys + budgets | agent auth to IdP-protected resources (M2M / on-behalf-of) |
-| `contained` and `fronted` execution tiers | enforced capabilities for fronted agents |
-| hash-chained ledger + `audit` / `audit verify` | multi-resource / cross-repo scope |
-| RBAC by group; linear workflow + fail-back | DAG workflows |
-| cross-run + control incident timeline (`investigate`) + config-join on `audit <run-id>` | SIEM / multi-org investigation at scale |
+| `echo` (offline) and `adk` (model-backed) executors | agent auth to IdP-protected resources (M2M / on-behalf-of; today's tool credentials are static bearer tokens only) |
+| model gateway with per-role keys + budgets | enforced capabilities for fronted agents (the proxy allowlists which tools a fronted agent may reach; it does not otherwise constrain what the agent's own code does) |
+| `contained` and `fronted` execution tiers | multi-resource / cross-repo scope |
+| inbound MCP proxy for a fronted agent's declared tools — allowlisted, credential-injecting, ledgered | DAG workflows |
+| hash-chained ledger + `audit` / `audit verify` | SIEM / multi-org investigation at scale |
+| RBAC by group; linear workflow + fail-back | |
+| cross-run + control incident timeline (`investigate`) + config-join on `audit <run-id>` | |
 
 Only shipped behavior is a guarantee.
 
