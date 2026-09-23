@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/identity"
@@ -21,18 +22,22 @@ type Binding struct {
 }
 
 type Event struct {
-	Time        time.Time `json:"time"`
-	Type        string    `json:"type"`
-	Step        string    `json:"step,omitempty"`
-	Agent       string    `json:"agent,omitempty"`
-	Status      string    `json:"status,omitempty"`
-	Reason      string    `json:"reason,omitempty"`
-	Artifact    string    `json:"artifact,omitempty"`
-	ArtifactSHA string    `json:"artifact_sha,omitempty"`
-	Execution   string    `json:"execution,omitempty"`
-	ConfigHash  string    `json:"config_hash,omitempty"`
-	Binding     Binding   `json:"binding"`
-	Prev        string    `json:"prev"`
+	Time             time.Time `json:"time"`
+	Type             string    `json:"type"`
+	Step             string    `json:"step,omitempty"`
+	Agent            string    `json:"agent,omitempty"`
+	Status           string    `json:"status,omitempty"`
+	Reason           string    `json:"reason,omitempty"`
+	Artifact         string    `json:"artifact,omitempty"`
+	ArtifactSHA      string    `json:"artifact_sha,omitempty"`
+	Execution        string    `json:"execution,omitempty"`
+	ConfigHash       string    `json:"config_hash,omitempty"`
+	AuthMode         string    `json:"auth_mode,omitempty"`         // e.g. "static_env"; reserved auth-mode axis
+	ResourcesTouched []string  `json:"resources_touched,omitempty"` // reserved: multi-resource
+	Actor            string    `json:"actor,omitempty"`             // reserved: delegation — the acting agent
+	Principal        string    `json:"principal,omitempty"`         // reserved: delegation — the initiating human/system
+	Binding          Binding   `json:"binding"`
+	Prev             string    `json:"prev"`
 }
 
 func NewRunID() string {
@@ -43,7 +48,10 @@ func NewRunID() string {
 	return "r-" + hex.EncodeToString(b)
 }
 
-type Log struct{ c *ledger.Chain }
+type Log struct {
+	mu sync.Mutex
+	c  *ledger.Chain
+}
 
 // OpenLog creates the run's log file and opens it for writing. Because
 // ledger.Open resumes an existing file's chain rather than rejecting it,
@@ -51,7 +59,8 @@ type Log struct{ c *ledger.Chain }
 // this guard, a colliding run ID would silently chain a second run's
 // events onto the first run's log, and audit would misattribute them.
 // A Log is opened exactly once per fresh run file; run logs are Unlocked
-// because each has one writer.
+// because each has one writer process. Concurrent in-process appenders
+// (e.g. the engine and a future tool proxy) are serialized by Log.mu.
 func OpenLog(dir, runID string) (*Log, error) {
 	c, err := ledger.Open(filepath.Join(dir, runID+".jsonl"), ledger.Unlocked)
 	if err != nil {
@@ -65,6 +74,8 @@ func OpenLog(dir, runID string) (*Log, error) {
 }
 
 func (l *Log) Append(e Event) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	e.Prev = l.c.Prev()
 	data, err := json.Marshal(e)
 	if err != nil {

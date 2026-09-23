@@ -54,10 +54,30 @@ type ModelRoute struct {
 }
 
 type GatewayConfig struct {
-	Models   map[string]ModelRoute `yaml:"models"`
+	Models   map[string]ModelRoute   `yaml:"models"`
+	Tools    map[string]ToolResource `yaml:"tools"`
 	Defaults struct {
 		Model string `yaml:"model"`
 	} `yaml:"defaults"`
+}
+
+// ToolResource is a declared tool/MCP resource in the gateway catalog.
+// Reserved shape: parsed, not yet read by any runtime path. The first
+// consumer will read only Kind/URL/CredentialSource=="static_env"/TokenEnv;
+// the remaining fields are the three-axis (grant × client-auth × source) +
+// multi-IdP shape, present so later additions to this catalog stay additive.
+// Credential coordinates are env-var NAMES, never values (Article II).
+type ToolResource struct {
+	Kind             string `yaml:"kind"` // "mcp"
+	URL              string `yaml:"url"`
+	CredentialSource string `yaml:"credential_source"` // "static_env" | vault|spiffe|sts (reserved)
+	TokenEnv         string `yaml:"token_env"`         // static_env bearer env NAME
+	GrantType        string `yaml:"grant_type"`        // reserved
+	ClientAuth       string `yaml:"client_auth"`       // reserved
+	Issuer           string `yaml:"issuer"`            // reserved: (resource,issuer) key
+	TokenEndpoint    string `yaml:"token_endpoint"`    // reserved
+	ClientIDEnv      string `yaml:"client_id_env"`     // reserved: env NAME
+	Scope            string `yaml:"scope"`             // reserved
 }
 
 type Config struct {

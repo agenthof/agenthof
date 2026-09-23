@@ -98,3 +98,33 @@ budget_usd_month: 50
 		t.Fatalf("parsed: %+v", r)
 	}
 }
+
+func TestGatewayToolsParse(t *testing.T) {
+	src := `
+models:
+  fast:
+    endpoint: https://x/v1
+    model: m
+    api_key_env: K
+tools:
+  github:
+    kind: mcp
+    url: https://mcp.example.com/mcp
+    credential_source: static_env
+    token_env: GITHUB_MCP_TOKEN
+defaults:
+  model: fast
+`
+	var gw GatewayConfig
+	if err := yaml.Unmarshal([]byte(src), &gw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	r, ok := gw.Tools["github"]
+	if !ok {
+		t.Fatalf("tools[github] missing; got %+v", gw.Tools)
+	}
+	if r.Kind != "mcp" || r.URL != "https://mcp.example.com/mcp" ||
+		r.CredentialSource != "static_env" || r.TokenEnv != "GITHUB_MCP_TOKEN" {
+		t.Fatalf("tool resource mismatch: %+v", r)
+	}
+}

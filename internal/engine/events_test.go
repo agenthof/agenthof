@@ -232,6 +232,51 @@ func TestOpenLogRejectsRunIDCollision(t *testing.T) {
 	}
 }
 
+func TestToolCallEventRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	log, err := OpenLog(dir, "r-toolcall")
+	if err != nil {
+		t.Fatalf("OpenLog: %v", err)
+	}
+	want := Event{
+		Type:             "tool_call",
+		Agent:            "coder",
+		Status:           "succeeded",
+		AuthMode:         "static_env",
+		ResourcesTouched: []string{"github"},
+	}
+	if err := log.Append(want); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events, _, err := ReadLog(dir, "r-toolcall")
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	got := events[0]
+	if got.Type != "tool_call" || got.AuthMode != "static_env" ||
+		len(got.ResourcesTouched) != 1 || got.ResourcesTouched[0] != "github" {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+}
+
+func TestEventOmitsReservedFieldsWhenEmpty(t *testing.T) {
+	data, err := json.Marshal(Event{Type: "step_started", Agent: "coder"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, k := range []string{"auth_mode", "resources_touched", "actor", "principal"} {
+		if strings.Contains(string(data), k) {
+			t.Fatalf("empty event must omit %q; got %s", k, data)
+		}
+	}
+}
+
 // TestReadLogUnmarshalFailurePreservesHeadCountInvariant is a regression
 // test for a bug where, if a record was valid per the ledger's hash chain
 // but failed to decode as an Event (e.g. a malformed "time" field), and a

@@ -255,6 +255,7 @@ budget_usd_month: 20
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
 | Models | `models` | map of string → `ModelRoute` | conditionally | — |
+| Tools | `tools` | map of string → `ToolResource` | no | — |
 | Defaults.Model | `defaults.model` | string | no | — |
 
 `ModelRoute` fields:
@@ -265,6 +266,25 @@ budget_usd_month: 20
 | Model | `model` | string | no (not checked by `apply`) | — |
 | APIKeyEnv | `api_key_env` | string | no (not checked by `apply`) | — |
 
+`ToolResource` fields — the reserved tool/MCP gateway schema slot described in
+`docs/concepts.md` (parsed, but not yet read by `apply` or any runtime path):
+
+| Field | YAML key | Type | Required | Default |
+|---|---|---|---|---|
+| Kind | `kind` | string | no (not checked by `apply`) | — |
+| URL | `url` | string | no (not checked by `apply`) | — |
+| CredentialSource | `credential_source` | string | no (not checked by `apply`) | — |
+| TokenEnv | `token_env` | string | no (not checked by `apply`) | — |
+| GrantType | `grant_type` | string | no (not checked by `apply`) | — |
+| ClientAuth | `client_auth` | string | no (not checked by `apply`) | — |
+| Issuer | `issuer` | string | no (not checked by `apply`) | — |
+| TokenEndpoint | `token_endpoint` | string | no (not checked by `apply`) | — |
+| ClientIDEnv | `client_id_env` | string | no (not checked by `apply`) | — |
+| Scope | `scope` | string | no (not checked by `apply`) | — |
+
+`TokenEnv` and `ClientIDEnv` hold the *name* of an environment variable, never
+a credential value.
+
 ### `models`
 
 A map from a logical model name to a `ModelRoute`. `apply` uses the map's
@@ -273,6 +293,13 @@ agent's effective `model` (see `model` under Agents, above) — a name not
 present as a key here fails with `unroutable-model`. The contents of each
 `ModelRoute` entry (`endpoint`, `model`, `api_key_env`) are not themselves
 validated by `apply`.
+
+### `tools`
+
+A map from a logical tool-resource name to a `ToolResource`. This is the
+reserved tool/MCP gateway schema slot (see "Tool/MCP gateway" in
+`docs/concepts.md`): it is parsed today, but `apply` does not validate it and
+no runtime path reads it yet.
 
 ### `defaults` / `defaults.model`
 
