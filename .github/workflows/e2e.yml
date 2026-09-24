@@ -8,6 +8,8 @@ on:
       - 'scripts/e2e-dex.sh'
       - '.github/workflows/e2e.yml'
       - 'deploy/**'
+      - 'cmd/agenthof/**'      # a CLI change (e.g. a removed flag) can break the e2e
+      - 'examples/**'          # the e2e runs the example config + fronted agent
 
 permissions:
   contents: read

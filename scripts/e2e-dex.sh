@@ -3,9 +3,14 @@
 # Requires: docker, curl, jq, go. Run from the repo root.
 set -euo pipefail
 
-cleanup() { docker compose -f deploy/docker-compose.yml rm -sf dex >/dev/null 2>&1 || true; }
+AGENT_PID=""
+cleanup() {
+  [ -n "$AGENT_PID" ] && kill "$AGENT_PID" >/dev/null 2>&1 || true
+  docker compose -f deploy/docker-compose.yml rm -sf dex >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
-# Cleanup only stops/removes the dex container; a running litellm stack is left untouched.
+# Cleanup stops the dex container and the example fronted agent; a running
+# litellm stack is left untouched.
 
 # docker-compose.yml requires LITELLM_MASTER_KEY for interpolation even when
 # only the dex service is targeted; this tier doesn't touch litellm, so a
@@ -34,11 +39,28 @@ export AGENTHOF_OIDC_ISSUER=http://localhost:5556/dex
 export AGENTHOF_OIDC_CLIENT_ID=agenthof
 
 WORK=$(mktemp -d)
+
+# The example agents are fronted (execution: fronted, endpoint
+# http://127.0.0.1:8080/); start the reference fronted agent so the run has a
+# real endpoint to reach. Build then run the binary (killing `go run` would not
+# reliably stop the child server).
+go build -o "$WORK/echo-agent" ./examples/echo-agent
+"$WORK/echo-agent" -addr 127.0.0.1:8080 &
+AGENT_PID=$!
+
+echo "waiting for the fronted agent..."
+for i in $(seq 1 30); do
+  curl -fsS -o /dev/null -X POST -H "Content-Type: application/json" \
+    -d '{}' http://127.0.0.1:8080/ >/dev/null 2>&1 && break
+  [ "$i" = 30 ] && { echo "echo-agent never became ready"; exit 1; }
+  sleep 1
+done
+
 go run ./cmd/agenthof apply --config examples/config
 OUT=$(go run ./cmd/agenthof run software-engineer fix-bug \
-  --input "e2e oidc smoke" --token "$TOKEN" --executor echo \
+  --input "e2e oidc smoke" --token "$TOKEN" \
   --config examples/config --log-dir "$WORK/logs" \
-  --artifact-dir "$WORK/artifacts" --workspace "$WORK/ws")
+  --artifact-dir "$WORK/artifacts")
 echo "$OUT"
 echo "$OUT" | grep -q "finished: succeeded"
 
