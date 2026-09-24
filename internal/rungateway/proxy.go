@@ -7,6 +7,7 @@
 package rungateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,6 +18,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +30,7 @@ import (
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/gateway"
 )
 
 // connectTimeout bounds an upstream connect/list-tools call at Start time so a
@@ -38,8 +43,10 @@ const connectTimeout = 30 * time.Second
 // their tools onto an inbound MCP server gated by the run token, and forwards
 // calls, appending a tool_call event per call.
 type Gateway struct {
-	tools  map[string]config.ToolResource
-	broker broker.Broker
+	tools   map[string]config.ToolResource
+	broker  broker.Broker
+	gwcfg   config.GatewayConfig
+	keyRoot string
 
 	mu       sync.Mutex
 	srv      *http.Server
@@ -133,6 +140,7 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil))
 	mux.HandleFunc("/exec/authorize", p.execAuthorizeHandler(bind, agent, appendEvent))
 	mux.HandleFunc("/exec/attest", p.execAttestHandler(bind, agent, appendEvent))
+	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent))
 	handler := authMiddleware(mux, token)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -520,4 +528,168 @@ func resultErrorText(result *mcp.CallToolResult) string {
 		text = string(r[:200])
 	}
 	return text
+}
+
+// modelHandler is the OpenAI-compatible door on the per-run listener. The
+// agent authenticates with the run token; the proxy authorizes the logical
+// model, injects the per-role provider key, and never forwards the run token
+// or any X-Agenthof-* header.
+func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		logical, _ := req["model"].(string)
+
+		effective := agent.Model
+		if effective == "" {
+			effective = p.gwcfg.Defaults.Model
+		}
+		if logical == "" || logical != effective {
+			p.guardedAppend(appendEvent, engine.Event{
+				Type: "model_call", Agent: agent.Name, Status: "refused",
+				Reason: fmt.Sprintf("model %q is not allowed for this agent", logical),
+				Model:  logical, Binding: bind,
+			})
+			http.Error(w, "model not allowed", http.StatusForbidden)
+			return
+		}
+
+		// keyRoot is the working dir gateway provision writes keys under
+		// (".", per main), not --config. Reading from --config would miss
+		// provisioned keys and fall back to the unbudgeted env key.
+		roleKey := gateway.LoadRoleKey(p.keyRoot, bind.Role)
+		route, err := gateway.Resolve(p.gwcfg, logical, roleKey)
+		if err != nil {
+			p.guardedAppend(appendEvent, engine.Event{
+				Type: "model_call", Agent: agent.Name, Status: "failed",
+				Reason: "model route not resolved", Model: logical, Binding: bind,
+			})
+			http.Error(w, "model route not resolved", http.StatusBadGateway)
+			return
+		}
+
+		req["model"] = route.Model
+		newBody, err := json.Marshal(req)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		target, err := url.Parse(route.Endpoint)
+		if err != nil || target.Scheme == "" || target.Host == "" {
+			http.Error(w, "bad route", http.StatusBadGateway)
+			return
+		}
+
+		r.Body = io.NopCloser(bytes.NewReader(newBody))
+		r.ContentLength = int64(len(newBody))
+		r.Header.Set("Content-Length", strconv.Itoa(len(newBody)))
+		r.Header.Set("Content-Type", "application/json")
+		r.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(newBody)), nil
+		}
+
+		const maxResp = 10 << 20
+		rp := &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.Out.URL.Scheme, pr.Out.URL.Host = target.Scheme, target.Host
+				pr.Out.Host = target.Host
+				pr.Out.URL.Path = singleJoiningSlash(target.Path, "/v1/chat/completions")
+				pr.Out.URL.RawQuery = ""
+				pr.Out.Header.Set("Authorization", "Bearer "+route.APIKey)
+				for k := range pr.Out.Header {
+					if strings.HasPrefix(k, "X-Agenthof-") {
+						pr.Out.Header.Del(k)
+					}
+				}
+				pr.Out.Header.Del("Cookie")
+			},
+			ModifyResponse: func(resp *http.Response) error {
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					reason := "upstream " + resp.Status
+					if resp.StatusCode == http.StatusTooManyRequests {
+						reason = "budget"
+					}
+					p.guardedAppend(appendEvent, engine.Event{
+						Type: "model_call", Agent: agent.Name, Status: "refused",
+						Reason: reason, Model: logical, Binding: bind,
+					})
+					return nil
+				}
+				if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+					p.guardedAppend(appendEvent, engine.Event{
+						Type: "model_call", Agent: agent.Name, Status: "started",
+						Model: logical, Binding: bind,
+					})
+					return nil
+				}
+				rb, err := io.ReadAll(io.LimitReader(resp.Body, maxResp+1))
+				_ = resp.Body.Close()
+				if err != nil {
+					p.guardedAppend(appendEvent, engine.Event{
+						Type: "model_call", Agent: agent.Name, Status: "failed",
+						Reason: "upstream read failed", Model: logical, Binding: bind,
+					})
+					return err
+				}
+				if len(rb) > maxResp {
+					p.guardedAppend(appendEvent, engine.Event{
+						Type: "model_call", Agent: agent.Name, Status: "failed",
+						Reason: "upstream response too large", Model: logical, Binding: bind,
+					})
+					return fmt.Errorf("upstream response too large")
+				}
+				resp.Body = io.NopCloser(bytes.NewReader(rb))
+				resp.ContentLength = int64(len(rb))
+				resp.Header.Set("Content-Length", strconv.Itoa(len(rb)))
+				pt, ct := parseUsage(rb)
+				p.guardedAppend(appendEvent, engine.Event{
+					Type: "model_call", Agent: agent.Name, Status: "succeeded",
+					Model: logical, PromptTokens: pt, CompletionTokens: ct, Binding: bind,
+				})
+				return nil
+			},
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+				http.Error(w, "upstream error", http.StatusBadGateway)
+			},
+		}
+		rp.ServeHTTP(w, r)
+	}
+}
+
+func parseUsage(body []byte) (*int, *int) {
+	var parsed struct {
+		Usage struct {
+			PromptTokens     *int `json:"prompt_tokens"`
+			CompletionTokens *int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, nil
+	}
+	return parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens
+}
+
+func singleJoiningSlash(a, b string) string {
+	aslash := strings.HasSuffix(a, "/")
+	bslash := strings.HasPrefix(b, "/")
+	switch {
+	case aslash && bslash:
+		return a + b[1:]
+	case !aslash && !bslash:
+		return a + "/" + b
+	}
+	return a + b
 }
