@@ -29,12 +29,14 @@ Every action carries three identities:
 3. **Delegation binding** (per run) — `invoker → role → workflow → agent →
    run-id`, stamped on every ledger event and every gateway call.
 
-External credentials live only in gateways, never in agent config or agent
-runtime state; config may reference an env-var name, never a secret value.
-Only mature, universally supported standards are load-bearing: OIDC login
-and M2M client-credentials. Emerging agent-identity standards (token
-exchange, SPIFFE/WIMSE, IdP agent-SSO products) are optional federation
-upgrades, never prerequisites for a release.
+The external credentials Agenthof injects live only in its gateways, never in
+agent config or agent runtime state; config may reference an env-var name,
+never a secret value. Credentials Agenthof does not govern — e.g. a fronted
+agent's model key while the model gateway is reserved (Article I) — are the
+operator's, outside Agenthof. Only mature, universally supported standards are
+load-bearing: OIDC login and M2M client-credentials. Emerging agent-identity
+standards (token exchange, SPIFFE/WIMSE, IdP agent-SSO products) are optional
+federation upgrades, never prerequisites for a release.
 
 ## Article III — The ledger
 
