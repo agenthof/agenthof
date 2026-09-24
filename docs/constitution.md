@@ -7,10 +7,10 @@ Where it and any other document disagree, this constitution wins.
 
 Capability reaches an agent only through governed, logged doors: the tool/MCP
 gateway, the exec gateway, and the model gateway. Where a door injects a
-credential, the agent never holds it — today the tool/MCP gateway, which
-injects a resource credential per call. The model gateway is reserved: until
-the fronted model proxy lands, a fronted agent's model access is arranged by
-its operator, outside Agenthof. Allowlisted commands run in the operator's
+credential, the agent never holds it. The tool/MCP gateway injects a resource
+credential per call. The model gateway injects the per-role provider key, so
+a fronted agent reaches models through Agenthof and never holds that key.
+Allowlisted commands run in the operator's
 sandbox and each is recorded — attested by the agent today; Agenthof records
 but does not run or contain them, and enforced execution is reserved. The
 agent runs in an operator-provided sandbox. That sandbox's network and exec
@@ -31,8 +31,8 @@ Every action carries three identities:
 
 The external credentials Agenthof injects live only in its gateways, never in
 agent config or agent runtime state; config may reference an env-var name,
-never a secret value. Credentials Agenthof does not govern — e.g. a fronted
-agent's model key while the model gateway is reserved (Article I) — are the
+never a secret value. Credentials Agenthof does not govern — e.g. a key a
+non-conforming agent obtains outside Agenthof's gateways — are the
 operator's, outside Agenthof. Only mature, universally supported standards are
 load-bearing: OIDC login and M2M client-credentials. Emerging agent-identity
 standards (token exchange, SPIFFE/WIMSE, IdP agent-SSO products) are optional
