@@ -60,7 +60,11 @@ type Options struct {
 	StepTimeout time.Duration
 	ArtifactDir string
 	ConfigHash  string
-	ToolProxy   ToolProxy
+	// NewGateway returns the gateway for this run. The engine calls it once,
+	// before the step loop, and reuses that instance across the run's steps.
+	// Nil means this run has no gateway. A fresh return value per call keeps
+	// one run from closing or overwriting another's listener.
+	NewGateway func() ToolProxy
 }
 
 const defaultMaxBounces = 2
@@ -125,6 +129,10 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	}
 
 	emit(Event{Type: "workflow_started", ConfigHash: opts.ConfigHash})
+	var gw ToolProxy
+	if opts.NewGateway != nil {
+		gw = opts.NewGateway()
+	}
 	artifacts := map[string]string{}
 	bounces := map[string]int{}
 	i := 0
@@ -142,7 +150,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		// doors this agent uses — tools, exec, or the model proxy — and a
 		// listener with no traffic is cheap. The agent receives the proxy
 		// URL and run token and ignores the doors it does not call.
-		fronted := opts.ToolProxy != nil && agent.EffectiveExecution() == "fronted"
+		fronted := gw != nil && agent.EffectiveExecution() == "fronted"
 		if fronted {
 			// appendEvent writes tool_call events on the same serialized
 			// ledger writer but must NOT touch the engine-goroutine logErr var.
@@ -151,7 +159,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 				e.Binding = bind
 				_ = log.Append(e)
 			}
-			url, token, perr := opts.ToolProxy.Start(bind, agent, appendEvent)
+			url, token, perr := gw.Start(bind, agent, appendEvent)
 			if perr != nil {
 				cancel()
 				emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: "tool proxy: " + perr.Error(), Execution: execTier})
@@ -166,7 +174,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		res, execErr := exec.Execute(stepCtx, bind, agent, input, artifacts)
 		cancel()
 		if fronted {
-			opts.ToolProxy.Stop()
+			gw.Stop()
 		}
 		if execErr != nil {
 			if errors.Is(execErr, ErrStepConfig) {
