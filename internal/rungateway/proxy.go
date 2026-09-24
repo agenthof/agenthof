@@ -716,22 +716,23 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				return nil
 			},
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
-				// Reached for a RoundTrip transport failure (connection
-				// refused, DNS, timeout — ModifyResponse never ran, nothing
-				// recorded yet), for a response-copy failure (the agent
-				// disconnected mid-stream, after ModifyResponse already
-				// returned nil), AND for a ModifyResponse error return
-				// (already recorded via record() above). The reason is kept
-				// deliberately generic rather than "upstream unreachable"
-				// (which would be wrong for a client-side disconnect) — it
-				// covers both an upstream that never answered and a response
-				// that never finished delivering. Only append here when
-				// nothing has been recorded yet, so a transport/copy failure
+				// ReverseProxy calls ErrorHandler in exactly two cases: (a) a
+				// Transport.RoundTrip failure (connection refused, DNS,
+				// timeout — ModifyResponse never ran, nothing recorded yet),
+				// or (b) a non-nil return from ModifyResponse (already
+				// recorded via record() above). It is NOT reached for a
+				// mid-stream response-copy failure — that aborts the handler
+				// via the recovered http.ErrAbortHandler panic, bypassing
+				// ErrorHandler entirely. The reason is kept deliberately
+				// generic rather than "upstream unreachable" (which would be
+				// wrong for case (b), e.g. an oversized or unreadable body)
+				// — it covers both without claiming more than is known. Only
+				// append here when nothing has been recorded yet, so case (a)
 				// still leaves a ledger line (Article III: no action without
-				// an event) without double-recording a ModifyResponse path
-				// that already appended its own. The error itself is never
-				// echoed — it can carry the upstream URL or a wrapped
-				// secret — a fixed reason is enough.
+				// an event) without double-recording case (b), which already
+				// appended its own. The error itself is never echoed — it
+				// can carry the upstream URL or a wrapped secret — a fixed
+				// reason is enough.
 				if !recorded {
 					p.guardedAppend(appendEvent, engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "failed",
