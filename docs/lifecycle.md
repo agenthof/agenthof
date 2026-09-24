@@ -20,7 +20,7 @@ That one line sets five things in motion:
 - **the invoker** — the human the run is attributed to (`dana@example.com`);
 - **the role** — `software-engineer`, which owns workflows and gates who may use them;
 - **the workflow** — `fix-bug`, an ordered list of steps;
-- **the agents** — each step names one, run either inside Agenthof or fronted over HTTP;
+- **the agents** — each step names one, an external HTTP service;
 - **the ledger** — where every step and every refusal is recorded as it happens.
 
 ## The journey at a glance
@@ -38,11 +38,10 @@ That one line sets five things in motion:
   3. Start the run      create run-id + delegation binding; write workflow_started
       │
       ▼
-  4. For each step:     step_started ─► run the agent ─► step_succeeded / step_failed
+  4. For each step:     step_started ─► POST the agent's endpoint ─► step_succeeded / step_failed
       │                          │
-      │                          ├─ contained: ADK agent in a jailed workspace
-      │                          └─ fronted:   external HTTP service (attested)
-      │                          (a model call gets its key from the gateway here)
+      │                          └─ fronted: external HTTP service (attested)
+      │                             declared tools and exec go through Agenthof's doors
       │
       ▼
   5. Finish             workflow_finished { succeeded | failed }
@@ -105,28 +104,27 @@ The engine writes `workflow_started`, then walks the workflow's steps in order.
 For each step it writes `step_started` (naming the step, the agent, and the
 agent's execution tier), runs the agent, and then records the outcome.
 
-### How an agent actually runs: two tiers
+### How an agent actually runs
 
-Every agent runs under one of two tiers, and **which one is stamped on every
-step event**, so an audit shows exactly what guarantee applied:
+Every agent is an external HTTP service. `execution` is `fronted`, or empty,
+which means the same thing, and that value is **stamped on every step
+event**. The value `contained` is rejected at apply: that tier was removed.
 
-- **`contained`** (the default) — the agent is materialized as a Google-ADK
-  agent *inside Agenthof's own runtime*, confined to a **jailed workspace**
-  (path-confined, symlink-hardened, no dotfile or VCS-metadata access) and given
-  **only its file tools** — list, search, read, edit, write. There is no shell
-  and no raw network. This is *containment by construction*: there is no door
-  for the agent to escape through because none was built.
-- **`fronted`** — the agent is an external HTTP service Agenthof calls out to.
-  Its internal code runs outside Agenthof, so it cannot be contained; instead it
-  is **governed at the doors it must pass through** — the call in, the result
-  out, and the identity and ledger entries around it. As part of the call in,
-  Agenthof forwards the run's delegation binding — the invoker's subject,
-  issuer, and method, the role, the workflow, and the run id — to the agent as
-  request headers, so the agent can see who and what it is acting for. The
-  six headers, and what each carries, are:
+Agenthof POSTs the step to the agent's `endpoint`. The agent's own code runs
+outside Agenthof, so Agenthof does not confine that process. The agent is
+**governed at the doors it must pass through** — the call in, the result
+out, and the identity and ledger entries around it. It runs in an
+operator-provided sandbox. That sandbox's network and exec confinement is
+required, and Agenthof does not verify it.
+
+As part of the call in, Agenthof forwards the agent name and the run's
+delegation binding — the invoker's subject, issuer, and method, the role,
+the workflow, and the run id — as request headers, so the agent can see who
+and what it is acting for. The headers, and what each carries, are:
 
   | Header | Carries |
   | --- | --- |
+  | `X-Agenthof-Agent` | the agent name |
   | `X-Agenthof-Invoker` | the invoker's subject |
   | `X-Agenthof-Invoker-Issuer` | the invoker's issuer |
   | `X-Agenthof-Invoker-Method` | the invoker's authentication method |
@@ -134,11 +132,16 @@ step event**, so an audit shows exactly what guarantee applied:
   | `X-Agenthof-Workflow` | the name of the running workflow |
   | `X-Agenthof-Run-Id` | the run's id |
 
-  A fronted agent is *attested, not enforced*: it can read those headers,
-  ignore them, or do anything else it likes with the request, and Agenthof
-  records the call as `fronted` either way.
+  The agent is *attested, not enforced*: it can read those headers, ignore
+  them, or do anything else it likes with the request, and Agenthof records
+  the call as `fronted` either way. The request body is JSON with `input`,
+  `artifacts` (prior named artifacts, when any), and `agent`. A 200 response
+  is JSON with `artifact`, `success`, and `reason`. Anything else — a
+  non-200, a transport error, a timeout, or a body over 1 MiB — is a failed
+  step. The client does not follow redirects. An empty endpoint never
+  reaches this call: `apply` rejects it.
 
-  When a fronted agent's registry entry also declares `tools`, two more
+  When an agent's registry entry also declares `tools`, two more
   headers ride along on that one call, present only for the duration of this
   step:
 
@@ -201,31 +204,27 @@ step event**, so an audit shows exactly what guarantee applied:
 
   The same listener, and the same two headers, also serve the exec door when
   the agent declares `exec`, including an agent that declares exec and no
-  tools. See [`lifecycle-exec.md`](lifecycle-exec.md). A fronted agent that
-  declares neither `tools` nor `exec` never sees these two headers or any
-  listener at all.
+  tools. See [`lifecycle-exec.md`](lifecycle-exec.md). An agent that declares
+  neither `tools` nor `exec` never sees these two headers or any listener at
+  all.
 
-Two executors ship for the contained tier: the default **`echo`** executor,
-which runs fully offline with no model and no credentials (great for trying the
-flow), and the **`adk`** executor, which runs a real model-backed agent.
+A minimal agent that implements this contract — echoing `input` back as
+`artifact` — ships at `examples/echo-agent`. It holds no credentials.
 
-### The life of a credential (model-backed runs)
+### Model access is reserved
 
-When a contained agent needs to call a model, it does **not** hold an API key.
-Instead:
+A run does not inject a model credential. `gateway.models`,
+`gateway.defaults.model`, and `roles[].budget_usd_month` are accepted
+configuration for a reserved door: an agent reaching models through
+Agenthof, with the credential injected and never passed through to the
+agent. Until that proxy lands, the agent's own process obtains models
+however its operator arranged, outside Agenthof.
 
-1. the **gateway** resolves the agent's logical model name to a real endpoint
-   and the calling **role's** provisioned key;
-2. that key is injected into the model client's transport at the moment of the
-   call;
-3. the agent uses the model — and **never sees the key**. No tool returns it,
-   there is no shell or env access, and it is never placed in the agent's prompt.
-
-The credential lives in the door, not in the agent. The inbound MCP proxy
-described above uses the same shape for a fronted agent's declared tools: the
-credential is held and injected by Agenthof, resolved from an environment
-variable named in `gateway.yaml` (never a value stored in config), and the
-human is attributed through the ledger rather than through the credential.
+Tool credentials are live, and they use the hold-and-inject shape described
+above: the credential is held and injected by Agenthof, resolved from an
+environment variable named in `gateway.yaml` (never a value stored in
+config), and the human is attributed through the ledger rather than through
+the credential.
 
 > Shipped: a tool resource's credential is either a static bearer token read
 > from an environment variable (`credential_source: static_env`, the
@@ -254,7 +253,7 @@ the previous step), up to a bounce cap (default 2). Each bounce is a
 `bounced_back` event. When the bounces are exhausted — or there is nowhere to
 bounce — the run ends as `workflow_finished { failed }`. A *configuration* error
 is different: it can't be fixed by retrying, so it fails the run immediately
-without bouncing. A fronted-with-tools step whose proxy itself fails to start
+without bouncing. A step whose proxy itself fails to start
 — its declared upstream unreachable, or two of its declared tools exposing a
 tool of the same name — is treated the same way: the step and the run fail
 immediately, with no bounce.
@@ -267,7 +266,7 @@ ordinary execution that didn't succeed. Both are fully recorded.
 
 When the last step succeeds, the engine writes `workflow_finished { succeeded }`
 and the run is done. The whole story — who asked, what ran, what each step
-touched, what it cost to get there — now lives in the run's ledger.
+touched — now lives in the run's ledger.
 
 ## The record (the life of a ledger event)
 
@@ -324,14 +323,13 @@ flag and exit-code reference.
 
 | Shipped today | Reserved for later |
 |---|---|
-| `echo` (offline) and `adk` (model-backed) executors | on-behalf-of / token-exchange agent auth to IdP-protected resources (RFC 8693) |
-| model gateway with per-role keys + budgets | enforced capabilities for fronted agents (the proxy allowlists which tools a fronted agent may reach; it does not otherwise constrain what the agent's own code does) |
-| `contained` and `fronted` execution tiers | multi-resource / cross-repo scope |
-| inbound MCP proxy for a fronted agent's declared tools — allowlisted, credential-injecting, ledgered, and able to mint its own upstream token via the `client_credentials` grant | DAG workflows |
-| attested exec for a fronted agent: an allowlist check, then an agent-reported outcome recorded as `exec` with `mode: attested`. Agenthof records the report and does not run or contain the command | enforced execution, where Agenthof would run the command |
-| hash-chained ledger + `audit` / `audit verify` | SIEM / multi-org investigation at scale |
-| RBAC by group; linear workflow + fail-back | |
-| cross-run + control incident timeline (`investigate`) + config-join on `audit <run-id>` | |
+| fronted agents: every step is an HTTP call to the agent's endpoint, with identity headers and `execution: fronted` stamped on the step events | fronted model proxy — agents reach models through Agenthof, credential injected, never passed through to the agent |
+| inbound MCP proxy for an agent's declared tools — allowlisted, credential-injecting, ledgered, and able to mint its own upstream token via the `client_credentials` grant | on-behalf-of / token-exchange agent auth to IdP-protected resources (RFC 8693) |
+| attested exec: an allowlist check, then an agent-reported outcome recorded as `exec` with `mode: attested`. Agenthof records the report and does not run or contain the command | enforced execution, where Agenthof would run the command |
+| hash-chained ledger + `audit` / `audit verify` | enforced capabilities beyond the tool allowlist (the proxy allowlists which tools an agent may reach; it does not otherwise constrain what the agent's own code does) |
+| RBAC by group; linear workflow + fail-back | multi-resource / cross-repo scope |
+| cross-run + control incident timeline (`investigate`) + config-join on `audit <run-id>` | DAG workflows |
+| | SIEM / multi-org investigation at scale |
 
 Only shipped behavior is a guarantee.
 

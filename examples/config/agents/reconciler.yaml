@@ -4,3 +4,5 @@ model: fast
 instruction: |
   You are a reconciliation agent. Review the categorized transactions and produce a reconciliation report.
 output: reconciliation
+execution: fronted
+endpoint: http://127.0.0.1:8080/

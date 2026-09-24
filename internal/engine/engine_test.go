@@ -36,9 +36,9 @@ func (f *fakeExec) Execute(ctx context.Context, _ Binding, agent config.AgentDef
 func engCfg() *registry.Registry {
 	cfg := config.Config{
 		Agents: []config.AgentDef{
-			{Name: "planner", Model: "fast", Output: "plan", SourceFile: "a"},
-			{Name: "coder", Model: "fast", Output: "patch", SourceFile: "b"},
-			{Name: "reviewer", Model: "fast", Output: "review", SourceFile: "c"},
+			{Name: "planner", Model: "fast", Output: "plan", Endpoint: "https://example.test/run", SourceFile: "a"},
+			{Name: "coder", Model: "fast", Output: "patch", Endpoint: "https://example.test/run", SourceFile: "b"},
+			{Name: "reviewer", Model: "fast", Output: "review", Endpoint: "https://example.test/run", SourceFile: "c"},
 		},
 		Workflows: []config.WorkflowDef{{
 			Name: "fix-bug", SourceFile: "w",
@@ -263,7 +263,7 @@ func TestRunThreadsBindingToExecutor(t *testing.T) {
 func rbacCfg() *registry.Registry {
 	cfg := config.Config{
 		Agents: []config.AgentDef{
-			{Name: "planner", Model: "fast", Output: "plan", SourceFile: "a"},
+			{Name: "planner", Model: "fast", Output: "plan", Endpoint: "https://example.test/run", SourceFile: "a"},
 		},
 		Workflows: []config.WorkflowDef{{
 			Name: "simple", SourceFile: "w",
@@ -419,9 +419,9 @@ func TestRunEventsCarryExecutionTier(t *testing.T) {
 		if e.Type == "step_started" || e.Type == "step_succeeded" {
 			seen++
 			// engCfg's agents have no execution field set, so
-			// EffectiveExecution() must normalize to "contained".
-			if e.Execution != "contained" {
-				t.Fatalf("event %+v must carry execution tier %q", e, "contained")
+			// EffectiveExecution() must normalize to "fronted".
+			if e.Execution != "fronted" {
+				t.Fatalf("event %+v must carry execution tier %q", e, "fronted")
 			}
 		}
 	}

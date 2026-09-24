@@ -28,11 +28,11 @@ The governed core is real and runnable today:
   prove.
 - **Identity & RBAC** — invokers are established by a pluggable authenticator
   (`static` for dev, OIDC for production); roles gate access by group.
-- **Model gateway** — agents speak logical model names resolved to any
-  OpenAI-compatible endpoint, with per-role keys and budgets.
-- **Execution tiers** — `contained` agents run inside Agenthof's own jailed
-  runtime; `fronted` agents are any external HTTP endpoint, governed at the
-  doors. The tier is recorded on every ledger event.
+- **Fronted agents** — every agent is an external HTTP endpoint, governed at
+  the tool/MCP and exec doors. The agent runs in an operator-provided
+  sandbox; that sandbox's network and exec confinement is required, and
+  Agenthof does not verify it. `execution: fronted` (the default when the
+  field is empty) is stamped on every step event.
 - **Retention** — `runs prune` ships in the core, not behind a paywall.
 - **Auditable control plane** — *who applied config* and *who flipped the
   kill switch* is recorded to its own hash-chained control ledger, so "who
@@ -51,6 +51,12 @@ The governed core is real and runnable today:
 
 ## Next
 
+- **Fronted model proxy** — agents reach models through Agenthof. The
+  credential is injected at that door and is not passed through to the agent.
+  This is the model analogue of the tool proxy.
+- **Model gateway** — reserved with that proxy. It resolved logical model
+  names and provisioned per-role keys for in-process agents. That engine
+  remains, and no run consumes it, so it is not a current guarantee.
 - **More harness adapters** — first-class support for registering and governing
   agents built on other runtimes and frameworks, not just an HTTP endpoint.
 

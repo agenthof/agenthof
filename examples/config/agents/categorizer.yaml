@@ -4,3 +4,5 @@ model: fast
 instruction: |
   You are a categorization agent. Examine the input and produce a list of transaction categories.
 output: categories
+execution: fronted
+endpoint: http://127.0.0.1:8080/

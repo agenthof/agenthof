@@ -2,9 +2,19 @@
 
 This document walks through four scripted demonstrations of Agenthof's core
 governance capabilities: CONFIG (agent registry management), AUDIT (run
-traceability and integrity), GOVERNANCE (role-based access control and
-budgeting), and INVESTIGATE (incident investigation across the control plane
-and every run).
+traceability and integrity), GOVERNANCE (role-based access control), and
+INVESTIGATE (incident investigation across the control plane and every run).
+
+The runs below call the example agents at `http://127.0.0.1:8080/`. Start
+the reference agent first and leave it running:
+
+```bash
+go run ./examples/echo-agent
+```
+
+It echoes each step's input back as the artifact and holds no credentials.
+If that port is taken, pass `-addr` and point every agent's `endpoint` at
+the same loopback URL.
 
 ## Part 1: CONFIG Moment — Registry Management & Kill Switches
 
@@ -163,13 +173,11 @@ Run the fix-bug workflow as dana@example.com:
 ./agenthof run software-engineer fix-bug \
   --input "fix the login bug" \
   --as dana@example.com \
-  --executor echo \
   --config examples/config
 ```
 
 Expected output:
 ```
-workspace: .agenthof/workspaces/<unix-nano>
 run r-<run-id> finished: succeeded
 ```
 
@@ -188,13 +196,17 @@ ledger integrity: verified (8 events)
 
   08:57:52  workflow started
   08:57:52  step plan (agent planner) started
-  08:57:52  step plan succeeded — artifact 511878f2: [planner] fix the login bug
+  08:57:52  step plan succeeded — artifact f7459994: fix the login bug
   08:57:52  step code (agent coder) started
-  08:57:52  step code succeeded — artifact 565dfc2c: [coder] fix the login bug
+  08:57:52  step code succeeded — artifact f7459994: fix the login bug
   08:57:52  step review (agent reviewer) started
-  08:57:52  step review succeeded — artifact 79866298: [reviewer] fix the login bug
+  08:57:52  step review succeeded — artifact f7459994: fix the login bug
   08:57:52  workflow finished: succeeded
+config sha256:<hex> — applied by dana@example.com (asserted) at <ts>
 ```
+
+The three artifacts match because the example agent echoes the step input.
+A different agent would return a different body, and a different hash.
 
 The audit trail shows:
 - **Run ID and Workflow**: Which workflow was executed and in which role
@@ -261,13 +273,11 @@ Run the workflow with the OIDC token:
 ./agenthof run software-engineer fix-bug \
   --input "fix the login bug" \
   --token "$TOKEN" \
-  --executor echo \
   --config examples/config
 ```
 
 Expected output:
 ```
-workspace: .agenthof/workspaces/<unix-nano>
 run r-<run-id> finished: succeeded
 ```
 
@@ -290,9 +300,9 @@ Note the identity method: when using an OIDC token, the invoker's identity is cr
 
 ---
 
-## Part 3: GOVERNANCE Moment — Role-Based Access Control & Budgeting
+## Part 3: GOVERNANCE Moment — Role-Based Access Control
 
-Demonstrates how roles enforce group membership (RBAC) and spending limits (budget).
+Demonstrates how roles enforce group membership (RBAC).
 
 ### 3.1 Run with role-based access control
 
@@ -313,13 +323,11 @@ Allow the run (invoker is in the finance group):
   --input "reconcile Q3 expenses" \
   --as finance-lead@example.com \
   --groups finance \
-  --executor echo \
   --config examples/config
 ```
 
 Expected output:
 ```
-workspace: .agenthof/workspaces/<unix-nano>
 run r-<run-id> finished: succeeded
 ```
 
@@ -332,13 +340,11 @@ Attempt to run the same workflow as an invoker not in the finance group:
   --input "reconcile Q3 expenses" \
   --as engineer@example.com \
   --groups engineering \
-  --executor echo \
   --config examples/config
 ```
 
 Expected output:
 ```
-workspace: .agenthof/workspaces/<unix-nano>
 run r-ac91cc6a refused: role "accountant" requires membership in one of its allowed groups (finance); the invoker's groups don't qualify
 ```
 
@@ -360,40 +366,13 @@ ledger integrity: verified (1 events)
 
 Even though the run was refused, it is **ledgered** (recorded) in the audit trail for compliance. The refusal is chained into the run's ledger like every other event.
 
-### 3.3 Budget enforcement via LiteLLM gateway
+### 3.3 Model budgets are reserved
 
-The accountant role has a monthly budget of $20. When the role's budget is exhausted, the model gateway returns HTTP 429 (Too Many Requests) and the step fails.
-
-Provision the role key for billing:
-
-```bash
-export LITELLM_MASTER_KEY="your-secret-key"
-cd deploy
-docker compose up -d litellm
-cd ..
-./agenthof gateway provision --config examples/config
-```
-
-Expected output:
-```
-provisioned key for role software-engineer (budget $50)
-provisioned key for role accountant (budget $20)
-```
-
-Run the workflow with the adk executor (model-backed):
-
-```bash
-./agenthof run accountant reconcile-lite \
-  --input "reconcile Q3 expenses" \
-  --as finance-lead@example.com \
-  --groups finance \
-  --executor adk \
-  --config examples/config
-```
-
-If the role's monthly budget has been exhausted, LiteLLM rejects the request with HTTP 429. That is a step failure, not a refusal: the workflow's fail-back graph handles it, and the whole chain — including the failure — stays in the ledger.
-
-For details on provisioning and budget behavior, see [`scripts/live-smoke.md`](../scripts/live-smoke.md).
+`budget_usd_month` on a role is accepted configuration. It does not gate a
+run. The door that would enforce it — agents reaching models through
+Agenthof, with the credential injected and not passed through to the agent —
+is reserved. `gateway provision` can still mint a per-role key for that
+door; no run consumes the key.
 
 ---
 
@@ -411,9 +390,9 @@ One identity pulls an agent's kill switch; another tries to run:
 ```bash
 # run in a fresh working directory (or after `rm -rf .agenthof`) for the output shown
 ./agenthof apply --as dana@example.com --config examples/config
-./agenthof run software-engineer fix-bug --input "fix the login bug" --as dana@example.com --executor echo --config examples/config
+./agenthof run software-engineer fix-bug --input "fix the login bug" --as dana@example.com --config examples/config
 ./agenthof registry disable coder --as ops@example.com --config examples/config
-./agenthof run software-engineer fix-bug --input "urgent prod bug" --as dana@example.com --executor echo --config examples/config
+./agenthof run software-engineer fix-bug --input "urgent prod bug" --as dana@example.com --config examples/config
 ```
 
 The last run is refused:
@@ -528,5 +507,5 @@ of a control action.
 
 - **CONFIG**: Registry applies instantly; dependencies are validated; kill switches (disable/enable) are atomic.
 - **AUDIT**: Every run is attributed to an invoker (asserted or OIDC-verified); artifacts are SHA256-hashed for integrity; refused runs are still ledgered.
-- **GOVERNANCE**: Role-based access (allowed_groups) and role-based budgeting (via LiteLLM) control who can run what and at what cost.
+- **GOVERNANCE**: Role-based access (`allowed_groups`) controls who can run what. Model budgets are reserved and do not gate a run.
 - **INVESTIGATE**: One time-ordered timeline across the control plane and every run — filterable, with a stable `investigate/1` JSON contract, per-source integrity, and a config-join from each run back to the apply that authorized it.

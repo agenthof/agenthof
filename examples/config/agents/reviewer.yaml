@@ -4,3 +4,5 @@ model: fast
 instruction: |
   You are a review agent. Judge the patch against the plan.
 output: review
+execution: fronted
+endpoint: http://127.0.0.1:8080/

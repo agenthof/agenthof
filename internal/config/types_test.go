@@ -53,16 +53,10 @@ endpoint: https://api.example.com/agent
 		t.Fatal("EffectiveExecution must return fronted")
 	}
 
-	// Test EffectiveExecution: empty Execution defaults to contained
+	// An omitted execution tier is fronted.
 	a.Execution = ""
-	if a.EffectiveExecution() != "contained" {
-		t.Fatal("EffectiveExecution must return contained when Execution is empty")
-	}
-
-	// Test explicit contained
-	a.Execution = "contained"
-	if a.EffectiveExecution() != "contained" {
-		t.Fatal("EffectiveExecution must return contained")
+	if a.EffectiveExecution() != "fronted" {
+		t.Fatal("EffectiveExecution must return fronted when Execution is empty")
 	}
 }
 

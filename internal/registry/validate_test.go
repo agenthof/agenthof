@@ -12,8 +12,8 @@ func baseCfg() config.Config {
 	_ = f
 	return config.Config{
 		Agents: []config.AgentDef{
-			{Name: "planner", Model: "fast", SourceFile: "agents/planner.yaml"},
-			{Name: "coder", Model: "fast", SourceFile: "agents/coder.yaml"},
+			{Name: "planner", Model: "fast", Endpoint: "https://example.test/run", SourceFile: "agents/planner.yaml"},
+			{Name: "coder", Model: "fast", Endpoint: "https://example.test/run", SourceFile: "agents/coder.yaml"},
 		},
 		Workflows: []config.WorkflowDef{{
 			Name:       "fix-bug",
@@ -94,11 +94,10 @@ func TestValidateGraphRules(t *testing.T) {
 
 func TestValidateModelsRolesBounces(t *testing.T) {
 	cfg := baseCfg()
-	cfg.Agents[0].Model = "unknown"
 	cfg.Roles[0].Workflows = []string{"nope"}
 	cfg.Workflows[0].Steps[1].MaxBounces = 99
 	c := codes(Validate(cfg))
-	if c["unroutable-model"] != 1 || c["dangling-workflow-ref"] != 1 || c["bad-bounces"] != 1 {
+	if c["dangling-workflow-ref"] != 1 || c["bad-bounces"] != 1 {
 		t.Fatalf("codes: %v", c)
 	}
 	cfg = baseCfg()
@@ -151,24 +150,70 @@ func TestValidateExecutionTiers(t *testing.T) {
 		t.Fatalf("invalid execution must be bad-execution: %v", c)
 	}
 
-	// Test fronted agent without endpoint
+	cfg = baseCfg()
+	cfg.Agents[0].Execution = "contained"
+	cfg.Agents[0].Endpoint = "https://example.com/agent"
+	c = codes(Validate(cfg))
+	if c["bad-execution"] != 1 || c["contained-has-endpoint"] != 0 {
+		t.Fatalf("contained must be bad-execution: %v", c)
+	}
+	var containedMsg string
+	for _, e := range Validate(cfg) {
+		if e.Code == "bad-execution" {
+			containedMsg = e.Msg
+		}
+	}
+	if !strings.Contains(containedMsg, "was removed") {
+		t.Fatalf("contained rejection must explain the migration: %q", containedMsg)
+	}
+
 	cfg = baseCfg()
 	cfg.Agents[0].Execution = "fronted"
+	cfg.Agents[0].Endpoint = ""
 	c = codes(Validate(cfg))
 	if c["fronted-needs-endpoint"] != 1 {
 		t.Fatalf("fronted without endpoint must be fronted-needs-endpoint: %v", c)
 	}
 
-	// Test contained agent with endpoint
 	cfg = baseCfg()
-	cfg.Agents[0].Execution = "contained"
-	cfg.Agents[0].Endpoint = "https://example.com/agent"
-	c = codes(Validate(cfg))
-	if c["contained-has-endpoint"] != 1 {
-		t.Fatalf("contained with endpoint must be contained-has-endpoint: %v", c)
+	cfg.Agents[0].Execution = ""
+	cfg.Agents[0].Endpoint = ""
+	errs := Validate(cfg)
+	if codes(errs)["fronted-needs-endpoint"] != 1 {
+		t.Fatalf("empty execution without endpoint must be fronted-needs-endpoint: %v", errs)
+	}
+	var emptyMsg string
+	for _, e := range errs {
+		if e.Code == "fronted-needs-endpoint" && e.Entity == "planner" {
+			emptyMsg = e.Msg
+		}
+	}
+	if !strings.Contains(emptyMsg, "contained tier was removed") {
+		t.Fatalf("omitted execution must explain the migration: %q", emptyMsg)
 	}
 
-	// Test fronted agent with a declared gateway tool resource - should be valid
+	cfg = baseCfg()
+	cfg.Agents[0].Execution = ""
+	cfg.Agents[0].Endpoint = "https://example.com/agent"
+	if errs := Validate(cfg); len(errs) != 0 {
+		t.Fatalf("empty execution with an endpoint is fronted and valid: %v", errs)
+	}
+
+	cfg = baseCfg()
+	cfg.Agents[0].Execution = "fronted"
+	cfg.Agents[0].Endpoint = "http://remote.example/run"
+	if !hasCode(Validate(cfg), "bad-endpoint") {
+		t.Fatal("plaintext remote endpoint must be bad-endpoint")
+	}
+	cfg.Agents[0].Endpoint = "https://example.com/agent"
+	if hasCode(Validate(cfg), "bad-endpoint") {
+		t.Fatal("https endpoint must be accepted")
+	}
+	cfg.Agents[0].Endpoint = "http://127.0.0.1:8080/"
+	if hasCode(Validate(cfg), "bad-endpoint") {
+		t.Fatal("loopback http endpoint must be accepted")
+	}
+
 	cfg = baseCfg()
 	cfg.Agents[0].Execution = "fronted"
 	cfg.Agents[0].Endpoint = "https://example.com/agent"
@@ -181,30 +226,27 @@ func TestValidateExecutionTiers(t *testing.T) {
 		t.Fatalf("fronted agent with declared gateway tool must be valid: %v", c)
 	}
 
-	// Test fronted agent with endpoint, no model, no tools - should pass
+	cfg = baseCfg()
+	cfg.Agents[0].Execution = "contained"
+	cfg.Agents[0].Endpoint = "https://example.com/agent"
+	cfg.Agents[0].Tools = []string{"nope"}
+	if codes(Validate(cfg))["unknown-tool"] != 1 {
+		t.Fatal("unknown-tool must run for every agent, including one marked contained")
+	}
+
 	cfg = baseCfg()
 	cfg.Agents[0].Execution = "fronted"
 	cfg.Agents[0].Endpoint = "https://example.com/agent"
 	cfg.Agents[0].Model = ""
-	cfg.Agents[0].Tools = []string{}
-	errs := Validate(cfg)
-	// Filter to just agent-related errors
+	cfg.Agents[0].Tools = nil
 	agentErrs := []ValidationError{}
-	for _, e := range errs {
+	for _, e := range Validate(cfg) {
 		if e.Entity == "planner" {
 			agentErrs = append(agentErrs, e)
 		}
 	}
 	if len(agentErrs) != 0 {
 		t.Fatalf("fronted agent with endpoint and no model should pass: %v", agentErrs)
-	}
-
-	// Test that empty execution defaults to contained (no endpoint needed)
-	cfg = baseCfg()
-	cfg.Agents[0].Execution = ""
-	cfg.Agents[0].Endpoint = ""
-	if errs := Validate(cfg); len(errs) != 0 {
-		t.Fatalf("agent with empty execution should default to contained: %v", errs)
 	}
 }
 

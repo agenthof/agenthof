@@ -23,10 +23,11 @@ inside, see [`lifecycle.md`](lifecycle.md). For the YAML, see
 
 ## When the door exists
 
-Only a `fronted` agent may declare `exec`. A contained agent that declares it
-is rejected at `apply`. The block names `mode: attested` and a non-empty
-`allow` list. `enforced` — Agenthof running the command itself — is reserved
-and rejected the same way.
+Any agent may declare `exec`; every agent is fronted. The block names
+`mode: attested` and a non-empty `allow` list. `enforced` — Agenthof running
+the command itself — is reserved and rejected at `apply`. An `exec` block on
+an agent whose `execution` is not `fronted` (including the removed value
+`contained`) is rejected the same way.
 
 For the duration of that agent's step, Agenthof starts a listener on
 `127.0.0.1` and an ephemeral port, reachable only from the host Agenthof

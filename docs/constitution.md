@@ -3,17 +3,20 @@
 This document states the invariants every change to Agenthof must honor.
 Where it and any other document disagree, this constitution wins.
 
-## Article I — Containment by construction
+## Article I — Containment by governance
 
-Agents get no raw network access and no ambient credentials, and run no
-commands except those on the config allowlist. Capability reaches an agent
-only through governed, logged doors: the model gateway, the tool catalog
-(tool gateway in V2), the exec gateway, and a jailed workspace (path-confined,
-symlink-hardened, no dotfile or VCS-metadata access). Allowlisted commands run
-in the operator's sandbox and each is recorded — attested by the agent today;
-Agenthof records but does not run or contain them, and enforced execution is
-reserved. No change may add an unmediated network call, or a credential stored
-where an agent's config or runtime can read its value.
+Capability reaches an agent only through governed, logged doors: the tool/MCP
+gateway, the exec gateway, and the model gateway. Where a door injects a
+credential, the agent never holds it — today the tool/MCP gateway, which
+injects a resource credential per call. The model gateway is reserved: until
+the fronted model proxy lands, a fronted agent's model access is arranged by
+its operator, outside Agenthof. Allowlisted commands run in the operator's
+sandbox and each is recorded — attested by the agent today; Agenthof records
+but does not run or contain them, and enforced execution is reserved. The
+agent runs in an operator-provided sandbox. That sandbox's network and exec
+confinement is required, and Agenthof does not verify it. No change may add
+an unmediated network call, or a credential stored where an agent's config or
+runtime can read its value.
 
 ## Article II — Identity
 
@@ -26,12 +29,14 @@ Every action carries three identities:
 3. **Delegation binding** (per run) — `invoker → role → workflow → agent →
    run-id`, stamped on every ledger event and every gateway call.
 
-External credentials live only in gateways, never in agent config or agent
-runtime state; config may reference an env-var name, never a secret value.
-Only mature, universally supported standards are load-bearing: OIDC login
-and M2M client-credentials. Emerging agent-identity standards (token
-exchange, SPIFFE/WIMSE, IdP agent-SSO products) are optional federation
-upgrades, never prerequisites for a release.
+The external credentials Agenthof injects live only in its gateways, never in
+agent config or agent runtime state; config may reference an env-var name,
+never a secret value. Credentials Agenthof does not govern — e.g. a fronted
+agent's model key while the model gateway is reserved (Article I) — are the
+operator's, outside Agenthof. Only mature, universally supported standards are
+load-bearing: OIDC login and M2M client-credentials. Emerging agent-identity
+standards (token exchange, SPIFFE/WIMSE, IdP agent-SSO products) are optional
+federation upgrades, never prerequisites for a release.
 
 ## Article III — The ledger
 

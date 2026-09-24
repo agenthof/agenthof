@@ -1,80 +1,73 @@
-# Live Smoke Test: Model-Backed Runs with LiteLLM
+# Live smoke: a fronted agent
 
-This script demonstrates end-to-end model-backed execution via a local LiteLLM gateway.
+Start the reference agent, apply the example config, run a workflow, and
+read the ledger. This is the path a run actually takes.
 
-## Setup
+## Start the agent
 
-Export your Anthropic credentials and LiteLLM master key:
+From the repository root:
 
 ```bash
-export ANTHROPIC_API_KEY="your-anthropic-key"
-export LITELLM_MASTER_KEY="any-secret-key"
+go run ./examples/echo-agent
 ```
 
-Start the gateway (from the repo root):
+It listens on `127.0.0.1:8080`. The example agents' `endpoint` values are
+`http://127.0.0.1:8080/`. Leave this process running. It echoes each step's
+input back as the artifact and holds no credentials.
+
+If that port is taken, start it elsewhere and point the agents at it:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+go run ./examples/echo-agent -addr 127.0.0.1:18080
 ```
 
-Provision the example roles and obtain gateway keys:
+Then set every `endpoint` under `examples/config/agents/` to
+`http://127.0.0.1:18080/`.
+
+## Apply and run
+
+In another terminal, from the repository root:
 
 ```bash
-./agenthof gateway provision --config examples/config
-```
-
-This creates role keys in `.agenthof/keys/` (gitignored, never commit).
-
-## Verification
-
-Before running the agent, verify the LiteLLM Responses API is available:
-
-```bash
-curl -s http://localhost:4000/responses \
-  -H "Authorization: Bearer $(cat .agenthof/keys/software-engineer.key)" \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"fast","input":"ping"}' | head -c 400
-```
-
-If this returns 404, the LiteLLM version does not support the Responses API and must be updated.
-
-## Run
-
-Invoke the agent:
-
-```bash
+go build -o agenthof ./cmd/agenthof
+./agenthof apply --as you@example.com --config examples/config
 ./agenthof run software-engineer fix-bug \
-  --executor adk \
-  --input "write NOTES.md summarizing this task" \
+  --input "fix the login bug" \
   --as you@example.com \
   --config examples/config
 ```
 
-`run` auto-loads the role key from `.agenthof/keys/<role>.key` (`gateway.LoadRoleKey`), so no
-`export` is needed once a role has been provisioned. Exporting `AGENTHOF_GATEWAY_KEY` yourself
-is OPTIONAL / fallback-only — it's only consulted when no role key file exists yet.
+Expected `apply`:
 
-This runs the workflow's steps against the real model through the gateway. If
-the role's key has exhausted its budget, the gateway returns HTTP 429 and that
-step fails; the workflow's fail-back graph handles it like any other step
-failure, and the whole chain stays in the ledger.
+```
+registry ok: 5 agents, 2 workflows, 2 roles
+control head: seq=1 sha256=<hex>
+```
+
+Expected `run`:
+
+```
+run r-<run-id> finished: succeeded
+```
+
+If the echo agent is not listening, the run finishes `failed`. The ledger
+records the connection error as a step failure.
 
 ## Audit
-
-Inspect the run:
 
 ```bash
 ./agenthof audit <run-id>
 ```
 
-Expected output includes:
-- The invoker, role, and workflow for the run
-- Every step event in order, with the agent that ran it and its execution tier
-- The artifact SHA-256 prefix and preview for each successful step
-- The integrity line: `ledger integrity: verified (N events)`
+Expected:
 
-## Notes
+- the invoker, role, and workflow
+- eight events: workflow started, three steps started and succeeded, workflow finished
+- each successful step's artifact preview `fix the login bug` and SHA-256 prefix `f7459994` (the echo of the input)
+- `ledger integrity: verified (8 events)`
 
-- The admin key-check (`gateway provision`'s `GET /key/info?key=...`) passes
-  the key as a query parameter, so it may appear in LiteLLM server access
-  logs — run the gateway on localhost or behind TLS.
+## What this does not exercise
+
+Model access through Agenthof is reserved. `gateway provision` can mint a
+per-role key, and no run consumes it. Tool and exec doors are live when an
+agent declares them; the example agents declare neither.
