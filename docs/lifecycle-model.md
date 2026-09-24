@@ -75,10 +75,11 @@ hash of either.
 | non-streaming 2xx | `succeeded`, with `prompt_tokens` and `completion_tokens` when the body carries `usage` (a present 0 is distinct from absent) |
 | `text/event-stream` | `started`. The stream is relayed. Token counts are not captured |
 | HTTP 429 | `refused`, reason `budget`. The status is relayed to the agent |
-| other non-2xx | `refused`, reason `upstream <status>`. The body is not copied into the event |
+| other non-2xx | `refused`, reason `upstream <code> <status text>` (e.g. `upstream 500 Internal Server Error`). The upstream's own body/reason phrase is not copied into the event |
 | body over 10 MiB | `failed`, reason `upstream response too large`, and the agent sees 502 |
 | logical name not allowed | `refused`, and the provider is not called |
 | no route for that name | `failed`, reason `model route not resolved`, and the agent sees 502 |
+| the call never completes (provider unreachable, DNS/timeout, or the response is cut off) | `failed`, reason `model call did not complete`, and the agent sees 502 |
 
 A request body over 1 MiB is rejected before any of that, with no event.
 
