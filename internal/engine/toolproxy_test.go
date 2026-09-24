@@ -104,7 +104,7 @@ func TestRunStartsListenerForFrontedAgentWithoutTools(t *testing.T) {
 	sp := &spyProxy{}
 	ce := &coordExec{}
 	_, status, err := Run(context.Background(), reg, "se", "wf", "x",
-		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a", ToolProxy: sp})
+		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return sp }})
 	if err != nil || status != "succeeded" {
 		t.Fatalf("run: status=%q err=%v", status, err)
 	}
@@ -122,7 +122,7 @@ func TestRunBracketsFrontedToolStepWithProxy(t *testing.T) {
 	ce := &coordExec{}
 	// ftCfg: a role/workflow whose single step is a FRONTED agent with tools.
 	_, status, err := Run(context.Background(), ftCfg(), "se", "wf", "x",
-		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a", ToolProxy: sp})
+		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return sp }})
 	if err != nil || status != "succeeded" {
 		t.Fatalf("run: status=%q err=%v", status, err)
 	}
@@ -142,7 +142,7 @@ func TestRunFailsStepWhenToolProxyStartErrors(t *testing.T) {
 	fp := &failProxy{}
 	ce := &coordExec{}
 	id, status, err := Run(context.Background(), ftCfg(), "se", "wf", "x",
-		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a", ToolProxy: fp})
+		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return fp }})
 	if err != nil || status != "failed" {
 		t.Fatalf("run: status=%q err=%v", status, err)
 	}

@@ -596,19 +596,22 @@ func cmdRun(args []string, out io.Writer) int {
 	// A hash failure here yields an empty join key, not a run failure: the
 	// run's config already validated above, so the run proceeds regardless.
 	h, _ := config.HashDir(*cfgDir)
-	// Every fronted step gets the per-run listener. keyRoot is ".", the same
-	// working directory gateway provision writes role keys under
-	// (EnsureRoleKey(".", role)) — not --config, which would miss those keys.
-	var toolProxy engine.ToolProxy = rungateway.New(cfg.Gateway, ".", broker.Dispatch{
+	// One broker for the process. Each run gets its own gateway: the Gateway
+	// holds per-run listener state, so a shared instance would let one run
+	// close another's. keyRoot is ".", the same working directory gateway
+	// provision writes role keys under (EnsureRoleKey(".", role)) — not
+	// --config, which would miss those keys.
+	b := broker.Dispatch{
 		StaticEnv: broker.StaticEnv{},
 		// A hung upstream token endpoint must not block the outbound call
 		// forever: an explicit client with a timeout is required here,
 		// mirroring the proxy's own connectTimeout, rather than nil (which
 		// falls back to http.DefaultClient, which has no timeout).
 		ClientCredentials: broker.NewClientCredentials(&http.Client{Timeout: 30 * time.Second}),
-	})
+	}
+	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b) }
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
-		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, ToolProxy: toolProxy})
+		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway})
 	if err != nil && status == "refused" {
 		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", runID, err)
 		return 1

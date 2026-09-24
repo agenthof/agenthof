@@ -1052,7 +1052,7 @@ func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 // resource's credential env var is deliberately left unset, so the wired
 // proxy's Start call fails fast at the broker (no network involved), and
 // that failure — prefixed "tool proxy: " by the engine's own bracketing
-// code — can only appear if Options.ToolProxy was actually non-nil. Before
+// code — can only appear if Options.NewGateway was actually set. Before
 // the proxy is wired, this same config runs the fronted step directly
 // through the adapter (bypassing the tool proxy entirely) and succeeds
 // instead — the regression this test guards against.
@@ -1200,9 +1200,8 @@ func TestRunWiresClientCredentialsBrokerForFrontedToolAgent(t *testing.T) {
 
 // TestRunToolProxyAddrFlagParsesButIsUnused confirms --tool-proxy-addr is
 // accepted (forward-compat) on an ordinary run that declares no gateway
-// tools at all, and that such a run is unaffected: Options.ToolProxy stays
-// nil, so the fronted step still executes directly through the adapter
-// (proof: the stub's own artifact comes back unchanged).
+// tools at all, and that such a run is unaffected: the flag does not change
+// the listener address, and the stub's own artifact still comes back.
 func TestRunToolProxyAddrFlagParsesButIsUnused(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("AGENTHOF_TOKEN", "")
