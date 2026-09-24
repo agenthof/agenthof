@@ -596,30 +596,17 @@ func cmdRun(args []string, out io.Writer) int {
 	// A hash failure here yields an empty join key, not a run failure: the
 	// run's config already validated above, so the run proceeds regardless.
 	h, _ := config.HashDir(*cfgDir)
-	// Wire the run listener when the config declares gateway tool resources
-	// or any agent declares exec. Otherwise leave Options.ToolProxy nil (a
-	// *rungateway.Gateway assigned into the interface even when unused would
-	// make it a non-nil interface holding a nil pointer, which the engine's
-	// own opts.ToolProxy != nil bracketing check would then wrongly treat as
-	// present).
-	anyExec := false
-	for _, a := range cfg.Agents {
-		if a.Exec.Declared() {
-			anyExec = true
-			break
-		}
-	}
-	var toolProxy engine.ToolProxy
-	if len(cfg.Gateway.Tools) > 0 || anyExec {
-		toolProxy = rungateway.New(cfg.Gateway.Tools, broker.Dispatch{
-			StaticEnv: broker.StaticEnv{},
-			// A hung upstream token endpoint must not block the outbound call
-			// forever: an explicit client with a timeout is required here,
-			// mirroring the proxy's own connectTimeout, rather than nil (which
-			// falls back to http.DefaultClient, which has no timeout).
-			ClientCredentials: broker.NewClientCredentials(&http.Client{Timeout: 30 * time.Second}),
-		})
-	}
+	// Every fronted step gets the per-run listener. keyRoot is ".", the same
+	// working directory gateway provision writes role keys under
+	// (EnsureRoleKey(".", role)) — not --config, which would miss those keys.
+	var toolProxy engine.ToolProxy = rungateway.New(cfg.Gateway, ".", broker.Dispatch{
+		StaticEnv: broker.StaticEnv{},
+		// A hung upstream token endpoint must not block the outbound call
+		// forever: an explicit client with a timeout is required here,
+		// mirroring the proxy's own connectTimeout, rather than nil (which
+		// falls back to http.DefaultClient, which has no timeout).
+		ClientCredentials: broker.NewClientCredentials(&http.Client{Timeout: 30 * time.Second}),
+	})
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, ToolProxy: toolProxy})
 	if err != nil && status == "refused" {

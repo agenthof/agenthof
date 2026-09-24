@@ -58,10 +58,11 @@ type Gateway struct {
 	inflight sync.WaitGroup
 }
 
-// New builds a Gateway over the gateway's declared tool resources, resolving
-// upstream credentials through b.
-func New(tools map[string]config.ToolResource, b broker.Broker) *Gateway {
-	return &Gateway{tools: tools, broker: b}
+// New builds a Gateway over the gateway config. Tool resources come from
+// gw.Tools. keyRoot is the working directory gateway provision writes role
+// keys under (".", the same root as EnsureRoleKey), not the --config directory.
+func New(gw config.GatewayConfig, keyRoot string, b broker.Broker) *Gateway {
+	return &Gateway{tools: gw.Tools, broker: b, gwcfg: gw, keyRoot: keyRoot}
 }
 
 // Start serves one fronted step. It mints a run token, connects to each of
