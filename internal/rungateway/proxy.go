@@ -418,6 +418,17 @@ func mintToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// capRunes truncates s to at most n runes. It is the one place the ledger
+// caps agent- or upstream-controlled text before it enters an event, so
+// hashResult's preview, resultErrorText's failure text, and the model door's
+// echoed model name all share the same bound.
+func capRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+
 // hashResult computes the tool_call event's result hash + preview, mirroring
 // how the artifact store hashes step outputs (sha256 + a single-line preview
 // capped at 200 runes): the ledger carries only this, never the raw result
@@ -434,10 +445,7 @@ func hashResult(result *mcp.CallToolResult, callErr error) (sha, preview string)
 	sum := sha256.Sum256(body)
 	sha = hex.EncodeToString(sum[:])
 
-	preview = strings.Join(strings.Fields(strings.ReplaceAll(string(body), "\n", " ")), " ")
-	if r := []rune(preview); len(r) > 200 {
-		preview = string(r[:200])
-	}
+	preview = capRunes(strings.Join(strings.Fields(strings.ReplaceAll(string(body), "\n", " ")), " "), 200)
 	return sha, preview
 }
 
@@ -525,10 +533,7 @@ func resultErrorText(result *mcp.CallToolResult) string {
 	if text == "" {
 		return "upstream tool call reported an error"
 	}
-	if r := []rune(text); len(r) > 200 {
-		text = string(r[:200])
-	}
-	return text
+	return capRunes(text, 200)
 }
 
 // modelHandler is the OpenAI-compatible door on the per-run listener. The
@@ -546,22 +551,35 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		var req map[string]any
+		// Decode into json.RawMessage per field rather than map[string]any: an
+		// any-decode + re-marshal round-trips every JSON number through
+		// float64, silently losing precision above 2^53 (e.g. a seed). Raw
+		// bytes for every field but "model" are preserved untouched; only
+		// "model" is parsed and later replaced.
+		var req map[string]json.RawMessage
 		if err := json.Unmarshal(body, &req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		logical, _ := req["model"].(string)
+		var logical string
+		if raw, ok := req["model"]; ok {
+			_ = json.Unmarshal(raw, &logical) // non-string "model" leaves logical "", matching the old .(string) assertion
+		}
 
 		effective := agent.Model
 		if effective == "" {
 			effective = p.gwcfg.Defaults.Model
 		}
 		if logical == "" || logical != effective {
+			// logical is agent-supplied and, on this path, unvalidated — cap it
+			// before it enters the ledger (same 200-rune bound as hashResult /
+			// resultErrorText) so an oversized "model" value can't bloat the
+			// event.
+			echoed := capRunes(logical, 200)
 			p.guardedAppend(appendEvent, engine.Event{
 				Type: "model_call", Agent: agent.Name, Status: "refused",
-				Reason: fmt.Sprintf("model %q is not allowed for this agent", logical),
-				Model:  logical, Binding: bind,
+				Reason: fmt.Sprintf("model %q is not allowed for this agent", echoed),
+				Model:  echoed, Binding: bind,
 			})
 			http.Error(w, "model not allowed", http.StatusForbidden)
 			return
@@ -581,7 +599,12 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 			return
 		}
 
-		req["model"] = route.Model
+		modelRaw, err := json.Marshal(route.Model)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		req["model"] = modelRaw
 		newBody, err := json.Marshal(req)
 		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -603,6 +626,24 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 		}
 
 		const maxResp = 10 << 20
+
+		// recorded tracks whether this request already appended a model_call
+		// event from inside ModifyResponse before returning an error from it.
+		// ReverseProxy calls ErrorHandler both when RoundTrip itself fails
+		// (upstream unreachable — no event yet) AND when ModifyResponse
+		// returns a non-nil error (which, on every path below, has already
+		// appended its own event) — without this guard ErrorHandler would
+		// double-record the latter. record() is the only way ModifyResponse
+		// appends, so no future branch can forget to set it. It is local to
+		// this handler invocation (a fresh closure per request), and
+		// Rewrite/ModifyResponse/ErrorHandler all run synchronously on the
+		// request's own goroutine, so no lock is needed.
+		var recorded bool
+		record := func(e engine.Event) {
+			recorded = true
+			p.guardedAppend(appendEvent, e)
+		}
+
 		rp := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.Out.URL.Scheme, pr.Out.URL.Host = target.Scheme, target.Host
@@ -616,21 +657,33 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 					}
 				}
 				pr.Out.Header.Del("Cookie")
+				// Deleting (not merely leaving empty) lets http.Transport
+				// negotiate its own gzip and transparently decode the
+				// response: Transport only auto-adds "Accept-Encoding: gzip"
+				// and auto-decompresses when the outbound request carries no
+				// Accept-Encoding at all. The agent's own HTTP client sets
+				// one; forwarding it verbatim would leave ModifyResponse
+				// reading raw compressed bytes, so parseUsage would silently
+				// fail and the 10 MiB cap would measure compressed size.
+				pr.Out.Header.Del("Accept-Encoding")
 			},
 			ModifyResponse: func(resp *http.Response) error {
 				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					reason := "upstream " + resp.Status
+					// The numeric code + a fixed status text, never the
+					// upstream's own reason phrase (resp.Status), which is
+					// upstream-controlled text that could carry anything.
+					reason := fmt.Sprintf("upstream %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 					if resp.StatusCode == http.StatusTooManyRequests {
 						reason = "budget"
 					}
-					p.guardedAppend(appendEvent, engine.Event{
+					record(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "refused",
 						Reason: reason, Model: logical, Binding: bind,
 					})
 					return nil
 				}
 				if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-					p.guardedAppend(appendEvent, engine.Event{
+					record(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "started",
 						Model: logical, Binding: bind,
 					})
@@ -639,14 +692,14 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				rb, err := io.ReadAll(io.LimitReader(resp.Body, maxResp+1))
 				_ = resp.Body.Close()
 				if err != nil {
-					p.guardedAppend(appendEvent, engine.Event{
+					record(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "failed",
 						Reason: "upstream read failed", Model: logical, Binding: bind,
 					})
 					return err
 				}
 				if len(rb) > maxResp {
-					p.guardedAppend(appendEvent, engine.Event{
+					record(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "failed",
 						Reason: "upstream response too large", Model: logical, Binding: bind,
 					})
@@ -656,13 +709,28 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				resp.ContentLength = int64(len(rb))
 				resp.Header.Set("Content-Length", strconv.Itoa(len(rb)))
 				pt, ct := parseUsage(rb)
-				p.guardedAppend(appendEvent, engine.Event{
+				record(engine.Event{
 					Type: "model_call", Agent: agent.Name, Status: "succeeded",
 					Model: logical, PromptTokens: pt, CompletionTokens: ct, Binding: bind,
 				})
 				return nil
 			},
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+				// Reached both for a RoundTrip transport failure (connection
+				// refused, DNS, timeout — ModifyResponse never ran, nothing
+				// recorded yet) and for a ModifyResponse error return (already
+				// recorded via record() above). Only append here in the
+				// former case, so a transport failure still leaves a ledger
+				// line (Article III: no action without an event) without
+				// double-recording the latter. The error itself is never
+				// echoed — it can carry the upstream URL or a wrapped
+				// secret — a fixed reason is enough.
+				if !recorded {
+					p.guardedAppend(appendEvent, engine.Event{
+						Type: "model_call", Agent: agent.Name, Status: "failed",
+						Reason: "upstream unreachable", Model: logical, Binding: bind,
+					})
+				}
 				http.Error(w, "upstream error", http.StatusBadGateway)
 			},
 		}

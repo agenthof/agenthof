@@ -1,6 +1,8 @@
 package rungateway
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -960,6 +962,19 @@ func (u *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "huge":
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(make([]byte, (10<<20)+1))
+	case "gzip":
+		// Simulates an upstream that compresses its response regardless of
+		// what the forwarded request asked for — this stub always gzips, so
+		// the test only passes if the PROXY negotiates decoding correctly
+		// (by not forwarding the agent's own Accept-Encoding header), not
+		// because the stub happened to leave the body uncompressed.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		_, _ = gz.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`))
+		_ = gz.Close()
+		_, _ = w.Write(buf.Bytes())
 	default:
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":0}}`))
@@ -1184,6 +1199,121 @@ func TestModelProxyOversizedResponseFails(t *testing.T) {
 	}
 	if len(*events) != 1 || (*events)[0].Status != "failed" || (*events)[0].Reason != "upstream response too large" {
 		t.Fatalf("events = %+v", *events)
+	}
+}
+
+// TestModelProxyUpstreamUnreachableRecordsFailedEvent exercises the
+// transport-failure path (connection refused): ModifyResponse never runs
+// because RoundTrip itself errors, so only ErrorHandler sees the call. Before
+// the fix, this path recorded nothing — an action with no ledger line. It
+// must record exactly one failed model_call and still answer the agent 502.
+func TestModelProxyUpstreamUnreachableRecordsFailedEvent(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+
+	// A server that is immediately closed: its address no longer accepts
+	// connections, so RoundTrip fails with "connection refused" — the same
+	// shape as a real unreachable upstream (DNS failure, timeout, etc).
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close()
+
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	gw := config.GatewayConfig{
+		Models: map[string]config.ModelRoute{
+			"planner-model": {Endpoint: closedURL, Model: "gpt-4o", APIKeyEnv: "MODEL_KEY"},
+		},
+	}
+	gw.Defaults.Model = "planner-model"
+	p := New(gw, t.TempDir(), broker.StaticEnv{})
+
+	var mu sync.Mutex
+	var events []engine.Event
+	base, token, err := p.Start(testBinding(), agent, func(e engine.Event) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var failed []engine.Event
+	for _, e := range events {
+		if e.Type == "model_call" && e.Status == "failed" {
+			failed = append(failed, e)
+		}
+	}
+	if len(failed) != 1 {
+		t.Fatalf("failed model_call events = %d, want exactly 1: %+v", len(failed), events)
+	}
+	if !strings.Contains(failed[0].Reason, "unreachable") {
+		t.Fatalf("Reason = %q, want it to mention unreachable", failed[0].Reason)
+	}
+}
+
+// TestModelProxyDecodesGzippedUpstreamResponse guards against the
+// Accept-Encoding passthrough bug: forwarding the agent's own
+// "Accept-Encoding: gzip" (set automatically by Go's default HTTP client) to
+// the upstream defeats http.Transport's transparent decompression, so
+// ModifyResponse would read raw gzip bytes and parseUsage would silently
+// fail. It must see the decoded usage counts.
+func TestModelProxyDecodesGzippedUpstreamResponse(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{mode: "gzip"}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	_, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	// postModel uses http.DefaultClient, whose Transport automatically sends
+	// "Accept-Encoding: gzip" on the wire when the request doesn't already
+	// set one — exactly the header the agent's own client would send, which
+	// this test relies on the proxy stripping before forwarding upstream.
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	if len(*events) != 1 {
+		t.Fatalf("events = %+v", *events)
+	}
+	ev := (*events)[0]
+	if ev.Status != "succeeded" {
+		t.Fatalf("status = %q, want succeeded", ev.Status)
+	}
+	if ev.PromptTokens == nil || *ev.PromptTokens != 7 || ev.CompletionTokens == nil || *ev.CompletionTokens != 3 {
+		t.Fatalf("usage = %v %v, want 7 3 (proves the gzip body was decoded before parseUsage)", ev.PromptTokens, ev.CompletionTokens)
+	}
+}
+
+// TestModelProxyPreservesRequestNumberPrecision guards against the
+// map[string]any round-trip losing integer precision above 2^53: a seed (or
+// any other numeric field) larger than that must survive the model-field
+// rewrite byte-for-byte.
+func TestModelProxyPreservesRequestNumberPrecision(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	_, base, token, _ := startModelGateway(t, up, agent, t.TempDir())
+
+	const seedLiteral = `9007199254740993` // 2^53 + 1: not exactly representable as float64
+	resp := postModel(t, base, token, `{"model":"planner-model","seed":`+seedLiteral+`,"messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	_, _, _, body, _ := up.snapshot()
+	if !strings.Contains(string(body), `"seed":`+seedLiteral) {
+		t.Fatalf("forwarded body lost seed precision: %s", body)
 	}
 }
 
