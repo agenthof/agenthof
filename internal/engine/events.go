@@ -40,6 +40,9 @@ type Event struct {
 	ExitCode         *int      `json:"exit_code,omitempty"`         // set by exec attest: pointer so 0 (success) is distinct from absent
 	OutputSHA        string    `json:"output_sha,omitempty"`        // set by exec attest: sha256 of the reported command output (never the output)
 	Mode             string    `json:"mode,omitempty"`              // set by exec: "attested" (enforced reserved)
+	Model            string    `json:"model,omitempty"`             // set by model_call: the logical model requested
+	PromptTokens     *int      `json:"prompt_tokens,omitempty"`     // set by model_call (non-streaming): usage
+	CompletionTokens *int      `json:"completion_tokens,omitempty"` // set by model_call (non-streaming): usage
 	Actor            string    `json:"actor,omitempty"`             // reserved: delegation — the acting agent
 	Principal        string    `json:"principal,omitempty"`         // reserved: delegation — the initiating human/system
 	Binding          Binding   `json:"binding"`

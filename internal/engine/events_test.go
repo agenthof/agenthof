@@ -384,3 +384,31 @@ func TestEventExecFieldsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestEventModelCallFieldsRoundTrip(t *testing.T) {
+	pt, ct := 12, 0
+	e := Event{Type: "model_call", Model: "planner-model", PromptTokens: &pt, CompletionTokens: &ct}
+	data, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"model":"planner-model"`) ||
+		!strings.Contains(string(data), `"prompt_tokens":12`) ||
+		!strings.Contains(string(data), `"completion_tokens":0`) { // pointer → present even at 0
+		t.Fatalf("model_call fields missing: %s", data)
+	}
+	var got Event
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Model != "planner-model" || got.PromptTokens == nil || *got.PromptTokens != 12 ||
+		got.CompletionTokens == nil || *got.CompletionTokens != 0 {
+		t.Fatalf("round-trip lost fields: %+v", got)
+	}
+	empty, _ := json.Marshal(Event{Type: "step"})
+	for _, k := range []string{`"model":`, `"prompt_tokens":`, `"completion_tokens":`} {
+		if strings.Contains(string(empty), k) {
+			t.Fatalf("omitempty violated for %s: %s", k, empty)
+		}
+	}
+}
