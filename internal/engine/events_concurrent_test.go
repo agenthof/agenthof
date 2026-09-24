@@ -7,8 +7,8 @@ import (
 )
 
 // TestLogAppendConcurrent proves Log.Append is safe for concurrent callers:
-// the engine and a future tool proxy append to the same hash-chained log
-// from different goroutines. Run with -race.
+// the engine and the run gateway append to the same hash-chained log from
+// different goroutines. Run with -race.
 func TestLogAppendConcurrent(t *testing.T) {
 	dir := t.TempDir()
 	log, err := OpenLog(dir, "r-concurrent")

@@ -69,7 +69,7 @@ type Log struct {
 // events onto the first run's log, and audit would misattribute them.
 // A Log is opened exactly once per fresh run file; run logs are Unlocked
 // because each has one writer process. Concurrent in-process appenders
-// (e.g. the engine and a future tool proxy) are serialized by Log.mu.
+// (e.g. the engine and the run gateway) are serialized by Log.mu.
 func OpenLog(dir, runID string) (*Log, error) {
 	c, err := ledger.Open(filepath.Join(dir, runID+".jsonl"), ledger.Unlocked)
 	if err != nil {
