@@ -5,16 +5,18 @@ Where it and any other document disagree, this constitution wins.
 
 ## Article I — Containment by governance
 
-Capability reaches an agent only through governed, logged doors: the model
-gateway, the tool/MCP gateway, and the exec gateway. Agents hold no raw
-model or resource credentials; they obtain access only through those
-gateways. Allowlisted commands run in the operator's sandbox and each is
-recorded — attested by the agent today; Agenthof records but does not run
-or contain them, and enforced execution is reserved. The agent runs in an
-operator-provided sandbox. That sandbox's network and exec confinement is
-required, and Agenthof does not verify it. No change may add an unmediated
-network call, or a credential stored where an agent's config or runtime can
-read its value.
+Capability reaches an agent only through governed, logged doors: the tool/MCP
+gateway, the exec gateway, and the model gateway. Where a door injects a
+credential, the agent never holds it — today the tool/MCP gateway, which
+injects a resource credential per call. The model gateway is reserved: until
+the fronted model proxy lands, a fronted agent's model access is arranged by
+its operator, outside Agenthof. Allowlisted commands run in the operator's
+sandbox and each is recorded — attested by the agent today; Agenthof records
+but does not run or contain them, and enforced execution is reserved. The
+agent runs in an operator-provided sandbox. That sandbox's network and exec
+confinement is required, and Agenthof does not verify it. No change may add
+an unmediated network call, or a credential stored where an agent's config or
+runtime can read its value.
 
 ## Article II — Identity
 

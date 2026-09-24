@@ -94,11 +94,10 @@ func TestValidateGraphRules(t *testing.T) {
 
 func TestValidateModelsRolesBounces(t *testing.T) {
 	cfg := baseCfg()
-	cfg.Agents[0].Model = "unknown"
 	cfg.Roles[0].Workflows = []string{"nope"}
 	cfg.Workflows[0].Steps[1].MaxBounces = 99
 	c := codes(Validate(cfg))
-	if c["unroutable-model"] != 0 || c["dangling-workflow-ref"] != 1 || c["bad-bounces"] != 1 {
+	if c["dangling-workflow-ref"] != 1 || c["bad-bounces"] != 1 {
 		t.Fatalf("codes: %v", c)
 	}
 	cfg = baseCfg()
