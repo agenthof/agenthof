@@ -1,4 +1,4 @@
-package toolproxy
+package rungateway
 
 import (
 	"context"
@@ -393,7 +393,7 @@ func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 	// upstream's own auth check returns an IsError result — the same shape a
 	// real upstream tool failure would produce.
 	httpClient := &http.Client{Transport: &bearerTransport{base: http.DefaultTransport, token: "wrong-token"}}
-	client := mcp.NewClient(&mcp.Implementation{Name: "toolproxy-test", Version: "v0.1.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "rungateway-test", Version: "v0.1.0"}, nil)
 	upstream, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: ts.URL, HTTPClient: httpClient}, nil)
 	if err != nil {
 		t.Fatalf("connect upstream: %v", err)

@@ -1,10 +1,10 @@
-// Package toolproxy is Agenthof's enforced inbound MCP proxy: a
+// Package rungateway is Agenthof's enforced inbound MCP proxy: a
 // credential-starved agent reaches a declared tool/MCP resource only through
 // here, which authenticates the step (a per-step run token), authorizes
 // against the agent's allowlist, injects a resource credential the agent
 // never sees (no-passthrough), forwards the call to the upstream MCP server,
 // and appends a tool_call event per call.
-package toolproxy
+package rungateway
 
 import (
 	"context"
@@ -32,12 +32,12 @@ import (
 // hung upstream fails the step instead of hanging Start indefinitely.
 const connectTimeout = 30 * time.Second
 
-// Proxy implements engine.ToolProxy: for one fronted step it mints a run
+// Gateway implements engine.ToolProxy: for one fronted step it mints a run
 // token, connects to each of the agent's allowlisted tool resources as an MCP
 // client (with a broker-injected credential the agent never sees), mirrors
 // their tools onto an inbound MCP server gated by the run token, and forwards
 // calls, appending a tool_call event per call.
-type Proxy struct {
+type Gateway struct {
 	tools  map[string]config.ToolResource
 	broker broker.Broker
 
@@ -51,10 +51,10 @@ type Proxy struct {
 	inflight sync.WaitGroup
 }
 
-// New builds a Proxy over the gateway's declared tool resources, resolving
+// New builds a Gateway over the gateway's declared tool resources, resolving
 // upstream credentials through b.
-func New(tools map[string]config.ToolResource, b broker.Broker) *Proxy {
-	return &Proxy{tools: tools, broker: b}
+func New(tools map[string]config.ToolResource, b broker.Broker) *Gateway {
+	return &Gateway{tools: tools, broker: b}
 }
 
 // Start serves one fronted step. It mints a run token, connects to each of
@@ -63,7 +63,7 @@ func New(tools map[string]config.ToolResource, b broker.Broker) *Proxy {
 // listener. It returns the URL the agent must call and the token it must
 // present — the token travels only in the HTTP Authorization header, never on
 // Binding or the ledger.
-func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) (string, string, error) {
+func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) (string, string, error) {
 	token, err := mintToken()
 	if err != nil {
 		return "", "", fmt.Errorf("mint run token: %w", err)
@@ -158,7 +158,7 @@ func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent fu
 // bookkeeping forward uses, so Stop() waits for it and no append races the
 // run's log.Close() after teardown. If the proxy is already closing, the event
 // is dropped rather than racing the close.
-func (p *Proxy) guardedAppend(appendEvent func(engine.Event), e engine.Event) {
+func (p *Gateway) guardedAppend(appendEvent func(engine.Event), e engine.Event) {
 	p.mu.Lock()
 	if p.closing {
 		p.mu.Unlock()
@@ -170,7 +170,7 @@ func (p *Proxy) guardedAppend(appendEvent func(engine.Event), e engine.Event) {
 	p.inflight.Done()
 }
 
-func (p *Proxy) execAuthorizeHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
+func (p *Gateway) execAuthorizeHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Command []string `json:"command"`
@@ -193,7 +193,7 @@ func (p *Proxy) execAuthorizeHandler(bind engine.Binding, agent config.AgentDef,
 	}
 }
 
-func (p *Proxy) execAttestHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
+func (p *Gateway) execAttestHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Command   []string `json:"command"`
@@ -228,7 +228,7 @@ func (p *Proxy) execAttestHandler(bind engine.Binding, agent config.AgentDef, ap
 // the caller can safely close the run's ledger immediately after. The wait is
 // tracked by the proxy's own bookkeeping (inflight), not by however the HTTP
 // server happens to treat an in-flight connection when closed.
-func (p *Proxy) Stop() {
+func (p *Gateway) Stop() {
 	p.mu.Lock()
 	if p.closing {
 		p.mu.Unlock()
@@ -258,7 +258,7 @@ func (p *Proxy) Stop() {
 // through raw (never touching the run token), and appends a tool_call event
 // recording only a result hash + short preview — never the call body or any
 // credential.
-func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow map[string]bool, upstream *mcp.ClientSession, appendEvent func(engine.Event)) mcp.ToolHandler {
+func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow map[string]bool, upstream *mcp.ClientSession, appendEvent func(engine.Event)) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		p.mu.Lock()
 		if p.closing {
@@ -336,7 +336,7 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 // is resolved per outbound request by injectingTransport (the broker caches),
 // not once here — a client_credentials token is short-lived and a step may run
 // for minutes, so a token captured at connect could expire mid-step.
-func (p *Proxy) connectUpstream(id string, res config.ToolResource) (*mcp.ClientSession, error) {
+func (p *Gateway) connectUpstream(id string, res config.ToolResource) (*mcp.ClientSession, error) {
 	ref := broker.CredentialRef{
 		ResourceID:      id,
 		Source:          res.CredentialSource,
@@ -443,11 +443,11 @@ const mcpMethodToolsCall = "tools/call"
 // It only ADDS a refused event for unexposed tools; exposed tools pass through
 // untouched (forward emits their event), so there is no double emit.
 //
-// It is a method on *Proxy (not a free function) so its appendEvent call can
+// It is a method on *Gateway (not a free function) so its appendEvent call can
 // share forward's closing/inflight bookkeeping: without that, an in-flight
 // appendEvent here could run after Stop() returns and race the run's
 // log.Close(), violating Stop()'s documented invariant.
-func (p *Proxy) refusedTraceMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) mcp.Middleware {
+func (p *Gateway) refusedTraceMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method == mcpMethodToolsCall {

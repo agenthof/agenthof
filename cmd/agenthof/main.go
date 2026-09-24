@@ -26,7 +26,7 @@ import (
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/registry"
-	"github.com/agenthof/agenthof/internal/toolproxy"
+	"github.com/agenthof/agenthof/internal/rungateway"
 )
 
 const usage = `agenthof — the agents' court
@@ -598,7 +598,7 @@ func cmdRun(args []string, out io.Writer) int {
 	h, _ := config.HashDir(*cfgDir)
 	// Wire the run listener when the config declares gateway tool resources
 	// or any agent declares exec. Otherwise leave Options.ToolProxy nil (a
-	// *toolproxy.Proxy assigned into the interface even when unused would
+	// *rungateway.Gateway assigned into the interface even when unused would
 	// make it a non-nil interface holding a nil pointer, which the engine's
 	// own opts.ToolProxy != nil bracketing check would then wrongly treat as
 	// present).
@@ -611,7 +611,7 @@ func cmdRun(args []string, out io.Writer) int {
 	}
 	var toolProxy engine.ToolProxy
 	if len(cfg.Gateway.Tools) > 0 || anyExec {
-		toolProxy = toolproxy.New(cfg.Gateway.Tools, broker.Dispatch{
+		toolProxy = rungateway.New(cfg.Gateway.Tools, broker.Dispatch{
 			StaticEnv: broker.StaticEnv{},
 			// A hung upstream token endpoint must not block the outbound call
 			// forever: an explicit client with a timeout is required here,

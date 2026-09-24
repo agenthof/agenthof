@@ -1047,7 +1047,7 @@ func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 }
 
 // TestRunWiresToolProxyForFrontedToolAgent proves `run` actually constructs
-// and wires a real toolproxy.Proxy into engine.Options when the config
+// and wires a real rungateway.Gateway into engine.Options when the config
 // declares a gateway tool resource that a fronted agent references: the
 // resource's credential env var is deliberately left unset, so the wired
 // proxy's Start call fails fast at the broker (no network involved), and
