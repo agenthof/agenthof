@@ -366,13 +366,14 @@ ledger integrity: verified (1 events)
 
 Even though the run was refused, it is **ledgered** (recorded) in the audit trail for compliance. The refusal is chained into the run's ledger like every other event.
 
-### 3.3 Model budgets are reserved
+### 3.3 Model budgets are the upstream gateway's
 
-`budget_usd_month` on a role is accepted configuration. It does not gate a
-run. The door that would enforce it — agents reaching models through
-Agenthof, with the credential injected and not passed through to the agent —
-is reserved. `gateway provision` can still mint a per-role key for that
-door; no run consumes the key.
+`budget_usd_month` does not gate `apply` or the group check above. After
+`gateway provision`, the model door injects that role's key, and the
+upstream gateway enforces the budget. A 429 is a refused `model_call`, not
+a `run_refused`. With no provisioned key, calls use `api_key_env` and no
+budget applies. This demo's echo agent does not make a model call. See
+[`lifecycle-model.md`](lifecycle-model.md).
 
 ---
 
@@ -507,5 +508,5 @@ of a control action.
 
 - **CONFIG**: Registry applies instantly; dependencies are validated; kill switches (disable/enable) are atomic.
 - **AUDIT**: Every run is attributed to an invoker (asserted or OIDC-verified); artifacts are SHA256-hashed for integrity; refused runs are still ledgered.
-- **GOVERNANCE**: Role-based access (`allowed_groups`) controls who can run what. Model budgets are reserved and do not gate a run.
+- **GOVERNANCE**: Role-based access (`allowed_groups`) controls who can run what. Model budgets are enforced by the upstream gateway on the provisioned role key, not by this demo's echo agent.
 - **INVESTIGATE**: One time-ordered timeline across the control plane and every run — filterable, with a stable `investigate/1` JSON contract, per-source integrity, and a config-join from each run back to the apply that authorized it.

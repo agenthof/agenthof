@@ -68,6 +68,9 @@ Expected:
 
 ## What this does not exercise
 
-Model access through Agenthof is reserved. `gateway provision` can mint a
-per-role key, and no run consumes it. Tool and exec doors are live when an
-agent declares them; the example agents declare neither.
+The echo agent does not call the model door. That door is live for an agent
+that posts to `<proxy URL>v1/chat/completions` with the run token — see
+`examples/model-agent` and [`docs/lifecycle-model.md`](../docs/lifecycle-model.md).
+Tool and exec doors are live when an agent declares them; the example
+agents declare neither. The listener and its two headers are still sent on
+every fronted step.

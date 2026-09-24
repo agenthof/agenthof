@@ -29,10 +29,17 @@ The governed core is real and runnable today:
 - **Identity & RBAC** — invokers are established by a pluggable authenticator
   (`static` for dev, OIDC for production); roles gate access by group.
 - **Fronted agents** — every agent is an external HTTP endpoint, governed at
-  the tool/MCP and exec doors. The agent runs in an operator-provided
+  the tool/MCP, exec, and model doors. The agent runs in an operator-provided
   sandbox; that sandbox's network and exec confinement is required, and
   Agenthof does not verify it. `execution: fronted` (the default when the
   field is empty) is stamped on every step event.
+- **Model gateway** — a fronted agent reaches models through Agenthof. The
+  per-role provider key is injected and is not passed through to the agent.
+  The logical model is authorized, the provider model is rewritten on the
+  way out, and each call is a `model_call`. Non-streaming calls record token
+  counts. A provisioned role key lets the upstream gateway enforce
+  `budget_usd_month`. Streamed calls are recorded without token counts.
+  Agenthof does not itself cap spend.
 - **Retention** — `runs prune` ships in the core, not behind a paywall.
 - **Auditable control plane** — *who applied config* and *who flipped the
   kill switch* is recorded to its own hash-chained control ledger, so "who
@@ -51,12 +58,10 @@ The governed core is real and runnable today:
 
 ## Next
 
-- **Fronted model proxy** — agents reach models through Agenthof. The
-  credential is injected at that door and is not passed through to the agent.
-  This is the model analogue of the tool proxy.
-- **Model gateway** — reserved with that proxy. It resolved logical model
-  names and provisioned per-role keys for in-process agents. That engine
-  remains, and no run consumes it, so it is not a current guarantee.
+- **Streamed model usage and Agenthof-side budgets** — record token counts
+  from a streamed completion, and cap spend inside Agenthof rather than only
+  at the upstream gateway. A per-role list of models, and OAuth-protected
+  model providers, sit with this.
 - **More harness adapters** — first-class support for registering and governing
   agents built on other runtimes and frameworks, not just an HTTP endpoint.
 

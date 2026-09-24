@@ -62,11 +62,12 @@ repair fragments untouched:
 
     ./agenthof runs prune --older-than 180d
 
-Model access through Agenthof is reserved. `gateway.models` and
-`roles[].budget_usd_month` are accepted configuration, and `gateway provision`
-can mint a per-role key, but no run consumes that key. Until the fronted
-model proxy lands, an agent's own process obtains models however its operator
-arranged, outside Agenthof.
+Model calls go through Agenthof when the agent targets the per-run proxy
+URL. `examples/echo-agent` does not make them. `examples/model-agent` does,
+and it needs an OpenAI-compatible endpoint in `gateway.models`.
+`gateway provision` writes a per-role key the model door injects;
+`budget_usd_month` is enforced by that upstream gateway, not by Agenthof.
+See [`docs/lifecycle-model.md`](lifecycle-model.md).
 
 **Requires:** Go >= 1.27 toolchain (auto-downloaded via `go.mod`).
 
