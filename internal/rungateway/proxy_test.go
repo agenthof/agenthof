@@ -1207,6 +1207,11 @@ func TestModelProxyOversizedResponseFails(t *testing.T) {
 // because RoundTrip itself errors, so only ErrorHandler sees the call. Before
 // the fix, this path recorded nothing — an action with no ledger line. It
 // must record exactly one failed model_call and still answer the agent 502.
+// The Reason is a generic "didn't complete" string rather than something
+// specific to "unreachable", because ErrorHandler also fires for a
+// response-copy failure (the agent disconnecting mid-stream) where the
+// upstream was reachable and did answer — the same fixed reason has to be
+// honest for both.
 func TestModelProxyUpstreamUnreachableRecordsFailedEvent(t *testing.T) {
 	t.Setenv("MODEL_KEY", "sk-provider")
 
@@ -1255,8 +1260,8 @@ func TestModelProxyUpstreamUnreachableRecordsFailedEvent(t *testing.T) {
 	if len(failed) != 1 {
 		t.Fatalf("failed model_call events = %d, want exactly 1: %+v", len(failed), events)
 	}
-	if !strings.Contains(failed[0].Reason, "unreachable") {
-		t.Fatalf("Reason = %q, want it to mention unreachable", failed[0].Reason)
+	if failed[0].Reason != "model call did not complete" {
+		t.Fatalf("Reason = %q, want %q", failed[0].Reason, "model call did not complete")
 	}
 }
 
