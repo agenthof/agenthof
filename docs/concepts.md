@@ -133,15 +133,16 @@ Every action carries three identities.
    run-id`, stamped on every ledger event and every gateway call.
 
 Taken together this is an inversion of the usual arrangement. Agents draw
-identity from the registry rather than from an external identity provider,
-external credentials live only in gateways and never in an agent, and
-attribution rides the ledger rather than the credential: authenticate as the
-machine, attribute to the human, per action. It is also what keeps the
-integration surface small — only mature, universally supported standards are
-load-bearing, namely OIDC login and machine-to-machine client credentials.
-Emerging agent-identity standards (RFC 8693 token exchange, SPIFFE/WIMSE,
-identity-provider agent-SSO products) are optional federation upgrades, never
-prerequisites for a release.
+identity from the registry rather than from an external identity provider, the
+external credentials Agenthof injects live only in gateways and never in an
+agent (a fronted agent's model key, while the model gateway is reserved, is the
+operator's, outside Agenthof), and attribution rides the ledger rather than the
+credential: authenticate as the machine, attribute to the human, per action. It
+is also what keeps the integration surface small — only mature, universally
+supported standards are load-bearing, namely OIDC login and machine-to-machine
+client credentials. Emerging agent-identity standards (RFC 8693 token exchange,
+SPIFFE/WIMSE, identity-provider agent-SSO products) are optional federation
+upgrades, never prerequisites for a release.
 
 ## Containment
 
