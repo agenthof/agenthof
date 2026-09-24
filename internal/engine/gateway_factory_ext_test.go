@@ -19,9 +19,23 @@ import (
 )
 
 // TestConcurrentRunsIsolateRealGateways is the load-bearing isolation test.
-// One run stops its gateway before the other run places a model call. A
-// shared Gateway closes whichever listener Start stored last and flips a
-// shared closing flag, so the second call fails. A per-run factory does not.
+// The leader's run completes (and stops its gateway) before the follower
+// places its model call. With the old shared *Gateway this could fail two
+// distinct ways depending on which run's Start stored its state last:
+//
+//   - If the follower's srv was stored last, the leader's Stop() closes the
+//     follower's listener out from under it, so the follower's model call
+//     gets connection-refused and its run status is not "succeeded".
+//   - If the leader's srv was stored last, the leader's Stop() sets the
+//     shared closing flag, so the follower's guardedAppend silently drops
+//     its ledger event even though the HTTP call itself returns 200 — the
+//     follower's ledger ends up with no model_call.
+//
+// So the load-bearing assertions are "each run status == succeeded" and
+// "each run's ledger has a model_call"; the distinct-URL/token and
+// no-cross-bleed checks below pass even under the shared-instance bug, since
+// the listener, token, and bind are created fresh on every Start() call. A
+// per-run factory avoids both failure modes.
 func TestConcurrentRunsIsolateRealGateways(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

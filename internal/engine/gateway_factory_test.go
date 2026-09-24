@@ -12,13 +12,11 @@ import (
 // spyGateway records which run started it. One instance per factory call.
 type spyGateway struct {
 	mu      sync.Mutex
-	started int32
 	lastRun string
 }
 
 func (s *spyGateway) Start(bind Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
 	s.mu.Lock()
-	s.started++
 	s.lastRun = bind.RunID
 	s.mu.Unlock()
 	return "http://127.0.0.1:9/", "tok", nil
@@ -26,10 +24,10 @@ func (s *spyGateway) Start(bind Binding, _ config.AgentDef, _ func(Event)) (stri
 
 func (s *spyGateway) Stop() {}
 
-func (s *spyGateway) runs() (started int32, lastRun string) {
+func (s *spyGateway) runs() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.started, s.lastRun
+	return s.lastRun
 }
 
 func frontedReg() *registry.Registry {
@@ -86,8 +84,8 @@ func TestRunUsesAFreshGatewayPerRun(t *testing.T) {
 	if len(made) != 2 {
 		t.Fatalf("factory calls = %d, want 2 (one per run)", len(made))
 	}
-	_, run0 := made[0].runs()
-	_, run1 := made[1].runs()
+	run0 := made[0].runs()
+	run1 := made[1].runs()
 	if run0 == "" || run1 == "" || run0 == run1 {
 		t.Fatalf("gateways saw runs %q and %q, want two distinct run ids", run0, run1)
 	}
