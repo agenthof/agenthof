@@ -1,6 +1,8 @@
-package toolproxy
+package rungateway
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -108,7 +112,7 @@ func TestProxyRoundTripNoPassthrough(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(tools, broker.StaticEnv{})
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{})
 
 	var mu sync.Mutex
 	var events []engine.Event
@@ -216,7 +220,7 @@ func TestProxyRejectsBadRunToken(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(tools, broker.StaticEnv{})
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{})
 
 	url, _, err := p.Start(testBinding(), testAgentDef("github"), func(engine.Event) {})
 	if err != nil {
@@ -240,7 +244,7 @@ func TestProxyForwardDeniesNonAllowlistedResource(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(tools, broker.StaticEnv{})
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{})
 
 	var events []engine.Event
 	appendEvent := func(e engine.Event) { events = append(events, e) }
@@ -311,7 +315,7 @@ func TestProxyStopWaitsForInFlightForward(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(tools, broker.StaticEnv{})
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{})
 
 	var mu sync.Mutex
 	appendCount := 0
@@ -393,7 +397,7 @@ func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 	// upstream's own auth check returns an IsError result — the same shape a
 	// real upstream tool failure would produce.
 	httpClient := &http.Client{Transport: &bearerTransport{base: http.DefaultTransport, token: "wrong-token"}}
-	client := mcp.NewClient(&mcp.Implementation{Name: "toolproxy-test", Version: "v0.1.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "rungateway-test", Version: "v0.1.0"}, nil)
 	upstream, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: ts.URL, HTTPClient: httpClient}, nil)
 	if err != nil {
 		t.Fatalf("connect upstream: %v", err)
@@ -403,7 +407,7 @@ func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(tools, broker.StaticEnv{})
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{})
 
 	var events []engine.Event
 	appendEvent := func(e engine.Event) { events = append(events, e) }
@@ -466,7 +470,7 @@ func TestProxyClientCredentialsMintsSeparateUpstreamToken(t *testing.T) {
 		ClientIDEnv: "CC_ID", ClientSecretEnv: "CC_SECRET",
 	}
 	b := broker.Dispatch{StaticEnv: broker.StaticEnv{}, ClientCredentials: broker.NewClientCredentials(nil)}
-	p := New(map[string]config.ToolResource{"up": res}, b)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", b)
 
 	var events []engine.Event
 	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) {
@@ -518,7 +522,7 @@ func TestProxyDirectBearerRegression(t *testing.T) {
 	defer ts.Close()
 
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(map[string]config.ToolResource{"up": res}, broker.StaticEnv{})
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{})
 
 	var events []engine.Event
 	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) {
@@ -564,7 +568,7 @@ func TestProxyForwardRecordsToolAndArgsSHA(t *testing.T) {
 	t.Setenv("UP_TOKEN", upstreamToken)
 
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(map[string]config.ToolResource{"up": res}, broker.StaticEnv{})
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{})
 
 	var events []engine.Event
 	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
@@ -615,7 +619,7 @@ func TestProxyDeniedToolRecordsRefusedEvent(t *testing.T) {
 	t.Setenv("UP_TOKEN", upstreamToken)
 
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(map[string]config.ToolResource{"up": res}, broker.StaticEnv{})
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{})
 
 	var events []engine.Event
 	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
@@ -671,7 +675,7 @@ func TestProxyExposedToolEmitsExactlyOneEvent(t *testing.T) {
 	t.Setenv("UP_TOKEN", upstreamToken)
 
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(map[string]config.ToolResource{"up": res}, broker.StaticEnv{})
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{})
 
 	var events []engine.Event
 	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
@@ -719,7 +723,7 @@ func startExecProxy(t *testing.T, allow []config.ExecEntry, record func(engine.E
 	t.Helper()
 	agent := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
 		Exec: config.ExecConfig{Mode: "attested", Allow: allow}}
-	p := New(map[string]config.ToolResource{}, broker.StaticEnv{})
+	p := New(config.GatewayConfig{}, "", broker.StaticEnv{})
 	url, token, err := p.Start(testBinding(), agent, record)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -817,7 +821,7 @@ func TestExecAndToolCallRecordInCallOrder(t *testing.T) {
 	t.Setenv("UP_TOKEN", upstreamToken)
 
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(map[string]config.ToolResource{"up": res}, broker.StaticEnv{})
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{})
 	agent := config.AgentDef{
 		Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
 		Tools: []string{"up"},
@@ -874,7 +878,7 @@ func TestExecStopWaitsForInFlightAttest(t *testing.T) {
 	}
 	agent := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
 		Exec: config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "go"}}}}
-	p := New(map[string]config.ToolResource{}, broker.StaticEnv{})
+	p := New(config.GatewayConfig{}, "", broker.StaticEnv{})
 	base, token, err := p.Start(testBinding(), agent, appendEvent)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -919,4 +923,466 @@ func TestExecStopWaitsForInFlightAttest(t *testing.T) {
 	}
 	<-callDone
 	p.Stop()
+}
+
+// modelUpstream is a stub OpenAI-compatible provider. It records the request
+// the proxy forwarded and answers in one of a few modes.
+type modelUpstream struct {
+	mu      sync.Mutex
+	calls   int
+	auth    string
+	model   string
+	body    []byte
+	headers http.Header
+	mode    string
+}
+
+func (u *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	var req map[string]any
+	_ = json.Unmarshal(body, &req)
+	model, _ := req["model"].(string)
+	u.mu.Lock()
+	u.calls++
+	u.auth = r.Header.Get("Authorization")
+	u.model = model
+	u.body = body
+	u.headers = r.Header.Clone()
+	mode := u.mode
+	u.mu.Unlock()
+
+	switch mode {
+	case "429":
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"SECRET-UPSTREAM-BODY budget exceeded"}}`))
+	case "stream":
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+	case "huge":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(make([]byte, (10<<20)+1))
+	case "gzip":
+		// Simulates an upstream that compresses its response regardless of
+		// what the forwarded request asked for — this stub always gzips, so
+		// the test only passes if the PROXY negotiates decoding correctly
+		// (by not forwarding the agent's own Accept-Encoding header), not
+		// because the stub happened to leave the body uncompressed.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		_, _ = gz.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`))
+		_ = gz.Close()
+		_, _ = w.Write(buf.Bytes())
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":0}}`))
+	}
+}
+
+func (u *modelUpstream) snapshot() (calls int, auth, model string, body []byte, headers http.Header) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.calls, u.auth, u.model, append([]byte(nil), u.body...), u.headers.Clone()
+}
+
+func startModelGateway(t *testing.T, up *modelUpstream, agent config.AgentDef, keyRoot string) (*Gateway, string, string, *[]engine.Event) {
+	t.Helper()
+	ts := httptest.NewServer(up)
+	t.Cleanup(ts.Close)
+	gw := config.GatewayConfig{
+		Models: map[string]config.ModelRoute{
+			"planner-model": {Endpoint: ts.URL, Model: "gpt-4o", APIKeyEnv: "MODEL_KEY"},
+		},
+	}
+	gw.Defaults.Model = "planner-model"
+	p := New(gw, keyRoot, broker.StaticEnv{})
+	var mu sync.Mutex
+	var events []engine.Event
+	base, token, err := p.Start(testBinding(), agent, func(e engine.Event) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(p.Stop)
+	return p, base, token, &events
+}
+
+func postModel(t *testing.T, base, token, body string, extra http.Header) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, base+"v1/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	for k, vs := range extra {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestModelProxyInjectsKeyRewritesModelAndStripsPassthrough(t *testing.T) {
+	const marker = "DISTINCTIVE-PROMPT-MARKER-9f3a"
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	_, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	extra := http.Header{}
+	extra.Set("X-Agenthof-Foo", "leak")
+	extra.Set("Cookie", "session=secret")
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[{"role":"user","content":"`+marker+`"}]}`, extra)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	calls, auth, model, body, hdr := up.snapshot()
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d", calls)
+	}
+	if auth != "Bearer sk-provider" || strings.Contains(auth, token) {
+		t.Fatalf("upstream auth = %q, want the provider key and not the run token", auth)
+	}
+	if model != "gpt-4o" {
+		t.Fatalf("forwarded model = %q", model)
+	}
+	if strings.Contains(string(body), "include_usage") || strings.Contains(string(body), "stream_options") {
+		t.Fatalf("proxy injected stream_options: %s", body)
+	}
+	for k := range hdr {
+		if strings.HasPrefix(k, "X-Agenthof-") {
+			t.Fatalf("upstream saw %s", k)
+		}
+	}
+	if hdr.Get("Cookie") != "" {
+		t.Fatalf("upstream saw Cookie: %q", hdr.Get("Cookie"))
+	}
+
+	if len(*events) != 1 {
+		t.Fatalf("events = %+v", *events)
+	}
+	ev := (*events)[0]
+	if ev.Type != "model_call" || ev.Model != "planner-model" || ev.Status != "succeeded" {
+		t.Fatalf("event = %+v", ev)
+	}
+	if ev.PromptTokens == nil || *ev.PromptTokens != 12 || ev.CompletionTokens == nil || *ev.CompletionTokens != 0 {
+		t.Fatalf("usage = %v %v", ev.PromptTokens, ev.CompletionTokens)
+	}
+	raw, _ := json.Marshal(*events)
+	if strings.Contains(string(raw), marker) {
+		t.Fatalf("prompt leaked into the ledger: %s", raw)
+	}
+}
+
+func TestModelProxyRefusesUndeclaredModel(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	_, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	resp := postModel(t, base, token, `{"model":"other","messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	if calls, _, _, _, _ := up.snapshot(); calls != 0 {
+		t.Fatalf("upstream was called %d times", calls)
+	}
+	if len(*events) != 1 || (*events)[0].Status != "refused" || (*events)[0].Model != "other" {
+		t.Fatalf("events = %+v", *events)
+	}
+}
+
+func TestModelProxyUsesDefaultsModel(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x"}
+	_, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if _, _, model, _, _ := up.snapshot(); model != "gpt-4o" {
+		t.Fatalf("forwarded model = %q", model)
+	}
+	if len(*events) != 1 || (*events)[0].Status != "succeeded" {
+		t.Fatalf("events = %+v", *events)
+	}
+}
+
+func TestModelProxyBudgetRefusalDoesNotEchoBody(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{mode: "429"}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	_, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 relayed", resp.StatusCode)
+	}
+	if len(*events) != 1 || (*events)[0].Status != "refused" || (*events)[0].Reason != "budget" {
+		t.Fatalf("events = %+v", *events)
+	}
+	raw, _ := json.Marshal(*events)
+	if strings.Contains(string(raw), "SECRET-UPSTREAM-BODY") {
+		t.Fatalf("upstream body leaked into the ledger: %s", raw)
+	}
+}
+
+func TestModelProxyRelaysStreamWithoutUsage(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{mode: "stream"}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	_, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	resp := postModel(t, base, token, `{"model":"planner-model","stream":true,"messages":[{"role":"user","content":"DISTINCTIVE-PROMPT-MARKER-9f3a"}]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	got, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(got), `"content":"hi"`) {
+		t.Fatalf("status %d body %s", resp.StatusCode, got)
+	}
+	if len(*events) != 1 || (*events)[0].Status != "started" || (*events)[0].PromptTokens != nil || (*events)[0].CompletionTokens != nil {
+		t.Fatalf("events = %+v", *events)
+	}
+	raw, _ := json.Marshal(*events)
+	if strings.Contains(string(raw), "DISTINCTIVE-PROMPT-MARKER-9f3a") {
+		t.Fatalf("prompt leaked: %s", raw)
+	}
+}
+
+func TestModelProxyPrefersProvisionedRoleKey(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	root := t.TempDir()
+	dir := filepath.Join(root, ".agenthof", "keys")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "se.key"), []byte("sk-role\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	up := &modelUpstream{}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	_, base, token, _ := startModelGateway(t, up, agent, root)
+
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if _, auth, _, _, _ := up.snapshot(); auth != "Bearer sk-role" {
+		t.Fatalf("upstream auth = %q, want the provisioned role key", auth)
+	}
+}
+
+func TestModelProxyOversizedResponseFails(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{mode: "huge"}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	_, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+	if len(*events) != 1 || (*events)[0].Status != "failed" || (*events)[0].Reason != "upstream response too large" {
+		t.Fatalf("events = %+v", *events)
+	}
+}
+
+// TestModelProxyUpstreamUnreachableRecordsFailedEvent exercises the
+// transport-failure path (connection refused): ModifyResponse never runs
+// because RoundTrip itself errors, so only ErrorHandler sees the call. Before
+// the fix, this path recorded nothing — an action with no ledger line. It
+// must record exactly one failed model_call and still answer the agent 502.
+// The Reason is a generic "didn't complete" string rather than something
+// specific to "unreachable", because ErrorHandler also fires for a
+// response-copy failure (the agent disconnecting mid-stream) where the
+// upstream was reachable and did answer — the same fixed reason has to be
+// honest for both.
+func TestModelProxyUpstreamUnreachableRecordsFailedEvent(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+
+	// A server that is immediately closed: its address no longer accepts
+	// connections, so RoundTrip fails with "connection refused" — the same
+	// shape as a real unreachable upstream (DNS failure, timeout, etc).
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close()
+
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	gw := config.GatewayConfig{
+		Models: map[string]config.ModelRoute{
+			"planner-model": {Endpoint: closedURL, Model: "gpt-4o", APIKeyEnv: "MODEL_KEY"},
+		},
+	}
+	gw.Defaults.Model = "planner-model"
+	p := New(gw, t.TempDir(), broker.StaticEnv{})
+
+	var mu sync.Mutex
+	var events []engine.Event
+	base, token, err := p.Start(testBinding(), agent, func(e engine.Event) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var failed []engine.Event
+	for _, e := range events {
+		if e.Type == "model_call" && e.Status == "failed" {
+			failed = append(failed, e)
+		}
+	}
+	if len(failed) != 1 {
+		t.Fatalf("failed model_call events = %d, want exactly 1: %+v", len(failed), events)
+	}
+	if failed[0].Reason != "model call did not complete" {
+		t.Fatalf("Reason = %q, want %q", failed[0].Reason, "model call did not complete")
+	}
+}
+
+// TestModelProxyDecodesGzippedUpstreamResponse guards against the
+// Accept-Encoding passthrough bug: forwarding the agent's own
+// "Accept-Encoding: gzip" (set automatically by Go's default HTTP client) to
+// the upstream defeats http.Transport's transparent decompression, so
+// ModifyResponse would read raw gzip bytes and parseUsage would silently
+// fail. It must see the decoded usage counts.
+func TestModelProxyDecodesGzippedUpstreamResponse(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{mode: "gzip"}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	_, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	// postModel uses http.DefaultClient, whose Transport automatically sends
+	// "Accept-Encoding: gzip" on the wire when the request doesn't already
+	// set one — exactly the header the agent's own client would send, which
+	// this test relies on the proxy stripping before forwarding upstream.
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	if len(*events) != 1 {
+		t.Fatalf("events = %+v", *events)
+	}
+	ev := (*events)[0]
+	if ev.Status != "succeeded" {
+		t.Fatalf("status = %q, want succeeded", ev.Status)
+	}
+	if ev.PromptTokens == nil || *ev.PromptTokens != 7 || ev.CompletionTokens == nil || *ev.CompletionTokens != 3 {
+		t.Fatalf("usage = %v %v, want 7 3 (proves the gzip body was decoded before parseUsage)", ev.PromptTokens, ev.CompletionTokens)
+	}
+}
+
+// TestModelProxyPreservesRequestNumberPrecision guards against the
+// map[string]any round-trip losing integer precision above 2^53: a seed (or
+// any other numeric field) larger than that must survive the model-field
+// rewrite byte-for-byte.
+func TestModelProxyPreservesRequestNumberPrecision(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	_, base, token, _ := startModelGateway(t, up, agent, t.TempDir())
+
+	const seedLiteral = `9007199254740993` // 2^53 + 1: not exactly representable as float64
+	resp := postModel(t, base, token, `{"model":"planner-model","seed":`+seedLiteral+`,"messages":[]}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	_, _, _, body, _ := up.snapshot()
+	if !strings.Contains(string(body), `"seed":`+seedLiteral) {
+		t.Fatalf("forwarded body lost seed precision: %s", body)
+	}
+}
+
+func TestModelProxyStopWaitsForInFlightAppend(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{}
+	ts := httptest.NewServer(up)
+	defer ts.Close()
+	p := New(config.GatewayConfig{
+		Models: map[string]config.ModelRoute{
+			"planner-model": {Endpoint: ts.URL, Model: "gpt-4o", APIKeyEnv: "MODEL_KEY"},
+		},
+	}, t.TempDir(), broker.StaticEnv{})
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	base, token, err := p.Start(testBinding(), agent, func(engine.Event) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	callDone := make(chan struct{})
+	go func() {
+		defer close(callDone)
+		req, err := http.NewRequest(http.MethodPost, base+"v1/chat/completions", strings.NewReader(`{"model":"planner-model","messages":[]}`))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("model_call append never started")
+	}
+	stopDone := make(chan struct{})
+	go func() {
+		p.Stop()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+		t.Fatal("Stop() returned while a model_call append was in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return after the in-flight model_call finished")
+	}
+	<-callDone
 }

@@ -85,6 +85,37 @@ func TestProxyCoordinatesRoundTripCtx(t *testing.T) {
 	}
 }
 
+func TestRunStartsListenerForFrontedAgentWithoutTools(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{
+		Agents: []config.AgentDef{
+			{Name: "fe", Output: "out", SourceFile: "a", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"},
+		},
+		Workflows: []config.WorkflowDef{{
+			Name: "wf", SourceFile: "w",
+			Steps: []config.Step{{Name: "step1", Agent: "fe"}},
+		}},
+		Roles: []config.RoleDef{{Name: "se", Workflows: []string{"wf"}, AllowedGroups: []string{"*"}, SourceFile: "r"}},
+	}
+	reg, errs := registry.Build(cfg)
+	if reg == nil {
+		t.Fatal(errs)
+	}
+	sp := &spyProxy{}
+	ce := &coordExec{}
+	_, status, err := Run(context.Background(), reg, "se", "wf", "x",
+		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a", ToolProxy: sp})
+	if err != nil || status != "succeeded" {
+		t.Fatalf("run: status=%q err=%v", status, err)
+	}
+	if sp.started != 1 || sp.stopped != 1 {
+		t.Fatalf("proxy bracket: started=%d stopped=%d, want 1/1", sp.started, sp.stopped)
+	}
+	if !ce.ok || ce.token != "tok-abc" {
+		t.Fatalf("executor coords: %q %q %v", ce.url, ce.token, ce.ok)
+	}
+}
+
 func TestRunBracketsFrontedToolStepWithProxy(t *testing.T) {
 	dir := t.TempDir()
 	sp := &spyProxy{}

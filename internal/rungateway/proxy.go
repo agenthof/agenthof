@@ -1,12 +1,13 @@
-// Package toolproxy is Agenthof's enforced inbound MCP proxy: a
+// Package rungateway is Agenthof's enforced inbound MCP proxy: a
 // credential-starved agent reaches a declared tool/MCP resource only through
 // here, which authenticates the step (a per-step run token), authorizes
 // against the agent's allowlist, injects a resource credential the agent
 // never sees (no-passthrough), forwards the call to the upstream MCP server,
 // and appends a tool_call event per call.
-package toolproxy
+package rungateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,6 +18,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,20 +30,23 @@ import (
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/gateway"
 )
 
 // connectTimeout bounds an upstream connect/list-tools call at Start time so a
 // hung upstream fails the step instead of hanging Start indefinitely.
 const connectTimeout = 30 * time.Second
 
-// Proxy implements engine.ToolProxy: for one fronted step it mints a run
+// Gateway implements engine.ToolProxy: for one fronted step it mints a run
 // token, connects to each of the agent's allowlisted tool resources as an MCP
 // client (with a broker-injected credential the agent never sees), mirrors
 // their tools onto an inbound MCP server gated by the run token, and forwards
 // calls, appending a tool_call event per call.
-type Proxy struct {
-	tools  map[string]config.ToolResource
-	broker broker.Broker
+type Gateway struct {
+	tools   map[string]config.ToolResource
+	broker  broker.Broker
+	gwcfg   config.GatewayConfig
+	keyRoot string
 
 	mu       sync.Mutex
 	srv      *http.Server
@@ -51,10 +58,11 @@ type Proxy struct {
 	inflight sync.WaitGroup
 }
 
-// New builds a Proxy over the gateway's declared tool resources, resolving
-// upstream credentials through b.
-func New(tools map[string]config.ToolResource, b broker.Broker) *Proxy {
-	return &Proxy{tools: tools, broker: b}
+// New builds a Gateway over the gateway config. Tool resources come from
+// gw.Tools. keyRoot is the working directory gateway provision writes role
+// keys under (".", the same root as EnsureRoleKey), not the --config directory.
+func New(gw config.GatewayConfig, keyRoot string, b broker.Broker) *Gateway {
+	return &Gateway{tools: gw.Tools, broker: b, gwcfg: gw, keyRoot: keyRoot}
 }
 
 // Start serves one fronted step. It mints a run token, connects to each of
@@ -63,7 +71,7 @@ func New(tools map[string]config.ToolResource, b broker.Broker) *Proxy {
 // listener. It returns the URL the agent must call and the token it must
 // present — the token travels only in the HTTP Authorization header, never on
 // Binding or the ledger.
-func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) (string, string, error) {
+func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) (string, string, error) {
 	token, err := mintToken()
 	if err != nil {
 		return "", "", fmt.Errorf("mint run token: %w", err)
@@ -133,6 +141,7 @@ func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent fu
 	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil))
 	mux.HandleFunc("/exec/authorize", p.execAuthorizeHandler(bind, agent, appendEvent))
 	mux.HandleFunc("/exec/attest", p.execAttestHandler(bind, agent, appendEvent))
+	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent))
 	handler := authMiddleware(mux, token)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -158,7 +167,7 @@ func (p *Proxy) Start(bind engine.Binding, agent config.AgentDef, appendEvent fu
 // bookkeeping forward uses, so Stop() waits for it and no append races the
 // run's log.Close() after teardown. If the proxy is already closing, the event
 // is dropped rather than racing the close.
-func (p *Proxy) guardedAppend(appendEvent func(engine.Event), e engine.Event) {
+func (p *Gateway) guardedAppend(appendEvent func(engine.Event), e engine.Event) {
 	p.mu.Lock()
 	if p.closing {
 		p.mu.Unlock()
@@ -170,7 +179,7 @@ func (p *Proxy) guardedAppend(appendEvent func(engine.Event), e engine.Event) {
 	p.inflight.Done()
 }
 
-func (p *Proxy) execAuthorizeHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
+func (p *Gateway) execAuthorizeHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Command []string `json:"command"`
@@ -193,7 +202,7 @@ func (p *Proxy) execAuthorizeHandler(bind engine.Binding, agent config.AgentDef,
 	}
 }
 
-func (p *Proxy) execAttestHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
+func (p *Gateway) execAttestHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Command   []string `json:"command"`
@@ -228,7 +237,7 @@ func (p *Proxy) execAttestHandler(bind engine.Binding, agent config.AgentDef, ap
 // the caller can safely close the run's ledger immediately after. The wait is
 // tracked by the proxy's own bookkeeping (inflight), not by however the HTTP
 // server happens to treat an in-flight connection when closed.
-func (p *Proxy) Stop() {
+func (p *Gateway) Stop() {
 	p.mu.Lock()
 	if p.closing {
 		p.mu.Unlock()
@@ -258,7 +267,7 @@ func (p *Proxy) Stop() {
 // through raw (never touching the run token), and appends a tool_call event
 // recording only a result hash + short preview — never the call body or any
 // credential.
-func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow map[string]bool, upstream *mcp.ClientSession, appendEvent func(engine.Event)) mcp.ToolHandler {
+func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow map[string]bool, upstream *mcp.ClientSession, appendEvent func(engine.Event)) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		p.mu.Lock()
 		if p.closing {
@@ -336,7 +345,7 @@ func (p *Proxy) forward(bind engine.Binding, agent config.AgentDef, resourceID s
 // is resolved per outbound request by injectingTransport (the broker caches),
 // not once here — a client_credentials token is short-lived and a step may run
 // for minutes, so a token captured at connect could expire mid-step.
-func (p *Proxy) connectUpstream(id string, res config.ToolResource) (*mcp.ClientSession, error) {
+func (p *Gateway) connectUpstream(id string, res config.ToolResource) (*mcp.ClientSession, error) {
 	ref := broker.CredentialRef{
 		ResourceID:      id,
 		Source:          res.CredentialSource,
@@ -409,6 +418,17 @@ func mintToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// capRunes truncates s to at most n runes. It is the one place the ledger
+// caps agent- or upstream-controlled text before it enters an event, so
+// hashResult's preview, resultErrorText's failure text, and the model door's
+// echoed model name all share the same bound.
+func capRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+
 // hashResult computes the tool_call event's result hash + preview, mirroring
 // how the artifact store hashes step outputs (sha256 + a single-line preview
 // capped at 200 runes): the ledger carries only this, never the raw result
@@ -425,10 +445,7 @@ func hashResult(result *mcp.CallToolResult, callErr error) (sha, preview string)
 	sum := sha256.Sum256(body)
 	sha = hex.EncodeToString(sum[:])
 
-	preview = strings.Join(strings.Fields(strings.ReplaceAll(string(body), "\n", " ")), " ")
-	if r := []rune(preview); len(r) > 200 {
-		preview = string(r[:200])
-	}
+	preview = capRunes(strings.Join(strings.Fields(strings.ReplaceAll(string(body), "\n", " ")), " "), 200)
 	return sha, preview
 }
 
@@ -443,11 +460,11 @@ const mcpMethodToolsCall = "tools/call"
 // It only ADDS a refused event for unexposed tools; exposed tools pass through
 // untouched (forward emits their event), so there is no double emit.
 //
-// It is a method on *Proxy (not a free function) so its appendEvent call can
+// It is a method on *Gateway (not a free function) so its appendEvent call can
 // share forward's closing/inflight bookkeeping: without that, an in-flight
 // appendEvent here could run after Stop() returns and race the run's
 // log.Close(), violating Stop()'s documented invariant.
-func (p *Proxy) refusedTraceMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) mcp.Middleware {
+func (p *Gateway) refusedTraceMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method == mcpMethodToolsCall {
@@ -516,8 +533,240 @@ func resultErrorText(result *mcp.CallToolResult) string {
 	if text == "" {
 		return "upstream tool call reported an error"
 	}
-	if r := []rune(text); len(r) > 200 {
-		text = string(r[:200])
+	return capRunes(text, 200)
+}
+
+// modelHandler is the OpenAI-compatible door on the per-run listener. The
+// agent authenticates with the run token; the proxy authorizes the logical
+// model, injects the per-role provider key, and never forwards the run token
+// or any X-Agenthof-* header.
+func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		// Decode into json.RawMessage per field rather than map[string]any: an
+		// any-decode + re-marshal round-trips every JSON number through
+		// float64, silently losing precision above 2^53 (e.g. a seed). Raw
+		// bytes for every field but "model" are preserved untouched; only
+		// "model" is parsed and later replaced.
+		var req map[string]json.RawMessage
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		var logical string
+		if raw, ok := req["model"]; ok {
+			_ = json.Unmarshal(raw, &logical) // non-string "model" leaves logical "", matching the old .(string) assertion
+		}
+
+		effective := agent.Model
+		if effective == "" {
+			effective = p.gwcfg.Defaults.Model
+		}
+		if logical == "" || logical != effective {
+			// logical is agent-supplied and, on this path, unvalidated — cap it
+			// before it enters the ledger (same 200-rune bound as hashResult /
+			// resultErrorText) so an oversized "model" value can't bloat the
+			// event.
+			echoed := capRunes(logical, 200)
+			p.guardedAppend(appendEvent, engine.Event{
+				Type: "model_call", Agent: agent.Name, Status: "refused",
+				Reason: fmt.Sprintf("model %q is not allowed for this agent", echoed),
+				Model:  echoed, Binding: bind,
+			})
+			http.Error(w, "model not allowed", http.StatusForbidden)
+			return
+		}
+
+		// keyRoot is the working dir gateway provision writes keys under
+		// (".", per main), not --config. Reading from --config would miss
+		// provisioned keys and fall back to the unbudgeted env key.
+		roleKey := gateway.LoadRoleKey(p.keyRoot, bind.Role)
+		route, err := gateway.Resolve(p.gwcfg, logical, roleKey)
+		if err != nil {
+			p.guardedAppend(appendEvent, engine.Event{
+				Type: "model_call", Agent: agent.Name, Status: "failed",
+				Reason: "model route not resolved", Model: logical, Binding: bind,
+			})
+			http.Error(w, "model route not resolved", http.StatusBadGateway)
+			return
+		}
+
+		modelRaw, err := json.Marshal(route.Model)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		req["model"] = modelRaw
+		newBody, err := json.Marshal(req)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		target, err := url.Parse(route.Endpoint)
+		if err != nil || target.Scheme == "" || target.Host == "" {
+			http.Error(w, "bad route", http.StatusBadGateway)
+			return
+		}
+
+		r.Body = io.NopCloser(bytes.NewReader(newBody))
+		r.ContentLength = int64(len(newBody))
+		r.Header.Set("Content-Length", strconv.Itoa(len(newBody)))
+		r.Header.Set("Content-Type", "application/json")
+		r.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(newBody)), nil
+		}
+
+		const maxResp = 10 << 20
+
+		// recorded tracks whether this request already appended a model_call
+		// event from inside ModifyResponse before returning an error from it.
+		// ReverseProxy calls ErrorHandler both when RoundTrip itself fails
+		// (upstream unreachable — no event yet) AND when ModifyResponse
+		// returns a non-nil error (which, on every path below, has already
+		// appended its own event) — without this guard ErrorHandler would
+		// double-record the latter. record() is the only way ModifyResponse
+		// appends, so no future branch can forget to set it. It is local to
+		// this handler invocation (a fresh closure per request), and
+		// Rewrite/ModifyResponse/ErrorHandler all run synchronously on the
+		// request's own goroutine, so no lock is needed.
+		var recorded bool
+		record := func(e engine.Event) {
+			recorded = true
+			p.guardedAppend(appendEvent, e)
+		}
+
+		rp := &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.Out.URL.Scheme, pr.Out.URL.Host = target.Scheme, target.Host
+				pr.Out.Host = target.Host
+				pr.Out.URL.Path = singleJoiningSlash(target.Path, "/v1/chat/completions")
+				pr.Out.URL.RawQuery = ""
+				pr.Out.Header.Set("Authorization", "Bearer "+route.APIKey)
+				for k := range pr.Out.Header {
+					if strings.HasPrefix(k, "X-Agenthof-") {
+						pr.Out.Header.Del(k)
+					}
+				}
+				pr.Out.Header.Del("Cookie")
+				// Deleting (not merely leaving empty) lets http.Transport
+				// negotiate its own gzip and transparently decode the
+				// response: Transport only auto-adds "Accept-Encoding: gzip"
+				// and auto-decompresses when the outbound request carries no
+				// Accept-Encoding at all. The agent's own HTTP client sets
+				// one; forwarding it verbatim would leave ModifyResponse
+				// reading raw compressed bytes, so parseUsage would silently
+				// fail and the 10 MiB cap would measure compressed size.
+				pr.Out.Header.Del("Accept-Encoding")
+			},
+			ModifyResponse: func(resp *http.Response) error {
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					// The numeric code + a fixed status text, never the
+					// upstream's own reason phrase (resp.Status), which is
+					// upstream-controlled text that could carry anything.
+					reason := fmt.Sprintf("upstream %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+					if resp.StatusCode == http.StatusTooManyRequests {
+						reason = "budget"
+					}
+					record(engine.Event{
+						Type: "model_call", Agent: agent.Name, Status: "refused",
+						Reason: reason, Model: logical, Binding: bind,
+					})
+					return nil
+				}
+				if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+					record(engine.Event{
+						Type: "model_call", Agent: agent.Name, Status: "started",
+						Model: logical, Binding: bind,
+					})
+					return nil
+				}
+				rb, err := io.ReadAll(io.LimitReader(resp.Body, maxResp+1))
+				_ = resp.Body.Close()
+				if err != nil {
+					record(engine.Event{
+						Type: "model_call", Agent: agent.Name, Status: "failed",
+						Reason: "upstream read failed", Model: logical, Binding: bind,
+					})
+					return err
+				}
+				if len(rb) > maxResp {
+					record(engine.Event{
+						Type: "model_call", Agent: agent.Name, Status: "failed",
+						Reason: "upstream response too large", Model: logical, Binding: bind,
+					})
+					return fmt.Errorf("upstream response too large")
+				}
+				resp.Body = io.NopCloser(bytes.NewReader(rb))
+				resp.ContentLength = int64(len(rb))
+				resp.Header.Set("Content-Length", strconv.Itoa(len(rb)))
+				pt, ct := parseUsage(rb)
+				record(engine.Event{
+					Type: "model_call", Agent: agent.Name, Status: "succeeded",
+					Model: logical, PromptTokens: pt, CompletionTokens: ct, Binding: bind,
+				})
+				return nil
+			},
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+				// ReverseProxy calls ErrorHandler in exactly two cases: (a) a
+				// Transport.RoundTrip failure (connection refused, DNS,
+				// timeout — ModifyResponse never ran, nothing recorded yet),
+				// or (b) a non-nil return from ModifyResponse (already
+				// recorded via record() above). It is NOT reached for a
+				// mid-stream response-copy failure — that aborts the handler
+				// via the recovered http.ErrAbortHandler panic, bypassing
+				// ErrorHandler entirely. The reason is kept deliberately
+				// generic rather than "upstream unreachable" (which would be
+				// wrong for case (b), e.g. an oversized or unreadable body)
+				// — it covers both without claiming more than is known. Only
+				// append here when nothing has been recorded yet, so case (a)
+				// still leaves a ledger line (Article III: no action without
+				// an event) without double-recording case (b), which already
+				// appended its own. The error itself is never echoed — it
+				// can carry the upstream URL or a wrapped secret — a fixed
+				// reason is enough.
+				if !recorded {
+					p.guardedAppend(appendEvent, engine.Event{
+						Type: "model_call", Agent: agent.Name, Status: "failed",
+						Reason: "model call did not complete", Model: logical, Binding: bind,
+					})
+				}
+				http.Error(w, "upstream error", http.StatusBadGateway)
+			},
+		}
+		rp.ServeHTTP(w, r)
 	}
-	return text
+}
+
+func parseUsage(body []byte) (*int, *int) {
+	var parsed struct {
+		Usage struct {
+			PromptTokens     *int `json:"prompt_tokens"`
+			CompletionTokens *int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, nil
+	}
+	return parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens
+}
+
+func singleJoiningSlash(a, b string) string {
+	aslash := strings.HasSuffix(a, "/")
+	bslash := strings.HasPrefix(b, "/")
+	switch {
+	case aslash && bslash:
+		return a + b[1:]
+	case !aslash && !bslash:
+		return a + "/" + b
+	}
+	return a + b
 }

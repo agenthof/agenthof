@@ -34,9 +34,9 @@ The runtime separates a control plane from a data plane.
   and read). This is the layer that decides what is allowed to run, and
   records what did.
 - **Data plane** — `gateway/`, which resolves logical model names to real
-  endpoints and can provision per-role keys. No run consumes that path
-  today; it is retained for the reserved fronted model proxy. `toolproxy/`
-  is the inbound MCP proxy an agent's declared tools are reached through
+  endpoints and provisions per-role keys, and `rungateway/`, the per-run
+  listener an agent's model calls, declared tools, and allowlisted commands
+  are reached through
   (see [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs)).
 
 The agent runtime in `agentrt/` is the HTTP adapter that hands each step to
@@ -48,13 +48,16 @@ work happens in the operator's process, outside Agenthof.
 These doors are first-class in the design. Designing one in is not the same
 as building every mode of it now:
 
-1. **Model gateway** — reserved. The engine that resolves a logical model
-   name and provisions a per-role key still exists, and `gateway.models`,
-   `gateway.defaults.model`, and `roles[].budget_usd_month` are accepted and
-   shape-validated. No run calls it. It returns when a fronted agent reaches
-   models through Agenthof, with the credential injected at that door and
-   never handed to the agent. Until then, model access is the operator's
-   arrangement outside Agenthof.
+1. **Model gateway** — the door a fronted agent uses for inference. The
+   agent calls the per-run listener with the run token and a logical model
+   name. Agenthof allows only that agent's effective model, injects the
+   per-role provider key (never the run token), forwards to the configured
+   endpoint, and records a `model_call`. A provisioned role key carries
+   `budget_usd_month` to the upstream gateway, which enforces it; with no
+   role key, the route's `api_key_env` is used and no budget applies.
+   Agenthof does not itself cap spend. A streamed call is recorded without
+   token counts. The prompt and the completion are not written to the
+   ledger. See [`lifecycle-model.md`](lifecycle-model.md).
 2. **Tool/MCP gateway** — the inbound MCP proxy an agent's declared tools
    (`tools:` entries naming `gateway.yaml` tool resources) are reached
    through (see [`lifecycle.md`](lifecycle.md#how-an-agent-actually-runs)).
@@ -86,7 +89,7 @@ value `contained` is rejected at apply: that tier was removed. Set
 Because the agent's own code runs outside Agenthof, Agenthof does not
 confine that process. The agent is **governed at the doors it has to pass
 through to act as an agent of the platform**: identity, the ledger, and —
-where declared — the tool and exec gateways. Its internals are *attested*,
+where it calls them — the model, tool, and exec gateways. Its internals are *attested*,
 not *enforced*. Agenthof governs what crosses the boundary — the call in,
 the result out, and the identity and ledger entries around it — not what
 the external service does internally. The call in carries the run's
@@ -104,10 +107,11 @@ injects the resource's credential, so the agent itself never holds one (see
 flow). It may also declare `exec`, an allowlist of commands it may run in
 the operator's sandbox; that door lives on the same per-run listener, and
 Agenthof records what the agent attests without running or containing the
-command (see [`lifecycle-exec.md`](lifecycle-exec.md)). `model` is not
-checked against `gateway.yaml`: model routing waits on the reserved fronted
-model proxy (see [`docs/reference/config.md`](reference/config.md#execution)
-for how `execution` and `endpoint` interact). A timeout or error from the
+command (see [`lifecycle-exec.md`](lifecycle-exec.md)). Its model calls go
+through the same listener: the agent sends the logical name, and Agenthof
+resolves it (see [`lifecycle-model.md`](lifecycle-model.md) and
+[`docs/reference/config.md`](reference/config.md#execution) for how
+`execution` and `endpoint` interact). A timeout or error from the
 endpoint is an ordinary step failure with the same fail-back semantics as
 any other step.
 
@@ -135,8 +139,8 @@ Every action carries three identities.
 Taken together this is an inversion of the usual arrangement. Agents draw
 identity from the registry rather than from an external identity provider, the
 external credentials Agenthof injects live only in gateways and never in an
-agent (a fronted agent's model key, while the model gateway is reserved, is the
-operator's, outside Agenthof), and attribution rides the ledger rather than the
+agent. A key a non-conforming agent obtains outside those gateways is the
+operator's, outside Agenthof. Attribution rides the ledger rather than the
 credential: authenticate as the machine, attribute to the human, per action. It
 is also what keeps the integration surface small — only mature, universally
 supported standards are load-bearing, namely OIDC login and machine-to-machine
@@ -147,10 +151,13 @@ upgrades, never prerequisites for a release.
 ## Containment
 
 Capability reaches an agent only through governed, logged doors: the tool/MCP
-gateway for declared tools, and the exec gateway for allowlisted commands.
-The model gateway is reserved and is not on the run path today. Agents hold
-no raw model or resource credentials in Agenthof config; tool credentials
-are injected by the proxy, and model credentials are not issued by a run.
+gateway for declared tools, the exec gateway for allowlisted commands, and
+the model gateway for inference. Agents hold no provider or resource
+credentials in Agenthof config. The model gateway injects the per-role
+provider key, and the tool gateway injects the resource credential. A
+non-conforming agent that already holds a key can still call a provider
+directly; the operator's sandbox is what prevents that, and Agenthof does
+not verify it.
 Allowlisted commands run in the operator's sandbox and each is recorded —
 attested by the agent. Agenthof records the report and does not run or
 contain the command. Enforced execution, where Agenthof would run the

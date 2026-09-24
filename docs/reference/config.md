@@ -55,10 +55,11 @@ A workflow step whose agent resolves to a disabled agent fails `apply` with
 
 ### `model`
 
-Optional string. `apply` does not check it, and a run does not resolve it.
-Together with `gateway.yaml`'s `models` and `defaults.model`, and a role's
-`budget_usd_month`, it is configuration for the reserved model door (see
-[`models`](#models)). No run consumes that door.
+Optional string. The agent's effective model is this value, or
+`gateway.yaml`'s `defaults.model` when it is empty. `apply` does not check
+that the name has a route. At run time the model door allows a chat
+completion only when the agent's request names that effective model, then
+resolves it through [`models`](#models).
 
 ### `instruction`
 
@@ -98,6 +99,12 @@ must have an endpoint" when `execution` is `fronted`. A non-empty endpoint
 must be `https`, or `http` whose host is `localhost`, `127.0.0.1`, or `::1`;
 anything else is rejected with `bad-endpoint` ("endpoint must be https (or
 loopback http)").
+
+Every fronted step receives `X-Agenthof-Proxy-URL` and
+`X-Agenthof-Run-Token`, whether or not the agent declares `tools` or `exec`.
+The model door is `POST <proxy URL>v1/chat/completions` with that run token.
+An agent uses the doors it needs and ignores the rest. See
+[`lifecycle-model.md`](../lifecycle-model.md).
 
 ### `exec`
 
@@ -303,9 +310,14 @@ and groups are used outside of `apply`).
 
 ### `budget_usd_month`
 
-Optional float. `apply` does not check its value. It is a declaration for
-the reserved model door: `gateway provision` can mint a per-role key from
-it, and no run consumes that key. See [`models`](#models).
+Optional float. `apply` does not check its value. `gateway provision` sends
+it to the upstream gateway as that role's budget and writes the resulting
+key under `.agenthof/keys/<role>.key` in the working directory. A run that
+finds the key injects it on model calls, so the upstream gateway enforces
+the budget (HTTP 429, recorded as a refused `model_call` with reason
+`budget`). Agenthof does not itself cap spend. With no key file, model
+calls use the route's `api_key_env` and no budget applies. See
+[`models`](#models).
 
 **Example (from `examples/config/roles/accountant.yaml`):**
 
@@ -386,12 +398,15 @@ variable, never a credential value.
 
 A map from a logical model name to a `ModelRoute`. `apply` accepts the map
 and does not validate its keys or the contents of each entry (`endpoint`,
-`model`, `api_key_env`). Nothing on the run path reads `models`,
-`defaults.model`, an agent's `model`, or a role's `budget_usd_month`. Those
-fields are declarations for the reserved model door — a fronted agent
-reaching models through Agenthof, with the credential injected and not
-passed through to the agent. `gateway.Resolve` still implements the lookup,
-and `gateway provision` can still mint a per-role key; no run calls either.
+`model`, `api_key_env`). The model door reads it on each chat completion.
+
+The agent sends the logical name. Agenthof rewrites the outbound `model` to
+the route's `model` and sends the call to the route's `endpoint`
+(`POST /v1/chat/completions`). The key is the role's provisioned key when
+`.agenthof/keys/<role>.key` exists in the working directory — the same
+directory `gateway provision` writes — and otherwise the value of
+`api_key_env`. The run token is not forwarded. See
+[`lifecycle-model.md`](../lifecycle-model.md).
 
 ### `tools`
 
@@ -406,8 +421,8 @@ reaches them only through Agenthof's inbound MCP proxy, never directly — see
 ### `defaults` / `defaults.model`
 
 `defaults` is a nested object holding one field, `model` (optional string).
-`apply` does not read it. It is part of the reserved model-door declaration
-described under [`models`](#models).
+`apply` does not read it. The model door uses it as the effective model for
+an agent that leaves `model` empty (see [`model`](#model)).
 
 **Example (from `examples/config/gateway.yaml`):**
 

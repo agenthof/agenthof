@@ -141,23 +141,25 @@ and what it is acting for. The headers, and what each carries, are:
   step. The client does not follow redirects. An empty endpoint never
   reaches this call: `apply` rejects it.
 
-  When an agent's registry entry also declares `tools`, two more
-  headers ride along on that one call, present only for the duration of this
-  step:
+  Every fronted step also receives two headers, present only for the
+  duration of this step:
 
   | Header | Carries |
   | --- | --- |
-  | `X-Agenthof-Proxy-URL` | the address of a proxy started just for this step |
+  | `X-Agenthof-Proxy-URL` | the address of a listener started just for this step |
   | `X-Agenthof-Run-Token` | a token minted just for this step |
 
-  Those two headers point the agent at Agenthof's own **inbound MCP proxy**
-  rather than at the tools directly — the agent holds no credential for any
-  tool it uses. For the life of the step:
+  Agenthof mints a fresh run token and starts a listener bound to
+  `127.0.0.1` on an ephemeral port — reachable only from the same host
+  Agenthof itself runs on. That listener is the model door
+  ([`lifecycle-model.md`](lifecycle-model.md)) and, when declared, the tool
+  and exec doors. An agent uses the doors it needs and ignores the rest.
 
-  1. Agenthof mints a fresh run token and starts a proxy bound to
-     `127.0.0.1` on an ephemeral port — reachable only from the same host
-     Agenthof itself runs on;
-  2. it connects, as an MCP client, to each of the agent's declared tools
+  When the agent declares `tools`, those headers point it at Agenthof's
+  inbound MCP proxy rather than at the tools directly — the agent holds no
+  credential for any tool it uses. For the life of the step:
+
+  1. it connects, as an MCP client, to each of the agent's declared tools
      (each one a `gateway.yaml` tool resource) and injects that resource's
      broker-resolved credential into its own outbound calls — a credential
      the agent never sees. For a resource declared with `grant_type:
@@ -165,15 +167,15 @@ and what it is acting for. The headers, and what each carries, are:
      environment: the broker mints a separate upstream OAuth token from the
      resource's token endpoint on the first outbound call, reuses it until
      shortly before it expires, and mints a fresh one once it's due to. The
-     run token from step 1 is a different token, scoped to this step only,
-     and it is never forwarded upstream in the minted token's place — the
-     agent's inbound credential and the tool's outbound credential never mix
+     run token minted for this step is a different token, and it is never
+     forwarded upstream in the minted token's place — the agent's inbound
+     credential and the tool's outbound credential never mix
      (no-passthrough);
-  3. it mirrors those upstream tools onto the proxy's inbound MCP server,
+  2. it mirrors those upstream tools onto the proxy's inbound MCP server,
      gated behind the run token: a request without the matching
      `Authorization: Bearer <token>` header is rejected before any tool
      call is even parsed;
-  4. a tool outside the agent's declared allowlist is never exposed by the
+  3. a tool outside the agent's declared allowlist is never exposed by the
      proxy in the first place — listing tools will not show it. If the agent
      calls such a name anyway, the call fails, and the ledger records the
      attempt first-hand as a refused `tool_call`: the tool name, and a
@@ -183,12 +185,12 @@ and what it is acting for. The headers, and what each carries, are:
      proxy and acts on its own — still leaves no such record. When the agent
      calls a tool it can see, Agenthof re-checks the call against the
      agent's declared tools, forwards it to the real MCP server over the
-     credentialed connection from step 2, and appends one `tool_call` event
+     credentialed connection from step 1, and appends one `tool_call` event
      recording the tool name, that same arguments fingerprint, which
      resource was touched, whether the call succeeded or failed, and a
      SHA-256 hash plus a short preview of the result — never the call's
      arguments, the full result body, or any credential;
-  5. once the step finishes, Agenthof shuts the proxy down and closes its
+  4. once the step finishes, Agenthof shuts the proxy down and closes its
      upstream connections; the run token stops working and is never written
      to the ledger or placed on the delegation binding — it exists only in
      the `Authorization` header of the agent's proxied calls, for as long as
@@ -203,24 +205,24 @@ and what it is acting for. The headers, and what each carries, are:
   step, the same treatment as a configuration error.
 
   The same listener, and the same two headers, also serve the exec door when
-  the agent declares `exec`, including an agent that declares exec and no
-  tools. See [`lifecycle-exec.md`](lifecycle-exec.md). An agent that declares
-  neither `tools` nor `exec` never sees these two headers or any listener at
-  all.
+  the agent declares `exec`. See [`lifecycle-exec.md`](lifecycle-exec.md).
+  They also serve the model door on every fronted step, including an agent
+  that declares neither tools nor exec. See
+  [`lifecycle-model.md`](lifecycle-model.md).
 
-A minimal agent that implements this contract — echoing `input` back as
-`artifact` — ships at `examples/echo-agent`. It holds no credentials.
+A minimal agent that implements the step contract — echoing `input` back as
+`artifact` — ships at `examples/echo-agent`. It holds no credentials and
+does not call the model door. `examples/model-agent` is the optional agent
+that does.
 
-### Model access is reserved
+### Model access
 
-A run does not inject a model credential. `gateway.models`,
-`gateway.defaults.model`, and `roles[].budget_usd_month` are accepted
-configuration for a reserved door: an agent reaching models through
-Agenthof, with the credential injected and never passed through to the
-agent. Until that proxy lands, the agent's own process obtains models
-however its operator arranged, outside Agenthof.
+A conforming agent reaches models through the listener above. Agenthof
+injects the per-role provider key and records a `model_call`. The walkthrough
+is [`lifecycle-model.md`](lifecycle-model.md). An agent that never calls the
+proxy does not get a model credential from Agenthof.
 
-Tool credentials are live, and they use the hold-and-inject shape described
+Tool credentials use the hold-and-inject shape described
 above: the credential is held and injected by Agenthof, resolved from an
 environment variable named in `gateway.yaml` (never a value stored in
 config), and the human is attributed through the ledger rather than through
@@ -323,7 +325,8 @@ flag and exit-code reference.
 
 | Shipped today | Reserved for later |
 |---|---|
-| fronted agents: every step is an HTTP call to the agent's endpoint, with identity headers and `execution: fronted` stamped on the step events | fronted model proxy — agents reach models through Agenthof, credential injected, never passed through to the agent |
+| fronted agents: every step is an HTTP call to the agent's endpoint, with identity headers and `execution: fronted` stamped on the step events. Every fronted step also receives the per-run listener coordinates | streamed model-call usage (a streamed call is recorded without token counts) |
+| model gateway: the agent calls `<proxy URL>v1/chat/completions` with the run token; Agenthof authorizes the logical model, injects the per-role provider key, and records `model_call`. Non-streaming calls record token counts. Budgets are the upstream gateway's, via the provisioned role key | Agenthof-side spend caps; a per-role list of models; OAuth-protected model providers |
 | inbound MCP proxy for an agent's declared tools — allowlisted, credential-injecting, ledgered, and able to mint its own upstream token via the `client_credentials` grant | on-behalf-of / token-exchange agent auth to IdP-protected resources (RFC 8693) |
 | attested exec: an allowlist check, then an agent-reported outcome recorded as `exec` with `mode: attested`. Agenthof records the report and does not run or contain the command | enforced execution, where Agenthof would run the command |
 | hash-chained ledger + `audit` / `audit verify` | enforced capabilities beyond the tool allowlist (the proxy allowlists which tools an agent may reach; it does not otherwise constrain what the agent's own code does) |
@@ -336,6 +339,7 @@ Only shipped behavior is a guarantee.
 ## See also
 
 - [`lifecycle-exec.md`](lifecycle-exec.md) — the life of an exec: authorize, the operator's sandbox, attest, the ledger.
+- [`lifecycle-model.md`](lifecycle-model.md) — the life of a model call: authorize the logical model, inject the provider key, record `model_call`.
 - [`control-plane-lifecycle.md`](control-plane-lifecycle.md) — the life of a control action (the governance plane that decides what may run).
 - [`concepts.md`](concepts.md) — the pieces and why they're arranged this way.
 - [`constitution.md`](constitution.md) — the invariants every run must honor.

@@ -21,9 +21,9 @@ Pre-release, and the governed core is real and runnable today:
   in `examples/echo-agent`;
 - a hash-chained ledger where every action and refusal is attributed to the
   human who invoked it, with `audit verify` for integrity;
-- the kill switch, OIDC + RBAC, and agents governed at the tool/MCP and exec
-  doors. The model gateway is reserved until fronted agents reach models
-  through Agenthof;
+- the kill switch, OIDC + RBAC, and agents governed at the tool/MCP, exec,
+  and model doors. A fronted agent reaches models through Agenthof, which
+  injects the per-role provider key;
 - a control-plane audit — every `apply` and kill-switch flip is recorded to
   its own hash-chained control ledger, attributed to the human who invoked
   it, with `audit control`, `audit verify control`, and `audit repair
@@ -92,6 +92,8 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   planes, gateways, identity, the ledger.
 - [`docs/lifecycle.md`](docs/lifecycle.md) — the life of a run: how one
   invocation flows through identity, authorization, execution, and the ledger.
+- [`docs/lifecycle-model.md`](docs/lifecycle-model.md) — the life of a model
+  call: logical model, injected provider key, `model_call`.
 - [`docs/lifecycle-exec.md`](docs/lifecycle-exec.md) — the life of an exec:
   allowlist, the operator's sandbox, and the attested record.
 - [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md) — the

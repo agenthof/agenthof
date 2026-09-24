@@ -138,12 +138,12 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		emit(Event{Type: "step_started", Step: step.Name, Agent: agent.Name, Execution: execTier})
 
 		stepCtx, cancel := context.WithTimeout(ctx, opts.StepTimeout)
-		// Bracket a fronted step that declares tools or exec with the run
-		// listener: it serves this one agent's doors for the duration of the
-		// dispatch.
-		frontedWithGatewayDoors := opts.ToolProxy != nil && agent.EffectiveExecution() == "fronted" &&
-			(len(agent.Tools) > 0 || agent.Exec.Declared())
-		if frontedWithGatewayDoors {
+		// Every fronted step gets the per-run listener. It serves whichever
+		// doors this agent uses — tools, exec, or the model proxy — and a
+		// listener with no traffic is cheap. The agent receives the proxy
+		// URL and run token and ignores the doors it does not call.
+		fronted := opts.ToolProxy != nil && agent.EffectiveExecution() == "fronted"
+		if fronted {
 			// appendEvent writes tool_call events on the same serialized
 			// ledger writer but must NOT touch the engine-goroutine logErr var.
 			appendEvent := func(e Event) {
@@ -165,7 +165,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		}
 		res, execErr := exec.Execute(stepCtx, bind, agent, input, artifacts)
 		cancel()
-		if frontedWithGatewayDoors {
+		if fronted {
 			opts.ToolProxy.Stop()
 		}
 		if execErr != nil {
