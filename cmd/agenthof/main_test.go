@@ -38,6 +38,13 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if cmd, ok := strings.CutPrefix(req.Input, "exec:"); ok {
+		if err := stubCallExec(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), cmd); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "exec door: " + err.Error()})
+			return
+		}
+	}
 	line := req.Input
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
 		line = line[:i]
@@ -50,6 +57,40 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 		"success":  true,
 		"artifact": "[" + req.Agent + "] " + line,
 	})
+}
+
+// stubCallExec drives the exec door from the demo stub: authorize the command,
+// then attest a synthetic exit 0. Mirrors what a conforming fronted agent does.
+func stubCallExec(proxyURL, token, cmd string) error {
+	if proxyURL == "" {
+		return fmt.Errorf("no proxy url")
+	}
+	argv := strings.Fields(cmd)
+	do := func(path string, body any) error {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		rq, err := http.NewRequest(http.MethodPost, strings.TrimRight(proxyURL, "/")+path, bytes.NewReader(b))
+		if err != nil {
+			return err
+		}
+		rq.Header.Set("Content-Type", "application/json")
+		rq.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(rq)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode/100 != 2 {
+			return fmt.Errorf("%s returned %d", path, resp.StatusCode)
+		}
+		return nil
+	}
+	if err := do("/exec/authorize", map[string]any{"command": argv}); err != nil {
+		return err
+	}
+	return do("/exec/attest", map[string]any{"command": argv, "exit": 0, "output_sha": ""})
 }
 
 func writeSample(t *testing.T) string {
