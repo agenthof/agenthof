@@ -22,6 +22,11 @@ func TestMain(m *testing.M) {
 func TestScript(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(echoCompatHandler))
 	t.Cleanup(srv.Close)
+	modelSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":11,"completion_tokens":5}}`))
+	}))
+	t.Cleanup(modelSrv.Close)
 	testscript.Run(t, testscript.Params{
 		Dir: filepath.Join("testdata", "script"),
 		Setup: func(e *testscript.Env) error {
@@ -37,7 +42,10 @@ func TestScript(t *testing.T) {
 			// loopback endpoint or none. Point every agent at this process's
 			// echo-compatible stub so a fronted run succeeds without a
 			// separate server.
-			return rewriteAgentEndpoints(e.WorkDir, srv.URL)
+			if err := rewriteAgentEndpoints(e.WorkDir, srv.URL); err != nil {
+				return err
+			}
+			return rewriteModelEndpoints(e.WorkDir, modelSrv.URL)
 		},
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			// lastrun <log-dir>: finds the single newest run log and exports
@@ -70,6 +78,26 @@ func TestScript(t *testing.T) {
 				ts.Setenv("RUNID", id)
 			},
 		},
+	})
+}
+
+func rewriteModelEndpoints(root, endpoint string) error {
+	return filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() != "gateway.yaml" {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		lines := strings.Split(string(b), "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "endpoint:") {
+				indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+				lines[i] = indent + "endpoint: " + endpoint
+			}
+		}
+		return os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0o644)
 	})
 }
 

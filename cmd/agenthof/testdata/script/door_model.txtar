@@ -1,0 +1,42 @@
+# The model door: a fronted step reaches its model only through Agenthof, which
+# injects the provider key, forwards to the provider, and records — and audit
+# renders — a model_call with token usage.
+
+env AGENTHOF_GATEWAY_KEY=dummy
+
+exec agenthof apply --config config
+stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+
+exec agenthof run se model-demo --input 'model:fast' --as tester --config config --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+
+lastrun logs
+exec agenthof audit $RUNID --log-dir logs
+stdout 'model fast — 11 prompt / 5 completion tokens'
+
+grep '"type":"model_call"' logs/${RUNID}.jsonl
+grep '"prompt_tokens":11' logs/${RUNID}.jsonl
+
+-- config/agents/caller.yaml --
+name: caller
+model: fast
+instruction: call the model
+output: out
+execution: fronted
+-- config/workflows/model-demo.yaml --
+name: model-demo
+steps:
+  - name: call
+    agent: caller
+-- config/roles/se.yaml --
+name: se
+workflows: [model-demo]
+allowed_groups: ["*"]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: upstream-model
+    api_key_env: AGENTHOF_GATEWAY_KEY
+defaults:
+  model: fast
