@@ -382,6 +382,7 @@ func TestValidAgentEndpoint(t *testing.T) {
 		{"http://127.0.0.1:8080/", true},
 		{"http://evil.example/", false},
 		{"unix:///run/agenthof/agent.sock", true},
+		{"unix://run/agenthof/agent.sock", false}, // relative path (two slashes) rejected
 		{"unix://", false},
 		{"", false},
 	}

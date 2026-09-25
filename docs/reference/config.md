@@ -97,7 +97,7 @@ The message is "agents are fronted and must declare an endpoint (the
 contained tier was removed)" when `execution` is empty, and "fronted agents
 must have an endpoint" when `execution` is `fronted`. A non-empty endpoint
 must be `https`, `http` whose host is `localhost`, `127.0.0.1`, or `::1`, or
-a `unix://` socket path (the path after `unix://` must be non-empty; it names
+a `unix://` socket path (the path after `unix://` must be absolute; it names
 only the socket, not an HTTP route). Anything else is rejected with
 `bad-endpoint` ("endpoint must be https, loopback http, or unix:// socket").
 A `unix://` value is accepted only here. Tool and token endpoints stay on the

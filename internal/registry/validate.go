@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/agenthof/agenthof/internal/config"
@@ -235,7 +236,11 @@ func validSecureEndpoint(raw string) bool {
 // validSecureEndpoint rule since they receive a remote credential.
 func validAgentEndpoint(raw string) bool {
 	if path, ok := strings.CutPrefix(raw, config.UnixScheme); ok {
-		return path != ""
+		// The wire contract pins unix://<absolute-socket-path>. A relative path
+		// would resolve against the process working directory at dial time —
+		// silently not the socket the operator meant — so reject it here
+		// (config is law). IsAbs also rejects the empty path.
+		return filepath.IsAbs(path)
 	}
 	return validSecureEndpoint(raw)
 }
