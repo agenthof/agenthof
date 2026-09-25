@@ -33,6 +33,12 @@ The governed core is real and runnable today:
   sandbox; that sandbox's network and exec confinement is required, and
   Agenthof does not verify it. `execution: fronted` (the default when the
   field is empty) is stamped on every step event.
+- **Isolated agents — reference sandbox runtime** (`deploy/refbox`) — runs a
+  fronted agent with **no network at all**, reaching Agenthof only over a
+  bind-mounted Unix socket, so credential-starvation and no-egress hold *by
+  construction* on the operator's host. It is the operator's sibling runtime —
+  Agenthof still executes nothing — and its guarantees and limits are stated
+  plainly, not assumed.
 - **Model gateway** — a fronted agent reaches models through Agenthof. The
   per-role provider key is injected and is not passed through to the agent.
   The logical model is authorized, the provider model is rewritten on the
@@ -85,6 +91,5 @@ Earlier-stage ideas we're thinking through; the least settled tier.
 
 ---
 
-Have a use case or a priority you'd like to see move up? Once the project is
-public, the roadmap will have a discussion thread for exactly that; until then,
-open an issue.
+Have a use case or a priority you'd like to see move up? Open an issue — the
+roadmap will grow a discussion thread for exactly that.
