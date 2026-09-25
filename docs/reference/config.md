@@ -122,7 +122,9 @@ not contain it. The operator's sandbox is what confines execution.
 | Allow | `allow` | list of objects | yes, non-empty, when `mode` is set | — |
 
 `mode` accepts only `attested`. `enforced` (Agenthof running the command) is
-reserved and rejected at `apply` with `bad-exec-config`. Any other value,
+**not a planned capability** and is rejected at `apply` with `bad-exec-config`;
+the field keeps the two-value shape as a seam, but first-hand exec is at most a
+future commercial add-on, not core. Any other value,
 including an empty `mode` on a block that still lists `allow`, is rejected
 the same way.
 

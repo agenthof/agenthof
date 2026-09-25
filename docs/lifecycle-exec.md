@@ -27,7 +27,9 @@ authorize, attest, and the rendered audit line — see the testscript
 
 Any agent may declare `exec`; every agent is fronted. The block names
 `mode: attested` and a non-empty `allow` list. `enforced` — Agenthof running
-the command itself — is reserved and rejected at `apply`. An `exec` block on
+the command itself — is **not a planned capability** (exec containment is the
+operator's sandbox's job, not Agenthof's) and is rejected at `apply`. An `exec`
+block on
 an agent whose `execution` is not `fronted` (including the removed value
 `contained`) is rejected the same way.
 
@@ -132,10 +134,10 @@ it.*
   does not prove is the same limit as every other event; see
   [`lifecycle.md`](lifecycle.md).
 
-## What ships today vs what is reserved
+## What ships today vs what is not planned
 
-| Shipped today | Reserved for later |
+| Shipped today | Not a core capability |
 | --- | --- |
-| `mode: attested` — allowlist check on authorize, agent-reported outcome on attest, both on the per-run listener | `mode: enforced` — Agenthof runs the command and records the outcome itself |
+| `mode: attested` — allowlist check on authorize, agent-reported outcome on attest, both on the per-run listener | `mode: enforced` — Agenthof running the command first-hand — **retired**; exec containment is the operator's sandbox's job, and it could return only as a commercial compliance-audit add-on, never core |
 
 Only the attested door is a guarantee.
