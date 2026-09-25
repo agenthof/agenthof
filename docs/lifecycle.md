@@ -149,9 +149,14 @@ and what it is acting for. The headers, and what each carries, are:
   | `X-Agenthof-Proxy-URL` | the address of a listener started just for this step |
   | `X-Agenthof-Run-Token` | a token minted just for this step |
 
-  Agenthof mints a fresh run token and starts a listener bound to
-  `127.0.0.1` on an ephemeral port — reachable only from the same host
-  Agenthof itself runs on. That listener is the model door
+  Agenthof mints a fresh run token and starts a listener. By default that
+  listener is bound to `127.0.0.1` on an ephemeral port, reachable only from
+  the same host Agenthof itself runs on. When `gateway.refbox_socket_dir` is
+  set, the listener is a Unix domain socket in that directory and
+  `X-Agenthof-Proxy-URL` is `unix://` plus the socket path — the path names
+  the socket only, and the HTTP routes stay the fixed ones (`/`,
+  `/exec/authorize`, `/exec/attest`, `/v1/chat/completions`). Either way the
+  run token travels in the header, not in the URL. That listener is the model door
   ([`lifecycle-model.md`](lifecycle-model.md)) and, when declared, the tool
   and exec doors. An agent uses the doors it needs and ignores the rest.
 
@@ -214,6 +219,42 @@ A minimal agent that implements the step contract — echoing `input` back as
 `artifact` — ships at `examples/echo-agent`. It holds no credentials and
 does not call the model door. `examples/model-agent` is the optional agent
 that does.
+
+### A reference compartment (refbox)
+
+The sandbox in the paragraph above is the operator's. Agenthof does not
+check a sandbox you assemble yourself. `deploy/refbox/` is one reference
+recipe for that obligation, for a single agent:
+
+- the agent is `examples/echo-agent`, built into a distroless image whose
+  only program is that binary, serving its step endpoint on a Unix socket;
+- `deploy/refbox/refbox-run.sh` starts it with rootless podman: `--network
+  none` (no interface but the compartment's own loopback), a read-only root,
+  a tmpfs at `/work`, every Linux capability dropped, a memory / CPU / pid /
+  wall-clock cap, and one bind mount — the socket directory, at the same path
+  inside and out;
+- Agenthof, on the host, listens in that directory when
+  `refbox_socket_dir` is set, and dials the agent's `unix://` endpoint. The
+  agent calls models, tools, and exec only through that gateway socket. The
+  host process has the network; the compartment does not.
+
+No credential environment is passed into the compartment. A file written on
+`/work` dies with the compartment. The run token is not on a network.
+
+What this does **not** do: exec stays attested. The agent reports the command
+it ran; Agenthof checks the allowlist and records the report. A compromised
+agent can still run a command inside the compartment. The blast radius is the
+compartment (no network, no injected credentials, an ephemeral filesystem),
+and the exec line is the agent's report, not a record made by something that
+ran the command. Commands that need the network (`npm install`, `pip install`,
+`git fetch`) do not work here. Offline commands do.
+
+A supervisor that runs the command itself and records it first-hand, and a
+narrow network allowlist for those commands, are reserved. The CI job
+`refbox` runs this recipe and checks the perimeter: the workflow finishes,
+a connect from inside the compartment to the internet fails, a connect to an
+open host port fails, the container environment carries no credential, and a
+file on `/work` is not left on the host.
 
 ### Model access
 
@@ -325,7 +366,8 @@ flag and exit-code reference.
 
 | Shipped today | Reserved for later |
 |---|---|
-| fronted agents: every step is an HTTP call to the agent's endpoint, with identity headers and `execution: fronted` stamped on the step events. Every fronted step also receives the per-run listener coordinates | streamed model-call usage (a streamed call is recorded without token counts) |
+| fronted agents: every step is an HTTP call to the agent's endpoint, with identity headers and `execution: fronted` stamped on the step events. Every fronted step also receives the per-run listener coordinates. The listener is TCP loopback unless `refbox_socket_dir` is set, in which case it is a Unix socket | streamed model-call usage (a streamed call is recorded without token counts) |
+| refbox reference compartment: a rootless-podman recipe (`deploy/refbox/`) with no network, no injected credentials, and an ephemeral workspace. The agent reaches Agenthof only over the socket directory. Exec inside it stays attested | a supervisor that runs exec itself and records it first-hand; a network allowlist for commands that need one |
 | model gateway: the agent calls `<proxy URL>v1/chat/completions` with the run token; Agenthof authorizes the logical model, injects the per-role provider key, and records `model_call`. Non-streaming calls record token counts. Budgets are the upstream gateway's, via the provisioned role key | Agenthof-side spend caps; a per-role list of models; OAuth-protected model providers |
 | inbound MCP proxy for an agent's declared tools — allowlisted, credential-injecting, ledgered, and able to mint its own upstream token via the `client_credentials` grant | on-behalf-of / token-exchange agent auth to IdP-protected resources (RFC 8693) |
 | attested exec: an allowlist check, then an agent-reported outcome recorded as `exec` with `mode: attested`. Agenthof records the report and does not run or contain the command | enforced execution, where Agenthof would run the command |
