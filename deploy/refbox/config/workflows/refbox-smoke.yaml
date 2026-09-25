@@ -1,0 +1,5 @@
+name: refbox-smoke
+description: One step through the reference agent in a refbox compartment
+steps:
+  - name: echo
+    agent: refbox-echo

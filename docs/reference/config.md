@@ -435,6 +435,11 @@ directory exists. Keep the directory's path short: a Unix socket path has a
 small operating-system length limit, and a path that exceeds it fails the
 step at listen time.
 
+`deploy/refbox/` is a reference recipe that sets this to `/run/agenthof` and
+points the agent `endpoint` at `unix:///run/agenthof/refbox-echo.sock`. The
+same directory is bind-mounted into a compartment started with `--network
+none`. See [the life of a run](../lifecycle.md#a-reference-compartment-refbox).
+
 ### `defaults` / `defaults.model`
 
 `defaults` is a nested object holding one field, `model` (optional string).

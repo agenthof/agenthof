@@ -5,10 +5,17 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os"
+	"strings"
+	"time"
 )
 
 type request struct {
@@ -23,7 +30,15 @@ type response struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
+func newMux(callGateway bool) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		handleStep(w, r, callGateway)
+	})
+	return mux
+}
+
+func handleStep(w http.ResponseWriter, r *http.Request, callGateway bool) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -34,13 +49,116 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if callGateway {
+		if err := probeGateway(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token")); err != nil {
+			_ = json.NewEncoder(w).Encode(response{Success: false, Reason: "gateway unreachable: " + err.Error()})
+			return
+		}
+	}
 	_ = json.NewEncoder(w).Encode(response{Artifact: req.Input, Success: true})
 }
 
+// probeGateway confirms the Agenthof gateway is reachable over the socket named
+// by proxyURL, by POSTing to /exec/authorize with the run token. A 200 (any
+// allowed value) means the socket path works end to end.
+func probeGateway(proxyURL, token string) error {
+	if proxyURL == "" {
+		return fmt.Errorf("no proxy URL")
+	}
+	var client *http.Client
+	var route string
+	if p, ok := strings.CutPrefix(proxyURL, "unix://"); ok {
+		client = &http.Client{Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", p)
+			},
+		}}
+		route = "http://agenthof/exec/authorize"
+	} else {
+		client = http.DefaultClient
+		route = strings.TrimRight(proxyURL, "/") + "/exec/authorize"
+	}
+	body := bytes.NewReader([]byte(`{"command":["true"]}`))
+	rq, err := http.NewRequest(http.MethodPost, route, body)
+	if err != nil {
+		return err
+	}
+	rq.Header.Set("Content-Type", "application/json")
+	rq.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(rq)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gateway returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// dialTCP reports whether a TCP connect to addr completes. The refbox CI
+// check runs this inside the compartment: a connect that succeeds means the
+// compartment has a network path it must not have.
+func dialTCP(addr string) error {
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+// touch creates an empty file. The refbox CI check uses it to show a file
+// written on the compartment's tmpfs does not survive a new compartment.
+func touch(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// listenUnix listens on a Unix socket, removing any stale file first
+// (net.Listen fails if a path already exists). The listener unlinks on Close.
+func listenUnix(path string) (net.Listener, error) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	return net.Listen("unix", path)
+}
+
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
+	addr := flag.String("addr", "127.0.0.1:8080", "TCP listen address (ignored when -socket is set)")
+	socket := flag.String("socket", "", "Unix socket path to listen on; overrides -addr")
+	callGateway := flag.Bool("call-gateway", false, "probe the Agenthof gateway (X-Agenthof-Proxy-URL) on each step")
+	dial := flag.String("dial", "", "dial tcp host:port and exit 0 only if the connect succeeds")
+	touchPath := flag.String("touch", "", "create a file and exit")
 	flag.Parse()
-	http.HandleFunc("/", handler)
-	log.Printf("echo-agent listening on %s", *addr)
-	log.Fatal(http.ListenAndServe(*addr, nil))
+
+	if *dial != "" {
+		if err := dialTCP(*dial); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *touchPath != "" {
+		if err := touch(*touchPath); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	srv := &http.Server{Handler: newMux(*callGateway)}
+	var ln net.Listener
+	var err error
+	if *socket != "" {
+		ln, err = listenUnix(*socket)
+		log.Printf("echo-agent listening on unix:%s", *socket)
+	} else {
+		ln, err = net.Listen("tcp", *addr)
+		log.Printf("echo-agent listening on %s", *addr)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Fatal(srv.Serve(ln))
 }

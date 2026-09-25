@@ -1,0 +1,10 @@
+# Build a static echo-agent and ship it in a distroless base — no shell, no
+# package manager. The compartment's only program is this agent.
+FROM golang:1.27.1 AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/echo-agent ./examples/echo-agent
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=build /out/echo-agent /echo-agent
+ENTRYPOINT ["/echo-agent", "-socket", "/run/agenthof/refbox-echo.sock", "-call-gateway"]

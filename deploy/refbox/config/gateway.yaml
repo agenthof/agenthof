@@ -1,0 +1,9 @@
+# refbox demo: the per-run gateway listens on a Unix socket under this dir.
+refbox_socket_dir: /run/agenthof
+models:
+  fast:
+    endpoint: http://localhost:4000
+    model: fast
+    api_key_env: AGENTHOF_GATEWAY_KEY
+defaults:
+  model: fast
