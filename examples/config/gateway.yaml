@@ -8,3 +8,9 @@ models:
     api_key_env: AGENTHOF_GATEWAY_KEY
 defaults:
   model: fast
+tools:
+  code-search:
+    kind: mcp
+    url: https://mcp.example.internal/code-search
+    credential_source: static_env
+    token_env: CODE_SEARCH_TOKEN

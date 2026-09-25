@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/agenthof/agenthof/internal/engine"
 )
@@ -47,6 +50,12 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 	if model, ok := strings.CutPrefix(req.Input, "model:"); ok {
 		if err := stubCallModel(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), model); err != nil {
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "model door: " + err.Error()})
+			return
+		}
+	}
+	if tool, ok := strings.CutPrefix(req.Input, "tool:"); ok {
+		if err := stubCallTool(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), tool); err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "tool door: " + err.Error()})
 			return
 		}
 	}
@@ -155,6 +164,55 @@ func stubCallModel(proxyURL, token, model string) error {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("/v1/chat/completions returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// bearerRT sets a fixed bearer token on every outbound request. The tool
+// door's stub uses it to present ONLY the run token when dialing the
+// proxy's inbound MCP server — Agenthof's injecting transport separately
+// resolves and stamps the upstream resource credential on the outbound
+// leg, so the run token never reaches the upstream.
+type bearerRT struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t *bearerRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(req)
+}
+
+// stubCallTool drives the tool door: connect to the proxy's inbound MCP server
+// with ONLY the run token, and call the named tool. The agent never sees the
+// upstream credential — Agenthof injects it on the upstream leg.
+func stubCallTool(proxyURL, token, tool string) error {
+	if proxyURL == "" {
+		return fmt.Errorf("no proxy url")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	httpClient := &http.Client{Transport: &bearerRT{base: http.DefaultTransport, token: token}}
+	client := mcp.NewClient(&mcp.Implementation{Name: "demo-stub", Version: "v0.1.0"}, nil)
+	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: proxyURL, HTTPClient: httpClient}, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sess.Close() }()
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"text": "demo"}})
+	if err != nil {
+		return err
+	}
+	if res.IsError {
+		msg := "error result"
+		for _, c := range res.Content {
+			if tc, ok := c.(*mcp.TextContent); ok && tc.Text != "" {
+				msg = tc.Text
+				break
+			}
+		}
+		return fmt.Errorf("tool %q returned an error: %s", tool, msg)
 	}
 	return nil
 }

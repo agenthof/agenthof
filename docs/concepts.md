@@ -67,7 +67,7 @@ as building every mode of it now:
    the `client_credentials` grant and reuses until shortly before it
    expires. Either way the gateway injects the value outbound; the agent
    never holds it, and its own inbound run token is never forwarded upstream
-   in its place.
+   in its place. See [`lifecycle-tool.md`](lifecycle-tool.md).
 3. **Exec gateway** — the door an agent uses to run an allowlisted command
    in the operator's sandbox and report the result. Agenthof checks the
    reported argv against the agent's config allowlist and records the
