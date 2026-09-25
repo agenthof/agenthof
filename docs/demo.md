@@ -26,6 +26,19 @@ the same loopback URL.
 > [`cmd/agenthof/testdata/script/door_exec.txtar`](../cmd/agenthof/testdata/script/door_exec.txtar)
 > and the life-of doc [`lifecycle-exec.md`](lifecycle-exec.md).
 
+> **Model door note.** Every example agent already declares a logical model
+> (`model: fast` in [`examples/config/agents/planner.yaml`](../examples/config/agents/planner.yaml))
+> that resolves through the `fast` route in
+> [`examples/config/gateway.yaml`](../examples/config/gateway.yaml) — the agent
+> reaches the model **only through Agenthof**, which injects the provider key
+> (the provisioned per-role key when one exists, otherwise the route's
+> `api_key_env`) and records the call (enforcement by credential-starvation:
+> the agent holds no provider key of its own). The echo-agent walkthrough
+> below never POSTs `/v1/chat/completions`, so no `model_call` event appears
+> in its audit. For an executable proof of the door itself, see the
+> testscript [`cmd/agenthof/testdata/script/door_model.txtar`](../cmd/agenthof/testdata/script/door_model.txtar)
+> and the life-of doc [`lifecycle-model.md`](lifecycle-model.md).
+
 ## Part 1: CONFIG Moment — Registry Management & Kill Switches
 
 Demonstrates how roles, workflows, and agents are defined in YAML and validated on apply; and how the kill switch prevents invalid configurations from running.

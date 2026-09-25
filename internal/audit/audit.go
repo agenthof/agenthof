@@ -98,6 +98,22 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 				}
 				fmt.Fprintf(&sb, "  %s  exec %s — exit %s (%s)\n", t, strings.Join(e.Command, " "), exit, e.Mode)
 			}
+		case "model_call":
+			switch e.Status {
+			case "refused", "failed":
+				fmt.Fprintf(&sb, "  %s  model %s %s — %s\n", t, e.Model, e.Status, e.Reason)
+			case "started":
+				fmt.Fprintf(&sb, "  %s  model %s — streaming (usage not captured)\n", t, e.Model)
+			default: // succeeded
+				pt, ct := "?", "?"
+				if e.PromptTokens != nil {
+					pt = strconv.Itoa(*e.PromptTokens)
+				}
+				if e.CompletionTokens != nil {
+					ct = strconv.Itoa(*e.CompletionTokens)
+				}
+				fmt.Fprintf(&sb, "  %s  model %s — %s prompt / %s completion tokens\n", t, e.Model, pt, ct)
+			}
 		default:
 			fmt.Fprintf(&sb, "  %s  %s\n", t, e.Type)
 		}

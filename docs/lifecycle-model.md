@@ -3,7 +3,10 @@
 One chat completion, from the moment a fronted agent asks until the ledger
 line that records it. This is the model door. For the run it happens inside,
 see [`lifecycle.md`](lifecycle.md). For the YAML, see
-[`reference/config.md`](reference/config.md#models).
+[`reference/config.md`](reference/config.md#models). For the executable proof —
+the fronted call, the injected provider key, and the rendered `model_call`
+audit line — see the testscript
+[`cmd/agenthof/testdata/script/door_model.txtar`](../cmd/agenthof/testdata/script/door_model.txtar).
 
 ```
   agent                         Agenthof                         provider

@@ -44,6 +44,12 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if model, ok := strings.CutPrefix(req.Input, "model:"); ok {
+		if err := stubCallModel(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), model); err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "model door: " + err.Error()})
+			return
+		}
+	}
 	line := req.Input
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
 		line = line[:i]
@@ -119,6 +125,36 @@ func stubCallExec(proxyURL, token, cmd string) error {
 	defer func() { _ = attestResp.Body.Close() }()
 	if attestResp.StatusCode/100 != 2 {
 		return fmt.Errorf("/exec/attest returned %d", attestResp.StatusCode)
+	}
+	return nil
+}
+
+// stubCallModel drives the model door: POST a chat completion through the proxy
+// using the agent's logical model name (which modelHandler requires to match).
+func stubCallModel(proxyURL, token, model string) error {
+	if proxyURL == "" {
+		return fmt.Errorf("no proxy url")
+	}
+	body, err := json.Marshal(map[string]any{
+		"model":    model,
+		"messages": []map[string]string{{"role": "user", "content": "demo"}},
+	})
+	if err != nil {
+		return err
+	}
+	rq, err := http.NewRequest(http.MethodPost, strings.TrimRight(proxyURL, "/")+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	rq.Header.Set("Content-Type", "application/json")
+	rq.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(rq)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("/v1/chat/completions returned %d", resp.StatusCode)
 	}
 	return nil
 }
