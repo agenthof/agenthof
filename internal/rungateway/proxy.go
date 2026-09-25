@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,11 @@ type Gateway struct {
 	srv      *http.Server
 	sessions []*mcp.ClientSession
 	closing  bool
+	// sockPath is set when this step's listener is a Unix socket. Stop
+	// removes it: Server.Close only closes a listener Serve has registered,
+	// and Serve runs in another goroutine, so Close alone can leave the
+	// socket file behind.
+	sockPath string
 	// inflight counts forward calls currently running, so Stop can wait for
 	// them to finish independent of how the underlying HTTP server treats
 	// in-flight connections when closed.
@@ -144,7 +150,16 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent))
 	handler := authMiddleware(mux, token)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var ln net.Listener
+	var proxyURL string
+	if p.gwcfg.RefboxSocketDir != "" {
+		ln, proxyURL, err = listenGateway(p.gwcfg.RefboxSocketDir, bind.RunID)
+	} else {
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+		if err == nil {
+			proxyURL = "http://" + ln.Addr().String() + "/"
+		}
+	}
 	if err != nil {
 		closeSessions()
 		return "", "", fmt.Errorf("listen: %w", err)
@@ -156,11 +171,15 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 	p.srv = srv
 	p.sessions = sessions
 	p.closing = false
+	p.sockPath = ""
+	if path, ok := strings.CutPrefix(proxyURL, config.UnixScheme); ok {
+		p.sockPath = path
+	}
 	p.mu.Unlock()
 
 	go func() { _ = srv.Serve(ln) }()
 
-	return "http://" + ln.Addr().String() + "/", token, nil
+	return proxyURL, token, nil
 }
 
 // guardedAppend appends a ledger event under the same closing/inflight
@@ -246,12 +265,17 @@ func (p *Gateway) Stop() {
 	p.closing = true
 	srv := p.srv
 	sessions := p.sessions
+	sockPath := p.sockPath
 	p.srv = nil
 	p.sessions = nil
+	p.sockPath = ""
 	p.mu.Unlock()
 
 	if srv != nil {
 		_ = srv.Close() // cut connections now; forward()'s own bookkeeping (not this) is what Stop waits on
+	}
+	if sockPath != "" {
+		_ = os.Remove(sockPath)
 	}
 	p.inflight.Wait()
 

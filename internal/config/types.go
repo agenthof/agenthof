@@ -1,5 +1,10 @@
 package config
 
+// UnixScheme prefixes a gateway proxy URL or an AgentDef.Endpoint that names a
+// Unix domain socket to dial. The value after it is the socket PATH only; HTTP
+// routes are fixed constants, never encoded in the URL.
+const UnixScheme = "unix://"
+
 type AgentDef struct {
 	Name        string     `yaml:"name"`
 	Description string     `yaml:"description"`
@@ -104,6 +109,11 @@ type GatewayConfig struct {
 	Defaults struct {
 		Model string `yaml:"model"`
 	} `yaml:"defaults"`
+	// RefboxSocketDir, when set, makes the per-run gateway listen on a Unix
+	// domain socket under this directory instead of a TCP loopback port, so a
+	// refbox compartment can reach it with no network. Empty means TCP loopback
+	// (the default, unchanged).
+	RefboxSocketDir string `yaml:"refbox_socket_dir"`
 }
 
 // ToolResource is a declared tool/MCP resource in the gateway catalog. Kind,
