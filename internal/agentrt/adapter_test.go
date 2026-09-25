@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -430,5 +433,38 @@ func TestAdapterExecutor_Execute_EmptyEndpoint(t *testing.T) {
 	}
 	if !errors.Is(err, engine.ErrStepConfig) {
 		t.Errorf("Execute error = %v, want it to wrap engine.ErrStepConfig", err)
+	}
+}
+
+func TestExecuteDialsUnixEndpoint(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ah")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "agent.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Agenthof-Agent") != "a" {
+			t.Errorf("missing agent header")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "artifact": "ok"})
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Close() }()
+
+	x := AdapterExecutor{}
+	res, err := x.Execute(context.Background(), engine.Binding{RunID: "r1"},
+		config.AgentDef{Name: "a", Endpoint: config.UnixScheme + sock}, "hi", nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("Success = false, reason=%q", res.Reason)
 	}
 }
