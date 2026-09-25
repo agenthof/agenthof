@@ -77,6 +77,13 @@ func TestScript(t *testing.T) {
 			e.Setenv("AGENTHOF_TOKEN", "")
 			e.Setenv("AGENTHOF_OIDC_ISSUER", "")
 			e.Setenv("AGENTHOF_OIDC_CLIENT_ID", "")
+			// Demo scripts run the reviewer agent, which is granted the
+			// example `code-search` tool resource in examples/config. Its
+			// gateway declares `token_env: CODE_SEARCH_TOKEN`, and the broker
+			// fails the connect if the variable is unset. Provide a
+			// throw-away value for the hermetic mock upstream; the value is
+			// intentionally kept out of the published YAML.
+			e.Setenv("CODE_SEARCH_TOKEN", "example")
 			if err := copyDir(filepath.Join("..", "..", "examples", "config"),
 				filepath.Join(e.WorkDir, "examples", "config")); err != nil {
 				return err
