@@ -96,9 +96,12 @@ endpoint". `apply` rejects an empty endpoint with `fronted-needs-endpoint`.
 The message is "agents are fronted and must declare an endpoint (the
 contained tier was removed)" when `execution` is empty, and "fronted agents
 must have an endpoint" when `execution` is `fronted`. A non-empty endpoint
-must be `https`, or `http` whose host is `localhost`, `127.0.0.1`, or `::1`;
-anything else is rejected with `bad-endpoint` ("endpoint must be https (or
-loopback http)").
+must be `https`, `http` whose host is `localhost`, `127.0.0.1`, or `::1`, or
+a `unix://` socket path (the path after `unix://` must be absolute; it names
+only the socket, not an HTTP route). Anything else is rejected with
+`bad-endpoint` ("endpoint must be https, loopback http, or unix:// socket").
+A `unix://` value is accepted only here. Tool and token endpoints stay on the
+stricter https-or-loopback rule, because those calls carry a remote credential.
 
 Every fronted step receives `X-Agenthof-Proxy-URL` and
 `X-Agenthof-Run-Token`, whether or not the agent declares `tools` or `exec`.
@@ -338,6 +341,7 @@ budget_usd_month: 20
 | Models | `models` | map of string → `ModelRoute` | no | — |
 | Tools | `tools` | map of string → `ToolResource` | no | — |
 | Defaults.Model | `defaults.model` | string | no | — |
+| RefboxSocketDir | `refbox_socket_dir` | string | no | empty (TCP loopback) |
 
 `ModelRoute` fields:
 
@@ -417,6 +421,19 @@ and validates every declared resource itself against the `ToolResource` rules
 above (`bad-tool-resource`). At runtime, a step whose agent declares tools
 reaches them only through Agenthof's inbound MCP proxy, never directly — see
 [`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs).
+
+### `refbox_socket_dir`
+
+Optional string. Empty — the default — leaves the per-run gateway on a TCP
+loopback port, and the proxy URL stays `http://127.0.0.1:<port>/`. When set,
+each fronted step's gateway listens on a Unix domain socket in this directory
+instead, and the proxy URL is `unix://` plus that socket's path. The value
+after `unix://` is the socket path only; the HTTP routes stay fixed (`/`,
+`/exec/authorize`, `/exec/attest`, `/v1/chat/completions`). The run token
+still travels in the `Authorization` header. `apply` does not check that the
+directory exists. Keep the directory's path short: a Unix socket path has a
+small operating-system length limit, and a path that exceeds it fails the
+step at listen time.
 
 ### `defaults` / `defaults.model`
 

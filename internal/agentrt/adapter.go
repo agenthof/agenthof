@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
@@ -39,10 +41,30 @@ const maxAdapterReasonChars = 300
 // dedicated client rather than a mutation of http.DefaultClient, since
 // OIDC discovery elsewhere in the platform relies on DefaultClient's
 // normal (redirect-following) behavior.
-var adapterClient = &http.Client{
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+var adapterClient = &http.Client{CheckRedirect: noRedirect}
+
+// clientAndURL returns the HTTP client and request URL for an agent endpoint.
+// For http(s) it is the shared adapterClient and the endpoint unchanged. For a
+// unix:// endpoint it is a per-call client that dials the socket, and the
+// placeholder URL http://agenthof/ (the host is ignored; the route is fixed).
+func clientAndURL(endpoint string) (*http.Client, string) {
+	if path, ok := strings.CutPrefix(endpoint, config.UnixScheme); ok {
+		return &http.Client{
+			CheckRedirect: noRedirect,
+			Transport: &http.Transport{
+				// This transport is built per call and discarded, so keep-alive
+				// would only park an idle connection (and its read/write
+				// goroutines) in a pool nothing reuses or closes. Disable it.
+				DisableKeepAlives: true,
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "unix", path)
+				},
+			},
+		}, "http://agenthof/"
+	}
+	return adapterClient, endpoint
 }
 
 // AdapterExecutor runs a config.AgentDef as a "fronted" agent: it POSTs the
@@ -79,7 +101,8 @@ type adapterResponse struct {
 	Reason   string `json:"reason"`
 }
 
-// Execute POSTs {"input", "artifacts", "agent"} as JSON to a.Endpoint, with
+// Execute POSTs {"input", "artifacts", "agent"} as JSON to a.Endpoint
+// (for a unix:// endpoint, to http://agenthof/ over that socket), with
 // the X-Agenthof-Agent header, the X-Agenthof-* identity headers (invoker,
 // issuer, method, role, workflow, run id), and, when the step ctx carries
 // tool-proxy coordinates (engine.WithProxyCoordinates), the
@@ -111,7 +134,8 @@ func (x AdapterExecutor) Execute(ctx context.Context, binding engine.Binding, a 
 		return engine.StepResult{}, fmt.Errorf("marshal adapter request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, a.Endpoint, bytes.NewReader(reqBody))
+	client, reqURL := clientAndURL(a.Endpoint)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return engine.StepResult{Success: false, Reason: err.Error()}, nil
 	}
@@ -134,7 +158,7 @@ func (x AdapterExecutor) Execute(ctx context.Context, binding engine.Binding, a 
 		req.Header.Set("X-Agenthof-Run-Token", ptok)
 	}
 
-	resp, err := adapterClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return engine.StepResult{Success: false, Reason: err.Error()}, nil
 	}

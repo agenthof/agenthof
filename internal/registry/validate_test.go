@@ -372,3 +372,29 @@ func TestValidateExecConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestValidAgentEndpoint(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"https://agent.example/", true},
+		{"http://127.0.0.1:8080/", true},
+		{"http://evil.example/", false},
+		{"unix:///run/agenthof/agent.sock", true},
+		{"unix://run/agenthof/agent.sock", false}, // relative path (two slashes) rejected
+		{"unix://", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := validAgentEndpoint(c.in); got != c.want {
+			t.Errorf("validAgentEndpoint(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestUnixEndpointRejectedForToolResource(t *testing.T) {
+	if validSecureEndpoint("unix:///run/x.sock") {
+		t.Fatal("validSecureEndpoint accepted unix:// — tool/token endpoints must stay https/loopback only")
+	}
+}
