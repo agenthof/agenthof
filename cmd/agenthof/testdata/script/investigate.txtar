@@ -1,0 +1,50 @@
+# investigate merges the control ledger and every run log into one timeline.
+
+exec agenthof apply --config config --as tester --control-log control.jsonl
+stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+
+exec agenthof run se plan-only --input hello --as tester --config config --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+lastrun logs
+
+# merged, time-ordered timeline across BOTH sources (the apply on the control
+# ledger + the run's own events)
+exec agenthof investigate --log-dir logs --control-log control.jsonl
+stdout 'investigation timeline:'
+stdout 'source: control'
+stdout 'source: run'
+
+# the stable investigate/1 JSON contract
+exec agenthof investigate --log-dir logs --control-log control.jsonl --json
+stdout '"v":\s*"investigate/1"'
+stdout '"run_id":\s*"'$RUNID'"'
+
+# a filter narrows to this run only
+exec agenthof investigate --run $RUNID --log-dir logs --control-log control.jsonl
+stdout $RUNID
+stdout 'workflow_finished'
+
+# a filter that matches nothing is an empty timeline, not an error
+exec agenthof investigate --agent no-such-agent --log-dir logs --control-log control.jsonl
+stdout 'investigation timeline: 0 event'
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
