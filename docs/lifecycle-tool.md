@@ -31,13 +31,18 @@ a real upstream MCP server, the injected credential, and the rendered
 
 ## When the door exists
 
-An agent's `tools:` list names one or more tool resources from `gateway.yaml`.
-An entry that names no such resource is rejected at `apply`. Every fronted
-step already gets a listener on `127.0.0.1` and an ephemeral port (a Unix
-socket when `gateway.refbox_socket_dir` is set), plus the two headers
-`X-Agenthof-Proxy-URL` and `X-Agenthof-Run-Token`. When the agent declares
-tools, that same listener also serves an inbound MCP server at the proxy
-URL's root path.
+Every fronted step gets a listener on `127.0.0.1` and an ephemeral port (a
+Unix socket when `gateway.refbox_socket_dir` is set), plus the two headers
+`X-Agenthof-Proxy-URL` and `X-Agenthof-Run-Token`. That listener always
+serves an inbound MCP server at the proxy URL's root path, alongside the exec
+routes and the model route.
+
+What an agent's `tools:` list changes is **which tools are mirrored onto that
+server**. Each entry names a tool resource from `gateway.yaml`; an entry that
+names no such resource is rejected at `apply`. An agent that declares no
+tools still gets the MCP server — with an empty tool list, and any
+`tools/call` it sends recorded `refused`, reason
+`tool is not available to this run`.
 
 Before the step is handed to the agent, Agenthof connects out to each named
 resource as an MCP client, asks it for its tools, and mirrors them onto the
@@ -65,7 +70,11 @@ The agent connects to the inbound server holding **only the run token**.
 Every request must carry `Authorization: Bearer <run token>`; a missing or
 wrong token is rejected before a single MCP message is parsed, and the
 comparison is constant-time. The agent never receives the resource's
-credential, is never told what it is, and has no route to it.
+credential and is never told what it is: through this door there is no path
+from the run token to the credential's value. Whether the agent can reach
+that value some other way — a shared environment, a network path — is the
+operator's sandbox's business, not something this door can promise. See
+[Honest limits](#honest-limits).
 
 ## Making a call
 
@@ -87,13 +96,15 @@ Resolving per request, rather than once at connect, is what lets a token that
 expires mid-step be replaced. The agent's run token is never forwarded in
 that credential's place.
 
-This is enforcement by credential-starvation, not by inspection: the agent
-reaches the resource through this door because it holds nothing else that
-the resource would accept.
+This is enforcement by credential-starvation, not by inspection: Agenthof
+never hands the agent a credential of its own, so the door is the only route
+to the resource that Agenthof itself provides.
 
 ## What the ledger records
 
-One `tool_call` event per call — forwarded or refused.
+A call this door handles — forwarded or refused — is recorded as one
+`tool_call` event. The one exception is the last row of the second table
+below.
 
 | Field | What it holds |
 | --- | --- |
@@ -101,16 +112,21 @@ One `tool_call` event per call — forwarded or refused.
 | `args_sha` | the SHA-256 of the raw arguments. The arguments themselves are never recorded |
 | `auth_mode` | how the resource's credential was obtained: `static_env` or `client_credentials` |
 | `resources_touched` | the id of the resource the call went to |
-| `artifact_sha` | the SHA-256 of the result |
-| `artifact` | a single-line preview of the result, capped at 200 characters |
+| `artifact_sha` | the SHA-256 of the result — or, when the call itself failed, of the error text |
+| `artifact` | a single-line preview of that same body, capped at 200 characters |
 | `status` | `succeeded`, `failed`, or `refused` |
+
+A refused call is recorded before any resource is chosen, so it carries only
+`tool`, `args_sha`, `status`, and `reason` — plus the agent name and binding
+every event carries. It has no `auth_mode`, no `resources_touched`, and
+neither `artifact_sha` nor `artifact`.
 
 | What happened | `tool_call` |
 | --- | --- |
 | the resource returned a result | `succeeded` |
 | the resource flagged its result an error | `failed`, reason taken from that result's own text, capped at 200 characters |
-| the call did not complete (transport error, timeout) | `failed`, reason from the error, and the agent sees the same failure |
-| the name was never mirrored | `refused`, reason `tool is not available to this run`. Nothing is forwarded, and the event names no resource or auth mode, because the call was never tied to one |
+| the call did not complete (transport error, timeout) | `failed`, reason from the error, and the agent sees the same failure. The hash and preview are of that error text |
+| the name was never mirrored | `refused`, reason `tool is not available to this run`. Nothing is forwarded |
 | the call arrives while the step is being torn down | the agent gets an error result, `tool proxy is shutting down`, and no event is written |
 
 `audit <run-id>` renders a forwarded call as
