@@ -1,4 +1,8 @@
-# refbox demo: the per-run gateway listens on a Unix socket under this dir.
+# The per-run gateway listens on a Unix socket under this dir. It MUST equal the
+# recipe's socket dir (deploy/refbox/refbox-run.sh, default $XDG_RUNTIME_DIR/agenthof).
+# The agent endpoint must be unix:// plus that same directory plus /refbox-echo.sock.
+# The demo value below is a placeholder: YAML cannot expand $XDG_RUNTIME_DIR.
+# The e2e rewrites every /run/agenthof path to a temp dir; an operator sets both to the same path.
 refbox_socket_dir: /run/agenthof
 models:
   fast:

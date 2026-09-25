@@ -7,6 +7,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Hermetic override. The recipe default is $XDG_RUNTIME_DIR/agenthof, which a
+# systemd host provides as a user-owned tmpfs. This job does not prove that
+# default is writable; it points the recipe and a rewritten copy of the demo
+# config at a private directory.
 SOCK_DIR="$(mktemp -d)"
 export AGENTHOF_REFBOX_SOCKET_DIR="$SOCK_DIR"
 WORK="$(mktemp -d)"
