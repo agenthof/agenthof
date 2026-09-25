@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/agenthof/agenthof/internal/config"
 )
@@ -46,9 +47,9 @@ func Validate(cfg config.Config) []ValidationError {
 				msg = "agents are fronted and must declare an endpoint (the contained tier was removed)"
 			}
 			add(a.SourceFile, a.Name, "fronted-needs-endpoint", msg)
-		} else if !validSecureEndpoint(a.Endpoint) {
+		} else if !validAgentEndpoint(a.Endpoint) {
 			add(a.SourceFile, a.Name, "bad-endpoint",
-				"endpoint must be https (or loopback http)")
+				"endpoint must be https, loopback http, or unix:// socket")
 		}
 
 		// Tools are gateway tool-resource ids. Each must be a declared
@@ -226,4 +227,15 @@ func validSecureEndpoint(raw string) bool {
 		return host == "localhost" || host == "127.0.0.1" || host == "::1"
 	}
 	return false
+}
+
+// validAgentEndpoint is validSecureEndpoint plus a unix:// socket form, for the
+// fronted agent endpoint only. A refbox agent is reached over a bind-mounted
+// Unix socket (no network); tool/token endpoints keep the stricter
+// validSecureEndpoint rule since they receive a remote credential.
+func validAgentEndpoint(raw string) bool {
+	if path, ok := strings.CutPrefix(raw, config.UnixScheme); ok {
+		return path != ""
+	}
+	return validSecureEndpoint(raw)
 }

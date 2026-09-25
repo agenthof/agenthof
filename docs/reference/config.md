@@ -96,9 +96,12 @@ endpoint". `apply` rejects an empty endpoint with `fronted-needs-endpoint`.
 The message is "agents are fronted and must declare an endpoint (the
 contained tier was removed)" when `execution` is empty, and "fronted agents
 must have an endpoint" when `execution` is `fronted`. A non-empty endpoint
-must be `https`, or `http` whose host is `localhost`, `127.0.0.1`, or `::1`;
-anything else is rejected with `bad-endpoint` ("endpoint must be https (or
-loopback http)").
+must be `https`, `http` whose host is `localhost`, `127.0.0.1`, or `::1`, or
+a `unix://` socket path (the path after `unix://` must be non-empty; it names
+only the socket, not an HTTP route). Anything else is rejected with
+`bad-endpoint` ("endpoint must be https, loopback http, or unix:// socket").
+A `unix://` value is accepted only here. Tool and token endpoints stay on the
+stricter https-or-loopback rule, because those calls carry a remote credential.
 
 Every fronted step receives `X-Agenthof-Proxy-URL` and
 `X-Agenthof-Run-Token`, whether or not the agent declares `tools` or `exec`.
