@@ -27,10 +27,12 @@ func listenGateway(dir, runID string) (net.Listener, string, error) {
 	return ln, config.UnixScheme + path, nil
 }
 
-// listenUnix listens on a Unix socket at path, removing any stale file first
-// (net.Listen fails with "address already in use" if a file exists there even
-// when nothing is listening — e.g. after a prior process was killed before
-// Stop()). The listener unlinks the socket on Close.
+// listenUnix listens on a Unix socket at path, removing any file already there
+// first (net.Listen fails if a file exists at the path, even one no process is
+// listening on). Because listenGateway embeds a fresh random nonce per call,
+// this guards only the vanishingly unlikely nonce collision — orphaned sockets
+// from a process killed before Stop() keep their old nonce and are swept by the
+// refbox recipe (1b), not here. The listener unlinks its socket on Close.
 func listenUnix(path string) (net.Listener, error) {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove stale socket %q: %w", path, err)

@@ -53,10 +53,11 @@ type Gateway struct {
 	srv      *http.Server
 	sessions []*mcp.ClientSession
 	closing  bool
-	// sockPath is set when this step's listener is a Unix socket. Stop
-	// removes it: Server.Close only closes a listener Serve has registered,
-	// and Serve runs in another goroutine, so Close alone can leave the
-	// socket file behind.
+	// sockPath is set when this step's listener is a Unix socket. Stop removes
+	// it explicitly so the unlink is synchronous with Stop returning: srv.Close
+	// also unlinks (via Serve's deferred listener Close), but that runs in
+	// another goroutine, so without this a caller — or a test — could observe
+	// Stop return before the socket file is gone.
 	sockPath string
 	// inflight counts forward calls currently running, so Stop can wait for
 	// them to finish independent of how the underlying HTTP server treats
