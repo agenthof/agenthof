@@ -3,7 +3,9 @@
 One allowlisted command, from the moment a fronted agent asks permission to
 the line the ledger keeps. This is the exec door. For the run it happens
 inside, see [`lifecycle.md`](lifecycle.md). For the YAML, see
-[`reference/config.md`](reference/config.md#exec).
+[`reference/config.md`](reference/config.md#exec). For the executable proof —
+authorize, attest, and the rendered audit line — see the testscript
+[`cmd/agenthof/testdata/script/door_exec.txtar`](../cmd/agenthof/testdata/script/door_exec.txtar).
 
 ```
   agent                         Agenthof                         ledger
