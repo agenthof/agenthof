@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rogpeppe/go-internal/testscript"
 )
 
@@ -45,6 +47,29 @@ func TestScript(t *testing.T) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":11,"completion_tokens":5}}`))
 	}))
 	t.Cleanup(modelSrv.Close)
+	// Mock MCP upstream: exposes a single `echo(text)->text` tool that proves
+	// Agenthof injected the resource credential on the upstream leg. The
+	// check lives INSIDE the tool function (via req.Extra.Header) rather
+	// than around initialize/ListTools, so mirroring succeeds and the
+	// credential enforcement is scoped to the actual tool call.
+	type echoArgs struct {
+		Text string `json:"text"`
+	}
+	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "mock-upstream", Version: "v0.1.0"}, nil)
+	mcp.AddTool(mcpServer, &mcp.Tool{Name: "echo", Description: "echo back text"},
+		func(ctx context.Context, req *mcp.CallToolRequest, args echoArgs) (*mcp.CallToolResult, any, error) {
+			// Prove Agenthof injected the resource credential on the upstream leg.
+			var auth string
+			if req.Extra != nil && req.Extra.Header != nil {
+				auth = req.Extra.Header.Get("Authorization")
+			}
+			if auth != "Bearer tool-secret" {
+				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "unauthorized"}}}, nil, nil
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: args.Text}}}, nil, nil
+		})
+	mcpSrv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil))
+	t.Cleanup(mcpSrv.Close)
 	testscript.Run(t, testscript.Params{
 		Dir: filepath.Join("testdata", "script"),
 		Setup: func(e *testscript.Env) error {
@@ -63,7 +88,10 @@ func TestScript(t *testing.T) {
 			if err := rewriteAgentEndpoints(e.WorkDir, srv.URL); err != nil {
 				return err
 			}
-			return rewriteModelEndpoints(e.WorkDir, modelSrv.URL)
+			if err := rewriteModelEndpoints(e.WorkDir, modelSrv.URL); err != nil {
+				return err
+			}
+			return rewriteToolURLs(e.WorkDir, mcpSrv.URL)
 		},
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			// lastrun <log-dir>: finds the single newest run log and exports
@@ -152,6 +180,30 @@ func rewriteAgentEndpoints(root, endpoint string) error {
 			out += "endpoint: " + endpoint + "\n"
 		}
 		return os.WriteFile(p, []byte(out), 0o644)
+	})
+}
+
+// rewriteToolURLs repoints every `url:` line in every gateway.yaml under root
+// at the hermetic mock MCP upstream. In today's gateway schema `url:` is a
+// tool-resource-only field — model routes use `endpoint:` — so a bare-key
+// rewrite cannot misfire on a model route. Revisit if that changes.
+func rewriteToolURLs(root, url string) error {
+	return filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() != "gateway.yaml" {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		lines := strings.Split(string(b), "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "url:") {
+				indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+				lines[i] = indent + "url: " + url
+			}
+		}
+		return os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0o644)
 	})
 }
 

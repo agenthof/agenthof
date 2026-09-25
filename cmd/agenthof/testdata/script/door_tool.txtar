@@ -1,0 +1,49 @@
+# The tool/MCP door: a fronted step reaches an MCP tool only through Agenthof,
+# which connects to the upstream as an MCP client with an injected credential,
+# mirrors the tool to the agent, and records — and audit renders — a tool_call.
+
+env AGENTHOF_TOOL_TOKEN=tool-secret
+
+exec agenthof apply --config config
+stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+
+exec agenthof run se tool-demo --input 'tool:echo' --as tester --config config --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+
+lastrun logs
+exec agenthof audit $RUNID --log-dir logs
+stdout 'tool echo — args [0-9a-f]{8} \(static_env\)'
+
+grep '"type":"tool_call"' logs/${RUNID}.jsonl
+grep '"tool":"echo"' logs/${RUNID}.jsonl
+
+-- config/agents/user.yaml --
+name: user
+model: fast
+instruction: use a tool
+output: out
+execution: fronted
+tools: [echo-tool]
+-- config/workflows/tool-demo.yaml --
+name: tool-demo
+steps:
+  - name: call
+    agent: user
+-- config/roles/se.yaml --
+name: se
+workflows: [tool-demo]
+allowed_groups: ["*"]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
+tools:
+  echo-tool:
+    kind: mcp
+    url: http://127.0.0.1:0/
+    credential_source: static_env
+    token_env: AGENTHOF_TOOL_TOKEN
+defaults:
+  model: fast
