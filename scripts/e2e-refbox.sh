@@ -74,11 +74,11 @@ OUT="$("$WORK/agenthof" run refbox-operator refbox-smoke --input hi \
 echo "$OUT"
 echo "$OUT" | grep -q "finished: succeeded"
 
-if podman exec "$NAME" /echo-agent -dial 1.1.1.1:443; then
+if podman exec "$NAME" /probe -dial 1.1.1.1:443; then
 	echo "compartment reached the internet"
 	exit 1
 fi
-if podman exec "$NAME" /echo-agent -dial "$HOST_IP:$HOST_PORT"; then
+if podman exec "$NAME" /probe -dial "$HOST_IP:$HOST_PORT"; then
 	echo "compartment reached a host port"
 	exit 1
 fi
@@ -105,7 +105,7 @@ podman inspect "$NAME" --format '{{json .HostConfig.Tmpfs}}' | grep -q '/work'
 
 # A file on the tmpfs must not appear on the host, and must be gone once the
 # compartment is removed (a new container gets a new tmpfs).
-podman exec "$NAME" /echo-agent -touch /work/marker
+podman exec "$NAME" /probe -touch /work/marker
 podman rm -f "$NAME" >/dev/null
 if find "$SOCK_DIR" -name marker | grep -q .; then
 	echo "workspace file leaked onto the host"

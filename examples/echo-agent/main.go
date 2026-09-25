@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 type request struct {
@@ -96,27 +95,6 @@ func probeGateway(proxyURL, token string) error {
 	return nil
 }
 
-// dialTCP reports whether a TCP connect to addr completes. The refbox CI
-// check runs this inside the compartment: a connect that succeeds means the
-// compartment has a network path it must not have.
-func dialTCP(addr string) error {
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-	if err != nil {
-		return err
-	}
-	return conn.Close()
-}
-
-// touch creates an empty file. The refbox CI check uses it to show a file
-// written on the compartment's tmpfs does not survive a new compartment.
-func touch(path string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	return f.Close()
-}
-
 // listenUnix listens on a Unix socket, removing any stale file first
 // (net.Listen fails if a path already exists). The listener unlinks on Close.
 func listenUnix(path string) (net.Listener, error) {
@@ -130,22 +108,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "TCP listen address (ignored when -socket is set)")
 	socket := flag.String("socket", "", "Unix socket path to listen on; overrides -addr")
 	callGateway := flag.Bool("call-gateway", false, "probe the Agenthof gateway (X-Agenthof-Proxy-URL) on each step")
-	dial := flag.String("dial", "", "dial tcp host:port and exit 0 only if the connect succeeds")
-	touchPath := flag.String("touch", "", "create a file and exit")
 	flag.Parse()
-
-	if *dial != "" {
-		if err := dialTCP(*dial); err != nil {
-			log.Fatal(err)
-		}
-		return
-	}
-	if *touchPath != "" {
-		if err := touch(*touchPath); err != nil {
-			log.Fatal(err)
-		}
-		return
-	}
 
 	srv := &http.Server{Handler: newMux(*callGateway)}
 	var ln net.Listener
