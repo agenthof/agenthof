@@ -67,6 +67,29 @@ func TestRenderExecRefused(t *testing.T) {
 	}
 }
 
+func TestRenderModelCallSucceeded(t *testing.T) {
+	pt, ct := 11, 5
+	events := []engine.Event{{
+		Type: "model_call", Status: "succeeded", Model: "fast",
+		PromptTokens: &pt, CompletionTokens: &ct, Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	if !strings.Contains(out, "model fast — 11 prompt / 5 completion tokens") {
+		t.Fatalf("model_call not rendered:\n%s", out)
+	}
+}
+
+func TestRenderModelCallRefused(t *testing.T) {
+	events := []engine.Event{{
+		Type: "model_call", Status: "refused", Model: "gpt-9",
+		Reason: `model "gpt-9" is not allowed for this agent`, Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	if !strings.Contains(out, `model gpt-9 refused — model "gpt-9" is not allowed for this agent`) {
+		t.Fatalf("refused model_call not rendered:\n%s", out)
+	}
+}
+
 func TestRenderRefusedAndEmpty(t *testing.T) {
 	bind := engine.Binding{Invoker: identity.Static("dev@x"), Role: "se", Workflow: "fix-bug", RunID: "r-ffffffff"}
 	out := Render([]engine.Event{{Time: ts(5), Type: "run_refused", Reason: "role \"se\" is not in the registry", Binding: bind}}, ledger.Head{Count: 1}, nil)
