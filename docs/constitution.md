@@ -11,8 +11,12 @@ credential, the agent never holds it. The tool/MCP gateway injects a resource
 credential per call. The model gateway injects the per-role provider key, so
 a fronted agent reaches models through Agenthof and never holds that key.
 Allowlisted commands run in the operator's
-sandbox and each is recorded — attested by the agent today; Agenthof records
-but does not run or contain them, and enforced execution is reserved. The
+sandbox and each is recorded — attested by the agent; Agenthof records
+but does not run or contain them. Agenthof runs no commands itself — exec
+containment is the operator's sandbox's job, not Agenthof's — so Agenthof-run
+("enforced") exec is **not a planned core capability**: `exec.mode` accepts only
+`attested`, and first-hand exec, if it ever exists, is a commercial
+compliance add-on outside this core, never a core guarantee. The
 agent runs in an operator-provided sandbox. That sandbox's network and exec
 confinement is required, and Agenthof does not verify it. No change may add
 an unmediated network call, or a credential stored where an agent's config or
