@@ -17,6 +17,9 @@ stdout 'tool echo — args [0-9a-f]{8} \(static_env\)'
 grep '"type":"tool_call"' logs/${RUNID}.jsonl
 grep '"tool":"echo"' logs/${RUNID}.jsonl
 
+# no-passthrough: the injected upstream credential never lands in the ledger
+! grep 'tool-secret' logs/${RUNID}.jsonl
+
 -- config/agents/user.yaml --
 name: user
 model: fast

@@ -205,7 +205,14 @@ func stubCallTool(proxyURL, token, tool string) error {
 		return err
 	}
 	if res.IsError {
-		return fmt.Errorf("tool %q returned an error result", tool)
+		msg := "error result"
+		for _, c := range res.Content {
+			if tc, ok := c.(*mcp.TextContent); ok && tc.Text != "" {
+				msg = tc.Text
+				break
+			}
+		}
+		return fmt.Errorf("tool %q returned an error: %s", tool, msg)
 	}
 	return nil
 }
