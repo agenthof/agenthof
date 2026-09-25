@@ -226,8 +226,10 @@ The sandbox in the paragraph above is the operator's. Agenthof does not
 check a sandbox you assemble yourself. `deploy/refbox/` is one reference
 recipe for that obligation, for a single agent:
 
-- the agent is `examples/echo-agent`, built into a distroless image whose
-  only program is that binary, serving its step endpoint on a Unix socket;
+- the agent is `examples/echo-agent`, built into a distroless image and
+  serving its step endpoint on a Unix socket. The image also contains
+  `/probe`, a small binary the CI job execs to dial a port and to write a
+  marker on `/work`; it is not part of the agent;
 - `deploy/refbox/refbox-run.sh` starts it with rootless podman: `--network
   none` (no interface but the compartment's own loopback), a read-only root,
   a tmpfs at `/work`, every Linux capability dropped, a memory / CPU / pid /

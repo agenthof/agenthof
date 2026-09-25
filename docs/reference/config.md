@@ -435,10 +435,15 @@ directory exists. Keep the directory's path short: a Unix socket path has a
 small operating-system length limit, and a path that exceeds it fails the
 step at listen time.
 
-`deploy/refbox/` is a reference recipe that sets this to `/run/agenthof` and
-points the agent `endpoint` at `unix:///run/agenthof/refbox-echo.sock`. The
-same directory is bind-mounted into a compartment started with `--network
-none`. See [the life of a run](../lifecycle.md#a-reference-compartment-refbox).
+`deploy/refbox/` is a reference recipe. Its socket directory defaults to
+`$XDG_RUNTIME_DIR/agenthof` (user-owned, so a rootless `mkdir` works; `/run`
+itself is root-owned). Set `refbox_socket_dir` to that same directory, and
+set the agent `endpoint` to `unix://` plus that directory plus
+`/refbox-echo.sock`. The adapter dials the endpoint; the recipe's `-socket`
+flag only chooses where the compartment listens. The checked-in demo config
+uses `/run/agenthof` as a placeholder, because YAML cannot expand
+`$XDG_RUNTIME_DIR`. The two paths must match. See
+[the life of a run](../lifecycle.md#a-reference-compartment-refbox).
 
 ### `defaults` / `defaults.model`
 

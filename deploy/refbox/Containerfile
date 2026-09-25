@@ -1,10 +1,13 @@
 # Build a static echo-agent and ship it in a distroless base — no shell, no
-# package manager. The compartment's only program is this agent.
+# package manager. /probe is the CI perimeter check (dial, touch); it is not
+# the agent.
 FROM golang:1.27.1 AS build
 WORKDIR /src
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/echo-agent ./examples/echo-agent
+RUN CGO_ENABLED=0 go build -o /out/echo-agent ./examples/echo-agent \
+	&& CGO_ENABLED=0 go build -o /out/probe ./deploy/refbox/probe
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/echo-agent /echo-agent
+COPY --from=build /out/probe /probe
 ENTRYPOINT ["/echo-agent", "-socket", "/run/agenthof/refbox-echo.sock", "-call-gateway"]
