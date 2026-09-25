@@ -10,6 +10,7 @@ on:
       - 'deploy/**'
       - 'cmd/agenthof/**'      # a CLI change (e.g. a removed flag) can break the e2e
       - 'examples/**'          # the e2e runs the example config + fronted agent
+      - 'internal/**'          # the gateway/adapter/engine the e2e drives
 
 permissions:
   contents: read
