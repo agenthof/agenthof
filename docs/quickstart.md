@@ -53,7 +53,9 @@ Try the kill switch:
     ./agenthof apply --as you@example.com --config examples/config   # fails, naming every dependent workflow
 
 The disable is itself recorded in the control ledger, attributed to `--as`.
-See who flipped the kill switch and when:
+(`disable`/`enable` also rewrites `coder.yaml`'s YAML formatting, so `git status`
+will show `examples/config` changed afterward — reset with `git checkout
+examples/config`.) See who flipped the kill switch and when:
 
     ./agenthof audit control
 

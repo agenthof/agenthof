@@ -157,6 +157,13 @@ registry ok: 5 agents, 2 workflows, 2 roles
 control head: seq=6 sha256=<hex>
 ```
 
+> **Note — this walkthrough modifies `examples/config`.** The `reviewer.yaml`
+> edit in 1.2 is a deliberate change, and `registry disable`/`enable` rewrites
+> `coder.yaml`'s YAML formatting even when it flips the state back — so
+> `git status` will show changes under `examples/config` afterward. That's
+> expected and harmless; reset the tree with `git checkout examples/config` when
+> you're done.
+
 ### 1.4 Read the control ledger: who changed what, and when
 
 Every `apply` and kill-switch flip above was recorded, attributed, and
