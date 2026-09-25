@@ -39,6 +39,23 @@ the same loopback URL.
 > testscript [`cmd/agenthof/testdata/script/door_model.txtar`](../cmd/agenthof/testdata/script/door_model.txtar)
 > and the life-of doc [`lifecycle-model.md`](lifecycle-model.md).
 
+> **Tool door note.** The `reviewer` agent declares `tools: [code-search]` in
+> [`examples/config/agents/reviewer.yaml`](../examples/config/agents/reviewer.yaml),
+> naming the `code-search` MCP resource in
+> [`examples/config/gateway.yaml`](../examples/config/gateway.yaml) — that is
+> the shape: when the step starts, Agenthof connects to the resource, mirrors
+> its tools to the agent, and injects the credential named by `token_env`
+> (`CODE_SEARCH_TOKEN`) on every outbound call. The agent holds only its run
+> token and never the resource credential. That resource's URL is a
+> placeholder: before running the walkthrough below, either point it at an MCP
+> server you can reach and export `CODE_SEARCH_TOKEN`, or drop the `tools:`
+> line from `reviewer.yaml` — otherwise the review step fails when the proxy
+> cannot connect. The echo-agent walkthrough never sends a `tools/call`, so no
+> `tool_call` event appears in its audit either way. For an executable proof of
+> the door itself, see the testscript
+> [`cmd/agenthof/testdata/script/door_tool.txtar`](../cmd/agenthof/testdata/script/door_tool.txtar)
+> and the life-of doc [`lifecycle-tool.md`](lifecycle-tool.md).
+
 ## Part 1: CONFIG Moment — Registry Management & Kill Switches
 
 Demonstrates how roles, workflows, and agents are defined in YAML and validated on apply; and how the kill switch prevents invalid configurations from running.
