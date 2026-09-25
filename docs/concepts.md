@@ -96,8 +96,12 @@ the external service does internally. The call in carries the run's
 identity as `X-Agenthof-*` request headers (see
 [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs) for the list)
 — attested like the rest of the boundary, not enforced. The agent runs in
-an operator-provided sandbox. That sandbox's network and exec confinement
-is required, and Agenthof does not verify it.
+an operator-provided sandbox; a reference runtime that satisfies the contract —
+a no-network compartment the agent reaches Agenthof from only over a
+bind-mounted local socket — ships in `deploy/refbox`, making
+credential-starvation and no-egress hold by construction on the operator's
+host. That sandbox's network and exec confinement is required, and Agenthof
+does not verify that the operator runs the agent inside it.
 
 An agent may declare `tools`, each naming a `gateway.yaml` tool resource;
 for the duration of its step it reaches those tools only through Agenthof's

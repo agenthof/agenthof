@@ -1,13 +1,18 @@
 # Agenthof
 
-**The open-source agent registry: every agent in your org gets an identity,
-a privilege set, a kill switch, and a ledger of who ran it.**
+**Open-source governance for AI agents: give every agent a scoped identity and a
+kill switch, gate every model, tool, and command it uses through Agenthof's
+doors, run it credential-starved in an isolated sandbox, and keep a verifiable
+ledger of who ran what.**
 
 Define your AI workforce as roles in YAML — a role owns workflows, a workflow
-composes agents, and every action any agent takes is governed at the doors
-and attributed to the human who asked for it. The agent runs in an
-operator-provided sandbox. That sandbox's network and exec confinement is
-required, and Agenthof does not verify it.
+composes agents. Agents hold no credentials of their own: every model, tool,
+sub-agent, or command an agent reaches goes through an **Agenthof gateway** that
+authorizes it, injects the credential the agent never sees, and records it —
+attributed to the human who asked. Each agent runs in an operator-provided
+sandbox (a no-network reference runtime ships in `deploy/refbox`); that sandbox's
+confinement is the operator's responsibility, and Agenthof records what crossed
+the door rather than trusting the agent.
 
 > *Agenthof* — from the German **Hof**: the court. Where your agents are
 > housed, and what they answer to.
@@ -17,13 +22,22 @@ required, and Agenthof does not verify it.
 Pre-release, and the governed core is real and runnable today:
 
 - config → validated registry → event-sourced engine (linear + fail-back).
-  Every agent is an external HTTP service; a minimal reference agent ships
-  in `examples/echo-agent`;
+  Every agent is an external service Agenthof reaches over HTTP or a local Unix
+  socket; a minimal reference agent ships in `examples/echo-agent`;
+- **agents are credential-starved and reach everything through gateways** — the
+  **model** and **tool/MCP** doors are *enforced* (Agenthof sits in the call path
+  and injects the per-role or per-resource credential the agent never holds); the
+  **exec** door is *attested* (the agent reports the allowlisted command it ran
+  and Agenthof records that report, without running it); and sub-agent calls carry
+  the caller's delegation binding;
+- **isolated agents** — a reference sandbox runtime (`deploy/refbox`) runs an
+  agent with **no network at all**, reaching Agenthof only over a bind-mounted
+  Unix socket, so credential-starvation and no-egress hold *by construction* on
+  the operator's host. What the runtime does and does not guarantee is stated
+  plainly, not assumed;
 - a hash-chained ledger where every action and refusal is attributed to the
   human who invoked it, with `audit verify` for integrity;
-- the kill switch, OIDC + RBAC, and agents governed at the tool/MCP, exec,
-  and model doors. A fronted agent reaches models through Agenthof, which
-  injects the per-role provider key;
+- the kill switch and OIDC + RBAC, with every door governed and recorded;
 - a control-plane audit — every `apply` and kill-switch flip is recorded to
   its own hash-chained control ledger, attributed to the human who invoked
   it, with `audit control`, `audit verify control`, and `audit repair
@@ -32,8 +46,8 @@ Pre-release, and the governed core is real and runnable today:
   every run log into one filterable, time-ordered timeline (human or `--json`),
   and `audit <run-id>` names the exact `apply` that put a run's config on record.
 
-What's shipped versus what's coming — a tool/MCP gateway, governed skills,
-multi-resource scope — is laid out in the [roadmap](ROADMAP.md). Only shipped
+What's shipped versus what's coming — governed skills, multi-resource scope,
+finer-grained privileges — is laid out in the [roadmap](ROADMAP.md). Only shipped
 items are guarantees.
 
 ## Quickstart
@@ -88,14 +102,17 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 - [`ROADMAP.md`](ROADMAP.md) — what's shipped, next, later, and exploratory.
 - [`docs/quickstart.md`](docs/quickstart.md) — build, run, kill switch,
   retention.
-- [`docs/concepts.md`](docs/concepts.md) — the ideas behind the registry:
+- [`docs/concepts.md`](docs/concepts.md) — the ideas behind Agenthof:
   planes, gateways, identity, the ledger.
 - [`docs/lifecycle.md`](docs/lifecycle.md) — the life of a run: how one
-  invocation flows through identity, authorization, execution, and the ledger.
+  invocation flows through identity, authorization, execution, and the ledger,
+  including the isolated compartment an agent runs in.
 - [`docs/lifecycle-model.md`](docs/lifecycle-model.md) — the life of a model
   call: logical model, injected provider key, `model_call`.
 - [`docs/lifecycle-exec.md`](docs/lifecycle-exec.md) — the life of an exec:
   allowlist, the operator's sandbox, and the attested record.
+- [`docs/lifecycle-tool.md`](docs/lifecycle-tool.md) — the life of a tool call:
+  the two MCP legs, the injected resource credential, and `tool_call`.
 - [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md) — the
   life of a control action: apply, the kill switch, and the control ledger.
 - [`docs/reference/config.md`](docs/reference/config.md) — every YAML field,
