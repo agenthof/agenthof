@@ -54,6 +54,10 @@ func clientAndURL(endpoint string) (*http.Client, string) {
 		return &http.Client{
 			CheckRedirect: noRedirect,
 			Transport: &http.Transport{
+				// This transport is built per call and discarded, so keep-alive
+				// would only park an idle connection (and its read/write
+				// goroutines) in a pool nothing reuses or closes. Disable it.
+				DisableKeepAlives: true,
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 					return (&net.Dialer{}).DialContext(ctx, "unix", path)
 				},

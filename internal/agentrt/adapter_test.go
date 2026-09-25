@@ -468,3 +468,30 @@ func TestExecuteDialsUnixEndpoint(t *testing.T) {
 		t.Fatalf("Success = false, reason=%q", res.Reason)
 	}
 }
+
+func TestClientAndURLUnixDisablesKeepAlives(t *testing.T) {
+	// The per-call unix transport is built and discarded per Execute, so it
+	// must not keep idle connections alive (nothing would ever close the pool).
+	c, url := clientAndURL(config.UnixScheme + "/run/agenthof/agent.sock")
+	if url != "http://agenthof/" {
+		t.Fatalf("url = %q, want http://agenthof/", url)
+	}
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("unix client Transport = %T, want *http.Transport", c.Transport)
+	}
+	if !tr.DisableKeepAlives {
+		t.Fatal("unix transport must set DisableKeepAlives to avoid leaking idle connections")
+	}
+}
+
+func TestClientAndURLHTTPUsesSharedClient(t *testing.T) {
+	// The http(s) path must be unchanged: the shared adapterClient, endpoint verbatim.
+	c, url := clientAndURL("https://agent.example/")
+	if c != adapterClient {
+		t.Fatal("http(s) endpoint must use the shared adapterClient")
+	}
+	if url != "https://agent.example/" {
+		t.Fatalf("url = %q, want the endpoint unchanged", url)
+	}
+}
