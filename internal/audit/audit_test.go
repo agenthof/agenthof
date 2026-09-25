@@ -122,6 +122,17 @@ func TestRenderToolCallSucceeded(t *testing.T) {
 	}
 }
 
+func TestRenderToolCallFailed(t *testing.T) {
+	events := []engine.Event{{
+		Type: "tool_call", Status: "failed", Tool: "echo",
+		Reason: "upstream unreachable", Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	if !strings.Contains(out, "tool echo failed — upstream unreachable") {
+		t.Fatalf("failed tool_call not rendered:\n%s", out)
+	}
+}
+
 func TestRenderToolCallRefused(t *testing.T) {
 	events := []engine.Event{{
 		Type: "tool_call", Status: "refused", Tool: "danger",

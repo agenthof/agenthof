@@ -117,14 +117,17 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 				fmt.Fprintf(&sb, "  %s  model %s %s\n", t, e.Model, e.Status)
 			}
 		case "tool_call":
-			if e.Status == "refused" || e.Status == "failed" {
+			switch e.Status {
+			case "refused", "failed":
 				fmt.Fprintf(&sb, "  %s  tool %s %s — %s\n", t, e.Tool, e.Status, e.Reason)
-			} else {
+			case "succeeded":
 				sha := e.ArgsSHA
 				if len(sha) > 8 {
 					sha = sha[:8]
 				}
 				fmt.Fprintf(&sb, "  %s  tool %s — args %s (%s)\n", t, e.Tool, sha, e.AuthMode)
+			default:
+				fmt.Fprintf(&sb, "  %s  tool %s %s\n", t, e.Tool, e.Status)
 			}
 		default:
 			fmt.Fprintf(&sb, "  %s  %s\n", t, e.Type)
