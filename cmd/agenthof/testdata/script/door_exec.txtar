@@ -1,0 +1,42 @@
+# The exec door: a fronted step asks Agenthof to authorize + attest a command,
+# and the ledger records — and audit renders — the attested exec event.
+
+exec agenthof apply --config config
+stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+
+exec agenthof run se exec-demo --input 'exec:true' --as tester --config config --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+
+lastrun logs
+exec agenthof audit $RUNID --log-dir logs
+stdout 'exec true — exit 0 \(attested\)'
+
+# backstop: the raw ledger carries the attested exec event
+grep '"type":"exec"' logs/${RUNID}.jsonl
+grep '"mode":"attested"' logs/${RUNID}.jsonl
+
+-- config/agents/runner.yaml --
+name: runner
+model: fast
+instruction: run a command
+output: out
+execution: fronted
+exec:
+  mode: attested
+  allow:
+    - exe: "true"
+-- config/workflows/exec-demo.yaml --
+name: exec-demo
+steps:
+  - name: run
+    agent: runner
+-- config/roles/se.yaml --
+name: se
+workflows: [exec-demo]
+allowed_groups: ["*"]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

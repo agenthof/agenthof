@@ -42,6 +42,31 @@ func TestRenderFullRun(t *testing.T) {
 	}
 }
 
+func TestRenderExecAttested(t *testing.T) {
+	exit := 0
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "software-engineer", Workflow: "fix-bug", RunID: "r-exec1"}
+	events := []engine.Event{
+		{Type: "exec", Status: "succeeded", Command: []string{"true"}, ExitCode: &exit, Mode: "attested",
+			Time: time.Unix(0, 0).UTC(), Binding: bind},
+	}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	if !strings.Contains(out, "exec true — exit 0 (attested)") {
+		t.Fatalf("exec not rendered:\n%s", out)
+	}
+}
+
+func TestRenderExecRefused(t *testing.T) {
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "software-engineer", Workflow: "fix-bug", RunID: "r-exec2"}
+	events := []engine.Event{
+		{Type: "exec", Status: "refused", Command: []string{"rm", "-rf", "/"},
+			Reason: "command is not on the exec allowlist", Time: time.Unix(0, 0).UTC(), Binding: bind},
+	}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	if !strings.Contains(out, "exec rm -rf / refused — command is not on the exec allowlist") {
+		t.Fatalf("refused exec not rendered:\n%s", out)
+	}
+}
+
 func TestRenderRefusedAndEmpty(t *testing.T) {
 	bind := engine.Binding{Invoker: identity.Static("dev@x"), Role: "se", Workflow: "fix-bug", RunID: "r-ffffffff"}
 	out := Render([]engine.Event{{Time: ts(5), Type: "run_refused", Reason: "role \"se\" is not in the registry", Binding: bind}}, ledger.Head{Count: 1}, nil)

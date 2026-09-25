@@ -3,6 +3,7 @@ package audit
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/agenthof/agenthof/internal/engine"
@@ -87,6 +88,16 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 			fmt.Fprintf(&sb, "  %s  workflow finished: %s\n", t, e.Status)
 		case "run_refused":
 			fmt.Fprintf(&sb, "  %s  run refused — %s\n", t, e.Reason)
+		case "exec":
+			if e.Status == "refused" {
+				fmt.Fprintf(&sb, "  %s  exec %s refused — %s\n", t, strings.Join(e.Command, " "), e.Reason)
+			} else {
+				exit := "?"
+				if e.ExitCode != nil {
+					exit = strconv.Itoa(*e.ExitCode)
+				}
+				fmt.Fprintf(&sb, "  %s  exec %s — exit %s (%s)\n", t, strings.Join(e.Command, " "), exit, e.Mode)
+			}
 		default:
 			fmt.Fprintf(&sb, "  %s  %s\n", t, e.Type)
 		}

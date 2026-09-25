@@ -16,6 +16,16 @@ It echoes each step's input back as the artifact and holds no credentials.
 If that port is taken, pass `-addr` and point every agent's `endpoint` at
 the same loopback URL.
 
+> **Exec door note.** The `coder` agent declares an attested `exec:`
+> allowlist in [`examples/config/agents/coder.yaml`](../examples/config/agents/coder.yaml)
+> — the door is attested (agent-reported), not enforced: a conforming agent
+> reports the command it ran, Agenthof records that report, and Agenthof does
+> not run the command itself. The echo-agent walkthrough below never calls
+> `/exec/authorize` or `/exec/attest`, so no exec event appears in its audit.
+> For an executable proof of the door itself, see the testscript
+> [`cmd/agenthof/testdata/script/door_exec.txtar`](../cmd/agenthof/testdata/script/door_exec.txtar)
+> and the life-of doc [`lifecycle-exec.md`](lifecycle-exec.md).
+
 ## Part 1: CONFIG Moment — Registry Management & Kill Switches
 
 Demonstrates how roles, workflows, and agents are defined in YAML and validated on apply; and how the kill switch prevents invalid configurations from running.

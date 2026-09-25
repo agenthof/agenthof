@@ -38,6 +38,12 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if cmd, ok := strings.CutPrefix(req.Input, "exec:"); ok {
+		if err := stubCallExec(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), cmd); err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "exec door: " + err.Error()})
+			return
+		}
+	}
 	line := req.Input
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
 		line = line[:i]
@@ -50,6 +56,127 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 		"success":  true,
 		"artifact": "[" + req.Agent + "] " + line,
 	})
+}
+
+// stubCallExec drives the exec door from the demo stub: authorize the command,
+// then — only if the door said yes — attest a synthetic exit 0. Mirrors what
+// a conforming fronted agent does. The door returns 200 on both accept and
+// refuse, distinguished by the JSON body `{"allowed": bool}` (see
+// internal/rungateway/proxy.go's execAuthorizeHandler), so a 2xx alone is
+// NOT permission; the body must be decoded and honored. Attest returns 204
+// No Content on success — no body to decode, but the response body is still
+// closed.
+func stubCallExec(proxyURL, token, cmd string) error {
+	if proxyURL == "" {
+		return fmt.Errorf("no proxy url")
+	}
+	argv := strings.Fields(cmd)
+	post := func(path string, body any) (*http.Response, error) {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		rq, err := http.NewRequest(http.MethodPost, strings.TrimRight(proxyURL, "/")+path, bytes.NewReader(b))
+		if err != nil {
+			return nil, err
+		}
+		rq.Header.Set("Content-Type", "application/json")
+		rq.Header.Set("Authorization", "Bearer "+token)
+		return http.DefaultClient.Do(rq)
+	}
+
+	// authorize: a 2xx status alone does not imply permission; decode the
+	// response body to learn whether the door actually allowed the command.
+	// If the door refused, return an error immediately and do NOT attest —
+	// attesting an unauthorized command would forge evidence of a run that
+	// never happened. Decoding also drains the body before we close it.
+	authResp, err := post("/exec/authorize", map[string]any{"command": argv})
+	if err != nil {
+		return err
+	}
+	if authResp.StatusCode/100 != 2 {
+		_ = authResp.Body.Close()
+		return fmt.Errorf("/exec/authorize returned %d", authResp.StatusCode)
+	}
+	var decision struct {
+		Allowed bool `json:"allowed"`
+	}
+	decodeErr := json.NewDecoder(authResp.Body).Decode(&decision)
+	_ = authResp.Body.Close()
+	if decodeErr != nil {
+		return fmt.Errorf("/exec/authorize decode: %w", decodeErr)
+	}
+	if !decision.Allowed {
+		return fmt.Errorf("/exec/authorize refused the command")
+	}
+
+	// attest: 204 No Content, no body to decode, but the response body is
+	// still closed (net/http requires it even on 204 to release the conn).
+	attestResp, err := post("/exec/attest", map[string]any{"command": argv, "exit": 0, "output_sha": ""})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = attestResp.Body.Close() }()
+	if attestResp.StatusCode/100 != 2 {
+		return fmt.Errorf("/exec/attest returned %d", attestResp.StatusCode)
+	}
+	return nil
+}
+
+// TestStubCallExec pins the demo stub's exec-door client to the door's
+// contract: a 200 on /exec/authorize with {"allowed": false} is a REFUSAL,
+// not permission. A conforming agent must not attest a command the door
+// refused. The two cases stand up a local httptest server (the real
+// rungateway proxy is exercised elsewhere) and assert stubCallExec's
+// behavior end-to-end, including whether /exec/attest was reached at all.
+func TestStubCallExec(t *testing.T) {
+	cases := []struct {
+		name             string
+		authorizeBody    string
+		wantErr          bool
+		wantAttestCalled bool
+	}{
+		{
+			name:             "refused: allowed=false must not attest and must error",
+			authorizeBody:    `{"allowed":false}`,
+			wantErr:          true,
+			wantAttestCalled: false,
+		},
+		{
+			name:             "allowed: allowed=true attests and returns nil",
+			authorizeBody:    `{"allowed":true}`,
+			wantErr:          false,
+			wantAttestCalled: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var attestCalled bool
+			mux := http.NewServeMux()
+			mux.HandleFunc("/exec/authorize", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.authorizeBody))
+			})
+			mux.HandleFunc("/exec/attest", func(w http.ResponseWriter, r *http.Request) {
+				attestCalled = true
+				// Mirror the live handler: 204 No Content, no body.
+				w.WriteHeader(http.StatusNoContent)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			err := stubCallExec(srv.URL, "run-token", "go test")
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected an error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if attestCalled != tc.wantAttestCalled {
+				t.Fatalf("attestCalled = %v, want %v (err=%v)", attestCalled, tc.wantAttestCalled, err)
+			}
+		})
+	}
 }
 
 func writeSample(t *testing.T) string {

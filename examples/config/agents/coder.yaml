@@ -6,3 +6,10 @@ instruction: |
 output: patch
 execution: fronted
 endpoint: http://127.0.0.1:8080/
+# Attested exec door: the agent reports the command it ran, Agenthof records
+# that report, and Agenthof does not run the command itself.
+exec:
+  mode: attested
+  allow:
+    - exe: "go"
+      args_prefix: ["test"]
