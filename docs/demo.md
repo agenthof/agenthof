@@ -30,8 +30,9 @@ the same loopback URL.
 > (`model: fast` in [`examples/config/agents/planner.yaml`](../examples/config/agents/planner.yaml))
 > that resolves through the `fast` route in
 > [`examples/config/gateway.yaml`](../examples/config/gateway.yaml) — the agent
-> reaches the model **only through Agenthof**, which injects the per-role
-> provider key and records the call (enforcement by credential-starvation:
+> reaches the model **only through Agenthof**, which injects the provider key
+> (the provisioned per-role key when one exists, otherwise the route's
+> `api_key_env`) and records the call (enforcement by credential-starvation:
 > the agent holds no provider key of its own). The echo-agent walkthrough
 > below never POSTs `/v1/chat/completions`, so no `model_call` event appears
 > in its audit. For an executable proof of the door itself, see the
