@@ -90,6 +90,49 @@ func TestRenderModelCallRefused(t *testing.T) {
 	}
 }
 
+func TestRenderModelCallStarted(t *testing.T) {
+	events := []engine.Event{{
+		Type: "model_call", Status: "started", Model: "fast", Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	if !strings.Contains(out, "model fast — streaming (usage not captured)") {
+		t.Fatalf("started model_call not rendered:\n%s", out)
+	}
+}
+
+func TestRenderModelCallFailed(t *testing.T) {
+	events := []engine.Event{{
+		Type: "model_call", Status: "failed", Model: "fast",
+		Reason: "upstream timeout", Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	if !strings.Contains(out, "model fast failed — upstream timeout") {
+		t.Fatalf("failed model_call not rendered:\n%s", out)
+	}
+}
+
+func TestRenderToolCallSucceeded(t *testing.T) {
+	events := []engine.Event{{
+		Type: "tool_call", Status: "succeeded", Tool: "echo",
+		ArgsSHA: "abcdef1234567890", AuthMode: "static_env", Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	if !strings.Contains(out, "tool echo — args abcdef12 (static_env)") {
+		t.Fatalf("tool_call not rendered:\n%s", out)
+	}
+}
+
+func TestRenderToolCallRefused(t *testing.T) {
+	events := []engine.Event{{
+		Type: "tool_call", Status: "refused", Tool: "danger",
+		Reason: "tool not allowed", Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	if !strings.Contains(out, "tool danger refused — tool not allowed") {
+		t.Fatalf("refused tool_call not rendered:\n%s", out)
+	}
+}
+
 func TestRenderRefusedAndEmpty(t *testing.T) {
 	bind := engine.Binding{Invoker: identity.Static("dev@x"), Role: "se", Workflow: "fix-bug", RunID: "r-ffffffff"}
 	out := Render([]engine.Event{{Time: ts(5), Type: "run_refused", Reason: "role \"se\" is not in the registry", Binding: bind}}, ledger.Head{Count: 1}, nil)

@@ -104,7 +104,7 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 				fmt.Fprintf(&sb, "  %s  model %s %s — %s\n", t, e.Model, e.Status, e.Reason)
 			case "started":
 				fmt.Fprintf(&sb, "  %s  model %s — streaming (usage not captured)\n", t, e.Model)
-			default: // succeeded
+			case "succeeded":
 				pt, ct := "?", "?"
 				if e.PromptTokens != nil {
 					pt = strconv.Itoa(*e.PromptTokens)
@@ -113,6 +113,18 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 					ct = strconv.Itoa(*e.CompletionTokens)
 				}
 				fmt.Fprintf(&sb, "  %s  model %s — %s prompt / %s completion tokens\n", t, e.Model, pt, ct)
+			default:
+				fmt.Fprintf(&sb, "  %s  model %s %s\n", t, e.Model, e.Status)
+			}
+		case "tool_call":
+			if e.Status == "refused" || e.Status == "failed" {
+				fmt.Fprintf(&sb, "  %s  tool %s %s — %s\n", t, e.Tool, e.Status, e.Reason)
+			} else {
+				sha := e.ArgsSHA
+				if len(sha) > 8 {
+					sha = sha[:8]
+				}
+				fmt.Fprintf(&sb, "  %s  tool %s — args %s (%s)\n", t, e.Tool, sha, e.AuthMode)
 			}
 		default:
 			fmt.Fprintf(&sb, "  %s  %s\n", t, e.Type)
