@@ -175,8 +175,8 @@ func TestToolGrantScalarGrantsEveryTool(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parsed %+v, want %+v", got, want)
 	}
-	if got[0].Restricted() {
-		t.Fatal("a bare grant must not be Restricted()")
+	if got[0].Scope() != ScopeAll {
+		t.Fatal("a bare grant must be ScopeAll")
 	}
 }
 
@@ -197,8 +197,8 @@ func TestToolGrantMappingRestrictsToNamedTools(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parsed %+v, want %+v", got, want)
 	}
-	if got[0].Restricted() || !got[1].Restricted() {
-		t.Fatalf("Restricted(): bare=%v restricted=%v", got[0].Restricted(), got[1].Restricted())
+	if got[0].Scope() != ScopeAll || got[1].Scope() != ScopeNamed {
+		t.Fatalf("Scope(): bare=%v restricted=%v", got[0].Scope(), got[1].Scope())
 	}
 }
 
@@ -213,7 +213,7 @@ func TestToolGrantFailsClosed(t *testing.T) {
 	}{
 		{"singular tool: typo is an unknown key", "- resource: github\n  tool: [list_issues]\n", `unknown key "tool"`},
 		{"future mode: typo is an unknown key", "- resource: github\n  tools: [x]\n  mod: read\n", `unknown key "mod"`},
-		{"object with tools absent", "- resource: github\n", "at least one tool"},
+		{"object with tools absent", "- resource: github\n", "must set tools or mode"},
 		{"object with tools null", "- resource: github\n  tools: null\n", "at least one tool"},
 		{"object with tools empty", "- resource: github\n  tools: []\n", "at least one tool"},
 		{"object with empty resource", "- resource: \"\"\n  tools: [x]\n", "empty resource"},
@@ -247,6 +247,73 @@ func TestToolGrantNullElementIsDropped(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("a null element must be dropped, got %+v", got)
+	}
+}
+
+func TestToolGrantScope(t *testing.T) {
+	cases := []struct {
+		name string
+		g    ToolGrant
+		want GrantScope
+	}{
+		{"bare", ToolGrant{Resource: "github"}, ScopeAll},
+		{"mode all", ToolGrant{Resource: "github", Mode: "all"}, ScopeAll},
+		{"named tools", ToolGrant{Resource: "github", Tools: []string{"echo"}}, ScopeNamed},
+		{"read-only", ToolGrant{Resource: "github", Mode: "read-only"}, ScopeReadOnly},
+		{"named and read-only", ToolGrant{Resource: "github", Mode: "read-only", Tools: []string{"echo"}}, ScopeReadOnly},
+		{"bad mode is not all", ToolGrant{Resource: "github", Mode: "write"}, ScopeNamed},
+	}
+	for _, tc := range cases {
+		if got := tc.g.Scope(); got != tc.want {
+			t.Errorf("%s: Scope = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestToolGrantModeYAML(t *testing.T) {
+	ok := []struct {
+		name string
+		src  string
+		want ToolGrant
+	}{
+		{"mode all", "- resource: github\n  mode: all\n", ToolGrant{Resource: "github", Mode: "all"}},
+		{"mode read-only", "- resource: github\n  mode: read-only\n", ToolGrant{Resource: "github", Mode: "read-only"}},
+		{"tools plus read-only", "- resource: github\n  tools: [echo]\n  mode: read-only\n", ToolGrant{Resource: "github", Tools: []string{"echo"}, Mode: "read-only"}},
+	}
+	for _, tc := range ok {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []ToolGrant
+			if err := yaml.Unmarshal([]byte(tc.src), &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || !reflect.DeepEqual(got[0], tc.want) {
+				t.Fatalf("parsed %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToolGrantModeRejected(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{"bad mode", "- resource: github\n  mode: write\n", `mode "write"`},
+		{"neither tools nor mode", "- resource: github\n", "must set tools or mode"},
+		{"mode empty string is neither", "- resource: github\n  mode: \"\"\n", "must set tools or mode"},
+		{"mode null is neither", "- resource: github\n  mode: null\n", "must set tools or mode"},
+		{"empty tools with read-only", "- resource: github\n  tools: []\n  mode: read-only\n", "at least one tool"},
+		{"empty tools with all", "- resource: github\n  tools: []\n  mode: all\n", "at least one tool"},
+		{"mode all plus tools", "- resource: github\n  mode: all\n  tools: [echo]\n", "mode all"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []ToolGrant
+			err := yaml.Unmarshal([]byte(tc.src), &got)
+			if err == nil {
+				t.Fatalf("expected an error, parsed %+v", got)
+			}
+			if !strings.Contains(err.Error(), "bad-tool-grant: line ") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want %q", err.Error(), tc.want)
+			}
+		})
 	}
 }
 

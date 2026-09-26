@@ -70,18 +70,21 @@ Optional free text. Not checked by `apply`.
 Optional list of tool grants. Each entry is either the id of a tool
 resource declared under `gateway.yaml`'s `tools` map (see
 [`tools`](#tools-1) under Gateway, below), which grants every tool that
-resource exposes, or an object with two keys:
+resource exposes (same as `mode: all`), or an object with these keys:
 
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
 | Resource | `resource` | string | yes | — |
-| Tools | `tools` | list of strings | yes, non-empty | — |
+| Tools | `tools` | list of strings | yes when `mode` is absent; non-empty when present | — |
+| Mode | `mode` | string | no | `""` |
 
-which grants only the named tools of that resource. The bare string is the
-only way to grant every tool: an object whose `tools` is missing, `null`, or
-empty is rejected when the file is loaded, as is an object with any key
-other than `resource` and `tools`, or with an empty `resource` — all with
-`bad-tool-grant` — so a misspelled key can never widen a grant.
+`mode` accepts `all` (every tool on the resource) or `read-only` (the
+resource's `read_only_tools` list on the gateway catalog entry). An object
+must set a non-empty `tools` list and/or `mode: all` or `mode: read-only`;
+`mode: all` must not be combined with `tools`. A present `tools` key that is
+`null` or empty is rejected when the file is loaded, as is an object with any
+key other than `resource`, `tools`, and `mode`, or with an empty `resource`
+— all with `bad-tool-grant` — so a misspelled key can never widen a grant.
 
 `apply` rejects an entry whose resource is not declared in `gateway.yaml`
 with `unknown-tool` ("agent references tool ..., which is not a declared
@@ -395,6 +398,11 @@ for the runtime flow):
 | ClientIDEnv | `client_id_env` | string | yes for `client_credentials` | — |
 | ClientSecretEnv | `client_secret_env` | string | yes for `client_credentials` | — |
 | Scope | `scope` | string | no (not checked by `apply`) | — |
+| ReadOnlyTools | `read_only_tools` | list of strings | no (not checked by `apply`) | none |
+
+`read_only_tools` names tools on this resource that a `mode: read-only` agent
+grant may use; tools not listed are treated as mutating. An empty list means
+this resource offers no read-only grant surface.
 
 `apply` requires `kind` to be exactly `"mcp"` and `url` to be set and
 `https` (or `http` only to a loopback host — `localhost`, `127.0.0.1`, or
