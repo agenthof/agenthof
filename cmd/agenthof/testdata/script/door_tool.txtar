@@ -9,6 +9,7 @@ stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
 
 exec agenthof run se tool-demo --input 'tool:echo' --as tester --config config --log-dir logs --artifact-dir artifacts
 stdout 'finished: succeeded'
+! stderr 'tool-secret'
 
 lastrun logs
 exec agenthof audit $RUNID --log-dir logs
