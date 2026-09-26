@@ -61,11 +61,15 @@ If any of that fails — the resource is unreachable, it will not list its
 tools, two declared resources advertise a mirrored tool of the same name, or
 an object entry names a tool its resource does not advertise (a typo, or a
 tool the resource has since dropped) — the step fails outright, with
-`step_failed` and a reason beginning `tool proxy:`, and the workflow finishes
-failed. It does not bounce back to a prior step. Naming a tool that is not
-there fails loudly on purpose: a mirrored-nothing grant would leave the
-operator with only a refused `tool_call` to debug, indistinguishable from an
-off-allowlist attempt. Because a left-out tool is never mirrored, a name
+`step_failed` carrying the fixed reason `tool proxy start failed`, and the
+workflow finishes failed. It does not bounce back to a prior step. The ledger
+reason is fixed and generic on purpose: a start error can wrap the resource's
+own URL (query string and injected credential included), which must never
+reach an event (Article III). The *specific* cause — which resource, and for a
+missing allowlisted tool exactly which name — is named in the operational log
+instead, so naming a tool that is not there still fails loudly and debuggably;
+it just does so on stderr, not in the ledger. Because a left-out tool is never
+mirrored, a name
 clash between two resources is only a clash when both sides are actually
 granted — restricting one side is a way to resolve it.
 

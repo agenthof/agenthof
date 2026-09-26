@@ -180,11 +180,15 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 			url, token, perr := gw.Start(bind, agent, appendEvent)
 			if perr != nil {
 				cancel()
-				// perr is transport-derived (upstream connect / listen): the
-				// gateway already logged its class; no error text here.
+				// perr is transport-derived (upstream connect / listen) and can
+				// wrap a *url.Error carrying the resource URL, query string and
+				// any injected credential included. The gateway already logged
+				// the resource id and error class; the ledger reason stays a
+				// fixed string so no URL or secret reaches an event (Article
+				// III), mirroring the model door's fixed failure reason.
 				logger.Error("tool proxy start failed", "step", step.Name, "agent", agent.Name)
-				emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: "tool proxy: " + perr.Error(), Execution: execTier})
-				emit(Event{Type: "workflow_finished", Status: "failed", Reason: "tool proxy: " + perr.Error()})
+				emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: "tool proxy start failed", Execution: execTier})
+				emit(Event{Type: "workflow_finished", Status: "failed", Reason: "tool proxy start failed"})
 				if logErr != nil {
 					return ledgerFailed()
 				}
