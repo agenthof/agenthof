@@ -25,6 +25,7 @@ import (
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/obs"
 	"github.com/agenthof/agenthof/internal/registry"
 	"github.com/agenthof/agenthof/internal/rungateway"
 )
@@ -35,7 +36,7 @@ Usage:
   agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
-  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>]
+  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json]
   agenthof audit <run-id> [--log-dir <dir>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
@@ -64,7 +65,7 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 	case "registry":
 		return cmdRegistry(argv[1:], stdout)
 	case "run":
-		return cmdRun(argv[1:], stdout)
+		return cmdRun(argv[1:], stdout, stderr)
 	case "audit":
 		return cmdAudit(argv[1:], stdout)
 	case "runs":
@@ -523,7 +524,10 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	return 0
 }
 
-func cmdRun(args []string, out io.Writer) int {
+// cmdRun runs one workflow. out receives command results (and usage errors,
+// like every subcommand); stderr receives operational diagnostics built by
+// obs.New — the third channel, separate from stdout and from the run ledger.
+func cmdRun(args []string, out, stderr io.Writer) int {
 	if len(args) < 2 {
 		_, _ = fmt.Fprintln(out, "run needs: <role> <workflow>")
 		return 2
@@ -540,6 +544,10 @@ func cmdRun(args []string, out io.Writer) int {
 	// Accepted for forward-compat: the tool proxy always binds 127.0.0.1:0
 	// regardless of this flag's value today.
 	fs.String("tool-proxy-addr", "127.0.0.1:0", "tool-proxy bind address (currently always binds 127.0.0.1:0; reserved for future use)")
+	// Empty defaults are sentinels: an unset flag falls through to the env
+	// variable, then to info / text (resolveLogConfig).
+	logLevel := fs.String("log-level", "", "operational log level: debug|info|warn|error (default info; env "+envLogLevel+")")
+	logFormat := fs.String("log-format", "", "operational log format: text|json (default text; env "+envLogFormat+")")
 	fs.SetOutput(out)
 	if err := fs.Parse(args[2:]); err != nil {
 		return 2
@@ -548,6 +556,17 @@ func cmdRun(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, "run needs --input")
 		return 2
 	}
+	level, format, err := resolveLogConfig(*logLevel, *logFormat, os.Getenv)
+	if err != nil {
+		// A usage error, printed where every other usage error goes: stdout.
+		_, _ = fmt.Fprintf(out, "run: %v\n", err)
+		return 2
+	}
+	// Diagnostics go to the stderr writer threaded from dispatch — never to
+	// out and never into the ledger. Run lifecycle is Debug: the result line
+	// on stdout below is the Info-level signal already.
+	logger := obs.New(stderr, level, format)
+	logger.Debug("run invoked", "role", role, "workflow", workflow)
 
 	inv, _, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
 	if usageErr {
@@ -609,9 +628,9 @@ func cmdRun(args []string, out io.Writer) int {
 		// falls back to http.DefaultClient, which has no timeout).
 		ClientCredentials: broker.NewClientCredentials(&http.Client{Timeout: 30 * time.Second}),
 	}
-	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b) }
+	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger) }
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
-		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway})
+		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway, Logger: logger})
 	if err != nil && status == "refused" {
 		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", runID, err)
 		return 1

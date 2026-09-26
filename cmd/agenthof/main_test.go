@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -352,7 +353,7 @@ func TestRunAndAuditEndToEnd(t *testing.T) {
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--as", "dana@example.com",
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -384,7 +385,7 @@ func TestAuditCorruptedFirstLineReportsIntegrityFailureAndExitsNonZero(t *testin
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--as", "dana@example.com",
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -430,7 +431,7 @@ func TestAuditVerifyCleanAndExpectHead(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -458,7 +459,7 @@ func TestAuditTornExitsOne(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -494,7 +495,7 @@ func TestAuditDeletedTailPassesButExpectHeadFails(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -544,7 +545,7 @@ func TestRunFailBackOffline(t *testing.T) {
 	logs := t.TempDir()
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
-		"--input", "do it FAIL:coder", "--as", "dev@x", "--config", root, "--log-dir", logs}, &out)
+		"--input", "do it FAIL:coder", "--as", "dev@x", "--config", root, "--log-dir", logs}, &out, io.Discard)
 	_ = code // coder always fails on this input; bounces exhaust; run fails honestly
 	if !strings.Contains(out.String(), "finished: failed") {
 		t.Fatalf("out: %s", out.String())
@@ -556,7 +557,7 @@ func TestRunRefusedUnknownRole(t *testing.T) {
 	root := writeSample(t)
 	var out bytes.Buffer
 	code := cmdRun([]string{"ghost", "fix-bug", "--input", "x", "--as", "dev@x",
-		"--config", root, "--log-dir", t.TempDir()}, &out)
+		"--config", root, "--log-dir", t.TempDir()}, &out, io.Discard)
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("code=%d out=%s", code, out.String())
 	}
@@ -913,7 +914,7 @@ func TestRunTokenRequiresIssuerEnv(t *testing.T) {
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "x", "--token", "some-raw-jwt-value",
-		"--config", root, "--log-dir", t.TempDir()}, &out)
+		"--config", root, "--log-dir", t.TempDir()}, &out, io.Discard)
 	if code != 2 {
 		t.Fatalf("expected exit 2, got %d\n%s", code, out.String())
 	}
@@ -938,7 +939,7 @@ func TestRunStaticRBAC(t *testing.T) {
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--as", "dana@example.com", "--groups", "finance",
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run with allowed group: %d\n%s", code, out.String())
 	}
@@ -946,7 +947,7 @@ func TestRunStaticRBAC(t *testing.T) {
 	out.Reset()
 	code = cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--as", "dana@example.com", "--groups", "engineering",
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("expected refusal for wrong group: code=%d out=%s", code, out.String())
 	}
@@ -975,7 +976,7 @@ func TestRunValidationFailureIsLedgered(t *testing.T) {
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "x", "--as", "dev@x",
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d\n%s", code, out.String())
 	}
@@ -1018,7 +1019,7 @@ func TestRunOIDCHappyPathEndToEnd(t *testing.T) {
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--token", token,
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1077,7 +1078,7 @@ func TestRunBadTokenIsRejectedWithoutEcho(t *testing.T) {
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--token", badToken,
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code == 0 {
 		t.Fatalf("expected non-zero exit for a bad token, got 0:\n%s", out.String())
 	}
@@ -1142,7 +1143,7 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 	logs := t.TempDir()
 	var out bytes.Buffer
 	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1244,7 +1245,7 @@ func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 	logs := t.TempDir()
 	var out bytes.Buffer
 	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1310,7 +1311,7 @@ func TestRunWiresToolProxyForFrontedToolAgent(t *testing.T) {
 	logs := t.TempDir()
 	var out bytes.Buffer
 	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
-		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:0"}, &out)
+		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:0"}, &out, io.Discard)
 	if code != 1 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1387,7 +1388,7 @@ func TestRunWiresClientCredentialsBrokerForFrontedToolAgent(t *testing.T) {
 	logs := t.TempDir()
 	var out bytes.Buffer
 	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
-		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:0"}, &out)
+		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:0"}, &out, io.Discard)
 	if code != 1 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1450,7 +1451,7 @@ func TestRunToolProxyAddrFlagParsesButIsUnused(t *testing.T) {
 	logs := t.TempDir()
 	var out bytes.Buffer
 	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
-		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:9999"}, &out)
+		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:9999"}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}

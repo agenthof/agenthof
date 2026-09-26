@@ -7,6 +7,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,13 @@ type Route struct {
 	Model    string
 	APIKey   string
 }
+
+// LogValue makes a Route render as "REDACTED" when it is passed to a
+// slog.Logger as an attribute value, so a Route can never put its APIKey in
+// an operational log line. Defense in depth only: it fires for slog attribute
+// values, not for fmt verbs — the secret-absence test in internal/engine is
+// the guarantee.
+func (Route) LogValue() slog.Value { return slog.StringValue("REDACTED") }
 
 // Resolve looks up the gateway route for a logical model name. An empty
 // logical name falls back to cfg.Defaults.Model. The returned route's

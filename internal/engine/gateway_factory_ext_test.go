@@ -69,7 +69,7 @@ func TestConcurrentRunsIsolateRealGateways(t *testing.T) {
 	opts := engine.Options{
 		LogDir: dir, ArtifactDir: dir + "/a",
 		NewGateway: func() engine.ToolProxy {
-			return rungateway.New(cfg.Gateway, keyRoot, b)
+			return rungateway.New(cfg.Gateway, keyRoot, b, nil)
 		},
 	}
 

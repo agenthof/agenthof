@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -45,6 +46,11 @@ type Provisioner struct {
 	MasterKey string
 	HTTP      *http.Client
 }
+
+// LogValue makes a Provisioner render as "REDACTED" when logged as a slog
+// attribute, so MasterKey never reaches a log line by that route. Like
+// Route.LogValue, it is defense in depth, not the guarantee.
+func (Provisioner) LogValue() slog.Value { return slog.StringValue("REDACTED") }
 
 func (p Provisioner) httpClient() *http.Client {
 	if p.HTTP != nil {

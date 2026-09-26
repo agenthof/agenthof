@@ -629,7 +629,8 @@ rendering — never the exit code.
 `agenthof investigate` only, in this section (`agenthof run` also takes it,
 documented alongside the engine). Default `.agenthof/runs`. `investigate`
 reads every `<log-dir>/r-*.jsonl` run log it finds there, in addition to
-`--control-log`.
+`--control-log`. Not to be confused with `--log-level` / `--log-format`, which
+configure the operational log on stderr — see [`logging.md`](logging.md).
 
 ### Exit codes
 
