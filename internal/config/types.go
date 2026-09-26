@@ -1,5 +1,11 @@
 package config
 
+import (
+	"fmt"
+
+	"gopkg.in/yaml.v3"
+)
+
 // UnixScheme prefixes a gateway proxy URL or an AgentDef.Endpoint that names a
 // Unix domain socket to dial. The value after it is the socket PATH only; HTTP
 // routes are fixed constants, never encoded in the URL.
@@ -17,6 +23,74 @@ type AgentDef struct {
 	Endpoint    string     `yaml:"endpoint"`  // required: the agent's HTTP endpoint
 	Exec        ExecConfig `yaml:"exec"`      // fronted only: allowlisted attested exec
 	SourceFile  string     `yaml:"-"`
+}
+
+// ToolGrant is one entry in an agent's `tools:` list. A bare string is the
+// resource id and grants every tool the resource exposes (unchanged
+// behavior). The object form restricts the grant to the named tools within
+// that resource; it must list at least one tool — the bare string is the
+// only spelling of "all tools", so a typo can never widen a grant.
+//
+// Reserved (additive, not implemented): a per-tool mode (read-only vs
+// mutating).
+type ToolGrant struct {
+	Resource string   `yaml:"resource"`
+	Tools    []string `yaml:"tools"` // object form: non-empty; bare string: nil (= every tool)
+}
+
+// Restricted reports whether the grant names specific tools (the object
+// form) rather than every tool the resource exposes (the bare string).
+func (g ToolGrant) Restricted() bool { return len(g.Tools) > 0 }
+
+// rawGrant is ToolGrant without its methods, so the mapping form can be
+// decoded with value.Decode without recursing back into UnmarshalYAML.
+type rawGrant ToolGrant
+
+// UnmarshalYAML accepts a scalar (resource id → every tool) or a mapping
+// ({resource, tools} → only those tools) and rejects everything else. It
+// fails closed: yaml.v3 silently drops unknown mapping keys, so the keys are
+// checked by hand before decoding, and an object form with no tools is an
+// error rather than an accidental all-tools grant.
+//
+// A null list element (`tools: [~]`) never reaches this method: yaml.v3
+// skips the Unmarshaler for a null node and drops the element from the
+// slice, so it grants nothing. registry.Validate separately rejects a grant
+// whose Resource is empty, which covers AgentDefs built in Go.
+func (g *ToolGrant) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		if value.Value == "" {
+			return fmt.Errorf("bad-tool-grant: line %d: tool grant has an empty resource id", value.Line)
+		}
+		*g = ToolGrant{Resource: value.Value}
+		return nil
+	case yaml.MappingNode:
+		// Content alternates key, value, key, value. Only `resource` and
+		// `tools` are known; anything else (a singular `tool:`, a future
+		// `mode:` misspelled) is rejected rather than silently ignored.
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			key := value.Content[i]
+			switch key.Value {
+			case "resource", "tools":
+			default:
+				return fmt.Errorf("bad-tool-grant: line %d: unknown key %q in tool grant (allowed keys: resource, tools)", key.Line, key.Value)
+			}
+		}
+		var raw rawGrant
+		if err := value.Decode(&raw); err != nil {
+			return err
+		}
+		if raw.Resource == "" {
+			return fmt.Errorf("bad-tool-grant: line %d: tool grant has an empty resource id", value.Line)
+		}
+		if len(raw.Tools) == 0 {
+			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q must list at least one tool; write the bare string %q to grant every tool it exposes", value.Line, raw.Resource, raw.Resource)
+		}
+		*g = ToolGrant(raw)
+		return nil
+	default:
+		return fmt.Errorf("bad-tool-grant: line %d: tool grant must be a resource id string or a {resource, tools} object", value.Line)
+	}
 }
 
 func (a AgentDef) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
