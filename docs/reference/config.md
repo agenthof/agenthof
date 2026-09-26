@@ -67,16 +67,17 @@ Optional free text. Not checked by `apply`.
 
 ### `tools`
 
-Optional list of tool-resource grants. Each entry is either a bare string
-(a tool-resource id, granting every tool that resource exposes) or an
-object of the form `{resource, tools}` (granting only the named tools
-within that resource). Every entry's `resource` must be the id of a tool
-resource declared under `gateway.yaml`'s `tools` map (see
-[`tools`](#tools-1) under Gateway, below); an entry that names no such
-resource is rejected with `unknown-tool` ("agent references tool ..., which
-is not a declared gateway tool resource"). The object form's `tools` field
-must list at least one tool — the bare string is the only spelling of "all
-tools", so a typo can never widen a grant. The agent reaches its declared
+Optional list of tool grants. Each entry is either a bare string — a
+tool-resource id — or an object of the form `{resource, tools}`, where
+`resource` is a tool-resource id and `tools` is a non-empty list of tool
+names on that resource. Every entry's resource id must name a tool resource
+declared under `gateway.yaml`'s `tools` map (see [`tools`](#tools-1) under
+Gateway, below); an entry that names no such resource is rejected with
+`unknown-tool` ("agent references tool ..., which is not a declared gateway
+tool resource"). Config load is fail-closed on a malformed grant: an
+unknown key inside the object, an empty `tools` list, or an empty
+`resource` is rejected with `bad-tool-grant`, so a misspelled key can never
+silently widen a grant into the bare form. The agent reaches its declared
 tools only through Agenthof's inbound MCP proxy for the duration of its
 step — see [`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs)
 for the runtime flow; this reference only covers what `apply` checks.
