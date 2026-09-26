@@ -930,6 +930,42 @@ func TestProxyStartRejectsRestrictedDuplicateGrant(t *testing.T) {
 	}
 }
 
+// TestProxyStartAcceptsDuplicateBareGrant: two BARE grants of one resource
+// stay legal — a bare grant is the every-tool spelling, so restating it is
+// not a semantic conflict. Only a restricted grant among duplicates changes
+// the grant's meaning; that shape is rejected by
+// TestProxyStartRejectsRestrictedDuplicateGrant. Article VI: an additive
+// schema (the `{resource, tools}` object form) must not tighten a
+// previously-legal spelling of the same intent.
+func TestProxyStartAcceptsDuplicateBareGrant(t *testing.T) {
+	const upstreamToken = "up-tok"
+	ts, _ := newStubUpstream(t, upstreamToken)
+	t.Setenv("UP_TOKEN", upstreamToken)
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{})
+
+	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
+		Tools: []config.ToolGrant{{Resource: "up"}, {Resource: "up"}}}
+	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err != nil {
+		t.Fatalf("Start with two bare grants of one resource: %v", err)
+	}
+	defer p.Stop()
+
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo"}) {
+		t.Fatalf("mirrored tools = %v, want [echo] (the resource's one tool)", got)
+	}
+
+	_ = sess.Close()
+	p.Stop() // Stop must be safe to call more than once.
+}
+
 // TestProxyForwardDeniesToolOffAllowlist exercises forward's per-tool
 // defense-in-depth gate directly: a resource that IS granted, for a tool
 // name the grant does not list, is denied at call time with a refused event.
