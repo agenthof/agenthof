@@ -628,7 +628,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		// falls back to http.DefaultClient, which has no timeout).
 		ClientCredentials: broker.NewClientCredentials(&http.Client{Timeout: 30 * time.Second}),
 	}
-	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b) }
+	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger) }
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway})
 	if err != nil && status == "refused" {

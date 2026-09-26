@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -32,6 +33,7 @@ import (
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/gateway"
+	"github.com/agenthof/agenthof/internal/obs"
 )
 
 // connectTimeout bounds an upstream connect/list-tools call at Start time so a
@@ -49,6 +51,13 @@ type Gateway struct {
 	broker  broker.Broker
 	gwcfg   config.GatewayConfig
 	keyRoot string
+
+	// logger is the operational logger New was given (never nil — New
+	// applies obs.OrDiscard). stepLogger is logger scoped to the current
+	// step's run id and agent: Start sets it under mu so Stop, which has no
+	// binding of its own, logs with the same identifiers.
+	logger     *slog.Logger
+	stepLogger *slog.Logger
 
 	mu       sync.Mutex
 	srv      *http.Server
@@ -69,8 +78,11 @@ type Gateway struct {
 // New builds a Gateway over the gateway config. Tool resources come from
 // gw.Tools. keyRoot is the working directory gateway provision writes role
 // keys under (".", the same root as EnsureRoleKey), not the --config directory.
-func New(gw config.GatewayConfig, keyRoot string, b broker.Broker) *Gateway {
-	return &Gateway{tools: gw.Tools, broker: b, gwcfg: gw, keyRoot: keyRoot}
+// logger receives operational diagnostics (never ledger events); nil means
+// discard.
+func New(gw config.GatewayConfig, keyRoot string, b broker.Broker, logger *slog.Logger) *Gateway {
+	l := obs.OrDiscard(logger)
+	return &Gateway{tools: gw.Tools, broker: b, gwcfg: gw, keyRoot: keyRoot, logger: l, stepLogger: l}
 }
 
 // allowedTools is what Start derives from the agent's tool grants: resource
@@ -105,6 +117,8 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 		return "", "", fmt.Errorf("mint run token: %w", err)
 	}
 
+	logger := p.logger.With("run", bind.RunID, "agent", agent.Name)
+
 	// Build the per-resource allowlist. Registry validation already rejects
 	// a resource granted twice when either grant is restricted, but Start is
 	// reachable without the registry, so it fails closed on that shape too
@@ -113,6 +127,7 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 	for _, grant := range agent.Tools {
 		prev, seen := allow[grant.Resource]
 		if seen && (grant.Restricted() || prev != nil) {
+			logger.Error("gateway start refused", "reason", "resource granted more than once with a restricted grant", "resource", grant.Resource)
 			return "", "", fmt.Errorf("resource %q is granted more than once and at least one grant restricts tools", grant.Resource)
 		}
 		if !grant.Restricted() {
@@ -158,6 +173,7 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 
 		sess, err := p.connectUpstream(id, res)
 		if err != nil {
+			logger.Error("upstream connect failed", "resource", id, "class", errClass(err))
 			closeSessions()
 			return "", "", fmt.Errorf("connect upstream %q: %w", id, err)
 		}
@@ -167,6 +183,7 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 		list, err := sess.ListTools(listCtx, nil)
 		cancel()
 		if err != nil {
+			logger.Error("upstream list tools failed", "resource", id, "class", errClass(err))
 			closeSessions()
 			return "", "", fmt.Errorf("list tools for %q: %w", id, err)
 		}
@@ -178,14 +195,17 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 		for _, tool := range list.Tools {
 			exposed[tool.Name] = true
 			if !allow.allows(id, tool.Name) {
+				logger.Debug("tool left out by grant", "resource", id, "tool", tool.Name)
 				continue
 			}
 			if owner, dup := mirroredBy[tool.Name]; dup {
+				logger.Error("gateway start refused", "reason", "tool exposed by two resources", "tool", tool.Name, "resource", id, "other", owner)
 				closeSessions()
 				return "", "", fmt.Errorf("tool %q is exposed by both resource %q and %q", tool.Name, owner, id)
 			}
 			mirroredBy[tool.Name] = id
-			inbound.AddTool(tool, p.forward(bind, agent, id, allow, sess, appendEvent))
+			logger.Debug("tool mirrored", "resource", id, "tool", tool.Name)
+			inbound.AddTool(tool, p.forward(bind, agent, id, allow, sess, appendEvent, logger))
 		}
 		// An allowlisted name the upstream does not expose (a typo, or a
 		// tool the upstream since removed) fails the step loudly: a fronted
@@ -195,19 +215,20 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 		// deterministic.
 		for _, name := range grant.Tools {
 			if !exposed[name] {
+				logger.Error("gateway start refused", "reason", "allowlisted tool not exposed by upstream", "resource", id, "tool", name)
 				closeSessions()
 				return "", "", fmt.Errorf("resource %q does not expose allowlisted tool %q", id, name)
 			}
 		}
 	}
 
-	inbound.AddReceivingMiddleware(p.refusedTraceMiddleware(mirroredBy, bind, agent, appendEvent))
+	inbound.AddReceivingMiddleware(p.refusedTraceMiddleware(mirroredBy, bind, agent, appendEvent, logger))
 
 	mux := http.NewServeMux()
 	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil))
 	mux.HandleFunc("/exec/authorize", p.execAuthorizeHandler(bind, agent, appendEvent))
 	mux.HandleFunc("/exec/attest", p.execAttestHandler(bind, agent, appendEvent))
-	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent))
+	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
 	handler := authMiddleware(mux, token)
 
 	var ln net.Listener
@@ -221,6 +242,7 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 		}
 	}
 	if err != nil {
+		logger.Error("gateway listen failed", "class", errClass(err))
 		closeSessions()
 		return "", "", fmt.Errorf("listen: %w", err)
 	}
@@ -232,12 +254,14 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 	p.sessions = sessions
 	p.closing = false
 	p.sockPath = ""
+	p.stepLogger = logger
 	if path, ok := strings.CutPrefix(proxyURL, config.UnixScheme); ok {
 		p.sockPath = path
 	}
 	p.mu.Unlock()
 
 	go func() { _ = srv.Serve(ln) }()
+	logger.Info("gateway listener started", "network", ln.Addr().Network())
 
 	return proxyURL, token, nil
 }
@@ -326,6 +350,7 @@ func (p *Gateway) Stop() {
 	srv := p.srv
 	sessions := p.sessions
 	sockPath := p.sockPath
+	logger := p.stepLogger
 	p.srv = nil
 	p.sessions = nil
 	p.sockPath = ""
@@ -342,6 +367,9 @@ func (p *Gateway) Stop() {
 	for _, s := range sessions {
 		_ = s.Close()
 	}
+	if srv != nil {
+		logger.Info("gateway listener stopped")
+	}
 }
 
 // forward returns the ToolHandler mirrored onto the inbound server for one
@@ -351,7 +379,7 @@ func (p *Gateway) Stop() {
 // the arguments passed through raw (never touching the run token), and
 // appends a tool_call event recording only a result hash + short preview —
 // never the call body or any credential.
-func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow allowedTools, upstream *mcp.ClientSession, appendEvent func(engine.Event)) mcp.ToolHandler {
+func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow allowedTools, upstream *mcp.ClientSession, appendEvent func(engine.Event), logger *slog.Logger) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		p.mu.Lock()
 		if p.closing {
@@ -371,6 +399,7 @@ func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID
 		// as a per-tool second gate independent of the mirroring logic.
 		if !allow.allows(resourceID, req.Params.Name) {
 			denyReason := fmt.Sprintf("tool %q on resource %q is not allowlisted for this run", req.Params.Name, resourceID)
+			logger.Warn("tool call refused", "resource", resourceID, "tool", req.Params.Name)
 			appendEvent(engine.Event{
 				Type:             "tool_call",
 				Agent:            agent.Name,
@@ -388,6 +417,7 @@ func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID
 			}, nil
 		}
 
+		logger.Debug("tool call routed", "resource", resourceID, "tool", req.Params.Name)
 		result, callErr := upstream.CallTool(ctx, &mcp.CallToolParams{
 			Name:      req.Params.Name,
 			Arguments: req.Params.Arguments, // raw passthrough — never the run token
@@ -398,9 +428,12 @@ func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID
 		if callErr != nil {
 			status = "failed"
 			reason = callErr.Error()
+			// Class only: callErr can wrap a *url.Error carrying the upstream URL.
+			logger.Warn("tool call failed", "resource", resourceID, "tool", req.Params.Name, "class", errClass(callErr))
 		} else if result != nil && result.IsError {
 			status = "failed"
 			reason = resultErrorText(result)
+			logger.Warn("tool call reported error", "resource", resourceID, "tool", req.Params.Name)
 		}
 		sha, preview := hashResult(result, callErr)
 
@@ -548,7 +581,7 @@ const mcpMethodToolsCall = "tools/call"
 // share forward's closing/inflight bookkeeping: without that, an in-flight
 // appendEvent here could run after Stop() returns and race the run's
 // log.Close(), violating Stop()'s documented invariant.
-func (p *Gateway) refusedTraceMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) mcp.Middleware {
+func (p *Gateway) refusedTraceMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method == mcpMethodToolsCall {
@@ -564,6 +597,7 @@ func (p *Gateway) refusedTraceMiddleware(mirrored map[string]string, bind engine
 						} else {
 							p.inflight.Add(1)
 							p.mu.Unlock()
+							logger.Warn("tool call refused", "tool", params.Name, "reason", "tool is not available to this run")
 							appendEvent(engine.Event{
 								Type:    "tool_call",
 								Agent:   agent.Name,
@@ -624,7 +658,7 @@ func resultErrorText(result *mcp.CallToolResult) string {
 // agent authenticates with the run token; the proxy authorizes the logical
 // model, injects the per-role provider key, and never forwards the run token
 // or any X-Agenthof-* header.
-func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
+func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -660,6 +694,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 			// resultErrorText) so an oversized "model" value can't bloat the
 			// event.
 			echoed := capRunes(logical, 200)
+			logger.Warn("model call refused", "model", echoed)
 			p.guardedAppend(appendEvent, engine.Event{
 				Type: "model_call", Agent: agent.Name, Status: "refused",
 				Reason: fmt.Sprintf("model %q is not allowed for this agent", echoed),
@@ -675,6 +710,9 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 		roleKey := gateway.LoadRoleKey(p.keyRoot, bind.Role)
 		route, err := gateway.Resolve(p.gwcfg, logical, roleKey)
 		if err != nil {
+			// Resolve's error names an env VARIABLE, never a value, but the
+			// message stays fixed anyway: one rule for the whole door.
+			logger.Error("model route not resolved", "model", logical)
 			p.guardedAppend(appendEvent, engine.Event{
 				Type: "model_call", Agent: agent.Name, Status: "failed",
 				Reason: "model route not resolved", Model: logical, Binding: bind,
@@ -760,6 +798,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 					if resp.StatusCode == http.StatusTooManyRequests {
 						reason = "budget"
 					}
+					logger.Warn("model upstream returned error status", "model", logical, "status", resp.StatusCode)
 					record(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "refused",
 						Reason: reason, Model: logical, Binding: bind,
@@ -783,6 +822,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 					return err
 				}
 				if len(rb) > maxResp {
+					logger.Error("model upstream response too large", "model", logical)
 					record(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "failed",
 						Reason: "upstream response too large", Model: logical, Binding: bind,
@@ -793,13 +833,14 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				resp.ContentLength = int64(len(rb))
 				resp.Header.Set("Content-Length", strconv.Itoa(len(rb)))
 				pt, ct := parseUsage(rb)
+				logger.Debug("model call routed", "model", logical)
 				record(engine.Event{
 					Type: "model_call", Agent: agent.Name, Status: "succeeded",
 					Model: logical, PromptTokens: pt, CompletionTokens: ct, Binding: bind,
 				})
 				return nil
 			},
-			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 				// ReverseProxy calls ErrorHandler in exactly two cases: (a) a
 				// Transport.RoundTrip failure (connection refused, DNS,
 				// timeout — ModifyResponse never ran, nothing recorded yet),
@@ -817,7 +858,12 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				// appended its own. The error itself is never echoed — it
 				// can carry the upstream URL or a wrapped secret — a fixed
 				// reason is enough.
+				// The operational log follows the same dedupe: case (b) already
+				// logged its own Error from ModifyResponse. It gets a fixed
+				// message plus an error class — never err.Error(), for the same
+				// reason the ledger reason is fixed.
 				if !recorded {
+					logger.Error("model call did not complete", "model", logical, "class", errClass(err))
 					p.guardedAppend(appendEvent, engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "failed",
 						Reason: "model call did not complete", Model: logical, Binding: bind,

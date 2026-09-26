@@ -70,7 +70,7 @@ func TestListenGatewayRemovesStaleSocket(t *testing.T) {
 
 func TestStartUnixSocketServesAuthedRequests(t *testing.T) {
 	dir := shortSockDir(t)
-	gw := New(config.GatewayConfig{RefboxSocketDir: dir}, ".", broker.StaticEnv{})
+	gw := New(config.GatewayConfig{RefboxSocketDir: dir}, ".", broker.StaticEnv{}, nil)
 	url, token, err := gw.Start(engine.Binding{RunID: "r-udstest"}, config.AgentDef{Name: "a"}, func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -115,7 +115,7 @@ func TestStartUnixSocketServesAuthedRequests(t *testing.T) {
 }
 
 func TestStartTCPDefaultUnchanged(t *testing.T) {
-	gw := New(config.GatewayConfig{}, ".", broker.StaticEnv{})
+	gw := New(config.GatewayConfig{}, ".", broker.StaticEnv{}, nil)
 	url, _, err := gw.Start(engine.Binding{RunID: "r-tcp"}, config.AgentDef{Name: "a"}, func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -128,7 +128,7 @@ func TestStartTCPDefaultUnchanged(t *testing.T) {
 
 func TestStopRemovesSocketFile(t *testing.T) {
 	dir := shortSockDir(t)
-	gw := New(config.GatewayConfig{RefboxSocketDir: dir}, ".", broker.StaticEnv{})
+	gw := New(config.GatewayConfig{RefboxSocketDir: dir}, ".", broker.StaticEnv{}, nil)
 	url, _, err := gw.Start(engine.Binding{RunID: "r-cleanup"}, config.AgentDef{Name: "a"}, func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
