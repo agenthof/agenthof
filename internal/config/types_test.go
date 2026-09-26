@@ -1,6 +1,8 @@
 package config
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -20,6 +22,13 @@ output: plan
 		t.Fatal(err)
 	}
 	if a.Name != "planner" || a.Model != "fast" || len(a.Tools) != 2 || a.Output != "plan" {
+		t.Fatalf("parsed: %+v", a)
+	}
+	// A bare `tools: [id, id]` list keeps its meaning: each entry is a
+	// resource id granting every tool that resource exposes. (ToolGrant
+	// holds a slice, so it is not ==-comparable; compare the fields.)
+	if a.Tools[0].Resource != "read_file" || a.Tools[0].Restricted() ||
+		a.Tools[1].Resource != "search_files" || a.Tools[1].Restricted() {
 		t.Fatalf("parsed: %+v", a)
 	}
 	if !a.IsEnabled() {
@@ -154,5 +163,98 @@ func TestExecConfigDeclared(t *testing.T) {
 	}
 	if !(ExecConfig{Mode: "attested", Allow: []ExecEntry{{Exe: "go"}}}).Declared() {
 		t.Error("populated ExecConfig should be declared")
+	}
+}
+
+func TestToolGrantScalarGrantsEveryTool(t *testing.T) {
+	var got []ToolGrant
+	if err := yaml.Unmarshal([]byte("[code-search, github]\n"), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []ToolGrant{{Resource: "code-search"}, {Resource: "github"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parsed %+v, want %+v", got, want)
+	}
+	if got[0].Restricted() {
+		t.Fatal("a bare grant must not be Restricted()")
+	}
+}
+
+func TestToolGrantMappingRestrictsToNamedTools(t *testing.T) {
+	src := `
+- code-search
+- resource: github
+  tools: [list_issues, get_issue]
+`
+	var got []ToolGrant
+	if err := yaml.Unmarshal([]byte(src), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []ToolGrant{
+		{Resource: "code-search"},
+		{Resource: "github", Tools: []string{"list_issues", "get_issue"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parsed %+v, want %+v", got, want)
+	}
+	if got[0].Restricted() || !got[1].Restricted() {
+		t.Fatalf("Restricted(): bare=%v restricted=%v", got[0].Restricted(), got[1].Restricted())
+	}
+}
+
+// TestToolGrantFailsClosed: least privilege must never widen on a typo. Every
+// malformed object grant is a load error carrying the bad-tool-grant code,
+// never a silently-all-tools grant.
+func TestToolGrantFailsClosed(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string // substring of the error after the bad-tool-grant code
+	}{
+		{"singular tool: typo is an unknown key", "- resource: github\n  tool: [list_issues]\n", `unknown key "tool"`},
+		{"future mode: typo is an unknown key", "- resource: github\n  tools: [x]\n  mod: read\n", `unknown key "mod"`},
+		{"object with tools absent", "- resource: github\n", "at least one tool"},
+		{"object with tools null", "- resource: github\n  tools: null\n", "at least one tool"},
+		{"object with tools empty", "- resource: github\n  tools: []\n", "at least one tool"},
+		{"object with empty resource", "- resource: \"\"\n  tools: [x]\n", "empty resource"},
+		{"object with resource absent", "- tools: [x]\n", "empty resource"},
+		{"empty scalar", "- \"\"\n", "empty resource"},
+		{"sequence is neither form", "- [github]\n", "resource id string or a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []ToolGrant
+			err := yaml.Unmarshal([]byte(tc.src), &got)
+			if err == nil {
+				t.Fatalf("expected an error, parsed %+v", got)
+			}
+			if !strings.Contains(err.Error(), "bad-tool-grant: line ") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want bad-tool-grant with %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestToolGrantNullElementIsDropped pins a yaml.v3 behavior the guards above
+// rely on: a null sequence element whose target is a struct never reaches
+// UnmarshalYAML (prepare() returns early on the null tag) and sequence()
+// drops it. So `tools: [~]` grants nothing — it does not widen, and it does
+// not produce a zero ToolGrant either.
+func TestToolGrantNullElementIsDropped(t *testing.T) {
+	var got []ToolGrant
+	if err := yaml.Unmarshal([]byte("[~]\n"), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("a null element must be dropped, got %+v", got)
+	}
+}
+
+func TestToolGrantErrorNamesTheLine(t *testing.T) {
+	src := "- code-search\n- resource: github\n  tool: [x]\n"
+	var got []ToolGrant
+	err := yaml.Unmarshal([]byte(src), &got)
+	if err == nil || !strings.Contains(err.Error(), "line 3") {
+		t.Fatalf("error should name the offending key's line (3): %v", err)
 	}
 }

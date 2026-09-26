@@ -47,11 +47,12 @@ func TestScript(t *testing.T) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":11,"completion_tokens":5}}`))
 	}))
 	t.Cleanup(modelSrv.Close)
-	// Mock MCP upstream: exposes a single `echo(text)->text` tool that proves
-	// Agenthof injected the resource credential on the upstream leg. The
-	// check lives INSIDE the tool function (via req.Extra.Header) rather
-	// than around initialize/ListTools, so mirroring succeeds and the
-	// credential enforcement is scoped to the actual tool call.
+	// Mock MCP upstream: exposes `echo(text)->text`, which proves Agenthof
+	// injected the resource credential on the upstream leg, and a second
+	// tool, `other`, so a restricted grant has something to leave out. The
+	// credential check lives INSIDE echo (via req.Extra.Header) rather than
+	// around initialize/ListTools, so mirroring succeeds and the credential
+	// enforcement is scoped to the actual tool call.
 	type echoArgs struct {
 		Text string `json:"text"`
 	}
@@ -67,6 +68,10 @@ func TestScript(t *testing.T) {
 				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "unauthorized"}}}, nil, nil
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: args.Text}}}, nil, nil
+		})
+	mcp.AddTool(mcpServer, &mcp.Tool{Name: "other", Description: "a second tool a restricted grant can leave out"},
+		func(ctx context.Context, req *mcp.CallToolRequest, args echoArgs) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "other: " + args.Text}}}, nil, nil
 		})
 	mcpSrv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil))
 	t.Cleanup(mcpSrv.Close)
