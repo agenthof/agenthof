@@ -53,9 +53,10 @@ The governed core is real and runnable today:
   answerable; `audit control`, `audit verify control`, and `audit repair
   control` read, verify, and recover it.
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
-  reach declared MCP tool resources only through Agenthof, which authorizes
-  each call against a per-agent allowlist, injects the resource credential
-  (a static bearer or an OAuth `client_credentials`-minted token) the agent
+  reach declared MCP tool resources only through Agenthof, which mirrors a
+  whole resource or only the tools an agent's grant names, authorizes each
+  call against that per-agent allowlist, injects the resource credential (a
+  static bearer or an OAuth `client_credentials`-minted token) the agent
   never sees, and records every call — and every denied attempt.
 - **Exec gateway, attested** — allowlisted commands: a fronted agent runs an
   allowlisted command in its own operator sandbox and reports it; Agenthof
@@ -75,8 +76,9 @@ The governed core is real and runnable today:
 
 - **Governed skills & capabilities** — named capability bundles an agent may
   load, enabled or disabled per agent, workflow, or role.
-- **Finer-grained privileges** — read-only vs mutating execution, and per-agent
-  scoping of what an agent may touch.
+- **Finer-grained privileges** — read-only vs mutating execution, and
+  per-agent scoping of what an agent may touch beyond today's per-tool
+  grants.
 
 ## Exploring
 

@@ -59,8 +59,9 @@ as building every mode of it now:
    token counts. The prompt and the completion are not written to the
    ledger. See [`lifecycle-model.md`](lifecycle-model.md).
 2. **Tool/MCP gateway** — the inbound MCP proxy an agent's declared tools
-   (`tools:` entries naming `gateway.yaml` tool resources) are reached
-   through (see [`lifecycle.md`](lifecycle.md#how-an-agent-actually-runs)).
+   (`tools:` entries naming `gateway.yaml` tool resources — a whole resource,
+   or only named tools within it) are reached through (see
+   [`lifecycle.md`](lifecycle.md#how-an-agent-actually-runs)).
    The broker behind it gets that credential one of two ways: a static
    bearer token read straight from an environment variable, or, for an
    OAuth-protected resource, a separate upstream token it mints itself via
@@ -103,10 +104,12 @@ credential-starvation and no-egress hold by construction on the operator's
 host. That sandbox's network and exec confinement is required, and Agenthof
 does not verify that the operator runs the agent inside it.
 
-An agent may declare `tools`, each naming a `gateway.yaml` tool resource;
-for the duration of its step it reaches those tools only through Agenthof's
-inbound MCP proxy, which authorizes each call against that allowlist and
-injects the resource's credential, so the agent itself never holds one (see
+An agent may declare `tools`, each naming a `gateway.yaml` tool resource —
+every tool that resource exposes, or only the tools the entry names; for
+the duration of its step it reaches those tools only through Agenthof's
+inbound MCP proxy, which mirrors just the granted tools, authorizes each
+call against that allowlist, and injects the resource's credential, so the
+agent itself never holds one (see
 [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs) for the full
 flow). It may also declare `exec`, an allowlist of commands it may run in
 the operator's sandbox; that door lives on the same per-run listener, and

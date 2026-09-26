@@ -31,7 +31,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Enabled | `enabled` | bool | no | `true` |
 | Model | `model` | string | no | — |
 | Instruction | `instruction` | string | no | — |
-| Tools | `tools` | list of tool grants (a resource id, or a `{resource, tools}` object) | no | none |
+| Tools | `tools` | list of strings or objects | no | none |
 | Output | `output` | string | no | — |
 | Execution | `execution` | string | no | `fronted` |
 | Endpoint | `endpoint` | string | yes | — |
@@ -67,20 +67,34 @@ Optional free text. Not checked by `apply`.
 
 ### `tools`
 
-Optional list of tool grants. Each entry is either a bare string — a
-tool-resource id — or an object of the form `{resource, tools}`, where
-`resource` is a tool-resource id and `tools` is a non-empty list of tool
-names on that resource. Every entry's resource id must name a tool resource
-declared under `gateway.yaml`'s `tools` map (see [`tools`](#tools-1) under
-Gateway, below); an entry that names no such resource is rejected with
-`unknown-tool` ("agent references tool ..., which is not a declared gateway
-tool resource"). Config load is fail-closed on a malformed grant: an
-unknown key inside the object, an empty `tools` list, or an empty
-`resource` is rejected with `bad-tool-grant`, so a misspelled key can never
-silently widen a grant into the bare form. The agent reaches its declared
-tools only through Agenthof's inbound MCP proxy for the duration of its
-step — see [`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs)
-for the runtime flow; this reference only covers what `apply` checks.
+Optional list of tool grants. Each entry is either the id of a tool
+resource declared under `gateway.yaml`'s `tools` map (see
+[`tools`](#tools-1) under Gateway, below), which grants every tool that
+resource exposes, or an object with two keys:
+
+| Field | YAML key | Type | Required | Default |
+|---|---|---|---|---|
+| Resource | `resource` | string | yes | — |
+| Tools | `tools` | list of strings | yes, non-empty | — |
+
+which grants only the named tools of that resource. The bare string is the
+only way to grant every tool: an object whose `tools` is missing, `null`, or
+empty is rejected when the file is loaded, as is an object with any key
+other than `resource` and `tools`, or with an empty `resource` — all with
+`bad-tool-grant` — so a misspelled key can never widen a grant.
+
+`apply` rejects an entry whose resource is not declared in `gateway.yaml`
+with `unknown-tool` ("agent references tool ..., which is not a declared
+gateway tool resource"), an empty tool name with `bad-tool-grant`, and a
+resource that appears in more than one entry when any of those entries is
+the object form — also `bad-tool-grant` ("resource ... is granted more than
+once and at least one of those grants restricts tools; merge them into one
+grant"). A resource repeated only as bare ids is accepted, as before. `apply`
+does not check tool names against the resource itself; a name the resource
+does not expose fails the step at run time instead. The agent reaches its
+granted tools only through Agenthof's inbound MCP proxy for the duration of
+its step — see [`lifecycle-tool.md`](../lifecycle-tool.md) for the runtime
+flow; this reference only covers what `apply` checks.
 
 ### `output`
 
@@ -188,17 +202,20 @@ execution: fronted
 endpoint: http://127.0.0.1:8080/
 ```
 
-**Example (illustrative, with a declared tool):**
+**Example (illustrative, with declared tools):**
 
 ```yaml
 name: legacy-triage
 description: Fronts an existing HTTP agent behind the registry
 execution: fronted
 endpoint: https://legacy.internal/agents/triage
-tools: [ticket-search]
-# `model` is not checked. `tools` entries must each name a resource under
-# gateway.yaml's `tools` map (see `ticket-search` in the Gateway example
-# below), or apply rejects the agent with unknown-tool.
+tools:
+  - ticket-search                        # every tool ticket-search exposes
+  - resource: billing-mcp
+    tools: [get_invoice, list_invoices]  # only these two of billing-mcp
+# `model` is not checked. Each entry must name a resource under
+# gateway.yaml's `tools` map (see `ticket-search` and `billing-mcp` in the
+# Gateway examples below), or apply rejects the agent with unknown-tool.
 ```
 
 ## Workflows (`config/workflows/*.yaml` → `WorkflowDef` / `Step`)
@@ -423,7 +440,8 @@ directory `gateway provision` writes — and otherwise the value of
 ### `tools`
 
 A map from a tool-resource id to a `ToolResource` (fields above). An agent's
-`tools` list (see [`tools`](#tools) under Agents) names ids from this map;
+`tools` list (see [`tools`](#tools) under Agents) names ids from this map,
+bare or inside a `{resource, tools}` object;
 `apply` rejects an agent entry that doesn't resolve here with `unknown-tool`,
 and validates every declared resource itself against the `ToolResource` rules
 above (`bad-tool-resource`). At runtime, a step whose agent declares tools

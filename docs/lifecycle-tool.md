@@ -5,14 +5,17 @@ ledger line that records it. This is the tool door. For the run it happens
 inside, see [`lifecycle.md`](lifecycle.md). For the YAML, see
 [`reference/config.md`](reference/config.md#tools-1). For the executable proof —
 a real upstream MCP server, the injected credential, and the rendered
-`tool_call` audit line — see the testscript
-[`cmd/agenthof/testdata/script/door_tool.txtar`](../cmd/agenthof/testdata/script/door_tool.txtar).
+`tool_call` audit line — see the testscripts
+[`cmd/agenthof/testdata/script/door_tool.txtar`](../cmd/agenthof/testdata/script/door_tool.txtar)
+(a bare grant) and
+[`cmd/agenthof/testdata/script/door_tool_allowlist.txtar`](../cmd/agenthof/testdata/script/door_tool_allowlist.txtar)
+(a grant restricted to named tools, with the left-out tool refused).
 
 ```
   agent                         Agenthof                     MCP resource
     |                               |  step starts:              |
     |                               |  connect, list tools ----> |
-    |                               |  mirror them inbound       |
+    |                               |  mirror the granted ones   |
     |  tools/list                   |                            |
     |  Authorization: Bearer        |                            |
     |    <run token>                |                            |
@@ -38,22 +41,33 @@ serves an inbound MCP server at the proxy URL's root path, alongside the exec
 routes and the model route.
 
 What an agent's `tools:` list changes is **which tools are mirrored onto that
-server**. Each entry names a tool resource from `gateway.yaml`; an entry that
-names no such resource is rejected at `apply`. An agent that declares no
-tools still gets the MCP server — with an empty tool list, and any
-`tools/call` it sends recorded `refused`, reason
-`tool is not available to this run`.
+server**. Each entry names a tool resource from `gateway.yaml`, in one of two
+forms: the bare id (`- github`) grants every tool that resource advertises;
+an object (`- resource: github` with `tools: [list_issues, get_issue]`)
+grants only the named tools of that resource. An entry that names no such
+resource is rejected at `apply`. An agent that declares no tools still gets
+the MCP server — with an empty tool list, and any `tools/call` it sends
+recorded `refused`, reason `tool is not available to this run`.
 
 Before the step is handed to the agent, Agenthof connects out to each named
 resource as an MCP client, asks it for its tools, and mirrors them onto the
-inbound server. Resources are visited in the order the agent declared them,
-and each id is visited once. Connecting and listing are bounded at 30
+inbound server — all of them for a bare entry, only the named ones for an
+object entry; a tool the entry leaves out is treated as if the resource had
+never advertised it. Resources are visited in the order the agent declared
+them, and each id is visited once. Connecting and listing are bounded at 30
 seconds each.
 
 If any of that fails — the resource is unreachable, it will not list its
-tools, or two declared resources advertise a tool of the same name — the step
-fails outright, with `step_failed` and a reason beginning `tool proxy:`, and
-the workflow finishes failed. It does not bounce back to a prior step.
+tools, two declared resources advertise a mirrored tool of the same name, or
+an object entry names a tool its resource does not advertise (a typo, or a
+tool the resource has since dropped) — the step fails outright, with
+`step_failed` and a reason beginning `tool proxy:`, and the workflow finishes
+failed. It does not bounce back to a prior step. Naming a tool that is not
+there fails loudly on purpose: a mirrored-nothing grant would leave the
+operator with only a refused `tool_call` to debug, indistinguishable from an
+off-allowlist attempt. Because a left-out tool is never mirrored, a name
+clash between two resources is only a clash when both sides are actually
+granted — restricting one side is a way to resolve it.
 
 When the step ends, Agenthof shuts the listener down and closes every
 upstream connection. The run token stops working. It is never written to the
@@ -61,10 +75,11 @@ ledger and never placed on the delegation binding.
 
 ## What the agent can see
 
-Naming a resource grants **every tool that resource advertises**. Agenthof
-mirrors the upstream's own tool list as it comes back, names and schemas
-unchanged. It does not filter within a resource, and it does not invent
-tools of its own.
+A bare entry grants **every tool that resource advertises**; an object entry
+grants **only the tools it names**. Either way Agenthof mirrors the
+upstream's own tool definitions as they come back, names and schemas
+unchanged. It does not invent tools of its own, and it does not rewrite the
+ones it mirrors.
 
 The agent connects to the inbound server holding **only the run token**.
 Every request must carry `Authorization: Bearer <run token>`; a missing or
@@ -81,9 +96,10 @@ operator's sandbox's business, not something this door can promise. See
 The agent sends `tools/call` with a tool name and arguments.
 
 - **A name that was never mirrored** — a tool no declared resource
-  advertises, or one belonging to a resource this agent did not declare — is
-  not forwarded. The ledger records a `tool_call` with status `refused` and
-  reason `tool is not available to this run`.
+  advertises, one belonging to a resource this agent did not declare, or one
+  an object entry left out — is not forwarded. The ledger records a
+  `tool_call` with status `refused` and reason `tool is not available to
+  this run`.
 - **A mirrored name** is forwarded to the resource it came from. The
   arguments are passed through untouched.
 
@@ -162,8 +178,8 @@ not prove is the same limit as every other event; see
 
 | Shipped today | Reserved for later |
 | --- | --- |
-| naming a resource grants every tool it advertises | per-tool selection inside a resource — an allowlist of which of its tools the agent may see |
+| a bare entry grants every tool a resource advertises; an object entry restricts the grant to named tools within it | read-only versus mutating scope — a grant does not today distinguish a tool that reads from one that writes |
 | an HTTP (streamable) MCP transport | a stdio transport, where the MCP server would be a local subprocess |
-| `static_env` and `client_credentials` credentials, injected outbound | read-only versus mutating scope — a grant does not today distinguish a tool that reads from one that writes |
+| `static_env` and `client_credentials` credentials, injected outbound | |
 
 Only shipped behavior is a guarantee.
