@@ -32,6 +32,12 @@ These are binding, not aspirational:
   what it does — for example, the ledger is append-only and tamper-evident, not
   tamper-proof, and its limits are documented rather than glossed over. No
   document may overstate a guarantee.
+- **Built on established standards.** The design aligns with recognized security
+  and AI-governance standards — NIST (SP 800-207, 800-53, AI RMF), OWASP, OAuth /
+  OpenID Connect, the MCP authorization spec, and the EU AI Act. The full mapping,
+  including where Agenthof deliberately diverges, is public in
+  [`docs/standards.md`](docs/standards.md). This is honest alignment you can verify
+  from the design and the constitution — not third-party certification.
 - **Provenance of contributions.** Contributions are made under the Developer
   Certificate of Origin (see [CONTRIBUTING.md](CONTRIBUTING.md)); every commit
   is signed off.

@@ -123,6 +123,27 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   GOVERNANCE, INVESTIGATE).
 - [`docs/constitution.md`](docs/constitution.md) — the binding invariants
   every change must honor.
+- [`docs/standards.md`](docs/standards.md) — the security & AI-governance
+  standards and prior art Agenthof aligns with, mapped to the design.
+
+## Standards & prior art
+
+Agenthof's guarantees build on established security and governance standards, not
+novel claims. The design aligns with — honestly, *alignment* not certification:
+
+- **Least privilege & zero trust** — Saltzer & Schroeder; NIST SP 800-207.
+- **Access control & audit** — NIST SP 800-53 (AC/AU families); NIST RBAC.
+- **Identity** — OpenID Connect + OAuth 2.0 client-credentials.
+- **Tamper-evident audit** — Schneier–Kelsey and Crosby–Wallach; Certificate
+  Transparency (RFC 9162) for the reserved external-anchoring tier.
+- **Tool / MCP security** — the MCP Authorization spec's no-token-passthrough
+  mandate.
+- **AI governance & agent threats** — OWASP Top 10 for Agentic Applications,
+  NIST AI RMF, MITRE ATLAS, the EU AI Act.
+
+The full mapping — each standard to the Agenthof guarantee it supports, with
+links, and where the design *deliberately diverges* — is in
+[`docs/standards.md`](docs/standards.md).
 
 ## License
 
