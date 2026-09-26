@@ -54,11 +54,40 @@ func Validate(cfg config.Config) []ValidationError {
 		}
 
 		// Tools are gateway tool-resource grants. Each must name a declared
-		// gateway.tools resource.
+		// gateway.tools resource; a restricted grant lists non-empty tool
+		// names. A resource may be granted more than once only as bare
+		// grants (Start dedups those) — a duplicate involving a restricted
+		// grant is ambiguous and rejected. Tool NAMES cannot be checked
+		// against the upstream here (no network at apply); Start fails the
+		// step when an allowlisted name is not exposed. A Go-built grant
+		// with Tools == []string{} counts as bare: YAML cannot produce that
+		// shape (the object form rejects an empty tools list at load).
+		grantedBare := map[string]bool{}
+		grantedRestricted := map[string]bool{}
 		for _, grant := range a.Tools {
+			if grant.Resource == "" {
+				add(a.SourceFile, a.Name, "bad-tool-grant", "tool grant has an empty resource id")
+				continue
+			}
 			if _, ok := cfg.Gateway.Tools[grant.Resource]; !ok {
 				add(a.SourceFile, a.Name, "unknown-tool",
 					fmt.Sprintf("agent references tool %q, which is not a declared gateway tool resource", grant.Resource))
+			}
+			for _, name := range grant.Tools {
+				if name == "" {
+					add(a.SourceFile, a.Name, "bad-tool-grant",
+						fmt.Sprintf("tool grant for resource %q lists an empty tool name", grant.Resource))
+				}
+			}
+			seen := grantedBare[grant.Resource] || grantedRestricted[grant.Resource]
+			if seen && (grant.Restricted() || grantedRestricted[grant.Resource]) {
+				add(a.SourceFile, a.Name, "bad-tool-grant",
+					fmt.Sprintf("resource %q is granted more than once and at least one of those grants restricts tools; merge them into one grant", grant.Resource))
+			}
+			if grant.Restricted() {
+				grantedRestricted[grant.Resource] = true
+			} else {
+				grantedBare[grant.Resource] = true
 			}
 		}
 

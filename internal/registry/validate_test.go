@@ -273,6 +273,60 @@ func TestFrontedAgentUndeclaredToolRejected(t *testing.T) {
 	}
 }
 
+// TestValidateToolGrants covers the grant-level rules: a grant must name a
+// declared resource and non-empty tool names; a resource may be granted more
+// than once ONLY as bare grants (tolerated today, so still tolerated —
+// Article VI additivity); any duplicate involving a restricted grant is
+// ambiguous and rejected.
+func TestValidateToolGrants(t *testing.T) {
+	withGrants := func(grants []config.ToolGrant) config.Config {
+		cfg := baseCfg()
+		cfg.Agents[0].Tools = grants
+		cfg.Gateway.Tools = map[string]config.ToolResource{
+			"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
+		}
+		return cfg
+	}
+	cases := []struct {
+		name   string
+		grants []config.ToolGrant
+		code   string // "" = the agent must validate clean
+	}{
+		{"bare grant", []config.ToolGrant{{Resource: "github"}}, ""},
+		{"restricted grant", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues", "get_issue"}}}, ""},
+		{"bare duplicates tolerated", []config.ToolGrant{{Resource: "github"}, {Resource: "github"}}, ""},
+		{"unknown resource on a restricted grant", []config.ToolGrant{{Resource: "nope", Tools: []string{"x"}}}, "unknown-tool"},
+		{"empty tool name", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues", ""}}}, "bad-tool-grant"},
+		{"empty resource", []config.ToolGrant{{Resource: ""}}, "bad-tool-grant"},
+		{"bare then restricted duplicate", []config.ToolGrant{{Resource: "github"}, {Resource: "github", Tools: []string{"x"}}}, "bad-tool-grant"},
+		{"restricted then bare duplicate", []config.ToolGrant{{Resource: "github", Tools: []string{"x"}}, {Resource: "github"}}, "bad-tool-grant"},
+		{"two restricted duplicates", []config.ToolGrant{{Resource: "github", Tools: []string{"x"}}, {Resource: "github", Tools: []string{"y"}}}, "bad-tool-grant"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var agentErrs []ValidationError
+			for _, e := range Validate(withGrants(tc.grants)) {
+				if e.Entity == "planner" {
+					agentErrs = append(agentErrs, e)
+				}
+			}
+			c := codes(agentErrs)
+			if tc.code == "" {
+				if len(agentErrs) != 0 {
+					t.Fatalf("expected a clean agent, got %v", agentErrs)
+				}
+				return
+			}
+			if c[tc.code] != 1 {
+				t.Fatalf("codes = %v, want exactly one %s (errs: %v)", c, tc.code, agentErrs)
+			}
+			if tc.name == "empty resource" && c["unknown-tool"] != 0 {
+				t.Fatalf("an empty resource must be reported once, as bad-tool-grant, not also as unknown-tool: %v", agentErrs)
+			}
+		})
+	}
+}
+
 func TestBadCredentialSourceRejected(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Gateway.Tools = map[string]config.ToolResource{
