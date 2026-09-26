@@ -1,0 +1,67 @@
+# Per-tool allowlisting on the tool/MCP door: a grant restricted to named
+# tools mirrors only those. The mock upstream exposes `echo` and `other`;
+# the agent is granted `echo` only. One tool call per run, so two runs —
+# each with its own log dir so `lastrun` is unambiguous.
+
+env AGENTHOF_TOOL_TOKEN=tool-secret
+
+exec agenthof apply --config config
+stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+
+# the allowlisted tool is reachable and recorded succeeded
+exec agenthof run se tool-demo --input 'tool:echo' --as tester --config config --log-dir logs-ok --artifact-dir artifacts
+stdout 'finished: succeeded'
+
+lastrun logs-ok
+exec agenthof audit $RUNID --log-dir logs-ok
+stdout 'tool echo — args [0-9a-f]{8} \(static_env\)'
+grep '"type":"tool_call"' logs-ok/${RUNID}.jsonl
+grep '"tool":"echo"' logs-ok/${RUNID}.jsonl
+# no-passthrough: the injected upstream credential never lands in the ledger
+! grep 'tool-secret' logs-ok/${RUNID}.jsonl
+
+# a tool the upstream exposes but the grant leaves out is never mirrored:
+# the call fails, the step fails, and the attempt is recorded refused
+! exec agenthof run se tool-demo --input 'tool:other' --as tester --config config --log-dir logs-refused --artifact-dir artifacts
+stdout 'finished: failed'
+
+lastrun logs-refused
+exec agenthof audit $RUNID --log-dir logs-refused
+stdout 'tool other refused — tool is not available to this run'
+grep '"type":"tool_call"' logs-refused/${RUNID}.jsonl
+grep '"status":"refused"' logs-refused/${RUNID}.jsonl
+grep '"tool":"other"' logs-refused/${RUNID}.jsonl
+! grep 'tool-secret' logs-refused/${RUNID}.jsonl
+
+-- config/agents/user.yaml --
+name: user
+model: fast
+instruction: use only the echo tool
+output: out
+execution: fronted
+tools:
+  - resource: echo-tool
+    tools: [echo]
+-- config/workflows/tool-demo.yaml --
+name: tool-demo
+steps:
+  - name: call
+    agent: user
+-- config/roles/se.yaml --
+name: se
+workflows: [tool-demo]
+allowed_groups: ["*"]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
+tools:
+  echo-tool:
+    kind: mcp
+    url: http://127.0.0.1:0/
+    credential_source: static_env
+    token_env: AGENTHOF_TOOL_TOKEN
+defaults:
+  model: fast
