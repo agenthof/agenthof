@@ -257,7 +257,7 @@ func TestProxyForwardDeniesNonAllowlistedResource(t *testing.T) {
 
 	bind := testBinding()
 	agent := testAgentDef("github")
-	allow := map[string]bool{} // "github" deliberately absent
+	allow := allowedTools{} // "github" deliberately absent
 
 	handler := p.forward(bind, agent, "github", allow, nil, appendEvent)
 	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}
@@ -340,7 +340,7 @@ func TestProxyStopWaitsForInFlightForward(t *testing.T) {
 	p.mu.Lock()
 	sess := p.sessions[0]
 	p.mu.Unlock()
-	handler := p.forward(bind, agent, "github", map[string]bool{"github": true}, sess, appendEvent)
+	handler := p.forward(bind, agent, "github", allowedTools{"github": nil}, sess, appendEvent)
 
 	callDone := make(chan struct{})
 	go func() {
@@ -420,7 +420,7 @@ func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 
 	bind := testBinding()
 	agent := testAgentDef("github")
-	allow := map[string]bool{"github": true}
+	allow := allowedTools{"github": nil}
 
 	handler := p.forward(bind, agent, "github", allow, upstream, appendEvent)
 	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}
@@ -708,6 +708,259 @@ func TestProxyExposedToolEmitsExactlyOneEvent(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("exposed-tool call produced %d tool_call events, want exactly 1 (middleware must not double-emit)", n)
+	}
+}
+
+// newMultiToolUpstream stands up an in-process MCP server exposing one
+// trivial tool per name. Each tool answers "<label>:<text>" so a test can
+// tell WHICH upstream served a call. No credential check: these tests are
+// about which tools get mirrored, not about injection (newStubUpstream
+// covers that).
+func newMultiToolUpstream(t *testing.T, label string, names ...string) *httptest.Server {
+	t.Helper()
+	server := mcp.NewServer(&mcp.Implementation{Name: "upstream-" + label, Version: "v0.1.0"}, nil)
+	for _, name := range names {
+		mcp.AddTool(server, &mcp.Tool{Name: name, Description: name + " on " + label}, func(ctx context.Context, req *mcp.CallToolRequest, args EchoArgs) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: label + ":" + args.Text}}}, nil, nil
+		})
+	}
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func mirroredToolNames(ctx context.Context, t *testing.T, sess *mcp.ClientSession) []string {
+	t.Helper()
+	list, err := sess.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	var names []string
+	for _, tool := range list.Tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+func TestAllowedToolsAllows(t *testing.T) {
+	cases := []struct {
+		name  string
+		allow allowedTools
+		res   string
+		tool  string
+		want  bool
+	}{
+		{"resource not granted", allowedTools{}, "github", "echo", false},
+		{"bare grant (present, nil set) allows every tool", allowedTools{"github": nil}, "github", "echo", true},
+		{"restricted grant allows a listed name", allowedTools{"github": {"echo": {}}}, "github", "echo", true},
+		{"restricted grant denies an unlisted name", allowedTools{"github": {"echo": {}}}, "github", "other", false},
+		{"restricted grant on one resource says nothing about another", allowedTools{"github": {"echo": {}}}, "jira", "echo", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.allow.allows(tc.res, tc.tool); got != tc.want {
+				t.Fatalf("allows(%q, %q) = %v, want %v", tc.res, tc.tool, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProxyStartMirrorsOnlyAllowlistedTools: a restricted grant mirrors only
+// the named tools. The agent's ListTools shows exactly those; a call to a
+// tool the resource exposes but the grant left out fails at the MCP layer
+// AND is recorded refused by the existing middleware — no new refusal path.
+func TestProxyStartMirrorsOnlyAllowlistedTools(t *testing.T) {
+	ts := newMultiToolUpstream(t, "up", "echo", "other")
+	t.Setenv("UP_TOKEN", "up-tok")
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{})
+
+	var mu sync.Mutex
+	var events []engine.Event
+	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
+		Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"echo"}}}}
+	proxyURL, runToken, err := p.Start(testBinding(), agent, func(e engine.Event) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo"}) {
+		t.Fatalf("mirrored tools = %v, want [echo] only", got)
+	}
+
+	result, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hi"}})
+	if err != nil || result.IsError {
+		t.Fatalf("allowlisted echo must succeed: err=%v result=%+v", err, result)
+	}
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "other", Arguments: map[string]any{"text": "hi"}}); err == nil {
+		t.Fatal("a tool the grant left out must not be callable")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var refused *engine.Event
+	for i := range events {
+		if events[i].Type == "tool_call" && events[i].Status == "refused" {
+			refused = &events[i]
+		}
+	}
+	if refused == nil || refused.Tool != "other" || refused.Reason != "tool is not available to this run" {
+		t.Fatalf("expected a refused tool_call for other, got %+v", refused)
+	}
+}
+
+// TestProxyStartBareGrantMirrorsEveryTool is the backward-compat regression:
+// a bare grant still mirrors everything the resource exposes.
+func TestProxyStartBareGrantMirrorsEveryTool(t *testing.T) {
+	ts := newMultiToolUpstream(t, "up", "echo", "other")
+	t.Setenv("UP_TOKEN", "up-tok")
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{})
+
+	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(engine.Event) {})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo", "other"}) {
+		t.Fatalf("bare grant mirrored %v, want [echo other]", got)
+	}
+}
+
+// TestProxyStartFailsWhenAllowlistedToolIsNotExposed: an allowlisted name
+// the upstream does not expose (a typo) fails Start loudly instead of
+// silently mirroring nothing. The first missing name in declared order is
+// reported.
+func TestProxyStartFailsWhenAllowlistedToolIsNotExposed(t *testing.T) {
+	ts := newMultiToolUpstream(t, "up", "echo")
+	t.Setenv("UP_TOKEN", "up-tok")
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{})
+
+	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
+		Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"echo", "list_issue", "get_issue"}}}}
+	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	want := `resource "up" does not expose allowlisted tool "list_issue"`
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Start error = %v, want it to contain %q", err, want)
+	}
+	p.Stop() // must be safe after a failed Start
+}
+
+// TestProxyStartAllowlistResolvesCollision: filter-first. Resource a exposes
+// {echo, other}; resource b exposes {other}. Granting a restricted to [echo]
+// plus b bare must NOT trip the cross-resource collision guard (a's other is
+// never mirrored), and "other" must route to b.
+func TestProxyStartAllowlistResolvesCollision(t *testing.T) {
+	a := newMultiToolUpstream(t, "a", "echo", "other")
+	b := newMultiToolUpstream(t, "b", "other")
+	t.Setenv("UP_TOKEN", "up-tok")
+	tools := map[string]config.ToolResource{
+		"a": {Kind: "mcp", URL: a.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
+		"b": {Kind: "mcp", URL: b.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
+	}
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{})
+
+	// Without the filter this exact grant list fails Start with the
+	// collision error, so first prove the collision guard still fires for
+	// two BARE grants.
+	if _, _, err := p.Start(testBinding(), testAgentDef("a", "b"), func(engine.Event) {}); err == nil || !strings.Contains(err.Error(), `tool "other" is exposed by both resource "a" and "b"`) {
+		t.Fatalf("two bare grants exposing the same name must still collide, got %v", err)
+	}
+	p.Stop()
+
+	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
+		Tools: []config.ToolGrant{{Resource: "a", Tools: []string{"echo"}}, {Resource: "b"}}}
+	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err != nil {
+		t.Fatalf("Start with the collision allowlisted away: %v", err)
+	}
+	defer p.Stop()
+
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo", "other"}) {
+		t.Fatalf("mirrored tools = %v, want [echo other]", got)
+	}
+	result, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "other", Arguments: map[string]any{"text": "hi"}})
+	if err != nil || result.IsError {
+		t.Fatalf("other: err=%v result=%+v", err, result)
+	}
+	if text, ok := result.Content[0].(*mcp.TextContent); !ok || text.Text != "b:hi" {
+		t.Fatalf("other routed to %+v, want resource b (b:hi)", result.Content)
+	}
+}
+
+// TestProxyStartRejectsRestrictedDuplicateGrant: registry validation already
+// rejects this shape, but Start is callable without the registry (as here),
+// so it fails closed on its own rather than letting merge order decide the
+// grant.
+func TestProxyStartRejectsRestrictedDuplicateGrant(t *testing.T) {
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
+	}}, "", broker.StaticEnv{})
+	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
+		Tools: []config.ToolGrant{{Resource: "up"}, {Resource: "up", Tools: []string{"echo"}}}}
+	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err == nil || !strings.Contains(err.Error(), `resource "up" is granted more than once`) {
+		t.Fatalf("Start error = %v, want the restricted-duplicate rejection", err)
+	}
+}
+
+// TestProxyForwardDeniesToolOffAllowlist exercises forward's per-tool
+// defense-in-depth gate directly: a resource that IS granted, for a tool
+// name the grant does not list, is denied at call time with a refused event.
+func TestProxyForwardDeniesToolOffAllowlist(t *testing.T) {
+	tools := map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
+	}
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{})
+
+	var events []engine.Event
+	appendEvent := func(e engine.Event) { events = append(events, e) }
+
+	bind := testBinding()
+	agent := testAgentDef("github")
+	allow := allowedTools{"github": {"echo": {}}} // "other" deliberately absent
+
+	handler := p.forward(bind, agent, "github", allow, nil, appendEvent)
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "other", Arguments: json.RawMessage(`{"text":"x"}`)}}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("forward: unexpected transport error %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("expected a deny IsError result for an off-allowlist tool, got %+v", result)
+	}
+	if len(events) != 1 || events[0].Type != "tool_call" || events[0].Status != "refused" || events[0].Tool != "other" {
+		t.Fatalf("expected exactly one refused tool_call for other, got %+v", events)
+	}
+	if !strings.Contains(events[0].Reason, "not allowlisted") {
+		t.Fatalf("Reason = %q, want the allowlist denial", events[0].Reason)
 	}
 }
 

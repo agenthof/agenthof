@@ -39,10 +39,11 @@ import (
 const connectTimeout = 30 * time.Second
 
 // Gateway implements engine.ToolProxy: for one fronted step it mints a run
-// token, connects to each of the agent's allowlisted tool resources as an MCP
+// token, connects to each tool resource the agent's grants name as an MCP
 // client (with a broker-injected credential the agent never sees), mirrors
-// their tools onto an inbound MCP server gated by the run token, and forwards
-// calls, appending a tool_call event per call.
+// the granted tools — every tool of a bare grant, only the named tools of a
+// restricted one — onto an inbound MCP server gated by the run token, and
+// forwards calls, appending a tool_call event per call.
 type Gateway struct {
 	tools   map[string]config.ToolResource
 	broker  broker.Broker
@@ -72,6 +73,26 @@ func New(gw config.GatewayConfig, keyRoot string, b broker.Broker) *Gateway {
 	return &Gateway{tools: gw.Tools, broker: b, gwcfg: gw, keyRoot: keyRoot}
 }
 
+// allowedTools is what Start derives from the agent's tool grants: resource
+// id → the tool names the agent may see. A PRESENT key with a nil set is a
+// bare grant (every tool the resource exposes); an ABSENT key is a resource
+// the agent was not granted at all. allows is the only reader, so the
+// present-vs-nil distinction cannot be confused with "not granted".
+type allowedTools map[string]map[string]struct{}
+
+// allows reports whether tool on resourceID is within the agent's grant.
+func (a allowedTools) allows(resourceID, tool string) bool {
+	names, granted := a[resourceID]
+	if !granted {
+		return false
+	}
+	if names == nil {
+		return true // bare grant: every tool
+	}
+	_, ok := names[tool]
+	return ok
+}
+
 // Start serves one fronted step. It mints a run token, connects to each
 // resource the agent's tool grants name as an upstream MCP client, mirrors
 // their tools onto an inbound MCP server gated by that token, and binds an
@@ -84,9 +105,25 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 		return "", "", fmt.Errorf("mint run token: %w", err)
 	}
 
-	allow := map[string]bool{}
+	// Build the per-resource allowlist. Registry validation already rejects
+	// a resource granted twice when either grant is restricted, but Start is
+	// reachable without the registry, so it fails closed on that shape too
+	// rather than letting merge order decide what the agent may see.
+	allow := allowedTools{}
 	for _, grant := range agent.Tools {
-		allow[grant.Resource] = true
+		prev, seen := allow[grant.Resource]
+		if seen && (grant.Restricted() || prev != nil) {
+			return "", "", fmt.Errorf("resource %q is granted more than once and at least one grant restricts tools", grant.Resource)
+		}
+		if !grant.Restricted() {
+			allow[grant.Resource] = nil // present, nil: every tool
+			continue
+		}
+		names := make(map[string]struct{}, len(grant.Tools))
+		for _, name := range grant.Tools {
+			names[name] = struct{}{}
+		}
+		allow[grant.Resource] = names
 	}
 
 	inbound := mcp.NewServer(&mcp.Implementation{Name: "agenthof-tool-proxy", Version: "v0.1.0"}, nil)
@@ -133,13 +170,34 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 			closeSessions()
 			return "", "", fmt.Errorf("list tools for %q: %w", id, err)
 		}
+		// Filter FIRST, then collision-check: a tool the grant leaves out
+		// never enters mirroredBy, so it cannot manufacture a phantom
+		// cross-resource collision — and allowlisting a name away is a way
+		// to resolve a real one.
+		exposed := map[string]bool{}
 		for _, tool := range list.Tools {
+			exposed[tool.Name] = true
+			if !allow.allows(id, tool.Name) {
+				continue
+			}
 			if owner, dup := mirroredBy[tool.Name]; dup {
 				closeSessions()
 				return "", "", fmt.Errorf("tool %q is exposed by both resource %q and %q", tool.Name, owner, id)
 			}
 			mirroredBy[tool.Name] = id
 			inbound.AddTool(tool, p.forward(bind, agent, id, allow, sess, appendEvent))
+		}
+		// An allowlisted name the upstream does not expose (a typo, or a
+		// tool the upstream since removed) fails the step loudly: a fronted
+		// agent never reports ListTools to the operator, so silently
+		// mirroring nothing would be indistinguishable from an
+		// off-allowlist attempt. Declared order makes the reported name
+		// deterministic.
+		for _, name := range grant.Tools {
+			if !exposed[name] {
+				closeSessions()
+				return "", "", fmt.Errorf("resource %q does not expose allowlisted tool %q", id, name)
+			}
 		}
 	}
 
@@ -287,13 +345,13 @@ func (p *Gateway) Stop() {
 }
 
 // forward returns the ToolHandler mirrored onto the inbound server for one
-// upstream tool of resource resourceID. It re-checks resourceID against allow
-// at call time (defense in depth, independent of what Start already filtered
-// at mirror time), forwards the call to upstream with the arguments passed
-// through raw (never touching the run token), and appends a tool_call event
-// recording only a result hash + short preview — never the call body or any
-// credential.
-func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow map[string]bool, upstream *mcp.ClientSession, appendEvent func(engine.Event)) mcp.ToolHandler {
+// upstream tool of resource resourceID. It re-checks the (resource, tool)
+// pair against allow at call time (defense in depth, independent of what
+// Start already filtered at mirror time), forwards the call to upstream with
+// the arguments passed through raw (never touching the run token), and
+// appends a tool_call event recording only a result hash + short preview —
+// never the call body or any credential.
+func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow allowedTools, upstream *mcp.ClientSession, appendEvent func(engine.Event)) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		p.mu.Lock()
 		if p.closing {
@@ -307,11 +365,11 @@ func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID
 		p.mu.Unlock()
 		defer p.inflight.Done()
 
-		// Defense-in-depth: only allowlisted resources are ever mirrored, so
-		// the receiving middleware (refusedTraceMiddleware) is the real denial
-		// path and this branch is unreachable in normal operation. It stays as
-		// a per-resource second gate in case mirroring logic ever changes.
-		if !allow[resourceID] {
+		// Defense-in-depth: only allowlisted tools are ever mirrored, so the
+		// receiving middleware (refusedTraceMiddleware) is the real denial
+		// path and this branch is unreachable in normal operation. It stays
+		// as a per-tool second gate independent of the mirroring logic.
+		if !allow.allows(resourceID, req.Params.Name) {
 			denyReason := fmt.Sprintf("tool %q on resource %q is not allowlisted for this run", req.Params.Name, resourceID)
 			appendEvent(engine.Event{
 				Type:             "tool_call",
