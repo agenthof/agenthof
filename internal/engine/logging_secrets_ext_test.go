@@ -254,6 +254,10 @@ type doorScenario struct {
 	// captured: the listener line for scenarios that reach it, the connect
 	// failure for the two that fail inside Start before the listener binds.
 	wantLine string
+	// wantDoorLine is the door-handler line that proves the named branch
+	// ran. Empty for exec (no door lines yet) and the two connect-failure
+	// scenarios, whose wantLine already is that branch.
+	wantDoorLine string
 }
 
 const (
@@ -296,14 +300,14 @@ func TestOperationalLogCarriesNoSecret(t *testing.T) {
 	basicPair := base64.StdEncoding.EncodeToString([]byte(url.QueryEscape(ccClientID) + ":" + url.QueryEscape(ccSecret)))
 
 	scenarios := []doorScenario{
-		{name: "model success", gateway: modelRoute(modelUpstream(t, modelOK).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "succeeded", wantLine: lineListener},
-		{name: "model upstream 401 echoing the key", gateway: modelRoute(modelUpstream(t, model401).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener},
-		{name: "model upstream connection refused with query secret", gateway: modelRoute("http://" + refusedAddr + "/v1?key=" + querySecret), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener},
-		{name: "model upstream oversized body", gateway: modelRoute(modelUpstream(t, modelHuge).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener},
-		{name: "tool static bearer success", gateway: toolCfg(staticTool(stubMCP(t, toolBearer).URL)), agent: toolGrant, call: callEcho, wantStatus: "succeeded", wantLine: lineListener},
-		{name: "tool upstream rejects credential", gateway: toolCfg(staticTool(stubMCP(t, "somethingelse").URL)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineListener},
+		{name: "model success", gateway: modelRoute(modelUpstream(t, modelOK).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "model call routed"},
+		{name: "model upstream 401 echoing the key", gateway: modelRoute(modelUpstream(t, model401).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model upstream returned error status"},
+		{name: "model upstream connection refused with query secret", gateway: modelRoute("http://" + refusedAddr + "/v1?key=" + querySecret), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model call did not complete"},
+		{name: "model upstream oversized body", gateway: modelRoute(modelUpstream(t, modelHuge).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model upstream response too large"},
+		{name: "tool static bearer success", gateway: toolCfg(staticTool(stubMCP(t, toolBearer).URL)), agent: toolGrant, call: callEcho, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "tool call routed"},
+		{name: "tool upstream rejects credential", gateway: toolCfg(staticTool(stubMCP(t, "somethingelse").URL)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "tool call reported error"},
 		{name: "tool upstream connection refused with query secret", gateway: toolCfg(staticTool("http://" + refusedAddr + "/?key=" + querySecret)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineConnect},
-		{name: "tool client_credentials success", gateway: toolCfg(ccTool(stubMCP(t, mintedToken).URL, tokenEndpoint(t, http.StatusOK, `{"access_token":"`+mintedToken+`","token_type":"Bearer","expires_in":3600}`).URL)), agent: toolGrant, call: callEcho, wantStatus: "succeeded", wantLine: lineListener},
+		{name: "tool client_credentials success", gateway: toolCfg(ccTool(stubMCP(t, mintedToken).URL, tokenEndpoint(t, http.StatusOK, `{"access_token":"`+mintedToken+`","token_type":"Bearer","expires_in":3600}`).URL)), agent: toolGrant, call: callEcho, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "tool call routed"},
 		{name: "tool client_credentials token endpoint rejects and echoes the secret", gateway: toolCfg(ccTool(stubMCP(t, mintedToken).URL, tokenEndpoint(t, http.StatusUnauthorized, `{"error":"invalid_client","error_description":"secret `+ccSecret+` rejected for `+ccClientID+`"}`).URL)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineConnect},
 		{name: "exec allowed, refused, attested", gateway: config.GatewayConfig{}, agent: config.AgentDef{Exec: config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "ls"}}}}, call: callExec, wantStatus: "succeeded", wantLine: lineListener},
 	}
@@ -348,6 +352,9 @@ func TestOperationalLogCarriesNoSecret(t *testing.T) {
 				}
 				if !strings.Contains(out, s.wantLine) {
 					t.Fatalf("capture missed this scenario's branch line %q:\n%s", s.wantLine, out)
+				}
+				if s.wantDoorLine != "" && !strings.Contains(out, s.wantDoorLine) {
+					t.Fatalf("capture missed this scenario's door line %q:\n%s", s.wantDoorLine, out)
 				}
 
 				secrets := map[string]string{

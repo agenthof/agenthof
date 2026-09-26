@@ -597,7 +597,7 @@ func (p *Gateway) refusedTraceMiddleware(mirrored map[string]string, bind engine
 						} else {
 							p.inflight.Add(1)
 							p.mu.Unlock()
-							logger.Warn("tool call refused", "tool", params.Name, "reason", "tool is not available to this run")
+							logger.Warn("tool call refused", "tool", capRunes(params.Name, 200), "reason", "tool is not available to this run")
 							appendEvent(engine.Event{
 								Type:    "tool_call",
 								Agent:   agent.Name,
@@ -815,6 +815,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				rb, err := io.ReadAll(io.LimitReader(resp.Body, maxResp+1))
 				_ = resp.Body.Close()
 				if err != nil {
+					logger.Error("model upstream read failed", "model", logical, "class", errClass(err))
 					record(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "failed",
 						Reason: "upstream read failed", Model: logical, Binding: bind,
