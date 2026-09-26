@@ -3,9 +3,12 @@ package registry
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/agenthof/agenthof/internal/config"
 )
 
 func TestBuildAndLookups(t *testing.T) {
@@ -134,5 +137,48 @@ func TestSetEnabledAtomic(t *testing.T) {
 
 	if inodeBefore == inodeAfter {
 		t.Fatalf("inode unchanged: %d == %d (expected rename to change inode, but got truncate-write)", inodeBefore, inodeAfter)
+	}
+}
+
+// TestSetEnabledPreservesToolGrantShape pins that the kill switch — which
+// round-trips the agent file through map[string]any, never through AgentDef —
+// leaves both grant forms parsing identically afterwards. This is why
+// ToolGrant needs no MarshalYAML.
+func TestSetEnabledPreservesToolGrantShape(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "agents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := "name: planner\nendpoint: https://x\ntools:\n  - code-search\n  - resource: github\n    tools: [list_issues, get_issue]\n"
+	if err := os.WriteFile(filepath.Join(dir, "planner.yaml"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := []config.ToolGrant{
+		{Resource: "code-search"},
+		{Resource: "github", Tools: []string{"list_issues", "get_issue"}},
+	}
+
+	before, errs := config.LoadDir(root)
+	if len(errs) != 0 {
+		t.Fatalf("load before: %v", errs)
+	}
+	if !reflect.DeepEqual(before.Agents[0].Tools, want) {
+		t.Fatalf("before flip: %+v, want %+v", before.Agents[0].Tools, want)
+	}
+
+	if err := SetEnabled(root, "planner", false); err != nil {
+		t.Fatal(err)
+	}
+
+	after, errs := config.LoadDir(root)
+	if len(errs) != 0 {
+		t.Fatalf("load after: %v", errs)
+	}
+	if after.Agents[0].IsEnabled() {
+		t.Fatal("flip did not land")
+	}
+	if !reflect.DeepEqual(after.Agents[0].Tools, want) {
+		t.Fatalf("after flip: %+v, want %+v", after.Agents[0].Tools, want)
 	}
 }
