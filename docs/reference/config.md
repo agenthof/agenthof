@@ -78,23 +78,36 @@ resource exposes (same as `mode: all`), or an object with these keys:
 | Tools | `tools` | list of strings | yes when `mode` is absent; non-empty when present | — |
 | Mode | `mode` | string | no | `""` |
 
-`mode` accepts `all` (every tool on the resource) or `read-only` (the
-resource's `read_only_tools` list on the gateway catalog entry). An object
-must set a non-empty `tools` list and/or `mode: all` or `mode: read-only`;
-`mode: all` must not be combined with `tools`. A present `tools` key that is
-`null` or empty is rejected when the file is loaded, as is an object with any
-key other than `resource`, `tools`, and `mode`, or with an empty `resource`
-— all with `bad-tool-grant` — so a misspelled key can never widen a grant.
+A grant takes one of five forms:
+
+- a bare resource id, or `{resource, mode: all}` — every tool the resource
+  exposes;
+- `{resource, mode: read-only}` — the tools listed in that resource's
+  [`read_only_tools`](#tools-1) on the gateway catalog entry;
+- `{resource, tools: [...]}` — exactly the named tools;
+- `{resource, tools: [...], mode: read-only}` — exactly the named tools, and
+  `apply` rejects any of them that is not in the resource's
+  `read_only_tools`.
+
+These shapes are rejected with `bad-tool-grant`: an object with neither
+`tools` nor `mode`, a `tools` list that is empty (or `null`), `mode: all`
+together with `tools`, and any `mode` other than `all` or `read-only`. The
+file loader also rejects an object with any key other than `resource`,
+`tools`, and `mode`, or with an empty `resource`, so a misspelled key can
+never widen a grant. A `mode: read-only` grant on a resource that declares
+no `read_only_tools` is also `bad-tool-grant`.
 
 `apply` rejects an entry whose resource is not declared in `gateway.yaml`
 with `unknown-tool` ("agent references tool ..., which is not a declared
-gateway tool resource"), an empty tool name with `bad-tool-grant`, and a
-resource that appears in more than one entry when any of those entries is
-the object form — also `bad-tool-grant` ("resource ... is granted more than
-once and at least one of those grants restricts tools; merge them into one
-grant"). A resource repeated only as bare ids is accepted, as before. `apply`
-does not check tool names against the resource itself; a name the resource
-does not expose fails the step at run time instead. The agent reaches its
+gateway tool resource") and an empty tool name with `bad-tool-grant`. A
+resource granted more than once is `bad-tool-grant` ("resource ... is
+granted more than once and at least one of those grants is not an all-tools
+grant; merge them into one grant") unless every grant of it is a bare id or
+`mode: all`. `apply` does not check tool names against the resource itself;
+a name a grant lists that the resource does not expose fails the step at
+run time instead. The upstream's own `readOnlyHint` annotation does not
+decide which tools a `mode: read-only` grant mirrors; only
+`read_only_tools` does. The agent reaches its
 granted tools only through Agenthof's inbound MCP proxy for the duration of
 its step — see [`lifecycle-tool.md`](../lifecycle-tool.md) for the runtime
 flow; this reference only covers what `apply` checks.
@@ -219,6 +232,19 @@ tools:
 # `model` is not checked. Each entry must name a resource under
 # gateway.yaml's `tools` map (see `ticket-search` and `billing-mcp` in the
 # Gateway examples below), or apply rejects the agent with unknown-tool.
+```
+
+**Example (illustrative, a read-only grant):**
+
+```yaml
+name: billing-reader
+execution: fronted
+endpoint: https://billing-reader.internal/run
+tools:
+  - resource: billing-mcp
+    mode: read-only                     # only billing-mcp's read_only_tools
+# A second grant of billing-mcp in this list would be bad-tool-grant: a
+# resource may repeat only when every grant of it is bare or mode: all.
 ```
 
 ## Workflows (`config/workflows/*.yaml` → `WorkflowDef` / `Step`)
@@ -398,11 +424,16 @@ for the runtime flow):
 | ClientIDEnv | `client_id_env` | string | yes for `client_credentials` | — |
 | ClientSecretEnv | `client_secret_env` | string | yes for `client_credentials` | — |
 | Scope | `scope` | string | no (not checked by `apply`) | — |
-| ReadOnlyTools | `read_only_tools` | list of strings | no (not checked by `apply`) | none |
+| ReadOnlyTools | `read_only_tools` | list of strings | no | empty (no read-only grant) |
 
-`read_only_tools` names tools on this resource that a `mode: read-only` agent
-grant may use; tools not listed are treated as mutating. An empty list means
-this resource offers no read-only grant surface.
+`read_only_tools` is the operator's list of the tools on this resource that
+a `mode: read-only` agent grant may use. A tool whose name is not in the
+list is treated as mutating. Entries must be non-empty and unique, or
+`apply` rejects the resource with `bad-tool-resource` ("read_only_tools
+entries must be non-empty and unique"). `apply` cannot check the names
+against the upstream, since it makes no network call. At run time a listed
+name the upstream does not expose is skipped with a warning, and a
+`mode: read-only` grant that matches no exposed tool fails the step.
 
 `apply` requires `kind` to be exactly `"mcp"` and `url` to be set and
 `https` (or `http` only to a loopback host — `localhost`, `127.0.0.1`, or
@@ -527,6 +558,7 @@ tools:
     client_id_env: BILLING_MCP_CLIENT_ID
     client_secret_env: BILLING_MCP_CLIENT_SECRET
     scope: billing.read
+    read_only_tools: [get_invoice, list_invoices]
 ```
 
 `client_id_env` and `client_secret_env` name the environment variables

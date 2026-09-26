@@ -54,7 +54,9 @@ The governed core is real and runnable today:
   control` read, verify, and recover it.
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
   reach declared MCP tool resources only through Agenthof, which mirrors a
-  whole resource or only the tools an agent's grant names, authorizes each
+  whole resource, only the tools an agent's grant names, or — with
+  `mode: read-only` — only the tools the operator lists as `read_only_tools`
+  (the upstream's own read-only hint does not decide this), authorizes each
   call against that per-agent allowlist, injects the resource credential (a
   static bearer or an OAuth `client_credentials`-minted token) the agent
   never sees, and records every call — and every denied attempt.
@@ -76,9 +78,9 @@ The governed core is real and runnable today:
 
 - **Governed skills & capabilities** — named capability bundles an agent may
   load, enabled or disabled per agent, workflow, or role.
-- **Finer-grained privileges** — read-only vs mutating execution, and
-  per-agent scoping of what an agent may touch beyond today's per-tool
-  grants.
+- **Finer-grained privileges** — per-agent scoping of what an agent may
+  touch beyond today's tool grants. (Read-only tool grants have shipped: see
+  the tool gateway under Now.)
 
 ## Exploring
 
