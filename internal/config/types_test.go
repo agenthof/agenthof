@@ -27,8 +27,8 @@ output: plan
 	// A bare `tools: [id, id]` list keeps its meaning: each entry is a
 	// resource id granting every tool that resource exposes. (ToolGrant
 	// holds a slice, so it is not ==-comparable; compare the fields.)
-	if a.Tools[0].Resource != "read_file" || a.Tools[0].Restricted() ||
-		a.Tools[1].Resource != "search_files" || a.Tools[1].Restricted() {
+	if a.Tools[0].Resource != "read_file" || a.Tools[0].Scope() != ScopeAll ||
+		a.Tools[1].Resource != "search_files" || a.Tools[1].Scope() != ScopeAll {
 		t.Fatalf("parsed: %+v", a)
 	}
 	if !a.IsEnabled() {

@@ -67,11 +67,6 @@ func (g ToolGrant) Scope() GrantScope {
 	}
 }
 
-// Restricted reports whether the grant names specific tools. Kept until
-// validate and Start branch on Scope (Tasks 2 and 3). A read-only grant is
-// not Restricted; those callers must not ship that way.
-func (g ToolGrant) Restricted() bool { return len(g.Tools) > 0 }
-
 // rawGrant is ToolGrant without its methods, so the mapping form can be
 // decoded with value.Decode without recursing back into UnmarshalYAML.
 type rawGrant ToolGrant

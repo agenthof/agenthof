@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -965,6 +966,227 @@ func TestProxyStartAcceptsDuplicateBareGrant(t *testing.T) {
 
 	_ = sess.Close()
 	p.Stop() // Stop must be safe to call more than once.
+}
+
+// newAnnotatedUpstream stands up an in-process MCP server exposing one tool
+// carrying the given annotations pointer (nil means the server sent none), so
+// a test can drive the read-only hint check on both shapes.
+func newAnnotatedUpstream(t *testing.T, name string, ann *mcp.ToolAnnotations) *httptest.Server {
+	t.Helper()
+	server := mcp.NewServer(&mcp.Implementation{Name: "upstream-annotated", Version: "v0.1.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: name, Description: name, Annotations: ann}, func(ctx context.Context, req *mcp.CallToolRequest, args EchoArgs) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: args.Text}}}, nil, nil
+	})
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// TestProxyStartReadOnlyMirrorsClassifiedTools: `mode: read-only` with no
+// tools list mirrors exactly the resource's read_only_tools, not every tool.
+func TestProxyStartReadOnlyMirrorsClassifiedTools(t *testing.T) {
+	ts := newMultiToolUpstream(t, "up", "echo", "other")
+	t.Setenv("UP_TOKEN", "up-tok")
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
+	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Stop()
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo"}) {
+		t.Fatalf("mirrored = %v, want [echo]", got)
+	}
+}
+
+// TestProxyStartModeAllMirrorsEveryTool: `mode: all` is the explicit spelling
+// of the bare grant — read_only_tools on the resource does not narrow it.
+func TestProxyStartModeAllMirrorsEveryTool(t *testing.T) {
+	ts := newMultiToolUpstream(t, "up", "echo", "other")
+	t.Setenv("UP_TOKEN", "up-tok")
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}}}
+	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Stop()
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo", "other"}) {
+		t.Fatalf("mirrored = %v, want [echo other]", got)
+	}
+}
+
+// TestProxyStartReadOnlySkipsAbsentAndWarns: a classified name the upstream
+// no longer exposes is a partial miss, not a failure — it is warned and
+// skipped, and the rest of the intersection still mirrors.
+func TestProxyStartReadOnlySkipsAbsentAndWarns(t *testing.T) {
+	ts := newMultiToolUpstream(t, "up", "echo")
+	t.Setenv("UP_TOKEN", "up-tok")
+	var buf bytes.Buffer
+	logger := obs.New(&buf, slog.LevelWarn, obs.FormatText)
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo", "gone"}}
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, logger)
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
+	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Stop()
+	if !strings.Contains(buf.String(), "read-only tool absent upstream") || !strings.Contains(buf.String(), "tool=gone") {
+		t.Fatalf("log missing the partial-absence warn:\n%s", buf.String())
+	}
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo"}) {
+		t.Fatalf("mirrored = %v, want [echo]", got)
+	}
+}
+
+// TestProxyStartReadOnlyEmptyIntersectionFails: a read-only grant that would
+// mirror nothing fails the step loudly rather than handing the agent an empty
+// tool list it can never report.
+func TestProxyStartReadOnlyEmptyIntersectionFails(t *testing.T) {
+	ts := newMultiToolUpstream(t, "up", "other")
+	t.Setenv("UP_TOKEN", "up-tok")
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
+	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	// Stop unconditionally: a regression that lets Start succeed here leaves
+	// an upstream session open, which would block the stub server's cleanup
+	// instead of reporting the failure.
+	defer p.Stop()
+	if err == nil || !strings.Contains(err.Error(), "matches no exposed tool") {
+		t.Fatalf("Start error = %v, want empty-intersection failure", err)
+	}
+}
+
+// TestProxyStartRejectsMutatingToolUnderReadOnly: `tools` + `mode: read-only`
+// is a narrowing of read_only_tools, so a name outside that list is refused
+// before any upstream is contacted.
+func TestProxyStartRejectsMutatingToolUnderReadOnly(t *testing.T) {
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}},
+	}}, "", broker.StaticEnv{}, nil)
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"other"}, Mode: "read-only"}}}
+	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err == nil || !strings.Contains(err.Error(), "not classified read-only") {
+		t.Fatalf("Start error = %v, want classification rejection", err)
+	}
+}
+
+// TestProxyStartRejectsModeAllWithTools: registry validation rejects this
+// contradiction, but Start is reachable without the registry and fails closed
+// on it too rather than picking one half of the grant.
+func TestProxyStartRejectsModeAllWithTools(t *testing.T) {
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
+	}}, "", broker.StaticEnv{}, nil)
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "all", Tools: []string{"echo"}}}}
+	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err == nil || !strings.Contains(err.Error(), "mode all") {
+		t.Fatalf("Start error = %v, want mode-all contradiction", err)
+	}
+}
+
+// TestProxyStartRejectsReadOnlyDuplicateGrant: a read-only grant alongside a
+// bare one changes what the agent may see, so it is the same duplicate
+// conflict a named grant is — merge order must never decide it.
+func TestProxyStartRejectsReadOnlyDuplicateGrant(t *testing.T) {
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}},
+	}}, "", broker.StaticEnv{}, nil)
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up"}, {Resource: "up", Mode: "read-only"}}}
+	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err == nil || !strings.Contains(err.Error(), `resource "up" is granted more than once`) {
+		t.Fatalf("Start error = %v, want duplicate rejection", err)
+	}
+}
+
+// TestProxyStartAcceptsBareAndModeAll: `mode: all` and the bare form are the
+// same grant, so restating one as the other is not a conflict.
+func TestProxyStartAcceptsBareAndModeAll(t *testing.T) {
+	const upstreamToken = "up-tok"
+	ts, _ := newStubUpstream(t, upstreamToken)
+	t.Setenv("UP_TOKEN", upstreamToken)
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up"}, {Resource: "up", Mode: "all"}}}
+	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Stop()
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo"}) {
+		t.Fatalf("mirrored = %v, want [echo]", got)
+	}
+}
+
+// TestProxyStartReadOnlyHintWarnsOnlyWhenAnnotated: the upstream's own
+// readOnlyHint is a hint, never a gate — it can only warn that the operator's
+// classification disagrees with what the tool says about itself, and only
+// when the server actually sent annotations. Either way the tool mirrors.
+func TestProxyStartReadOnlyHintWarnsOnlyWhenAnnotated(t *testing.T) {
+	cases := []struct {
+		name     string
+		ann      *mcp.ToolAnnotations
+		wantWarn bool
+	}{
+		{"no annotations sent", nil, false},
+		{"annotated as mutating", &mcp.ToolAnnotations{ReadOnlyHint: false}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAnnotatedUpstream(t, "echo", tc.ann)
+			t.Setenv("UP_TOKEN", "up-tok")
+			var buf bytes.Buffer
+			logger := obs.New(&buf, slog.LevelWarn, obs.FormatText)
+			res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
+			p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, logger)
+			agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
+			proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Stop()
+			if got := strings.Contains(buf.String(), "reports itself mutating"); got != tc.wantWarn {
+				t.Fatalf("hint warn present = %v, want %v:\n%s", got, tc.wantWarn, buf.String())
+			}
+			ctx := context.Background()
+			sess, err := stubAgentSession(ctx, proxyURL, runToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = sess.Close() }()
+			if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo"}) {
+				t.Fatalf("mirrored = %v, want [echo]", got)
+			}
+		})
+	}
 }
 
 // TestProxyForwardDeniesToolOffAllowlist exercises forward's per-tool
