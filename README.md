@@ -117,6 +117,8 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   life of a control action: apply, the kill switch, and the control ledger.
 - [`docs/reference/config.md`](docs/reference/config.md) — every YAML field,
   required/optional, defaults, and validation rules.
+- [`docs/reference/logging.md`](docs/reference/logging.md) — the operational
+  log on stderr: levels, formats, fields, and what is never logged.
 - [`docs/demo.md`](docs/demo.md) — the scripted demos (CONFIG, AUDIT,
   GOVERNANCE, INVESTIGATE).
 - [`docs/constitution.md`](docs/constitution.md) — the binding invariants
