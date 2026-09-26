@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,7 +26,7 @@ func TestInvestigateJSONEnvelope(t *testing.T) {
 	out.Reset()
 	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
 		"--config", root, "--log-dir", logs,
-		"--artifact-dir", t.TempDir()}, &out); code != 0 {
+		"--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
 
@@ -61,7 +62,7 @@ func TestInvestigateAgentFilterNarrows(t *testing.T) {
 	out.Reset()
 	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
 		"--config", root, "--log-dir", logs,
-		"--artifact-dir", t.TempDir()}, &out); code != 0 {
+		"--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
 	out.Reset()
@@ -92,7 +93,7 @@ func TestInvestigateRunFilterShowsRefusal(t *testing.T) {
 	var out bytes.Buffer
 
 	code := cmdRun([]string{"ghost", "fix-bug", "--input", "x", "--as", "dev@x",
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("expected a refused run, code=%d out=%s", code, out.String())
 	}
@@ -122,7 +123,7 @@ func TestInvestigateOutcomeFilterShowsRefusal(t *testing.T) {
 	var out bytes.Buffer
 
 	code := cmdRun([]string{"ghost", "fix-bug", "--input", "x", "--as", "dev@x",
-		"--config", root, "--log-dir", logs}, &out)
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("expected a refused run, code=%d out=%s", code, out.String())
 	}
@@ -148,7 +149,7 @@ func TestInvestigateCorruptedRunLogExitsNonZero(t *testing.T) {
 
 	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
 		"--config", root, "--log-dir", logs,
-		"--artifact-dir", t.TempDir()}, &out); code != 0 {
+		"--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
 	m := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())

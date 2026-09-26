@@ -82,6 +82,8 @@ func TestScript(t *testing.T) {
 			e.Setenv("AGENTHOF_TOKEN", "")
 			e.Setenv("AGENTHOF_OIDC_ISSUER", "")
 			e.Setenv("AGENTHOF_OIDC_CLIENT_ID", "")
+			e.Setenv("AGENTHOF_LOG_LEVEL", "")
+			e.Setenv("AGENTHOF_LOG_FORMAT", "")
 			if err := copyDir(filepath.Join("..", "..", "examples", "config"),
 				filepath.Join(e.WorkDir, "examples", "config")); err != nil {
 				return err
