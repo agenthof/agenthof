@@ -12,17 +12,17 @@ import (
 const UnixScheme = "unix://"
 
 type AgentDef struct {
-	Name        string     `yaml:"name"`
-	Description string     `yaml:"description"`
-	Enabled     *bool      `yaml:"enabled"` // nil means true
-	Model       string     `yaml:"model"`
-	Instruction string     `yaml:"instruction"`
-	Tools       []string   `yaml:"tools"`
-	Output      string     `yaml:"output"`
-	Execution   string     `yaml:"execution"` // "", or "fronted"; "" means fronted
-	Endpoint    string     `yaml:"endpoint"`  // required: the agent's HTTP endpoint
-	Exec        ExecConfig `yaml:"exec"`      // fronted only: allowlisted attested exec
-	SourceFile  string     `yaml:"-"`
+	Name        string      `yaml:"name"`
+	Description string      `yaml:"description"`
+	Enabled     *bool       `yaml:"enabled"` // nil means true
+	Model       string      `yaml:"model"`
+	Instruction string      `yaml:"instruction"`
+	Tools       []ToolGrant `yaml:"tools"` // each entry: a resource id (every tool) or {resource, tools} (only those tools)
+	Output      string      `yaml:"output"`
+	Execution   string      `yaml:"execution"` // "", or "fronted"; "" means fronted
+	Endpoint    string      `yaml:"endpoint"`  // required: the agent's HTTP endpoint
+	Exec        ExecConfig  `yaml:"exec"`      // fronted only: allowlisted attested exec
+	SourceFile  string      `yaml:"-"`
 }
 
 // ToolGrant is one entry in an agent's `tools:` list. A bare string is the

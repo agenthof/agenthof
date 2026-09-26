@@ -95,8 +95,14 @@ func stubAgentSession(ctx context.Context, proxyURL, runToken string) (*mcp.Clie
 	return client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: proxyURL, HTTPClient: httpClient}, nil)
 }
 
+// testAgentDef builds a fronted agent with a bare grant (every tool) on each
+// listed resource id.
 func testAgentDef(tools ...string) config.AgentDef {
-	return config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x", Tools: tools}
+	grants := make([]config.ToolGrant, 0, len(tools))
+	for _, id := range tools {
+		grants = append(grants, config.ToolGrant{Resource: id})
+	}
+	return config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x", Tools: grants}
 }
 
 func testBinding() engine.Binding {
@@ -824,7 +830,7 @@ func TestExecAndToolCallRecordInCallOrder(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{})
 	agent := config.AgentDef{
 		Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
-		Tools: []string{"up"},
+		Tools: []config.ToolGrant{{Resource: "up"}},
 		Exec:  config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "go"}}},
 	}
 	var mu sync.Mutex

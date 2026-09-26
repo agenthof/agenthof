@@ -217,7 +217,7 @@ func TestValidateExecutionTiers(t *testing.T) {
 	cfg = baseCfg()
 	cfg.Agents[0].Execution = "fronted"
 	cfg.Agents[0].Endpoint = "https://example.com/agent"
-	cfg.Agents[0].Tools = []string{"github"}
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "github"}}
 	cfg.Gateway.Tools = map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
 	}
@@ -229,7 +229,7 @@ func TestValidateExecutionTiers(t *testing.T) {
 	cfg = baseCfg()
 	cfg.Agents[0].Execution = "contained"
 	cfg.Agents[0].Endpoint = "https://example.com/agent"
-	cfg.Agents[0].Tools = []string{"nope"}
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "nope"}}
 	if codes(Validate(cfg))["unknown-tool"] != 1 {
 		t.Fatal("unknown-tool must run for every agent, including one marked contained")
 	}
@@ -254,7 +254,7 @@ func TestFrontedAgentDeclaredToolValid(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Agents[0].Execution = "fronted"
 	cfg.Agents[0].Endpoint = "https://x"
-	cfg.Agents[0].Tools = []string{"github"}
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "github"}}
 	cfg.Gateway.Tools = map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
 	}
@@ -267,7 +267,7 @@ func TestFrontedAgentUndeclaredToolRejected(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Agents[0].Execution = "fronted"
 	cfg.Agents[0].Endpoint = "https://x"
-	cfg.Agents[0].Tools = []string{"nope"}
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "nope"}}
 	if codes(Validate(cfg))["unknown-tool"] != 1 {
 		t.Fatalf("undeclared tool must be unknown-tool")
 	}

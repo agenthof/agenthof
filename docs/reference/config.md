@@ -31,7 +31,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Enabled | `enabled` | bool | no | `true` |
 | Model | `model` | string | no | — |
 | Instruction | `instruction` | string | no | — |
-| Tools | `tools` | list of strings | no | none |
+| Tools | `tools` | list of tool grants (a resource id, or a `{resource, tools}` object) | no | none |
 | Output | `output` | string | no | — |
 | Execution | `execution` | string | no | `fronted` |
 | Endpoint | `endpoint` | string | yes | — |
@@ -67,11 +67,16 @@ Optional free text. Not checked by `apply`.
 
 ### `tools`
 
-Optional list of tool-resource ids. Each entry must be the id of a tool
+Optional list of tool-resource grants. Each entry is either a bare string
+(a tool-resource id, granting every tool that resource exposes) or an
+object of the form `{resource, tools}` (granting only the named tools
+within that resource). Every entry's `resource` must be the id of a tool
 resource declared under `gateway.yaml`'s `tools` map (see
 [`tools`](#tools-1) under Gateway, below); an entry that names no such
 resource is rejected with `unknown-tool` ("agent references tool ..., which
-is not a declared gateway tool resource"). The agent reaches its declared
+is not a declared gateway tool resource"). The object form's `tools` field
+must list at least one tool — the bare string is the only spelling of "all
+tools", so a typo can never widen a grant. The agent reaches its declared
 tools only through Agenthof's inbound MCP proxy for the duration of its
 step — see [`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs)
 for the runtime flow; this reference only covers what `apply` checks.

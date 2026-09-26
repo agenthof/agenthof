@@ -72,12 +72,12 @@ func New(gw config.GatewayConfig, keyRoot string, b broker.Broker) *Gateway {
 	return &Gateway{tools: gw.Tools, broker: b, gwcfg: gw, keyRoot: keyRoot}
 }
 
-// Start serves one fronted step. It mints a run token, connects to each of
-// agent.Tools' resources as an upstream MCP client, mirrors their tools onto
-// an inbound MCP server gated by that token, and binds an ephemeral localhost
-// listener. It returns the URL the agent must call and the token it must
-// present — the token travels only in the HTTP Authorization header, never on
-// Binding or the ledger.
+// Start serves one fronted step. It mints a run token, connects to each
+// resource the agent's tool grants name as an upstream MCP client, mirrors
+// their tools onto an inbound MCP server gated by that token, and binds an
+// ephemeral localhost listener. It returns the URL the agent must call and
+// the token it must present — the token travels only in the HTTP
+// Authorization header, never on Binding or the ledger.
 func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) (string, string, error) {
 	token, err := mintToken()
 	if err != nil {
@@ -85,8 +85,8 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 	}
 
 	allow := map[string]bool{}
-	for _, id := range agent.Tools {
-		allow[id] = true
+	for _, grant := range agent.Tools {
+		allow[grant.Resource] = true
 	}
 
 	inbound := mcp.NewServer(&mcp.Implementation{Name: "agenthof-tool-proxy", Version: "v0.1.0"}, nil)
@@ -98,13 +98,14 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 		}
 	}
 
-	// Mirror in agent.Tools' declared order (not map iteration order) so a
+	// Mirror in the grants' declared order (not map iteration order) so a
 	// name collision between two allowlisted resources' tools is resolved
 	// deterministically rather than by map-order luck — and rejected outright
 	// rather than silently letting the last one registered shadow the first.
 	seenResource := map[string]bool{}
 	mirroredBy := map[string]string{} // upstream tool name -> resource id that mirrored it
-	for _, id := range agent.Tools {
+	for _, grant := range agent.Tools {
+		id := grant.Resource
 		if seenResource[id] {
 			continue
 		}
@@ -112,8 +113,8 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 
 		res, ok := p.tools[id]
 		if !ok {
-			// Registry validation guarantees every declared agent.Tools entry
-			// names a gateway resource; skip defensively rather than fail the
+			// Registry validation guarantees every tool grant names a
+			// gateway resource; skip defensively rather than fail the
 			// step over a state that should be unreachable.
 			continue
 		}

@@ -53,12 +53,12 @@ func Validate(cfg config.Config) []ValidationError {
 				"endpoint must be https, loopback http, or unix:// socket")
 		}
 
-		// Tools are gateway tool-resource ids. Each must be a declared
+		// Tools are gateway tool-resource grants. Each must name a declared
 		// gateway.tools resource.
-		for _, t := range a.Tools {
-			if _, ok := cfg.Gateway.Tools[t]; !ok {
+		for _, grant := range a.Tools {
+			if _, ok := cfg.Gateway.Tools[grant.Resource]; !ok {
 				add(a.SourceFile, a.Name, "unknown-tool",
-					fmt.Sprintf("agent references tool %q, which is not a declared gateway tool resource", t))
+					fmt.Sprintf("agent references tool %q, which is not a declared gateway tool resource", grant.Resource))
 			}
 		}
 

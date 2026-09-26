@@ -7,11 +7,12 @@ import (
 )
 
 // ToolProxy serves an inbound MCP proxy for ONE fronted step. Start mints a
-// token, authorizes calls against agent.Tools, injects resource credentials,
-// forwards to the upstream resource, and appends a tool_call event per call via
-// appendEvent (the engine's serialized ledger appender). It returns the URL the
-// agent calls and the token it must present. The token is handed to the agent
-// via headers only — never stored on Binding or the ledger (Article III).
+// token, authorizes calls against the agent's tool grants, injects resource
+// credentials, forwards to the upstream resource, and appends a tool_call
+// event per call via appendEvent (the engine's serialized ledger appender).
+// It returns the URL the agent calls and the token it must present. The token
+// is handed to the agent via headers only — never stored on Binding or the
+// ledger (Article III).
 type ToolProxy interface {
 	Start(bind Binding, agent config.AgentDef, appendEvent func(Event)) (url, token string, err error)
 	Stop()
