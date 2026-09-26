@@ -54,24 +54,38 @@ func Validate(cfg config.Config) []ValidationError {
 		}
 
 		// Tools are gateway tool-resource grants. Each must name a declared
-		// gateway.tools resource; a restricted grant lists non-empty tool
-		// names. A resource may be granted more than once only as bare
-		// grants (Start dedups those) — a duplicate involving a restricted
-		// grant is ambiguous and rejected. Tool NAMES cannot be checked
-		// against the upstream here (no network at apply); Start fails the
-		// step when an allowlisted name is not exposed. A Go-built grant
-		// with Tools == []string{} counts as bare: YAML cannot produce that
+		// gateway.tools resource; a named grant lists non-empty tool names.
+		// A resource may be granted more than once only when every grant is
+		// ScopeAll (bare or mode: all; Start dedups those). Any
+		// ScopeReadOnly or ScopeNamed grant makes a second grant of that
+		// resource bad-tool-grant. Tool NAMES cannot be checked against the
+		// upstream here (no network at apply); Start fails the step when an
+		// allowlisted name is not exposed. A Go-built grant with
+		// Tools == []string{} is still ScopeAll: YAML cannot produce that
 		// shape (the object form rejects an empty tools list at load).
-		grantedBare := map[string]bool{}
-		grantedRestricted := map[string]bool{}
+		grantedAll := map[string]bool{}
+		grantedLimited := map[string]bool{}
 		for _, grant := range a.Tools {
 			if grant.Resource == "" {
 				add(a.SourceFile, a.Name, "bad-tool-grant", "tool grant has an empty resource id")
 				continue
 			}
-			if _, ok := cfg.Gateway.Tools[grant.Resource]; !ok {
+			known := true
+			res, ok := cfg.Gateway.Tools[grant.Resource]
+			if !ok {
+				known = false
 				add(a.SourceFile, a.Name, "unknown-tool",
 					fmt.Sprintf("agent references tool %q, which is not a declared gateway tool resource", grant.Resource))
+			}
+			switch grant.Mode {
+			case "", "all", "read-only":
+			default:
+				add(a.SourceFile, a.Name, "bad-tool-grant",
+					fmt.Sprintf("tool grant for resource %q has mode %q (want all or read-only)", grant.Resource, grant.Mode))
+			}
+			if grant.Mode == "all" && len(grant.Tools) > 0 {
+				add(a.SourceFile, a.Name, "bad-tool-grant",
+					fmt.Sprintf("tool grant for resource %q sets mode all and a tools list", grant.Resource))
 			}
 			for _, name := range grant.Tools {
 				if name == "" {
@@ -79,15 +93,34 @@ func Validate(cfg config.Config) []ValidationError {
 						fmt.Sprintf("tool grant for resource %q lists an empty tool name", grant.Resource))
 				}
 			}
-			seen := grantedBare[grant.Resource] || grantedRestricted[grant.Resource]
-			if seen && (grant.Restricted() || grantedRestricted[grant.Resource]) {
-				add(a.SourceFile, a.Name, "bad-tool-grant",
-					fmt.Sprintf("resource %q is granted more than once and at least one of those grants restricts tools; merge them into one grant", grant.Resource))
+			// Resource-dependent checks need the gateway entry. An unknown
+			// resource is already unknown-tool; do not also complain that
+			// its zero ReadOnlyTools list is missing.
+			if known && grant.Mode == "read-only" {
+				if len(res.ReadOnlyTools) == 0 {
+					add(a.SourceFile, a.Name, "bad-tool-grant",
+						fmt.Sprintf("tool grant for resource %q is mode read-only but the resource declares no read_only_tools", grant.Resource))
+				}
+				classified := map[string]bool{}
+				for _, name := range res.ReadOnlyTools {
+					classified[name] = true
+				}
+				for _, name := range grant.Tools {
+					if name != "" && !classified[name] {
+						add(a.SourceFile, a.Name, "bad-tool-grant",
+							fmt.Sprintf("tool grant for resource %q lists %q, which is not in read_only_tools", grant.Resource, name))
+					}
+				}
 			}
-			if grant.Restricted() {
-				grantedRestricted[grant.Resource] = true
+			seen := grantedAll[grant.Resource] || grantedLimited[grant.Resource]
+			if seen && (grant.Scope() != config.ScopeAll || grantedLimited[grant.Resource]) {
+				add(a.SourceFile, a.Name, "bad-tool-grant",
+					fmt.Sprintf("resource %q is granted more than once and at least one of those grants is not an all-tools grant; merge them into one grant", grant.Resource))
+			}
+			if grant.Scope() == config.ScopeAll {
+				grantedAll[grant.Resource] = true
 			} else {
-				grantedBare[grant.Resource] = true
+				grantedLimited[grant.Resource] = true
 			}
 		}
 
@@ -153,6 +186,15 @@ func Validate(cfg config.Config) []ValidationError {
 		default:
 			add("gateway.yaml", id, "bad-tool-resource",
 				fmt.Sprintf("tool resource %q: grant_type %q is not implemented (only client_credentials)", id, r.GrantType))
+		}
+		seenRO := map[string]bool{}
+		for _, name := range r.ReadOnlyTools {
+			if name == "" || seenRO[name] {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: read_only_tools entries must be non-empty and unique", id))
+				break
+			}
+			seenRO[name] = true
 		}
 	}
 
