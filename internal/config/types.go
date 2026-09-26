@@ -112,7 +112,7 @@ func (g *ToolGrant) UnmarshalYAML(value *yaml.Node) error {
 		}
 		// A present tools key that is null or an empty sequence is an error
 		// even when mode is set. An absent tools key leaves toolsNode nil.
-		if toolsNode != nil && (toolsNode.Tag == "!!null" || toolsNode.Kind != yaml.SequenceNode || len(toolsNode.Content) == 0) {
+		if toolsNode != nil && len(raw.Tools) == 0 {
 			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q must list at least one tool", toolsNode.Line, raw.Resource)
 		}
 		mode := raw.Mode

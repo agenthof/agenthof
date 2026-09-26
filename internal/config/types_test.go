@@ -202,6 +202,26 @@ func TestToolGrantMappingRestrictsToNamedTools(t *testing.T) {
 	}
 }
 
+func TestToolGrantToolsAcceptsAlias(t *testing.T) {
+	src := `
+tools:
+  - resource: a
+    tools: &shared [list_issues, get_issue]
+  - resource: b
+    tools: *shared
+`
+	var got struct {
+		Tools []ToolGrant `yaml:"tools"`
+	}
+	if err := yaml.Unmarshal([]byte(src), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"list_issues", "get_issue"}
+	if len(got.Tools) != 2 || !reflect.DeepEqual(got.Tools[1].Tools, want) {
+		t.Fatalf("parsed %+v, want second grant tools %v", got.Tools, want)
+	}
+}
+
 // TestToolGrantFailsClosed: least privilege must never widen on a typo. Every
 // malformed object grant is a load error carrying the bad-tool-grant code,
 // never a silently-all-tools grant.
