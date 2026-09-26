@@ -2,7 +2,10 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -32,6 +35,18 @@ func (f *failProxy) Start(_ Binding, _ config.AgentDef, _ func(Event)) (string, 
 	return "", "", errors.New("upstream unreachable")
 }
 func (f *failProxy) Stop() { f.stopped++ }
+
+// urlLeakProxy fails Start with a transport-derived error that wraps a
+// *url.Error carrying the tool resource URL (query string included), the way a
+// real upstream-connect failure does. Used to prove the ledger reason never
+// echoes it.
+type urlLeakProxy struct{}
+
+func (urlLeakProxy) Start(_ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
+	return "", "", fmt.Errorf("connect upstream %q: %w", "github",
+		&url.Error{Op: "Get", URL: "https://mcp/x?key=SUPERSECRET", Err: errors.New("connection refused")})
+}
+func (urlLeakProxy) Stop() {}
 
 // coordExec captures the proxy coordinates it sees in ctx during Execute.
 type coordExec struct {
@@ -137,6 +152,43 @@ func TestRunBracketsFrontedToolStepWithProxy(t *testing.T) {
 	}
 }
 
+func TestToolProxyStartFailureKeepsURLOutOfLedger(t *testing.T) {
+	dir := t.TempDir()
+	id, status, err := Run(context.Background(), ftCfg(), "se", "wf", "x",
+		staticInvoker(), &coordExec{}, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return urlLeakProxy{} }})
+	if err != nil || status != "failed" {
+		t.Fatalf("run: status=%q err=%v", status, err)
+	}
+	events, _, rerr := ReadLog(dir, id)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	// Article III: nothing in the ledger — any field of any event — may echo
+	// the resource URL or its secret.
+	for _, e := range events {
+		raw, merr := json.Marshal(e)
+		if merr != nil {
+			t.Fatal(merr)
+		}
+		if strings.Contains(string(raw), "SUPERSECRET") || strings.Contains(string(raw), "mcp/x?key=") {
+			t.Fatalf("ledger event leaked the tool URL/secret: %s", raw)
+		}
+	}
+	// The reason is the fixed, secret-free string on both failure events.
+	var sawStep, sawFinished bool
+	for _, e := range events {
+		if e.Type == "step_failed" && e.Reason == "tool proxy start failed" {
+			sawStep = true
+		}
+		if e.Type == "workflow_finished" && e.Reason == "tool proxy start failed" {
+			sawFinished = true
+		}
+	}
+	if !sawStep || !sawFinished {
+		t.Fatalf("want fixed 'tool proxy start failed' reason on step_failed and workflow_finished; events=%+v", events)
+	}
+}
+
 func TestRunFailsStepWhenToolProxyStartErrors(t *testing.T) {
 	dir := t.TempDir()
 	fp := &failProxy{}
@@ -162,8 +214,8 @@ func TestRunFailsStepWhenToolProxyStartErrors(t *testing.T) {
 			stepFailed = &events[i]
 		}
 	}
-	if stepFailed == nil || !strings.HasPrefix(stepFailed.Reason, "tool proxy: ") {
-		t.Fatalf("step_failed must name the tool proxy failure: %+v", stepFailed)
+	if stepFailed == nil || stepFailed.Reason != "tool proxy start failed" {
+		t.Fatalf("step_failed must carry the fixed tool-proxy reason: %+v", stepFailed)
 	}
 	last := events[len(events)-1]
 	if last.Type != "workflow_finished" || last.Status != "failed" {

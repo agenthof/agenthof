@@ -524,6 +524,23 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	return 0
 }
 
+// newBroker builds the process credential broker. Dispatch routes each
+// resource's grant to the right sub-broker: a direct-bearer (static_env) grant
+// to StaticEnv, a client_credentials grant to ClientCredentials. Extracted so
+// the routing is unit-testable without a live run (the tool-proxy path records
+// only a fixed failure reason, so a broker's error text is no longer observable
+// end-to-end).
+func newBroker() broker.Broker {
+	return broker.Dispatch{
+		StaticEnv: broker.StaticEnv{},
+		// A hung upstream token endpoint must not block the outbound call
+		// forever: an explicit client with a timeout is required here,
+		// mirroring the proxy's own connectTimeout, rather than nil (which
+		// falls back to http.DefaultClient, which has no timeout).
+		ClientCredentials: broker.NewClientCredentials(&http.Client{Timeout: 30 * time.Second}),
+	}
+}
+
 // cmdRun runs one workflow. out receives command results (and usage errors,
 // like every subcommand); stderr receives operational diagnostics built by
 // obs.New — the third channel, separate from stdout and from the run ledger.
@@ -620,14 +637,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	// close another's. keyRoot is ".", the same working directory gateway
 	// provision writes role keys under (EnsureRoleKey(".", role)) — not
 	// --config, which would miss those keys.
-	b := broker.Dispatch{
-		StaticEnv: broker.StaticEnv{},
-		// A hung upstream token endpoint must not block the outbound call
-		// forever: an explicit client with a timeout is required here,
-		// mirroring the proxy's own connectTimeout, rather than nil (which
-		// falls back to http.DefaultClient, which has no timeout).
-		ClientCredentials: broker.NewClientCredentials(&http.Client{Timeout: 30 * time.Second}),
-	}
+	b := newBroker()
 	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger) }
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway, Logger: logger})

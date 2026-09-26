@@ -22,6 +22,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/engine"
 )
 
@@ -1273,8 +1274,10 @@ func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 // declares a gateway tool resource that a fronted agent references: the
 // resource's credential env var is deliberately left unset, so the wired
 // proxy's Start call fails fast at the broker (no network involved), and
-// that failure — prefixed "tool proxy: " by the engine's own bracketing
-// code — can only appear if Options.NewGateway was actually set. Before
+// that failure — recorded with the fixed reason "tool proxy start failed"
+// by the engine's own bracketing code (no error text, so no resource URL
+// or credential reaches the ledger) — can only appear if Options.NewGateway
+// was actually set. Before
 // the proxy is wired, this same config runs the fronted step directly
 // through the adapter (bypassing the tool proxy entirely) and succeeds
 // instead — the regression this test guards against.
@@ -1333,23 +1336,55 @@ func TestRunWiresToolProxyForFrontedToolAgent(t *testing.T) {
 			stepFailed = &events[i]
 		}
 	}
-	if stepFailed == nil || !strings.HasPrefix(stepFailed.Reason, "tool proxy: ") {
+	if stepFailed == nil || stepFailed.Reason != "tool proxy start failed" {
 		t.Fatalf("expected a step_failed event naming the tool proxy, got %+v", events)
 	}
 }
 
-// TestRunWiresClientCredentialsBrokerForFrontedToolAgent proves `run` wires
-// the dispatching broker (broker.Dispatch), not a bare broker.StaticEnv, into
-// the tool proxy: a gateway tool resource declaring grant_type:
-// client_credentials only resolves at all if Dispatch routes it to a
-// ClientCredentials broker. The client id/secret env vars are deliberately
-// left unset, so the mint fails fast inside ClientCredentials itself, before
-// any request reaches the token endpoint — same no-network-call shape as
-// TestRunWiresToolProxyForFrontedToolAgent. The failure text ("client id
-// env") only comes from ClientCredentials.mint; a bare StaticEnv given the
-// same ref would fail with a different message ("handles the direct-bearer
-// grant only"), so this also regression-guards against the wiring reverting
-// to broker.StaticEnv{} alone.
+// TestNewBrokerRoutesClientCredentialsGrant proves the process broker routes a
+// client_credentials grant to the ClientCredentials sub-broker, not a bare
+// StaticEnv. Proof is the routed sub-broker's own distinctive failure: with the
+// client-id env unset, ClientCredentials fails with "client id env ... is not
+// set"; a bare StaticEnv given the same grant would instead reject it with
+// "direct-bearer grant only". The error is inspected in memory here and never
+// logged or written to the ledger, so this replaces the old end-to-end
+// discriminator that relied on the failure reason the tool-proxy path no longer
+// records.
+func TestNewBrokerRoutesClientCredentialsGrant(t *testing.T) {
+	t.Setenv("AGENTHOF_TEST_UNSET_CLIENT_ID", "")
+	t.Setenv("AGENTHOF_TEST_UNSET_CLIENT_SECRET", "")
+	ref := broker.CredentialRef{
+		ResourceID:      "github",
+		Source:          "static_env",
+		Grant:           "client_credentials",
+		ClientAuth:      "client_secret_basic",
+		Issuer:          "https://issuer.example.test/",
+		TokenURL:        "https://token.example.test/",
+		ClientIDEnv:     "AGENTHOF_TEST_UNSET_CLIENT_ID",
+		ClientSecretEnv: "AGENTHOF_TEST_UNSET_CLIENT_SECRET",
+	}
+	_, err := newBroker().Resolve(context.Background(), ref)
+	if err == nil {
+		t.Fatal("resolve must fail with the client-id env unset")
+	}
+	if !strings.Contains(err.Error(), "client id env") {
+		t.Fatalf("client_credentials must route to the ClientCredentials broker, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "direct-bearer grant only") {
+		t.Fatalf("client_credentials was misrouted to a bare StaticEnv broker: %v", err)
+	}
+}
+
+// TestRunWiresClientCredentialsBrokerForFrontedToolAgent proves `run` wires a
+// tool proxy for a fronted agent whose gateway resource declares grant_type:
+// client_credentials, and that the step fails via that proxy (fixed reason).
+// The client id/secret env vars are deliberately left unset, so the mint fails
+// fast without any network call — same no-network shape as
+// TestRunWiresToolProxyForFrontedToolAgent, but exercising the
+// client_credentials config path end-to-end. Which broker Dispatch routes the
+// grant to (ClientCredentials, not a bare StaticEnv) is guarded separately by
+// TestNewBrokerRoutesClientCredentialsGrant — the tool-proxy path no longer
+// records a broker's error text, so the broker type is not observable here.
 func TestRunWiresClientCredentialsBrokerForFrontedToolAgent(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("AGENTHOF_TOKEN", "")
@@ -1410,14 +1445,14 @@ func TestRunWiresClientCredentialsBrokerForFrontedToolAgent(t *testing.T) {
 			stepFailed = &events[i]
 		}
 	}
-	if stepFailed == nil || !strings.HasPrefix(stepFailed.Reason, "tool proxy: ") {
+	if stepFailed == nil || stepFailed.Reason != "tool proxy start failed" {
 		t.Fatalf("expected a step_failed event naming the tool proxy, got %+v", events)
 	}
-	// Discriminates the ClientCredentials path from a bare StaticEnv broker,
-	// which would fail with "handles the direct-bearer grant only" instead.
-	if !strings.Contains(stepFailed.Reason, "client id env") {
-		t.Fatalf("expected the ClientCredentials broker's own failure text, got %+v", stepFailed)
-	}
+	// The ClientCredentials-vs-StaticEnv routing guard lives in
+	// TestNewBrokerRoutesClientCredentialsGrant: the tool-proxy path now records
+	// only a fixed reason (no broker error text, so no token-endpoint URL or
+	// credential reaches the ledger), so the broker type is no longer observable
+	// from the run's events.
 }
 
 // TestRunToolProxyAddrFlagParsesButIsUnused confirms --tool-proxy-addr is
