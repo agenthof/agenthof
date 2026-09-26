@@ -47,8 +47,7 @@ advertises. An object with `tools: [list_issues, get_issue]` grants only the
 named tools of that resource. An object with `mode: read-only` grants only
 the tools the operator lists in that resource's `read_only_tools`; adding a
 `tools` list narrows it further, and every name in it must be one of those
-read-only tools. A tool not in `read_only_tools` is treated as mutating, and
-the upstream's own read-only hint does not change that. An entry that names no such
+read-only tools. A tool not in `read_only_tools` is treated as mutating. An entry that names no such
 resource is rejected at `apply`. An agent that declares no tools still gets
 the MCP server — with an empty tool list, and any `tools/call` it sends
 recorded `refused`, reason `tool is not available to this run`.

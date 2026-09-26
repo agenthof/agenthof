@@ -105,9 +105,7 @@ granted more than once and at least one of those grants is not an all-tools
 grant; merge them into one grant") unless every grant of it is a bare id or
 `mode: all`. `apply` does not check tool names against the resource itself;
 a name a grant lists that the resource does not expose fails the step at
-run time instead. The upstream's own `readOnlyHint` annotation does not
-decide which tools a `mode: read-only` grant mirrors; only
-`read_only_tools` does. The agent reaches its
+run time instead. The agent reaches its
 granted tools only through Agenthof's inbound MCP proxy for the duration of
 its step — see [`lifecycle-tool.md`](../lifecycle-tool.md) for the runtime
 flow; this reference only covers what `apply` checks.
