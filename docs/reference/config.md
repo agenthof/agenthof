@@ -31,7 +31,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Enabled | `enabled` | bool | no | `true` |
 | Model | `model` | string | no | — |
 | Instruction | `instruction` | string | no | — |
-| Tools | `tools` | list of strings or objects | no | none |
+| Tools | `tools` | list of tool grants (a resource id, or a {resource, tools} object) | no | none |
 | Output | `output` | string | no | — |
 | Execution | `execution` | string | no | `fronted` |
 | Endpoint | `endpoint` | string | yes | — |
@@ -441,12 +441,12 @@ directory `gateway provision` writes — and otherwise the value of
 
 A map from a tool-resource id to a `ToolResource` (fields above). An agent's
 `tools` list (see [`tools`](#tools) under Agents) names ids from this map,
-bare or inside a `{resource, tools}` object;
-`apply` rejects an agent entry that doesn't resolve here with `unknown-tool`,
-and validates every declared resource itself against the `ToolResource` rules
-above (`bad-tool-resource`). At runtime, a step whose agent declares tools
-reaches them only through Agenthof's inbound MCP proxy, never directly — see
-[`docs/lifecycle.md`](../lifecycle.md#how-an-agent-actually-runs).
+bare or inside a `{resource, tools}` object; `apply` rejects an agent entry
+that doesn't resolve here with `unknown-tool`, and validates every declared
+resource itself against the `ToolResource` rules above (`bad-tool-resource`).
+At runtime, a step whose agent declares tools reaches them only through
+Agenthof's inbound MCP proxy, never directly — see
+[`lifecycle-tool.md`](../lifecycle-tool.md).
 
 ### `refbox_socket_dir`
 
