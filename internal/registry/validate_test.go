@@ -294,7 +294,7 @@ func TestValidateToolGrants(t *testing.T) {
 		grants []config.ToolGrant
 		code   string // "" = the agent must validate clean
 	}{
-		{"bare grant", []config.ToolGrant{{Resource: "github"}}, ""},
+		{"grant with neither tools nor mode", []config.ToolGrant{{Resource: "github"}}, "bad-tool-grant"},
 		{"restricted grant", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues", "get_issue"}}}, ""},
 		{"mode all duplicates tolerated", []config.ToolGrant{{Resource: "github", Mode: "all"}, {Resource: "github", Mode: "all"}}, ""},
 		{"unknown resource on a restricted grant", []config.ToolGrant{{Resource: "nope", Tools: []string{"x"}}}, "unknown-tool"},
@@ -335,6 +335,37 @@ func TestValidateToolGrants(t *testing.T) {
 				t.Fatalf("an empty resource must be reported once, as bad-tool-grant, not also as unknown-tool: %v", agentErrs)
 			}
 		})
+	}
+}
+
+// TestValidateRejectsGrantWithoutScope: a Go-built {Resource} grant — the
+// struct twin of the retired bare id — is bad-tool-grant, reported once,
+// naming both remedies, and never widened to every tool. Validate stops at
+// that grant (as it does for an empty resource), so an unknown resource on
+// the same grant is not also unknown-tool, and the grant lands in no
+// duplicate bucket.
+func TestValidateRejectsGrantWithoutScope(t *testing.T) {
+	for _, res := range []string{"github", "nope"} {
+		cfg := baseCfg()
+		cfg.Agents[0].Tools = []config.ToolGrant{{Resource: res}, {Resource: res}}
+		cfg.Gateway.Tools = map[string]config.ToolResource{
+			"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
+		}
+		var agentErrs []ValidationError
+		for _, e := range Validate(cfg) {
+			if e.Entity == "planner" {
+				agentErrs = append(agentErrs, e)
+			}
+		}
+		c := codes(agentErrs)
+		if c["bad-tool-grant"] != 2 || c["unknown-tool"] != 0 || len(agentErrs) != 2 {
+			t.Fatalf("resource %q: codes = %v, want one bad-tool-grant per grant and nothing else (errs: %v)", res, c, agentErrs)
+		}
+		for _, e := range agentErrs {
+			if !strings.Contains(e.Msg, "must list tools or set mode (all|read-only)") {
+				t.Fatalf("resource %q: msg = %q, want both remedies named", res, e.Msg)
+			}
+		}
 	}
 }
 

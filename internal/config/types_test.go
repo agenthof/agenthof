@@ -14,7 +14,11 @@ name: planner
 description: Plans the work
 model: fast
 instruction: You are a planner.
-tools: [read_file, search_files]
+tools:
+  - resource: read_file
+    mode: all
+  - resource: search_files
+    mode: all
 output: plan
 `
 	var a AgentDef
@@ -24,9 +28,9 @@ output: plan
 	if a.Name != "planner" || a.Model != "fast" || len(a.Tools) != 2 || a.Output != "plan" {
 		t.Fatalf("parsed: %+v", a)
 	}
-	// A bare `tools: [id, id]` list keeps its meaning: each entry is a
-	// resource id granting every tool that resource exposes. (ToolGrant
-	// holds a slice, so it is not ==-comparable; compare the fields.)
+	// Each mode: all entry grants every tool that resource exposes.
+	// (ToolGrant holds a slice, so it is not ==-comparable; compare the
+	// fields.)
 	if a.Tools[0].Resource != "read_file" || a.Tools[0].Scope() != ScopeAll ||
 		a.Tools[1].Resource != "search_files" || a.Tools[1].Scope() != ScopeAll {
 		t.Fatalf("parsed: %+v", a)
@@ -166,23 +170,35 @@ func TestExecConfigDeclared(t *testing.T) {
 	}
 }
 
-func TestToolGrantScalarGrantsEveryTool(t *testing.T) {
+// TestToolGrantScalarRejected: a bare resource id is no longer a grant. The
+// error names the line and both replacements. yaml.v3 stops at the first
+// element whose UnmarshalYAML fails, so a list with two bare ids reports the
+// first one and aborts that file's parse — it does not enumerate them.
+func TestToolGrantScalarRejected(t *testing.T) {
 	var got []ToolGrant
-	if err := yaml.Unmarshal([]byte("[code-search, github]\n"), &got); err != nil {
-		t.Fatal(err)
+	err := yaml.Unmarshal([]byte("- resource: ok\n  mode: all\n- code-search\n- github\n"), &got)
+	if err == nil {
+		t.Fatalf("expected an error, parsed %+v", got)
 	}
-	want := []ToolGrant{{Resource: "code-search"}, {Resource: "github"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("parsed %+v, want %+v", got, want)
+	msg := err.Error()
+	for _, want := range []string{
+		"bad-tool-grant: line 3: a bare tool grant is no longer accepted",
+		`{resource: "code-search", tools: [...]}`,
+		`{resource: "code-search", mode: all}`,
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error = %q, want it to contain %q", msg, want)
+		}
 	}
-	if got[0].Scope() != ScopeAll {
-		t.Fatal("a bare grant must be ScopeAll")
+	if strings.Contains(msg, "github") {
+		t.Fatalf("only the first offending element is reported, got %q", msg)
 	}
 }
 
 func TestToolGrantMappingRestrictsToNamedTools(t *testing.T) {
 	src := `
-- code-search
+- resource: code-search
+  mode: all
 - resource: github
   tools: [list_issues, get_issue]
 `
@@ -191,14 +207,14 @@ func TestToolGrantMappingRestrictsToNamedTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []ToolGrant{
-		{Resource: "code-search"},
+		{Resource: "code-search", Mode: "all"},
 		{Resource: "github", Tools: []string{"list_issues", "get_issue"}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parsed %+v, want %+v", got, want)
 	}
 	if got[0].Scope() != ScopeAll || got[1].Scope() != ScopeNamed {
-		t.Fatalf("Scope(): bare=%v restricted=%v", got[0].Scope(), got[1].Scope())
+		t.Fatalf("Scope(): all=%v restricted=%v", got[0].Scope(), got[1].Scope())
 	}
 }
 
@@ -234,12 +250,13 @@ func TestToolGrantFailsClosed(t *testing.T) {
 		{"singular tool: typo is an unknown key", "- resource: github\n  tool: [list_issues]\n", `unknown key "tool"`},
 		{"future mode: typo is an unknown key", "- resource: github\n  tools: [x]\n  mod: read\n", `unknown key "mod"`},
 		{"object with tools absent", "- resource: github\n", "must set tools or mode"},
+		{"object with tools absent names both remedies", "- resource: github\n", "or write mode: all to grant every tool"},
 		{"object with tools null", "- resource: github\n  tools: null\n", "at least one tool"},
 		{"object with tools empty", "- resource: github\n  tools: []\n", "at least one tool"},
 		{"object with empty resource", "- resource: \"\"\n  tools: [x]\n", "empty resource"},
 		{"object with resource absent", "- tools: [x]\n", "empty resource"},
 		{"empty scalar", "- \"\"\n", "empty resource"},
-		{"sequence is neither form", "- [github]\n", "resource id string or a"},
+		{"sequence is neither form", "- [github]\n", "must be a {resource, tools, mode} object"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -276,7 +293,8 @@ func TestToolGrantScope(t *testing.T) {
 		g    ToolGrant
 		want GrantScope
 	}{
-		{"bare", ToolGrant{Resource: "github"}, ScopeAll},
+		{"no mode and no tools", ToolGrant{Resource: "github"}, ScopeNamed},
+		{"no mode, empty tools slice", ToolGrant{Resource: "github", Tools: []string{}}, ScopeNamed},
 		{"mode all", ToolGrant{Resource: "github", Mode: "all"}, ScopeAll},
 		{"named tools", ToolGrant{Resource: "github", Tools: []string{"echo"}}, ScopeNamed},
 		{"read-only", ToolGrant{Resource: "github", Mode: "read-only"}, ScopeReadOnly},
@@ -338,10 +356,10 @@ func TestToolGrantModeRejected(t *testing.T) {
 }
 
 func TestToolGrantErrorNamesTheLine(t *testing.T) {
-	src := "- code-search\n- resource: github\n  tool: [x]\n"
+	src := "- resource: ok\n  mode: all\n- resource: github\n  tool: [x]\n"
 	var got []ToolGrant
 	err := yaml.Unmarshal([]byte(src), &got)
-	if err == nil || !strings.Contains(err.Error(), "line 3") {
-		t.Fatalf("error should name the offending key's line (3): %v", err)
+	if err == nil || !strings.Contains(err.Error(), "line 4") {
+		t.Fatalf("error should name the offending key's line (4): %v", err)
 	}
 }

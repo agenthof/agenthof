@@ -754,6 +754,7 @@ func TestAllowedToolsAllows(t *testing.T) {
 	}{
 		{"resource not granted", allowedTools{}, "github", "echo", false},
 		{"mode: all grant (present, nil set) allows every tool", allowedTools{"github": nil}, "github", "echo", true},
+		{"present, empty set allows nothing", allowedTools{"github": {}}, "github", "echo", false},
 		{"restricted grant allows a listed name", allowedTools{"github": {"echo": {}}}, "github", "echo", true},
 		{"restricted grant denies an unlisted name", allowedTools{"github": {"echo": {}}}, "github", "other", false},
 		{"restricted grant on one resource says nothing about another", allowedTools{"github": {"echo": {}}}, "jira", "echo", false},
@@ -904,6 +905,30 @@ func TestProxyStartRejectsRestrictedDuplicateGrant(t *testing.T) {
 	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), `resource "up" is granted more than once`) {
 		t.Fatalf("Start error = %v, want the restricted-duplicate rejection", err)
+	}
+}
+
+// TestProxyStartRejectsGrantWithoutScope: a {Resource} grant with no tools
+// and no mode is the struct twin of the retired bare id. Start is reachable
+// without the registry, so it refuses the grant itself — and it does so
+// before the duplicate guard, so a pair of such grants names the real cause
+// (no scope), not a duplicate.
+func TestProxyStartRejectsGrantWithoutScope(t *testing.T) {
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
+	}}, "", broker.StaticEnv{}, nil)
+	for name, grants := range map[string][]config.ToolGrant{
+		"single":    {{Resource: "up"}},
+		"duplicate": {{Resource: "up"}, {Resource: "up"}},
+	} {
+		agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x", Tools: grants}
+		_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+		if err == nil || !strings.Contains(err.Error(), `resource "up" grant names no tools and sets no mode; list tools or set mode: all`) {
+			t.Fatalf("%s: Start error = %v, want the no-scope rejection naming both remedies", name, err)
+		}
+		if strings.Contains(err.Error(), "granted more than once") {
+			t.Fatalf("%s: the no-scope rejection must come before the duplicate guard, got %v", name, err)
+		}
 	}
 }
 

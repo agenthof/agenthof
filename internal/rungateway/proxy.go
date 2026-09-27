@@ -88,11 +88,12 @@ func New(gw config.GatewayConfig, keyRoot string, b broker.Broker, logger *slog.
 
 // allowedTools is what Start derives from the agent's tool grants: resource
 // id → the tool names the agent may see. A PRESENT key with a nil set is a
-// config.ScopeAll grant, bare or mode: all (every tool the resource exposes);
-// an ABSENT key is a resource the agent was not granted at all. A read-only
-// grant resolves to the resource's read_only_tools, so it arrives here as an
-// ordinary non-nil set. allows is the only reader, so the present-vs-nil
-// distinction cannot be confused with "not granted".
+// config.ScopeAll grant, mode: all (every tool the resource exposes); an
+// ABSENT key is a resource the agent was not granted at all; a present key
+// with an EMPTY set grants nothing. A read-only grant resolves to the
+// resource's read_only_tools, so it arrives here as an ordinary non-nil set.
+// allows is the only reader, so the present-vs-nil distinction cannot be
+// confused with "not granted".
 type allowedTools map[string]map[string]struct{}
 
 // allows reports whether tool on resourceID is within the agent's grant.
@@ -134,12 +135,18 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 	logger := p.logger.With("run", bind.RunID, "agent", agent.Name)
 
 	// Build the per-resource allowlist. Registry validation already rejects
-	// a resource granted twice when either grant limits tools, a mode it
-	// does not implement, and mode: all alongside a tools list — but Start
-	// is reachable without the registry, so it fails closed on all three
-	// rather than letting merge order decide what the agent may see.
+	// a grant with neither tools nor a mode, a resource granted twice when
+	// either grant limits tools, a mode it does not implement, and mode: all
+	// alongside a tools list — but Start is reachable without the registry,
+	// so it fails closed on all four rather than letting merge order decide
+	// what the agent may see. The no-scope check runs first so a pair of
+	// such grants is reported as what it is, not as a duplicate.
 	allow := allowedTools{}
 	for _, grant := range agent.Tools {
+		if grant.Mode == "" && len(grant.Tools) == 0 {
+			logger.Error("gateway start refused", "reason", "tool grant names no tools and sets no mode", "resource", grant.Resource)
+			return "", "", fmt.Errorf("resource %q grant names no tools and sets no mode; list tools or set mode: all", grant.Resource)
+		}
 		prev, seen := allow[grant.Resource]
 		scope := grant.Scope()
 		if seen && (scope != config.ScopeAll || prev != nil) {
