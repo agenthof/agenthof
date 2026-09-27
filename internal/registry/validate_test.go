@@ -275,15 +275,18 @@ func TestFrontedAgentUndeclaredToolRejected(t *testing.T) {
 
 // TestValidateToolGrants covers the grant-level rules: a grant must name a
 // declared resource and non-empty tool names; a resource may be granted more
-// than once ONLY as bare grants (tolerated today, so still tolerated —
-// Article VI additivity); any duplicate involving a restricted grant is
-// ambiguous and rejected.
+// than once only when every grant is ScopeAll (bare or mode: all). Any
+// ScopeReadOnly or ScopeNamed grant makes a second grant of that resource
+// bad-tool-grant.
 func TestValidateToolGrants(t *testing.T) {
 	withGrants := func(grants []config.ToolGrant) config.Config {
 		cfg := baseCfg()
 		cfg.Agents[0].Tools = grants
 		cfg.Gateway.Tools = map[string]config.ToolResource{
-			"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
+			"github": {
+				Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T",
+				ReadOnlyTools: []string{"list_issues", "get_issue"},
+			},
 		}
 		return cfg
 	}
@@ -301,6 +304,16 @@ func TestValidateToolGrants(t *testing.T) {
 		{"bare then restricted duplicate", []config.ToolGrant{{Resource: "github"}, {Resource: "github", Tools: []string{"x"}}}, "bad-tool-grant"},
 		{"restricted then bare duplicate", []config.ToolGrant{{Resource: "github", Tools: []string{"x"}}, {Resource: "github"}}, "bad-tool-grant"},
 		{"two restricted duplicates", []config.ToolGrant{{Resource: "github", Tools: []string{"x"}}, {Resource: "github", Tools: []string{"y"}}}, "bad-tool-grant"},
+		{"mode all", []config.ToolGrant{{Resource: "github", Mode: "all"}}, ""},
+		{"mode read-only", []config.ToolGrant{{Resource: "github", Mode: "read-only"}}, ""},
+		{"tools plus read-only", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues"}, Mode: "read-only"}}, ""},
+		{"bare and mode all tolerated", []config.ToolGrant{{Resource: "github"}, {Resource: "github", Mode: "all"}}, ""},
+		{"bare then read-only duplicate", []config.ToolGrant{{Resource: "github"}, {Resource: "github", Mode: "read-only"}}, "bad-tool-grant"},
+		{"named then read-only duplicate", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues"}}, {Resource: "github", Mode: "read-only"}}, "bad-tool-grant"},
+		{"mutating tool under read-only", []config.ToolGrant{{Resource: "github", Tools: []string{"delete_repo"}, Mode: "read-only"}}, "bad-tool-grant"},
+		{"bad mode", []config.ToolGrant{{Resource: "github", Mode: "write"}}, "bad-tool-grant"},
+		{"mode all plus tools", []config.ToolGrant{{Resource: "github", Mode: "all", Tools: []string{"list_issues"}}}, "bad-tool-grant"},
+		{"unknown resource read-only", []config.ToolGrant{{Resource: "nope", Mode: "read-only"}}, "unknown-tool"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -324,6 +337,64 @@ func TestValidateToolGrants(t *testing.T) {
 				t.Fatalf("an empty resource must be reported once, as bad-tool-grant, not also as unknown-tool: %v", agentErrs)
 			}
 		})
+	}
+}
+
+func TestValidateReadOnlyRequiresClassification(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "github", Mode: "read-only"}}
+	cfg.Gateway.Tools = map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
+	}
+	var agentErrs []ValidationError
+	for _, e := range Validate(cfg) {
+		if e.Entity == "planner" {
+			agentErrs = append(agentErrs, e)
+		}
+	}
+	c := codes(agentErrs)
+	if c["bad-tool-grant"] != 1 {
+		t.Fatalf("read-only without classification must be exactly one bad-tool-grant, got %v (errs: %v)", c, agentErrs)
+	}
+	if c["unknown-tool"] != 0 {
+		t.Fatalf("expected zero unknown-tool, got %v (errs: %v)", c, agentErrs)
+	}
+}
+
+func TestValidateUnknownReadOnlyIsOnlyUnknownTool(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "nope", Mode: "read-only"}}
+	var agentErrs []ValidationError
+	for _, e := range Validate(cfg) {
+		if e.Entity == "planner" {
+			agentErrs = append(agentErrs, e)
+		}
+	}
+	c := codes(agentErrs)
+	if c["unknown-tool"] != 1 {
+		t.Fatalf("unknown-tool count = %v, want 1 (errs: %v)", c, agentErrs)
+	}
+	if c["bad-tool-grant"] != 0 {
+		t.Fatalf("unknown resource plus mode read-only must not also be bad-tool-grant: %v", agentErrs)
+	}
+}
+
+func TestValidateReadOnlyToolsEntries(t *testing.T) {
+	base := func(names []string) config.Config {
+		cfg := baseCfg()
+		cfg.Gateway.Tools = map[string]config.ToolResource{
+			"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T", ReadOnlyTools: names},
+		}
+		return cfg
+	}
+	if codes(Validate(base([]string{"echo", "echo"})))["bad-tool-resource"] != 1 {
+		t.Fatal("duplicate read_only_tools entry must be bad-tool-resource")
+	}
+	if codes(Validate(base([]string{"echo", ""})))["bad-tool-resource"] != 1 {
+		t.Fatal("empty read_only_tools entry must be bad-tool-resource")
+	}
+	if errs := Validate(base([]string{"echo"})); len(errs) != 0 {
+		t.Fatalf("a unique non-empty read_only_tools list is valid, got %v", errs)
 	}
 }
 

@@ -105,7 +105,8 @@ host. That sandbox's network and exec confinement is required, and Agenthof
 does not verify that the operator runs the agent inside it.
 
 An agent may declare `tools`, each naming a `gateway.yaml` tool resource —
-every tool that resource exposes, or only the tools the entry names; for
+a grant names a resource and may limit it to named tools or to the
+resource's read-only tools; for
 the duration of its step it reaches those tools only through Agenthof's
 inbound MCP proxy, which mirrors just the granted tools, authorizes each
 call against that allowlist, and injects the resource's credential, so the

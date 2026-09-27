@@ -41,26 +41,30 @@ serves an inbound MCP server at the proxy URL's root path, alongside the exec
 routes and the model route.
 
 What an agent's `tools:` list changes is **which tools are mirrored onto that
-server**. Each entry names a tool resource from `gateway.yaml`, in one of two
-forms: the bare id (`- github`) grants every tool that resource advertises;
-an object (`- resource: github` with `tools: [list_issues, get_issue]`)
-grants only the named tools of that resource. An entry that names no such
+server**. Each entry names a tool resource from `gateway.yaml`. The bare id
+(`- github`), or an object with `mode: all`, grants every tool that resource
+advertises. An object with `tools: [list_issues, get_issue]` grants only the
+named tools of that resource. An object with `mode: read-only` grants only
+the tools the operator lists in that resource's `read_only_tools`; adding a
+`tools` list narrows it further, and every name in it must be one of those
+read-only tools. A tool not in `read_only_tools` is treated as mutating. An entry that names no such
 resource is rejected at `apply`. An agent that declares no tools still gets
 the MCP server — with an empty tool list, and any `tools/call` it sends
 recorded `refused`, reason `tool is not available to this run`.
 
 Before the step is handed to the agent, Agenthof connects out to each named
 resource as an MCP client, asks it for its tools, and mirrors them onto the
-inbound server — all of them for a bare entry, only the named ones for an
-object entry; a tool the entry leaves out is treated as if the resource had
+inbound server — all of them for a bare or `mode: all` entry, only the
+granted ones otherwise; a tool the entry leaves out is treated as if the resource had
 never advertised it. Resources are visited in the order the agent declared
 them, and each id is visited once. Connecting and listing are bounded at 30
 seconds each.
 
 If any of that fails — the resource is unreachable, it will not list its
 tools, two declared resources advertise a mirrored tool of the same name, or
-an object entry names a tool its resource does not advertise (a typo, or a
-tool the resource has since dropped) — the step fails outright, with
+an entry's `tools` list names a tool its resource does not advertise (a typo,
+or a tool the resource has since dropped), or a `mode: read-only` entry matches
+none of the tools the resource advertises — the step fails outright, with
 `step_failed` carrying the fixed reason `tool proxy start failed`, and the
 workflow finishes failed. It does not bounce back to a prior step. The ledger
 reason is fixed and generic on purpose: a start error can wrap the resource's
@@ -71,7 +75,10 @@ instead, so naming a tool that is not there still fails loudly and debuggably;
 it just does so on stderr, not in the ledger. Because a left-out tool is never
 mirrored, a name
 clash between two resources is only a clash when both sides are actually
-granted — restricting one side is a way to resolve it.
+granted — restricting one side is a way to resolve it. A name in
+`read_only_tools` that the resource no longer advertises is a standing list
+entry, not a request, so it is skipped with a warning in the operator's log
+rather than failing the step.
 
 When the step ends, Agenthof shuts the listener down and closes every
 upstream connection. The run token stops working. It is never written to the
@@ -79,8 +86,9 @@ ledger and never placed on the delegation binding.
 
 ## What the agent can see
 
-A bare entry grants **every tool that resource advertises**; an object entry
-grants **only the tools it names**. Either way Agenthof mirrors the
+A bare or `mode: all` entry grants **every tool that resource advertises**;
+any other entry grants **only the tools it names or the resource's
+`read_only_tools`**. Either way Agenthof mirrors the
 upstream's own tool definitions as they come back, names and schemas
 unchanged. It does not invent tools of its own, and it does not rewrite the
 ones it mirrors.
@@ -182,7 +190,7 @@ not prove is the same limit as every other event; see
 
 | Shipped today | Reserved for later |
 | --- | --- |
-| a bare entry grants every tool a resource advertises; an object entry restricts the grant to named tools within it | read-only versus mutating scope — a grant does not today distinguish a tool that reads from one that writes |
+| a grant is a bare resource id or `mode: all` (every tool the resource advertises), `mode: read-only` (the resource's `read_only_tools`, as the operator lists them), or a `tools` list (only those names) | |
 | an HTTP (streamable) MCP transport | a stdio transport, where the MCP server would be a local subprocess |
 | `static_env` and `client_credentials` credentials, injected outbound | |
 

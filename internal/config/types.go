@@ -17,7 +17,7 @@ type AgentDef struct {
 	Enabled     *bool       `yaml:"enabled"` // nil means true
 	Model       string      `yaml:"model"`
 	Instruction string      `yaml:"instruction"`
-	Tools       []ToolGrant `yaml:"tools"` // each entry: a resource id (every tool) or {resource, tools} (only those tools)
+	Tools       []ToolGrant `yaml:"tools"` // bare string, mode: all, mode: read-only, tools: [...], or tools + read-only
 	Output      string      `yaml:"output"`
 	Execution   string      `yaml:"execution"` // "", or "fronted"; "" means fronted
 	Endpoint    string      `yaml:"endpoint"`  // required: the agent's HTTP endpoint
@@ -25,32 +25,63 @@ type AgentDef struct {
 	SourceFile  string      `yaml:"-"`
 }
 
-// ToolGrant is one entry in an agent's `tools:` list. A bare string is the
-// resource id and grants every tool the resource exposes (unchanged
-// behavior). The object form restricts the grant to the named tools within
-// that resource; it must list at least one tool — the bare string is the
-// only spelling of "all tools", so a typo can never widen a grant.
+// ToolGrant is one entry in an agent's `tools:` list.
 //
-// Reserved (additive, not implemented): a per-tool mode (read-only vs
-// mutating).
+//	bare string                         every tool (legacy; same as mode: all)
+//	{resource, mode: all}               every tool, explicit
+//	{resource, mode: read-only}         the resource's read_only_tools
+//	{resource, tools: [a, b]}           exactly those tools
+//	{resource, tools: [a], mode: read-only}
+//	                                    those tools, each must be read-only
 type ToolGrant struct {
 	Resource string   `yaml:"resource"`
-	Tools    []string `yaml:"tools"` // object form: non-empty; bare string: nil (= every tool)
+	Tools    []string `yaml:"tools"`
+	Mode     string   `yaml:"mode"` // "", "all", or "read-only"
 }
 
-// Restricted reports whether the grant names specific tools (the object
-// form) rather than every tool the resource exposes (the bare string).
-func (g ToolGrant) Restricted() bool { return len(g.Tools) > 0 }
+// GrantScope is how wide a tool grant is. Callers branch on this, never on
+// len(Tools): a read-only grant has no tools list and would otherwise look bare.
+type GrantScope int
+
+const (
+	ScopeAll      GrantScope = iota // bare string, or mode: all
+	ScopeReadOnly                   // mode: read-only
+	ScopeNamed                      // tools: [...], no mode
+)
+
+// Scope classifies the grant by intent: ScopeAll (bare or mode: all),
+// ScopeReadOnly (mode: read-only — the resource's read_only_tools, optionally
+// narrowed by a tools list), or ScopeNamed (an explicit tools list, no mode).
+// A read-only grant that also lists tools stays ScopeReadOnly, so a caller that
+// needs its effective set must read Tools (narrowed) rather than assume
+// read_only_tools. An unrecognised Mode is ScopeNamed so it cannot widen to
+// every tool; Validate and Start both reject that value.
+func (g ToolGrant) Scope() GrantScope {
+	switch g.Mode {
+	case "read-only":
+		return ScopeReadOnly
+	case "all":
+		return ScopeAll
+	case "":
+		if len(g.Tools) > 0 {
+			return ScopeNamed
+		}
+		return ScopeAll
+	default:
+		return ScopeNamed
+	}
+}
 
 // rawGrant is ToolGrant without its methods, so the mapping form can be
 // decoded with value.Decode without recursing back into UnmarshalYAML.
 type rawGrant ToolGrant
 
 // UnmarshalYAML accepts a scalar (resource id → every tool) or a mapping
-// ({resource, tools} → only those tools) and rejects everything else. It
-// fails closed: yaml.v3 silently drops unknown mapping keys, so the keys are
-// checked by hand before decoding, and an object form with no tools is an
-// error rather than an accidental all-tools grant.
+// ({resource} with a tools list and/or a mode) and rejects everything else. It
+// fails closed: yaml.v3 silently drops unknown mapping keys, so resource,
+// tools, and mode are checked by hand before decoding, and an object form with
+// neither a tools list nor a mode is an error rather than an accidental
+// all-tools grant.
 //
 // A null list element (`tools: [~]`) never reaches this method: yaml.v3
 // skips the Unmarshaler for a null node and drops the element from the
@@ -65,15 +96,17 @@ func (g *ToolGrant) UnmarshalYAML(value *yaml.Node) error {
 		*g = ToolGrant{Resource: value.Value}
 		return nil
 	case yaml.MappingNode:
-		// Content alternates key, value, key, value. Only `resource` and
-		// `tools` are known; anything else (a singular `tool:`, a future
-		// `mode:` misspelled) is rejected rather than silently ignored.
+		var toolsNode, modeNode *yaml.Node
 		for i := 0; i+1 < len(value.Content); i += 2 {
 			key := value.Content[i]
 			switch key.Value {
-			case "resource", "tools":
+			case "resource":
+			case "tools":
+				toolsNode = value.Content[i+1]
+			case "mode":
+				modeNode = value.Content[i+1]
 			default:
-				return fmt.Errorf("bad-tool-grant: line %d: unknown key %q in tool grant (allowed keys: resource, tools)", key.Line, key.Value)
+				return fmt.Errorf("bad-tool-grant: line %d: unknown key %q in tool grant (allowed keys: resource, tools, mode)", key.Line, key.Value)
 			}
 		}
 		var raw rawGrant
@@ -83,13 +116,29 @@ func (g *ToolGrant) UnmarshalYAML(value *yaml.Node) error {
 		if raw.Resource == "" {
 			return fmt.Errorf("bad-tool-grant: line %d: tool grant has an empty resource id", value.Line)
 		}
-		if len(raw.Tools) == 0 {
-			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q must list at least one tool; write the bare string %q to grant every tool it exposes", value.Line, raw.Resource, raw.Resource)
+		// A present tools key that is null or an empty sequence is an error
+		// even when mode is set. An absent tools key leaves toolsNode nil.
+		if toolsNode != nil && len(raw.Tools) == 0 {
+			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q must list at least one tool", toolsNode.Line, raw.Resource)
+		}
+		// value.Decode already resolved mode: an absent or null mode leaves
+		// raw.Mode "". modeNode is non-nil whenever a mode key was present, so
+		// it is safe to cite in the value errors below.
+		switch raw.Mode {
+		case "", "all", "read-only":
+		default:
+			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q has mode %q (want all or read-only)", modeNode.Line, raw.Resource, raw.Mode)
+		}
+		if raw.Mode == "all" && toolsNode != nil {
+			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q sets mode all and a tools list; drop tools, or drop mode", modeNode.Line, raw.Resource)
+		}
+		if raw.Mode == "" && toolsNode == nil {
+			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q must set tools or mode: all", value.Line, raw.Resource)
 		}
 		*g = ToolGrant(raw)
 		return nil
 	default:
-		return fmt.Errorf("bad-tool-grant: line %d: tool grant must be a resource id string or a {resource, tools} object", value.Line)
+		return fmt.Errorf("bad-tool-grant: line %d: tool grant must be a resource id string or a {resource, tools, mode} object", value.Line)
 	}
 }
 
@@ -210,6 +259,10 @@ type ToolResource struct {
 	ClientIDEnv      string `yaml:"client_id_env"`     // client_credentials: env NAME
 	ClientSecretEnv  string `yaml:"client_secret_env"` // client_credentials: client secret env NAME
 	Scope            string `yaml:"scope"`             // client_credentials: optional, space-delimited
+	// ReadOnlyTools names the tools that are safe under a mode: read-only
+	// grant. Operator-declared. A tool not listed is mutating. Empty means
+	// this resource has no read-only grant.
+	ReadOnlyTools []string `yaml:"read_only_tools"`
 }
 
 type Config struct {

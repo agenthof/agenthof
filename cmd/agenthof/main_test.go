@@ -56,8 +56,29 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if tool, ok := strings.CutPrefix(req.Input, "tool:"); ok {
-		if err := stubCallTool(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), tool); err != nil {
-			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "tool door: " + err.Error()})
+		proxyURL := r.Header.Get("X-Agenthof-Proxy-URL")
+		token := r.Header.Get("X-Agenthof-Run-Token")
+		var pendingErr error
+		callIndex := 0
+		for _, name := range strings.Split(tool, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			err := stubCallTool(proxyURL, token, name)
+			if err != nil {
+				if callIndex == 0 {
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "tool door: " + err.Error()})
+					return
+				}
+				if pendingErr == nil {
+					pendingErr = err
+				}
+			}
+			callIndex++
+		}
+		if pendingErr != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "tool door: " + pendingErr.Error()})
 			return
 		}
 	}
