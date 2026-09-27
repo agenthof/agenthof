@@ -17,6 +17,10 @@ the door rather than trusting the agent.
 > *Agenthof* — from the German **Hof**: the court. Where your agents are
 > housed, and what they answer to.
 
+![Agenthof quickstart: apply a config, run a workflow, then audit the run — who asked, what ran, and the ledger's integrity verified](docs/assets/quickstart-demo.gif)
+
+*`apply` → `run` → `audit`: every action attributed to a human and verified against a hash-chained ledger. Full walkthrough in the [quickstart](docs/quickstart.md).*
+
 ## What Agenthof is — and isn't
 
 **Agenthof is** a governance layer for AI agents:
