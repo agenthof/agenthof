@@ -89,6 +89,12 @@ Authorization is default-deny: a role grants access only to invokers whose
 groups appear in its declared `allowed_groups`; the value `["*"]` is the
 explicit marker for a role open to any authenticated invoker; a role that
 declares no access floor at all is rejected at `apply`, never treated as open.
+A grant that names a set of reachable capabilities — invokers, tools,
+executables — declares which ones; the widest such set is an explicit marker
+(a role's `["*"]`, a tool grant's `mode: all`), and a grant that names none is
+rejected at `apply`, never widened to the maximum. Where a shipped shape
+conflicts with this rule it is retired by amendment — rejected at `apply` with
+its replacement named — never by silently changing what it means.
 
 Schema changes must be backward compatible: additive only,
 never a breaking change to an existing field's meaning. Engine capability
