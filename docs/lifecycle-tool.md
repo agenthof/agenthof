@@ -7,7 +7,7 @@ inside, see [`lifecycle.md`](lifecycle.md). For the YAML, see
 a real upstream MCP server, the injected credential, and the rendered
 `tool_call` audit line — see the testscripts
 [`cmd/agenthof/testdata/script/door_tool.txtar`](../cmd/agenthof/testdata/script/door_tool.txtar)
-(a bare grant) and
+(a `mode: all` grant) and
 [`cmd/agenthof/testdata/script/door_tool_allowlist.txtar`](../cmd/agenthof/testdata/script/door_tool_allowlist.txtar)
 (a grant restricted to named tools, with the left-out tool refused).
 
@@ -41,9 +41,10 @@ serves an inbound MCP server at the proxy URL's root path, alongside the exec
 routes and the model route.
 
 What an agent's `tools:` list changes is **which tools are mirrored onto that
-server**. Each entry names a tool resource from `gateway.yaml`. The bare id
-(`- github`), or an object with `mode: all`, grants every tool that resource
-advertises. An object with `tools: [list_issues, get_issue]` grants only the
+server**. Each entry is an object naming a tool resource from `gateway.yaml`.
+An object with `mode: all` grants every tool that resource advertises; a
+resource id on its own is not a grant and is rejected at `apply`. An object
+with `tools: [list_issues, get_issue]` grants only the
 named tools of that resource. An object with `mode: read-only` grants only
 the tools the operator lists in that resource's `read_only_tools`; adding a
 `tools` list narrows it further, and every name in it must be one of those
@@ -54,7 +55,7 @@ recorded `refused`, reason `tool is not available to this run`.
 
 Before the step is handed to the agent, Agenthof connects out to each named
 resource as an MCP client, asks it for its tools, and mirrors them onto the
-inbound server — all of them for a bare or `mode: all` entry, only the
+inbound server — all of them for a `mode: all` entry, only the
 granted ones otherwise; a tool the entry leaves out is treated as if the resource had
 never advertised it. Resources are visited in the order the agent declared
 them, and each id is visited once. Connecting and listing are bounded at 30
@@ -86,7 +87,7 @@ ledger and never placed on the delegation binding.
 
 ## What the agent can see
 
-A bare or `mode: all` entry grants **every tool that resource advertises**;
+A `mode: all` entry grants **every tool that resource advertises**;
 any other entry grants **only the tools it names or the resource's
 `read_only_tools`**. Either way Agenthof mirrors the
 upstream's own tool definitions as they come back, names and schemas
@@ -190,7 +191,7 @@ not prove is the same limit as every other event; see
 
 | Shipped today | Reserved for later |
 | --- | --- |
-| a grant is a bare resource id or `mode: all` (every tool the resource advertises), `mode: read-only` (the resource's `read_only_tools`, as the operator lists them), or a `tools` list (only those names) | |
+| a grant is `mode: all` (every tool the resource advertises), `mode: read-only` (the resource's `read_only_tools`, as the operator lists them), or a `tools` list (only those names); a resource id on its own is rejected at `apply` | |
 | an HTTP (streamable) MCP transport | a stdio transport, where the MCP server would be a local subprocess |
 | `static_env` and `client_credentials` credentials, injected outbound | |
 

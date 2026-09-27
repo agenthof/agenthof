@@ -54,20 +54,25 @@ func Validate(cfg config.Config) []ValidationError {
 		}
 
 		// Tools are gateway tool-resource grants. Each must name a declared
-		// gateway.tools resource; a named grant lists non-empty tool names.
-		// A resource may be granted more than once only when every grant is
-		// ScopeAll (bare or mode: all; Start dedups those). Any
+		// gateway.tools resource and either a non-empty tools list or a
+		// mode; a grant with neither is the struct twin of the retired bare
+		// id and is rejected here, before it can reach a duplicate bucket or
+		// be scoped. A resource may be granted more than once only when
+		// every grant is ScopeAll (mode: all; Start dedups those). Any
 		// ScopeReadOnly or ScopeNamed grant makes a second grant of that
 		// resource bad-tool-grant. Tool NAMES cannot be checked against the
 		// upstream here (no network at apply); Start fails the step when an
-		// allowlisted name is not exposed. A Go-built grant with
-		// Tools == []string{} is still ScopeAll: YAML cannot produce that
-		// shape (the object form rejects an empty tools list at load).
+		// allowlisted name is not exposed.
 		grantedAll := map[string]bool{}
 		grantedLimited := map[string]bool{}
 		for _, grant := range a.Tools {
 			if grant.Resource == "" {
 				add(a.SourceFile, a.Name, "bad-tool-grant", "tool grant has an empty resource id")
+				continue
+			}
+			if grant.Mode == "" && len(grant.Tools) == 0 {
+				add(a.SourceFile, a.Name, "bad-tool-grant",
+					fmt.Sprintf("tool grant for resource %q must list tools or set mode (all|read-only)", grant.Resource))
 				continue
 			}
 			known := true

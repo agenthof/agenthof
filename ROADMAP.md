@@ -6,8 +6,10 @@ that will change as the project and its users learn. Each item is a capability,
 not a promise of when.
 
 Agenthof is pre-1.0. Expect the config schema to grow (additively — existing
-fields keep their meaning), and expect "Next" items to land before "Later" ones
-without a fixed cadence.
+fields keep their meaning); where a shipped shape conflicts with a
+constitutional rule it can be retired by amendment, rejected at apply with its
+replacement named. Expect "Next" items to land before "Later" ones without a
+fixed cadence.
 
 ## Now — shipped (pre-release)
 
@@ -54,12 +56,14 @@ The governed core is real and runnable today:
   control` read, verify, and recover it.
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
   reach declared MCP tool resources only through Agenthof, which mirrors a
-  whole resource, only the tools an agent's grant names, or — with
-  `mode: read-only` — only the tools the operator lists as `read_only_tools`
-  (the upstream's own read-only hint does not decide this), authorizes each
-  call against that per-agent allowlist, injects the resource credential (a
-  static bearer or an OAuth `client_credentials`-minted token) the agent
-  never sees, and records every call — and every denied attempt.
+  whole resource (written `mode: all` — every-tool access is always an
+  explicit marker, never what a resource id grants by omission), only the
+  tools an agent's grant names, or — with `mode: read-only` — only the tools
+  the operator lists as `read_only_tools` (the upstream's own read-only hint
+  does not decide this), authorizes each call against that per-agent
+  allowlist, injects the resource credential (a static bearer or an OAuth
+  `client_credentials`-minted token) the agent never sees, and records every
+  call — and every denied attempt.
 - **Exec gateway, attested** — allowlisted commands: a fronted agent runs an
   allowlisted command in its own operator sandbox and reports it; Agenthof
   authorizes the command against the config allowlist and records it, but
