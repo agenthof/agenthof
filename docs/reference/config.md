@@ -67,10 +67,9 @@ Optional free text. Not checked by `apply`.
 
 ### `tools`
 
-Optional list of tool grants. Each entry is either the id of a tool
-resource declared under `gateway.yaml`'s `tools` map (see
-[`tools`](#tools-1) under Gateway, below), which grants every tool that
-resource exposes (same as `mode: all`), or an object with these keys:
+Optional list of tool grants. Each entry is an object naming a tool resource
+declared under `gateway.yaml`'s `tools` map (see [`tools`](#tools-1) under
+Gateway, below) with these keys:
 
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
@@ -78,10 +77,9 @@ resource exposes (same as `mode: all`), or an object with these keys:
 | Tools | `tools` | list of strings | yes when `mode` is absent; non-empty when present | — |
 | Mode | `mode` | string | no | `""` |
 
-A grant takes one of five forms:
+A grant takes one of four forms:
 
-- a bare resource id, or `{resource, mode: all}` — every tool the resource
-  exposes;
+- `{resource, mode: all}` — every tool the resource exposes;
 - `{resource, mode: read-only}` — the tools listed in that resource's
   [`read_only_tools`](#tools-1) on the gateway catalog entry;
 - `{resource, tools: [...]}` — exactly the named tools;
@@ -89,20 +87,24 @@ A grant takes one of five forms:
   `apply` rejects any of them that is not in the resource's
   `read_only_tools`.
 
-These shapes are rejected with `bad-tool-grant`: an object with neither
-`tools` nor `mode`, a `tools` list that is empty (or `null`), `mode: all`
-together with `tools`, and any `mode` other than `all` or `read-only`. The
-file loader also rejects an object with any key other than `resource`,
-`tools`, and `mode`, or with an empty `resource`, so a misspelled key can
-never widen a grant. A `mode: read-only` grant on a resource that declares
-no `read_only_tools` is also `bad-tool-grant`.
+These shapes are rejected with `bad-tool-grant`: a bare resource id on its
+own (`- ticket-search`), which is no longer a grant — the error names both
+replacements, a `tools` list or `mode: all`; an object with neither `tools`
+nor `mode`; a `tools` list that is empty (or `null`); `mode: all` together
+with `tools`; and any `mode` other than `all` or `read-only`. The file
+loader also rejects an object with any key other than `resource`, `tools`,
+and `mode`, or with an empty `resource`, so a misspelled key can never
+widen a grant. A `mode: read-only` grant on a resource that declares no
+`read_only_tools` is also `bad-tool-grant`. Every-tool access is therefore
+always a deliberate, visible `mode: all`, never something a resource id
+grants by omission.
 
 `apply` rejects an entry whose resource is not declared in `gateway.yaml`
 with `unknown-tool` ("agent references tool ..., which is not a declared
 gateway tool resource") and an empty tool name with `bad-tool-grant`. A
 resource granted more than once is `bad-tool-grant` ("resource ... is
 granted more than once and at least one of those grants is not an all-tools
-grant; merge them into one grant") unless every grant of it is a bare id or
+grant; merge them into one grant") unless every grant of it is
 `mode: all`. `apply` does not check tool names against the resource itself;
 a name a grant lists that the resource does not expose fails the step at
 run time instead. The agent reaches its
@@ -224,7 +226,8 @@ description: Fronts an existing HTTP agent behind the registry
 execution: fronted
 endpoint: https://legacy.internal/agents/triage
 tools:
-  - ticket-search                        # every tool ticket-search exposes
+  - resource: ticket-search
+    mode: all                            # every tool ticket-search exposes
   - resource: billing-mcp
     tools: [get_invoice, list_invoices]  # only these two of billing-mcp
 # `model` is not checked. Each entry must name a resource under
@@ -242,7 +245,7 @@ tools:
   - resource: billing-mcp
     mode: read-only                     # only billing-mcp's read_only_tools
 # A second grant of billing-mcp in this list would be bad-tool-grant: a
-# resource may repeat only when every grant of it is bare or mode: all.
+# resource may repeat only when every grant of it is mode: all.
 ```
 
 ## Workflows (`config/workflows/*.yaml` → `WorkflowDef` / `Step`)
@@ -477,8 +480,8 @@ directory `gateway provision` writes — and otherwise the value of
 ### `tools`
 
 A map from a tool-resource id to a `ToolResource` (fields above). An agent's
-`tools` list (see [`tools`](#tools) under Agents) names ids from this map,
-bare or inside a `{resource, tools}` object; `apply` rejects an agent entry
+`tools` list (see [`tools`](#tools) under Agents) names ids from this map
+inside a `{resource, ...}` object; `apply` rejects an agent entry
 that doesn't resolve here with `unknown-tool`, and validates every declared
 resource itself against the `ToolResource` rules above (`bad-tool-resource`).
 At runtime, a step whose agent declares tools reaches them only through
