@@ -6,8 +6,10 @@ that will change as the project and its users learn. Each item is a capability,
 not a promise of when.
 
 Agenthof is pre-1.0. Expect the config schema to grow (additively — existing
-fields keep their meaning), and expect "Next" items to land before "Later" ones
-without a fixed cadence.
+fields keep their meaning); where a shipped shape conflicts with a
+constitutional rule it can be retired by amendment, rejected at apply with its
+replacement named. Expect "Next" items to land before "Later" ones without a
+fixed cadence.
 
 ## Now — shipped (pre-release)
 
