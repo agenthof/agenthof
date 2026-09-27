@@ -40,9 +40,13 @@ type ToolGrant struct {
 	Mode     string   `yaml:"mode"` // "", "all", or "read-only"
 }
 
-// GrantScope is how wide a tool grant is. Callers branch on this, never on
+// GrantScope is how wide a tool grant is. Callers branch on this, not on
 // len(Tools): a read-only grant has no tools list and would otherwise look
-// like a named grant with nothing named.
+// like a named grant with nothing named. The lone exception is the empty
+// shape (no mode and no tools), which UnmarshalYAML, Validate, and Start
+// reject on the raw fields before scoping — branching on Scope() there
+// would misreport an unknown mode (it defaults to ScopeNamed) as a missing
+// scope.
 type GrantScope int
 
 const (
