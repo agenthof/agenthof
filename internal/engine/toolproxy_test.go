@@ -65,7 +65,7 @@ func (c *coordExec) Execute(ctx context.Context, _ Binding, _ config.AgentDef, _
 func ftCfg() *registry.Registry {
 	cfg := config.Config{
 		Agents: []config.AgentDef{
-			{Name: "fe", Output: "out", SourceFile: "a", Execution: "fronted", Endpoint: "https://x", Tools: []config.ToolGrant{{Resource: "github"}}},
+			{Name: "fe", Output: "out", SourceFile: "a", Execution: "fronted", Endpoint: "https://x", Tools: []config.ToolGrant{{Resource: "github", Mode: "all"}}},
 		},
 		Workflows: []config.WorkflowDef{{
 			Name: "wf", SourceFile: "w",

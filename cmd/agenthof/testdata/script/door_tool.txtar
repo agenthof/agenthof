@@ -27,7 +27,9 @@ model: fast
 instruction: use a tool
 output: out
 execution: fronted
-tools: [echo-tool]
+tools:
+  - resource: echo-tool
+    mode: all
 -- config/workflows/tool-demo.yaml --
 name: tool-demo
 steps:

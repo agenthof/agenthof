@@ -97,12 +97,12 @@ func stubAgentSession(ctx context.Context, proxyURL, runToken string) (*mcp.Clie
 	return client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: proxyURL, HTTPClient: httpClient}, nil)
 }
 
-// testAgentDef builds a fronted agent with a bare grant (every tool) on each
-// listed resource id.
+// testAgentDef builds a fronted agent with a mode: all grant (every tool) on
+// each listed resource id.
 func testAgentDef(tools ...string) config.AgentDef {
 	grants := make([]config.ToolGrant, 0, len(tools))
 	for _, id := range tools {
-		grants = append(grants, config.ToolGrant{Resource: id})
+		grants = append(grants, config.ToolGrant{Resource: id, Mode: "all"})
 	}
 	return config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x", Tools: grants}
 }
@@ -753,7 +753,7 @@ func TestAllowedToolsAllows(t *testing.T) {
 		want  bool
 	}{
 		{"resource not granted", allowedTools{}, "github", "echo", false},
-		{"bare grant (present, nil set) allows every tool", allowedTools{"github": nil}, "github", "echo", true},
+		{"mode: all grant (present, nil set) allows every tool", allowedTools{"github": nil}, "github", "echo", true},
 		{"restricted grant allows a listed name", allowedTools{"github": {"echo": {}}}, "github", "echo", true},
 		{"restricted grant denies an unlisted name", allowedTools{"github": {"echo": {}}}, "github", "other", false},
 		{"restricted grant on one resource says nothing about another", allowedTools{"github": {"echo": {}}}, "jira", "echo", false},
@@ -823,31 +823,6 @@ func TestProxyStartMirrorsOnlyAllowlistedTools(t *testing.T) {
 	}
 }
 
-// TestProxyStartBareGrantMirrorsEveryTool is the backward-compat regression:
-// a bare grant still mirrors everything the resource exposes.
-func TestProxyStartBareGrantMirrorsEveryTool(t *testing.T) {
-	ts := newMultiToolUpstream(t, "up", "echo", "other")
-	t.Setenv("UP_TOKEN", "up-tok")
-	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
-
-	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(engine.Event) {})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer p.Stop()
-
-	ctx := context.Background()
-	sess, err := stubAgentSession(ctx, proxyURL, runToken)
-	if err != nil {
-		t.Fatalf("agent session: %v", err)
-	}
-	defer func() { _ = sess.Close() }()
-	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo", "other"}) {
-		t.Fatalf("bare grant mirrored %v, want [echo other]", got)
-	}
-}
-
 // TestProxyStartFailsWhenAllowlistedToolIsNotExposed: an allowlisted name
 // the upstream does not expose (a typo) fails Start loudly instead of
 // silently mirroring nothing. The first missing name in declared order is
@@ -870,8 +845,8 @@ func TestProxyStartFailsWhenAllowlistedToolIsNotExposed(t *testing.T) {
 
 // TestProxyStartAllowlistResolvesCollision: filter-first. Resource a exposes
 // {echo, other}; resource b exposes {other}. Granting a restricted to [echo]
-// plus b bare must NOT trip the cross-resource collision guard (a's other is
-// never mirrored), and "other" must route to b.
+// plus b mode: all must NOT trip the cross-resource collision guard (a's
+// other is never mirrored), and "other" must route to b.
 func TestProxyStartAllowlistResolvesCollision(t *testing.T) {
 	a := newMultiToolUpstream(t, "a", "echo", "other")
 	b := newMultiToolUpstream(t, "b", "other")
@@ -884,14 +859,14 @@ func TestProxyStartAllowlistResolvesCollision(t *testing.T) {
 
 	// Without the filter this exact grant list fails Start with the
 	// collision error, so first prove the collision guard still fires for
-	// two BARE grants.
+	// two mode: all grants.
 	if _, _, err := p.Start(testBinding(), testAgentDef("a", "b"), func(engine.Event) {}); err == nil || !strings.Contains(err.Error(), `tool "other" is exposed by both resource "a" and "b"`) {
-		t.Fatalf("two bare grants exposing the same name must still collide, got %v", err)
+		t.Fatalf("two mode: all grants exposing the same name must still collide, got %v", err)
 	}
 	p.Stop()
 
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
-		Tools: []config.ToolGrant{{Resource: "a", Tools: []string{"echo"}}, {Resource: "b"}}}
+		Tools: []config.ToolGrant{{Resource: "a", Tools: []string{"echo"}}, {Resource: "b", Mode: "all"}}}
 	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start with the collision allowlisted away: %v", err)
@@ -925,21 +900,19 @@ func TestProxyStartRejectsRestrictedDuplicateGrant(t *testing.T) {
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
 	}}, "", broker.StaticEnv{}, nil)
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
-		Tools: []config.ToolGrant{{Resource: "up"}, {Resource: "up", Tools: []string{"echo"}}}}
+		Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}, {Resource: "up", Tools: []string{"echo"}}}}
 	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), `resource "up" is granted more than once`) {
 		t.Fatalf("Start error = %v, want the restricted-duplicate rejection", err)
 	}
 }
 
-// TestProxyStartAcceptsDuplicateBareGrant: two BARE grants of one resource
-// stay legal — a bare grant is the every-tool spelling, so restating it is
-// not a semantic conflict. Only a restricted grant among duplicates changes
-// the grant's meaning; that shape is rejected by
-// TestProxyStartRejectsRestrictedDuplicateGrant. Article VI: an additive
-// schema (the `{resource, tools}` object form) must not tighten a
-// previously-legal spelling of the same intent.
-func TestProxyStartAcceptsDuplicateBareGrant(t *testing.T) {
+// TestProxyStartAcceptsDuplicateModeAllGrant: two mode: all grants of one
+// resource stay legal — restating the every-tool grant is not a semantic
+// conflict. Only a narrower grant among duplicates changes the grant's
+// meaning; that shape is rejected by
+// TestProxyStartRejectsRestrictedDuplicateGrant.
+func TestProxyStartAcceptsDuplicateModeAllGrant(t *testing.T) {
 	const upstreamToken = "up-tok"
 	ts, _ := newStubUpstream(t, upstreamToken)
 	t.Setenv("UP_TOKEN", upstreamToken)
@@ -947,10 +920,10 @@ func TestProxyStartAcceptsDuplicateBareGrant(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
 
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
-		Tools: []config.ToolGrant{{Resource: "up"}, {Resource: "up"}}}
+		Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}, {Resource: "up", Mode: "all"}}}
 	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err != nil {
-		t.Fatalf("Start with two bare grants of one resource: %v", err)
+		t.Fatalf("Start with two mode: all grants of one resource: %v", err)
 	}
 	defer p.Stop()
 
@@ -1006,8 +979,8 @@ func TestProxyStartReadOnlyMirrorsClassifiedTools(t *testing.T) {
 	}
 }
 
-// TestProxyStartModeAllMirrorsEveryTool: `mode: all` is the explicit spelling
-// of the bare grant — read_only_tools on the resource does not narrow it.
+// TestProxyStartModeAllMirrorsEveryTool: `mode: all` is the every-tool grant
+// — read_only_tools on the resource does not narrow it.
 func TestProxyStartModeAllMirrorsEveryTool(t *testing.T) {
 	ts := newMultiToolUpstream(t, "up", "echo", "other")
 	t.Setenv("UP_TOKEN", "up-tok")
@@ -1150,41 +1123,16 @@ func TestProxyStartRejectsModeAllWithTools(t *testing.T) {
 }
 
 // TestProxyStartRejectsReadOnlyDuplicateGrant: a read-only grant alongside a
-// bare one changes what the agent may see, so it is the same duplicate
+// mode: all one changes what the agent may see, so it is the same duplicate
 // conflict a named grant is — merge order must never decide it.
 func TestProxyStartRejectsReadOnlyDuplicateGrant(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}},
 	}}, "", broker.StaticEnv{}, nil)
-	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up"}, {Resource: "up", Mode: "read-only"}}}
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}, {Resource: "up", Mode: "read-only"}}}
 	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), `resource "up" is granted more than once`) {
 		t.Fatalf("Start error = %v, want duplicate rejection", err)
-	}
-}
-
-// TestProxyStartAcceptsBareAndModeAll: `mode: all` and the bare form are the
-// same grant, so restating one as the other is not a conflict.
-func TestProxyStartAcceptsBareAndModeAll(t *testing.T) {
-	const upstreamToken = "up-tok"
-	ts, _ := newStubUpstream(t, upstreamToken)
-	t.Setenv("UP_TOKEN", upstreamToken)
-	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
-	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up"}, {Resource: "up", Mode: "all"}}}
-	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer p.Stop()
-	ctx := context.Background()
-	sess, err := stubAgentSession(ctx, proxyURL, runToken)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = sess.Close() }()
-	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo"}) {
-		t.Fatalf("mirrored = %v, want [echo]", got)
 	}
 }
 
@@ -1384,7 +1332,7 @@ func TestExecAndToolCallRecordInCallOrder(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
 	agent := config.AgentDef{
 		Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
-		Tools: []config.ToolGrant{{Resource: "up"}},
+		Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}},
 		Exec:  config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "go"}}},
 	}
 	var mu sync.Mutex
