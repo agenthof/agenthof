@@ -1093,6 +1093,48 @@ func TestProxyStartRejectsMutatingToolUnderReadOnly(t *testing.T) {
 	}
 }
 
+// TestProxyStartReadOnlyNarrowedMirrorsSubset: `tools` + `mode: read-only`
+// mirrors exactly the listed tools (a subset of read_only_tools), not the whole
+// classification — proving the narrowed form's effective set is Tools.
+func TestProxyStartReadOnlyNarrowedMirrorsSubset(t *testing.T) {
+	ts := newMultiToolUpstream(t, "up", "echo", "other")
+	t.Setenv("UP_TOKEN", "up-tok")
+	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo", "other"}}
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"echo"}, Mode: "read-only"}}}
+	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Stop()
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	if got := mirroredToolNames(ctx, t, sess); !reflect.DeepEqual(got, []string{"echo"}) {
+		t.Fatalf("mirrored = %v, want [echo] (narrowed subset of read_only_tools)", got)
+	}
+}
+
+// TestProxyStartRejectsNamedReadOnlyDuplicateGrant: a named grant alongside a
+// read-only grant of the same resource is a duplicate conflict at Start too, so
+// the F1 anti-widening guarantee holds even for a Go-built def with no registry.
+func TestProxyStartRejectsNamedReadOnlyDuplicateGrant(t *testing.T) {
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}},
+	}}, "", broker.StaticEnv{}, nil)
+	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{
+		{Resource: "up", Tools: []string{"echo"}},
+		{Resource: "up", Mode: "read-only"},
+	}}
+	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	if err == nil || !strings.Contains(err.Error(), "granted more than once") {
+		t.Fatalf("Start error = %v, want duplicate-grant rejection", err)
+	}
+}
+
 // TestProxyStartRejectsModeAllWithTools: registry validation rejects this
 // contradiction, but Start is reachable without the registry and fails closed
 // on it too rather than picking one half of the grant.

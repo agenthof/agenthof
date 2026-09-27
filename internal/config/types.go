@@ -49,8 +49,13 @@ const (
 	ScopeNamed                      // tools: [...], no mode
 )
 
-// Scope classifies the grant. An unrecognised Mode is ScopeNamed so it cannot
-// widen to every tool; Validate rejects that value.
+// Scope classifies the grant by intent: ScopeAll (bare or mode: all),
+// ScopeReadOnly (mode: read-only — the resource's read_only_tools, optionally
+// narrowed by a tools list), or ScopeNamed (an explicit tools list, no mode).
+// A read-only grant that also lists tools stays ScopeReadOnly, so a caller that
+// needs its effective set must read Tools (narrowed) rather than assume
+// read_only_tools. An unrecognised Mode is ScopeNamed so it cannot widen to
+// every tool; Validate and Start both reject that value.
 func (g ToolGrant) Scope() GrantScope {
 	switch g.Mode {
 	case "read-only":
@@ -72,10 +77,11 @@ func (g ToolGrant) Scope() GrantScope {
 type rawGrant ToolGrant
 
 // UnmarshalYAML accepts a scalar (resource id → every tool) or a mapping
-// ({resource, tools} → only those tools) and rejects everything else. It
-// fails closed: yaml.v3 silently drops unknown mapping keys, so the keys are
-// checked by hand before decoding, and an object form with no tools is an
-// error rather than an accidental all-tools grant.
+// ({resource} with a tools list and/or a mode) and rejects everything else. It
+// fails closed: yaml.v3 silently drops unknown mapping keys, so resource,
+// tools, and mode are checked by hand before decoding, and an object form with
+// neither a tools list nor a mode is an error rather than an accidental
+// all-tools grant.
 //
 // A null list element (`tools: [~]`) never reaches this method: yaml.v3
 // skips the Unmarshaler for a null node and drops the element from the
@@ -115,26 +121,24 @@ func (g *ToolGrant) UnmarshalYAML(value *yaml.Node) error {
 		if toolsNode != nil && len(raw.Tools) == 0 {
 			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q must list at least one tool", toolsNode.Line, raw.Resource)
 		}
-		mode := raw.Mode
-		if modeNode != nil && (modeNode.Tag == "!!null" || mode == "") {
-			mode = ""
-			raw.Mode = ""
-		}
-		switch mode {
+		// value.Decode already resolved mode: an absent or null mode leaves
+		// raw.Mode "". modeNode is non-nil whenever a mode key was present, so
+		// it is safe to cite in the value errors below.
+		switch raw.Mode {
 		case "", "all", "read-only":
 		default:
-			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q has mode %q (want all or read-only)", modeNode.Line, raw.Resource, mode)
+			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q has mode %q (want all or read-only)", modeNode.Line, raw.Resource, raw.Mode)
 		}
-		if mode == "all" && toolsNode != nil {
+		if raw.Mode == "all" && toolsNode != nil {
 			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q sets mode all and a tools list; drop tools, or drop mode", modeNode.Line, raw.Resource)
 		}
-		if mode == "" && toolsNode == nil {
+		if raw.Mode == "" && toolsNode == nil {
 			return fmt.Errorf("bad-tool-grant: line %d: tool grant for resource %q must set tools or mode: all", value.Line, raw.Resource)
 		}
 		*g = ToolGrant(raw)
 		return nil
 	default:
-		return fmt.Errorf("bad-tool-grant: line %d: tool grant must be a resource id string or a {resource, tools} object", value.Line)
+		return fmt.Errorf("bad-tool-grant: line %d: tool grant must be a resource id string or a {resource, tools, mode} object", value.Line)
 	}
 }
 

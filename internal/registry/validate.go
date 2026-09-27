@@ -100,15 +100,19 @@ func Validate(cfg config.Config) []ValidationError {
 				if len(res.ReadOnlyTools) == 0 {
 					add(a.SourceFile, a.Name, "bad-tool-grant",
 						fmt.Sprintf("tool grant for resource %q is mode read-only but the resource declares no read_only_tools", grant.Resource))
-				}
-				classified := map[string]bool{}
-				for _, name := range res.ReadOnlyTools {
-					classified[name] = true
-				}
-				for _, name := range grant.Tools {
-					if name != "" && !classified[name] {
-						add(a.SourceFile, a.Name, "bad-tool-grant",
-							fmt.Sprintf("tool grant for resource %q lists %q, which is not in read_only_tools", grant.Resource, name))
+				} else {
+					// Only meaningful once the resource classifies something;
+					// otherwise every listed tool would also report "not in
+					// read_only_tools", double-reporting one root cause.
+					classified := map[string]bool{}
+					for _, name := range res.ReadOnlyTools {
+						classified[name] = true
+					}
+					for _, name := range grant.Tools {
+						if name != "" && !classified[name] {
+							add(a.SourceFile, a.Name, "bad-tool-grant",
+								fmt.Sprintf("tool grant for resource %q lists %q, which is not in read_only_tools", grant.Resource, name))
+						}
 					}
 				}
 			}
