@@ -17,6 +17,30 @@ the door rather than trusting the agent.
 > *Agenthof* — from the German **Hof**: the court. Where your agents are
 > housed, and what they answer to.
 
+## What Agenthof is — and isn't
+
+**Agenthof is** a governance layer for AI agents:
+
+- a **scoped identity and kill switch** for every agent;
+- **credential-injecting gateways** for the three doors an agent uses — model,
+  tool/MCP, and exec — so the agent reaches each one through Agenthof and never
+  holds the credential itself;
+- **least privilege by default** — an agent reaches a tool only because you
+  named it; naming none is rejected, never silently widened to every tool;
+- a **hash-chained audit ledger** that attributes every action and refusal to
+  the human who asked, with OIDC + RBAC on every door.
+
+**Agenthof is not** a sandbox, and doesn't pretend to be:
+
+- it **governs and audits; it does not _contain_ the agent.** Confinement is the
+  operator's sandbox's job — a no-network reference runtime ships in
+  [`deploy/refbox`](deploy/refbox), but that containment guarantee is the
+  sandbox's, not Agenthof's;
+- the ledger is **tamper-evident, not tamper-proof** — hash-chaining makes edits
+  _detectable_, not impossible;
+- **only shipped items are guarantees** — what is shipped versus coming is in the
+  [roadmap](ROADMAP.md).
+
 ## Status
 
 Pre-release, and the governed core is real and runnable today:
@@ -54,21 +78,42 @@ items are guarantees.
 
 **Requires:** Go >= 1.27 toolchain; Linux or macOS.
 
+Agents are external HTTP services. The example config points every agent at
+`http://127.0.0.1:8080/`, where `examples/echo-agent` — a credential-free
+reference agent — listens. Start it first, in its own terminal, and leave it
+running:
+
+    go run ./examples/echo-agent
+
+Then, from the repository root:
+
     go build -o agenthof ./cmd/agenthof
     ./agenthof apply --as you@example.com --config examples/config
     ./agenthof run software-engineer fix-bug --input "fix the login bug" --as you@example.com --config examples/config
     ./agenthof audit <run-id>
 
-Expected output from `apply`:
+`apply` prints the registry summary and records itself to the control ledger,
+attributed to `--as` (or your OS user if omitted):
 
     registry ok: 5 agents, 2 workflows, 2 roles
     control head: seq=1 sha256=<hex>
 
-The `control head` line is the control ledger recording the apply, attributed
-to `--as` (or your OS user if omitted); the hash varies per run. See
-[`ROADMAP.md`](ROADMAP.md) and `audit control` for the control-plane audit.
+`run` prints the run id it assigned (`run <run-id> finished: succeeded`). Pass
+that id to `audit` to see who asked, what ran, and whether the record can be
+trusted:
 
-See [`docs/quickstart.md`](docs/quickstart.md) for the kill switch, retention, and the full walkthrough.
+    run <run-id> — fix-bug (role software-engineer)
+    invoked by you@example.com (asserted, issuer local)
+    status: succeeded
+    ledger integrity: verified (8 events)
+      ...
+      step plan succeeded — artifact f7459994: fix the login bug
+      step code succeeded — artifact f7459994: fix the login bug
+      step review succeeded — artifact f7459994: fix the login bug
+
+See [`docs/quickstart.md`](docs/quickstart.md) for the kill switch, retention,
+choosing another port if 8080 is taken, and the full walkthrough. `audit
+control` shows the control-plane audit.
 
 ## The idea in three commands
 
