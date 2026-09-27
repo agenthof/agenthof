@@ -918,17 +918,20 @@ func TestProxyStartRejectsGrantWithoutScope(t *testing.T) {
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
 	}}, "", broker.StaticEnv{}, nil)
 	for name, grants := range map[string][]config.ToolGrant{
-		"single":    {{Resource: "up"}},
-		"duplicate": {{Resource: "up"}, {Resource: "up"}},
+		"single":                 {{Resource: "up"}},
+		"duplicate":              {{Resource: "up"}, {Resource: "up"}},
+		"mode all then no scope": {{Resource: "up", Mode: "all"}, {Resource: "up"}},
 	} {
-		agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x", Tools: grants}
-		_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
-		if err == nil || !strings.Contains(err.Error(), `resource "up" grant names no tools and sets no mode; list tools or set mode: all`) {
-			t.Fatalf("%s: Start error = %v, want the no-scope rejection naming both remedies", name, err)
-		}
-		if strings.Contains(err.Error(), "granted more than once") {
-			t.Fatalf("%s: the no-scope rejection must come before the duplicate guard, got %v", name, err)
-		}
+		t.Run(name, func(t *testing.T) {
+			agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x", Tools: grants}
+			_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+			if err == nil || !strings.Contains(err.Error(), `resource "up" grant names no tools and sets no mode; list tools or set mode: all`) {
+				t.Fatalf("Start error = %v, want the no-scope rejection naming both remedies", err)
+			}
+			if strings.Contains(err.Error(), "granted more than once") {
+				t.Fatalf("the no-scope rejection must come before the duplicate guard, got %v", err)
+			}
+		})
 	}
 }
 
