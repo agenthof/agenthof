@@ -31,7 +31,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Enabled | `enabled` | bool | no | `true` |
 | Model | `model` | string | no | — |
 | Instruction | `instruction` | string | no | — |
-| Tools | `tools` | list of tool grants (a resource id, or a {resource, tools} object) | no | none |
+| Tools | `tools` | list of tool grants ({resource, tools} or {resource, mode} objects) | no | none |
 | Output | `output` | string | no | — |
 | Execution | `execution` | string | no | `fronted` |
 | Endpoint | `endpoint` | string | yes | — |
