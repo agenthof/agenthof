@@ -59,10 +59,11 @@ Pre-release, and the governed core is real and runnable today:
   and Agenthof records that report, without running it); and sub-agent calls carry
   the caller's delegation binding;
 - **isolated agents** — a reference sandbox runtime (`deploy/refbox`) runs an
-  agent with **no network at all**, reaching Agenthof only over a bind-mounted
-  Unix socket, so credential-starvation and no-egress hold *by construction* on
-  the operator's host. What the runtime does and does not guarantee is stated
-  plainly, not assumed;
+  agent — a Go echo agent or a Python LangChain agent, both shipped as
+  reference images — with **no network at all**, reaching Agenthof only over a
+  bind-mounted Unix socket, so credential-starvation and no-egress hold *by
+  construction* on the operator's host. What the runtime does and does not
+  guarantee is stated plainly, not assumed;
 - a hash-chained ledger where every action and refusal is attributed to the
   human who invoked it, with `audit verify` for integrity;
 - the kill switch and OIDC + RBAC, with every door governed and recorded;

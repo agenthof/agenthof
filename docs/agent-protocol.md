@@ -7,8 +7,11 @@ Agenthof agent — this page is the core of the contract (a few optional headers
 at the end).
 
 Reference implementations: [`examples/echo-agent`](../examples/echo-agent) (Go, echoes
-its input and shows both the TCP and `unix://` gateway forms) and
-[`examples/model-agent`](../examples/model-agent) (Go, makes one model call over TCP).
+its input and shows both the TCP and `unix://` gateway forms),
+[`examples/model-agent`](../examples/model-agent) (Go, makes one model call over TCP),
+and [`examples/langchain-agent`](../examples/langchain-agent) (Python, LangChain; serves
+the contract over TCP or a Unix socket and makes one model call through the gateway in
+either form).
 
 ## The one rule: an agent needs no credentials
 

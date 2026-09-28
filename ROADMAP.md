@@ -41,6 +41,10 @@ The governed core is real and runnable today:
   construction* on the operator's host. It is the operator's sibling runtime —
   Agenthof still executes nothing — and its guarantees and limits are stated
   plainly, not assumed.
+  Two reference images run there today: a Go echo agent and a Python
+  LangChain agent whose model call reaches Agenthof through the gateway
+  socket in that same directory — a framework agent governed with no
+  provider key and no network.
 - **Model gateway** — a fronted agent reaches models through Agenthof. The
   per-role provider key is injected and is not passed through to the agent.
   The logical model is authorized, the provider model is rewritten on the

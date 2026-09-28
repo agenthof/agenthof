@@ -227,9 +227,13 @@ check a sandbox you assemble yourself. `deploy/refbox/` is one reference
 recipe for that obligation, for a single agent:
 
 - the agent is `examples/echo-agent`, built into a distroless image and
-  serving its step endpoint on a Unix socket. The image also contains
-  `/probe`, a small binary the CI job execs to dial a port and to write a
-  marker on `/work`; it is not part of the agent;
+  serving its step endpoint on a Unix socket. A second image
+  (`deploy/refbox/Containerfile.python`) does the same for
+  `examples/langchain-agent`, a Python LangChain agent, from a distroless
+  Python base with its pinned dependencies copied in — no shell, no package
+  manager, nothing installed at run time. Both images also contain `/probe`,
+  a small binary the CI job execs to dial a port and to write a marker on
+  `/work`; it is not part of the agent;
 - `deploy/refbox/refbox-run.sh` starts it with rootless podman: `--network
   none` (no interface but the compartment's own loopback), a read-only root,
   a tmpfs at `/work`, every Linux capability dropped, a memory / CPU / pid /
@@ -253,10 +257,15 @@ ran the command. Commands that need the network (`npm install`, `pip install`,
 
 A supervisor that runs the command itself and records it first-hand, and a
 narrow network allowlist for those commands, are reserved. The CI job
-`refbox` runs this recipe and checks the perimeter: the workflow finishes,
-a connect from inside the compartment to the internet fails, a connect to an
-open host port fails, the container environment carries no credential, and a
-file on `/work` is not left on the host.
+`refbox` runs this recipe for both images and checks the perimeter: the
+workflow finishes, a connect from inside the compartment to the internet
+fails, a connect to an open host port fails, the container environment
+carries no credential, and a file on `/work` is not left on the host. For the
+LangChain image it also checks that the model call went through Agenthof and
+nowhere else: the step's artifact equals the reply a provider running on the
+host returned for that run, the run ledger records the `model_call`, and the
+compartment cannot reach that provider's address directly. The provider key
+was on the host, in the gateway; it was never in the compartment.
 
 ### Model access
 
@@ -369,7 +378,7 @@ flag and exit-code reference.
 | Shipped today | Reserved for later |
 |---|---|
 | fronted agents: every step is an HTTP call to the agent's endpoint, with identity headers and `execution: fronted` stamped on the step events. Every fronted step also receives the per-run listener coordinates. The listener is TCP loopback unless `refbox_socket_dir` is set, in which case it is a Unix socket | streamed model-call usage (a streamed call is recorded without token counts) |
-| refbox reference compartment: a rootless-podman recipe (`deploy/refbox/`) with no network, no injected credentials, and an ephemeral workspace. The agent reaches Agenthof only over the socket directory. Exec inside it stays attested | a supervisor that runs exec itself and records it first-hand; a network allowlist for commands that need one |
+| refbox reference compartment: a rootless-podman recipe (`deploy/refbox/`) with no network, no injected credentials, and an ephemeral workspace. The agent reaches Agenthof only over the socket directory; a Go echo agent and a Python LangChain agent both run there from their own images, the latter making its model call through the gateway socket in that directory. Exec inside it stays attested | a supervisor that runs exec itself and records it first-hand; a network allowlist for commands that need one |
 | model gateway: the agent calls `<proxy URL>v1/chat/completions` with the run token; Agenthof authorizes the logical model, injects the per-role provider key, and records `model_call`. Non-streaming calls record token counts. Budgets are the upstream gateway's, via the provisioned role key | Agenthof-side spend caps; a per-role list of models; OAuth-protected model providers |
 | inbound MCP proxy for an agent's declared tools — allowlisted, credential-injecting, ledgered, and able to mint its own upstream token via the `client_credentials` grant | on-behalf-of / token-exchange agent auth to IdP-protected resources (RFC 8693) |
 | attested exec: an allowlist check, then an agent-reported outcome recorded as `exec` with `mode: attested`. Agenthof records the report and does not run or contain the command | enforced execution, where Agenthof would run the command |

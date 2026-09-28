@@ -1,0 +1,3 @@
+# The only third-party dependency. It brings openai, langchain-core and httpx
+# (httpx is imported directly for the Unix-socket transport).
+langchain-openai==1.6.6

@@ -2,3 +2,5 @@
 *.env
 .DS_Store
 /agenthof
+__pycache__/
+*.pyc
