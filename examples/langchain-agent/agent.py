@@ -38,8 +38,8 @@ def gateway_client(proxy_url):
                      base URL's host is a placeholder (the gateway ignores it;
                      only the /v1/... route matters).
     http(s)://...  → the URL with its trailing slash stripped, so appending
-                     /v1 never yields //v1 (the gateway answers that with a
-                     307 the client will not follow); no custom client.
+                     /v1 hits /v1/chat/completions directly instead of
+                     bouncing through a 307 redirect; no custom client.
     """
     if proxy_url.startswith(UNIX):
         transport = httpx.HTTPTransport(uds=proxy_url[len(UNIX):])

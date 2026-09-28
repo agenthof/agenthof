@@ -16,8 +16,8 @@ with `403`.
 Two proxy-URL forms are handled:
 
 - `http://127.0.0.1:<port>/` — the default gateway. The trailing slash is
-  stripped before `/v1` is appended (a `//v1` path is answered with a redirect
-  the client will not follow).
+  stripped before `/v1` is appended, so the request hits `/v1/chat/completions`
+  directly instead of bouncing through a redirect.
 - `unix://<socket-path>` — what Agenthof emits when `gateway.refbox_socket_dir`
   is set, as inside the [refbox](../../deploy/refbox) compartment. The agent
   dials the socket with an httpx Unix-socket transport; the URL's host is a
