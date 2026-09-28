@@ -1,0 +1,5 @@
+name: refbox-langchain
+description: One step through the LangChain agent in a refbox compartment; its model call goes through Agenthof over the socket directory
+steps:
+  - name: answer
+    agent: refbox-langchain

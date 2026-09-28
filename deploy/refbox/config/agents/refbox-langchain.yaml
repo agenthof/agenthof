@@ -1,0 +1,7 @@
+name: refbox-langchain
+description: LangChain (Python) agent running inside a refbox compartment (UDS, no network); one governed model call per step
+model: fast
+instruction: Answer the input with one model call through the gateway.
+output: reply
+execution: fronted
+endpoint: unix:///run/agenthof/refbox-langchain.sock
