@@ -7,8 +7,10 @@ on:
     paths:
       - 'deploy/refbox/**'
       - 'scripts/e2e-refbox.sh'
+      - 'scripts/fake-openai-provider.py'
       - '.github/workflows/refbox.yml'
       - 'examples/echo-agent/**'
+      - 'examples/langchain-agent/**'
       - 'internal/**'
       - 'cmd/agenthof/**'
 
@@ -17,8 +19,32 @@ permissions:
 
 jobs:
   refbox:
+    name: refbox (${{ matrix.agent }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - agent: echo
+          - agent: langchain
+            containerfile: deploy/refbox/Containerfile.python
+            image: refbox-langchain:test
+            name: refbox-langchain
+            socket: refbox-langchain.sock
+            workflow: refbox-langchain
+            socket_wait: "60"
+            model_proof: "1"
+    env:
+      # Unset matrix keys become empty strings, which the script treats as
+      # "use the default" (the echo agent).
+      REFBOX_CONTAINERFILE: ${{ matrix.containerfile }}
+      REFBOX_IMAGE: ${{ matrix.image }}
+      REFBOX_NAME: ${{ matrix.name }}
+      REFBOX_SOCKET: ${{ matrix.socket }}
+      REFBOX_WORKFLOW: ${{ matrix.workflow }}
+      REFBOX_SOCKET_WAIT: ${{ matrix.socket_wait }}
+      REFBOX_MODEL_PROOF: ${{ matrix.model_proof }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -31,4 +57,12 @@ jobs:
             sudo apt-get install -y podman
           fi
           podman --version
+      - name: prove the Python image boots under the recipe's flags
+        if: matrix.agent == 'langchain'
+        run: |
+          podman build -f deploy/refbox/Containerfile.python -t refbox-langchain:test .
+          podman run --rm --network none --read-only --tmpfs /work --cap-drop=ALL \
+            --security-opt no-new-privileges --userns=keep-id --user "$(id -u):$(id -g)" \
+            --memory=256m --pids-limit=64 --entrypoint /usr/bin/python3.13 refbox-langchain:test \
+            -c 'import langchain_openai, httpx; print("image boots; langchain_openai", langchain_openai.__version__)'
       - run: ./scripts/e2e-refbox.sh
