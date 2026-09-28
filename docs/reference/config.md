@@ -504,9 +504,12 @@ step at listen time.
 `deploy/refbox/` is a reference recipe. Its socket directory defaults to
 `$XDG_RUNTIME_DIR/agenthof` (user-owned, so a rootless `mkdir` works; `/run`
 itself is root-owned). Set `refbox_socket_dir` to that same directory, and
-set the agent `endpoint` to `unix://` plus that directory plus
-`/refbox-echo.sock`. The adapter dials the endpoint; the recipe's `-socket`
-flag only chooses where the compartment listens. The checked-in demo config
+set the agent `endpoint` to `unix://` plus that directory, a `/`, and the
+agent's socket file name — `unix:///run/agenthof/refbox-echo.sock` for the
+default (`refbox-echo.sock`; the recipe's `REFBOX_SOCKET` variable names
+another, such as `refbox-langchain.sock` for the Python agent). The adapter
+dials the endpoint; the recipe's `-socket` flag only chooses where the
+compartment listens. The checked-in demo config
 uses `/run/agenthof` as a placeholder, because YAML cannot expand
 `$XDG_RUNTIME_DIR`. The two paths must match. See
 [the life of a run](../lifecycle.md#a-reference-compartment-refbox).
