@@ -11,6 +11,9 @@ set -euo pipefail
 SOCK_DIR="${AGENTHOF_REFBOX_SOCKET_DIR:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/agenthof}"
 IMAGE="${REFBOX_IMAGE:-refbox-echo:test}"
 NAME="${REFBOX_NAME:-refbox-echo}"
+# The agent's socket file name inside SOCK_DIR. The echo image is the default;
+# another runtime's image (deploy/refbox/Containerfile.python) names its own.
+SOCKET="${REFBOX_SOCKET:-refbox-echo.sock}"
 
 mkdir -p "$SOCK_DIR"
 # The socket directory must be exclusive to this one compartment. The default
@@ -18,7 +21,7 @@ mkdir -p "$SOCK_DIR"
 # socket in a shared directory. A shared directory would. Stale gateway
 # sockets from a killed run are orphans; the next run mints a new nonce.
 # The compartment recreates the agent socket.
-rm -f "$SOCK_DIR"/gw-*.sock "$SOCK_DIR/refbox-echo.sock"
+rm -f "$SOCK_DIR"/gw-*.sock "$SOCK_DIR/$SOCKET"
 
 # --user is the host uid: --userns=keep-id maps that uid into the container,
 # and the distroless image's own nonroot user cannot create a socket in a
@@ -43,7 +46,7 @@ common=(
 # Args after the image append to the entrypoint. The last -socket wins, so
 # SOCK_DIR overrides the image's /run/agenthof path and matches the mount.
 if [ "${REFBOX_DETACH:-}" = 1 ]; then
-	podman run -d "${common[@]}" "$IMAGE" -socket "$SOCK_DIR/refbox-echo.sock"
+	podman run -d "${common[@]}" "$IMAGE" -socket "$SOCK_DIR/$SOCKET"
 else
-	exec podman run --rm "${common[@]}" "$IMAGE" -socket "$SOCK_DIR/refbox-echo.sock"
+	exec podman run --rm "${common[@]}" "$IMAGE" -socket "$SOCK_DIR/$SOCKET"
 fi
