@@ -151,6 +151,9 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 - [`ROADMAP.md`](ROADMAP.md) — what's shipped, next, later, and exploratory.
 - [`docs/quickstart.md`](docs/quickstart.md) — build, run, kill switch,
   retention.
+- [`docs/agent-protocol.md`](docs/agent-protocol.md) — the agent wire contract:
+  how to build an agent in any language (the step JSON, the gateway headers, and
+  the model/tool/exec call patterns).
 - [`docs/concepts.md`](docs/concepts.md) — the ideas behind Agenthof:
   planes, gateways, identity, the ledger.
 - [`docs/lifecycle.md`](docs/lifecycle.md) — the life of a run: how one
