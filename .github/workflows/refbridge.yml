@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - 'deploy/refbridge/**'
+      - 'deploy/internal/refrunner/**'
       - 'deploy/refbox/probe/**'
       - 'examples/stdio-tool/**'
       - 'examples/tool-agent/**'
