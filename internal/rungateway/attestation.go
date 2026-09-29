@@ -99,14 +99,14 @@ func validAttestation(a *engine.RuntimeAttestation, declared string) bool {
 	if a.PID < 1 || a.Spawn < 1 {
 		return false
 	}
-	if !envNameRE.MatchString(a.CredentialEnv) {
+	if !envNameRE.MatchString(a.CredentialEnv) || len([]rune(a.CredentialEnv)) > maxAttestedRunes {
 		return false
 	}
 	if len(a.EnvNames) > maxAttestedEnvNames {
 		return false
 	}
 	for _, name := range a.EnvNames {
-		if !envNameRE.MatchString(name) {
+		if !envNameRE.MatchString(name) || len([]rune(name)) > maxAttestedRunes {
 			return false
 		}
 	}

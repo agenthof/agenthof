@@ -93,6 +93,8 @@ func TestTakeRuntimeAttestation(t *testing.T) {
 		"credential_env not a name": func(m map[string]any) { m["credential_env"] = "not a name" },
 		"env name not a name":       func(m map[string]any) { m["env_names"] = []any{"DEMO_TOKEN=value"} },
 		"too many env names":        func(m map[string]any) { m["env_names"] = make([]any, 65) },
+		"oversized env name":        func(m map[string]any) { m["env_names"] = []any{strings.Repeat("X", 201)} },
+		"oversized credential_env":  func(m map[string]any) { m["credential_env"] = strings.Repeat("X", 201) },
 		"unknown materialization":   func(m map[string]any) { m["materialization"] = "inherit" },
 		"oversized session":         func(m map[string]any) { m["session"] = strings.Repeat("s", 201) },
 		"control char in argv":      func(m map[string]any) { m["command"] = []any{"/bin/tool", "a\nforged: line"} },
