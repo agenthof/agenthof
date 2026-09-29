@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
 )
@@ -137,9 +138,31 @@ func Validate(cfg config.Config) []ValidationError {
 			if effectiveExec != "fronted" {
 				add(a.SourceFile, a.Name, "bad-exec-config", "exec is only valid on fronted agents")
 			}
-			if a.Exec.Mode != "attested" {
+			switch a.Exec.Mode {
+			case "attested":
+				if a.Exec.Runtime != "" || a.Exec.URL != "" || a.Exec.Timeout != 0 {
+					add(a.SourceFile, a.Name, "bad-exec-config",
+						"exec.mode attested takes no runtime, url or timeout; those belong to mode: runtime")
+				}
+			case "runtime":
+				// A trusted runtime is reached only over a local socket (its
+				// directory permissions are what make it trusted), exactly as
+				// runtime: refbridge on a tool resource.
+				if a.Exec.Runtime != "refexec" {
+					add(a.SourceFile, a.Name, "bad-exec-config",
+						fmt.Sprintf("exec.runtime %q is not implemented (only refexec)", a.Exec.Runtime))
+				}
+				if !strings.HasPrefix(a.Exec.URL, config.UnixScheme) || !validSecureOrUnixEndpoint(a.Exec.URL) {
+					add(a.SourceFile, a.Name, "bad-exec-config",
+						"exec.url must be a unix:// socket path (absolute) when exec.mode is runtime")
+				}
+				if a.Exec.Timeout < time.Second {
+					add(a.SourceFile, a.Name, "bad-exec-config",
+						"exec.timeout is required with exec.mode runtime: a duration of at least 1s, such as 5m")
+				}
+			default:
 				add(a.SourceFile, a.Name, "bad-exec-config",
-					fmt.Sprintf("exec.mode %q is not implemented (only attested)", a.Exec.Mode))
+					fmt.Sprintf("exec.mode %q is not implemented (attested or runtime)", a.Exec.Mode))
 			}
 			if len(a.Exec.Allow) == 0 {
 				add(a.SourceFile, a.Name, "bad-exec-config", "exec.mode is set but exec.allow is empty")

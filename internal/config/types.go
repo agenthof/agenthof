@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -155,13 +156,21 @@ func (a AgentDef) EffectiveExecution() string {
 	return a.Execution
 }
 
-// ExecConfig declares the commands a fronted agent may run in its operator
-// sandbox. Only Mode "attested" is implemented; "enforced" (Agenthof-run) is
-// reserved. Attested: the agent runs the command and reports it; Agenthof
-// authorizes against Allow and records it, but does not run or contain it.
+// ExecConfig declares the commands a fronted agent may run and whose account
+// of each the ledger gets. Mode "attested": the agent runs the command in its
+// sandbox and reports it; Agenthof authorizes against Allow and records the
+// report, but does not run or contain it. Mode "runtime": a trusted
+// operator-side runtime, named by Runtime and reached over URL, runs the
+// command on the agent's behalf and attests it first-hand; Agenthof
+// authorizes, forwards, enforces Timeout and records that account. Agenthof
+// itself never runs a command. Runtime, URL and Timeout are required with
+// mode runtime and rejected with mode attested (config is law).
 type ExecConfig struct {
-	Mode  string      `yaml:"mode"`  // "attested"; "enforced" reserved
-	Allow []ExecEntry `yaml:"allow"` // non-empty when Mode is set
+	Mode    string        `yaml:"mode"`    // "attested" | "runtime"
+	Allow   []ExecEntry   `yaml:"allow"`   // non-empty when Mode is set
+	Runtime string        `yaml:"runtime"` // mode runtime: "refexec" (the only runtime implemented)
+	URL     string        `yaml:"url"`     // mode runtime: unix://<absolute socket path> of that runtime
+	Timeout time.Duration `yaml:"timeout"` // mode runtime: the per-command deadline Agenthof enforces, e.g. 5m
 }
 
 // ExecEntry allowlists an executable and a required leading-argument prefix.
@@ -170,8 +179,17 @@ type ExecEntry struct {
 	ArgsPrefix []string `yaml:"args_prefix"` // required leading args; empty = any args
 }
 
-// Declared reports whether an agent declares exec at all.
-func (e ExecConfig) Declared() bool { return e.Mode != "" || len(e.Allow) > 0 }
+// Declared reports whether an agent declares exec at all: any field set. A
+// block that sets only the runtime fields is declared (and then rejected for
+// its empty mode), never silently ignored.
+func (e ExecConfig) Declared() bool {
+	return e.Mode != "" || len(e.Allow) > 0 || e.Runtime != "" || e.URL != "" || e.Timeout != 0
+}
+
+// FirstHand reports whether the agent's exec door is served by a declared
+// trusted runtime (the ledger gets that runtime's account) rather than by
+// the agent's own report.
+func (e ExecConfig) FirstHand() bool { return e.Runtime == "refexec" }
 
 // Allows reports whether a reported argv matches any allowlist entry: argv[0]
 // equals the entry's Exe and the entry's ArgsPrefix is a prefix of argv[1:].
