@@ -1,0 +1,4 @@
+name: bridge-operator
+description: Runs the refbridge demo workflow
+workflows: [bridge-demo]
+allowed_groups: ["bridge-users"]

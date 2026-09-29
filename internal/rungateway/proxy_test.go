@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -33,11 +36,10 @@ type EchoArgs struct {
 	Text string `json:"text"`
 }
 
-// newStubUpstream stands up an in-process MCP server exposing one tool,
+// newStubServer builds an in-process MCP server exposing one tool,
 // echo(text) -> text, that records every Authorization header it receives and
 // rejects calls that don't carry the expected upstream bearer token.
-func newStubUpstream(t *testing.T, wantToken string) (*httptest.Server, func() string) {
-	t.Helper()
+func newStubServer(wantToken string) (*mcp.Server, func() string) {
 	var mu sync.Mutex
 	var lastAuth string
 
@@ -60,17 +62,112 @@ func newStubUpstream(t *testing.T, wantToken string) (*httptest.Server, func() s
 			Content: []mcp.Content{&mcp.TextContent{Text: args.Text}},
 		}, nil, nil
 	})
-
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
-	ts := httptest.NewServer(handler)
-	t.Cleanup(ts.Close)
-
-	readLastAuth := func() string {
+	return server, func() string {
 		mu.Lock()
 		defer mu.Unlock()
 		return lastAuth
 	}
+}
+
+// newStubUpstream serves newStubServer over loopback TCP.
+func newStubUpstream(t *testing.T, wantToken string) (*httptest.Server, func() string) {
+	t.Helper()
+	server, readLastAuth := newStubServer(wantToken)
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	t.Cleanup(ts.Close)
 	return ts, readLastAuth
+}
+
+// countingListener counts accepted and closed connections, so a test can tell
+// a keep-alive transport (few connections, reused) from one that opens a
+// connection per request — and can tell a transport that drains its pool on
+// session close from one that parks the last connection forever.
+type countingListener struct {
+	net.Listener
+	mu       sync.Mutex
+	accepted int
+	closed   int
+}
+
+// countedConn reports its (first) Close back to the listener.
+type countedConn struct {
+	net.Conn
+	once sync.Once
+	l    *countingListener
+}
+
+func (c *countedConn) Close() error {
+	c.once.Do(func() {
+		c.l.mu.Lock()
+		c.l.closed++
+		c.l.mu.Unlock()
+	})
+	return c.Conn.Close()
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	l.accepted++
+	l.mu.Unlock()
+	return &countedConn{Conn: c, l: l}, nil
+}
+
+func (l *countingListener) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.accepted
+}
+
+// open is the number of accepted connections the server has not yet closed.
+func (l *countingListener) open() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.accepted - l.closed
+}
+
+// waitNoOpenConns polls until the stub server has closed every connection it
+// accepted, failing the test if that does not happen before the deadline. It
+// polls rather than sleeping a fixed time so the check is deterministic on a
+// slow machine and fast on a quick one.
+func waitNoOpenConns(t *testing.T, l *countingListener, when string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n := l.open()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: upstream still has %d open connection(s); the transport's idle pool was not drained", when, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// newStubUpstreamUnix serves newStubServer on a Unix socket, as a refbridge
+// would, and returns the socket path plus the connection counter.
+func newStubUpstreamUnix(t *testing.T, wantToken string) (string, *countingListener, func() string) {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gwup") // short: Unix socket paths have a small length limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "up.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	counting := &countingListener{Listener: ln}
+	server, readLastAuth := newStubServer(wantToken)
+	srv := &http.Server{Handler: mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)}
+	go func() { _ = srv.Serve(counting) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return sock, counting, readLastAuth
 }
 
 // bearerTransport sets a fixed bearer token on every outbound request. It
@@ -340,7 +437,7 @@ func TestProxyStopWaitsForInFlightForward(t *testing.T) {
 	}
 
 	p.mu.Lock()
-	sess := p.sessions[0]
+	sess := p.sessions[0].sess
 	p.mu.Unlock()
 	handler := p.forward(bind, agent, "github", allowedTools{"github": nil}, sess, appendEvent, obs.Discard())
 
@@ -444,6 +541,54 @@ func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 	}
 	if ev.Reason == "" {
 		t.Fatal("event.Reason must be set on a failed tool_call")
+	}
+}
+
+// TestProxyForwardCapsReasonOnCallError pins that a JSON-RPC failure's text —
+// upstream-controlled, of any length — enters the ledger capped at the same
+// 200 runes as every other upstream string.
+func TestProxyForwardCapsReasonOnCallError(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "failing-stub", Version: "v0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "echo"}, func(_ context.Context, _ *mcp.CallToolRequest, args EchoArgs) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: args.Text}}}, nil, nil
+	})
+	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/call" {
+				return nil, errors.New(strings.Repeat("é", 1000))
+			}
+			return next(ctx, method, req)
+		}
+	})
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	t.Cleanup(ts.Close)
+	client := mcp.NewClient(&mcp.Implementation{Name: "rungateway-test", Version: "v0.1.0"}, nil)
+	upstream, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("connect upstream: %v", err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	tools := map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
+	}
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	var events []engine.Event
+	handler := p.forward(testBinding(), testAgentDef("github"), "github", allowedTools{"github": nil}, upstream,
+		func(e engine.Event) { events = append(events, e) }, obs.Discard())
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}
+	if _, err := handler(context.Background(), req); err == nil {
+		t.Fatal("forward: want the upstream's JSON-RPC error")
+	}
+	if len(events) != 1 || events[0].Status != "failed" {
+		t.Fatalf("events = %+v, want one failed tool_call", events)
+	}
+	reason := events[0].Reason
+	if n := utf8.RuneCountInString(reason); n == 0 || n > 200 {
+		t.Fatalf("Reason has %d runes, want 1..200: %q", n, reason)
+	}
+	if !utf8.ValidString(reason) {
+		t.Fatalf("Reason is not valid UTF-8: %q", reason)
 	}
 }
 
@@ -1921,4 +2066,153 @@ func TestModelProxyStopWaitsForInFlightAppend(t *testing.T) {
 		t.Fatal("Stop() did not return after the in-flight model_call finished")
 	}
 	<-callDone
+}
+
+func TestUpstreamTransportSelectsByScheme(t *testing.T) {
+	rt, endpoint, closeIdle := upstreamTransport("unix:///run/agenthof-bridge/tool.sock")
+	tr, ok := rt.(*http.Transport)
+	if !ok || tr.DialContext == nil {
+		t.Fatalf("unix:// must dial through a dedicated *http.Transport with a DialContext, got %T", rt)
+	}
+	if tr.DisableKeepAlives {
+		t.Fatal("unix:// transport must keep keep-alives on: the session's Streamable/SSE stream is long-lived")
+	}
+	if tr.IdleConnTimeout <= 0 {
+		t.Fatal("unix:// transport must bound idle connections as a backstop for a missed close")
+	}
+	if endpoint != "http://agenthof/" {
+		t.Fatalf("endpoint = %q, want the fixed placeholder http://agenthof/", endpoint)
+	}
+	if closeIdle == nil {
+		t.Fatal("unix:// transport must come with a closeIdle that drains its pool")
+	}
+	closeIdle() // safe on a transport that never dialed
+	rt, endpoint, closeIdle = upstreamTransport("https://mcp.example.com/")
+	if rt != http.DefaultTransport || endpoint != "https://mcp.example.com/" {
+		t.Fatalf("https must use http.DefaultTransport and the url unchanged, got %T %q", rt, endpoint)
+	}
+	if closeIdle == nil {
+		t.Fatal("the default branch must still return a callable (no-op) closeIdle")
+	}
+	closeIdle()
+}
+
+// TestProxyRoundTripOverUnixSocket is the core seam's proof: a tool resource
+// whose url is unix://<path> is reached over that socket with the injected
+// credential (never the run token), the connection is reused across calls
+// rather than re-dialed per request, and nothing is left open once the step
+// is torn down.
+func TestProxyRoundTripOverUnixSocket(t *testing.T) {
+	const upstreamToken = "upstream-secret-uds"
+	t.Setenv("BRIDGE_TOKEN", upstreamToken)
+	sock, conns, lastAuth := newStubUpstreamUnix(t, upstreamToken)
+
+	tools := map[string]config.ToolResource{
+		"bridge": {Kind: "mcp", URL: config.UnixScheme + sock, CredentialSource: "static_env", TokenEnv: "BRIDGE_TOKEN"},
+	}
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	var mu sync.Mutex
+	var events []engine.Event
+	appendEvent := func(e engine.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, e)
+	}
+	url, runToken, err := p.Start(testBinding(), testAgentDef("bridge"), appendEvent)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, url, runToken)
+	if err != nil {
+		t.Fatalf("agent connect: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	for i := 0; i < 5; i++ {
+		result, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "over uds"}})
+		if err != nil {
+			t.Fatalf("CallTool %d: %v", i, err)
+		}
+		if result.IsError {
+			t.Fatalf("CallTool %d returned an error result: %+v", i, result.Content)
+		}
+		if text, ok := result.Content[0].(*mcp.TextContent); !ok || text.Text != "over uds" {
+			t.Fatalf("CallTool %d: unexpected result %+v", i, result.Content)
+		}
+	}
+	if got := lastAuth(); got != "Bearer "+upstreamToken {
+		t.Fatalf("upstream saw Authorization %q, want the injected credential", got)
+	}
+	// The session makes 10 requests up to this point: 9 POSTs (the SDK's
+	// server/discover probe, initialize, notifications/initialized,
+	// tools/list, five tools/call) and 1 standalone SSE GET. With keep-alives
+	// on, the GET holds one connection and every POST reuses a second, so the
+	// expected count is 2; a third is tolerated because the SDK delivers a
+	// call's response before it drains that POST's body back to the pool, so
+	// the next POST can race it onto a fresh connection. With keep-alives off
+	// every request opens its own connection and the count is 10. The bound
+	// also holds if a go-sdk bump negotiates the 2026-07-28 protocol against
+	// a stateless server: that drops the standalone GET and the legacy
+	// initialize, so there are fewer requests and at most the same reuse.
+	if n := conns.count(); n > 3 {
+		t.Fatalf("upstream accepted %d connections for 10 requests; keep-alives are off", n)
+	}
+	_ = sess.Close()
+	p.Stop()
+	// Teardown must leave nothing behind on the socket: the session's Close
+	// cancels the SSE GET, and the gateway must then drain the transport's
+	// idle pool so the connection the final POST/DELETE rode on is closed
+	// too — otherwise every step leaks one fd and two transport goroutines
+	// for the life of the process.
+	waitNoOpenConns(t, conns, "after Stop")
+	mu.Lock()
+	defer mu.Unlock()
+	succeeded := 0
+	for _, e := range events {
+		if e.Type == "tool_call" && e.Status == "succeeded" {
+			succeeded++
+		}
+	}
+	if succeeded != 5 {
+		t.Fatalf("recorded %d succeeded tool_call events, want 5", succeeded)
+	}
+}
+
+// TestUnixUpstreamReleasesConnectionsAcrossSteps runs several steps against
+// one unix:// resource and checks the bridge side ends with no open
+// connection. It is the leak this guards against, seen from the bridge:
+// without the pool drain on session close, each step parks one connection
+// on the bridge forever, so the open count would climb by one per step.
+func TestUnixUpstreamReleasesConnectionsAcrossSteps(t *testing.T) {
+	const upstreamToken = "upstream-secret-uds"
+	t.Setenv("BRIDGE_TOKEN", upstreamToken)
+	sock, conns, _ := newStubUpstreamUnix(t, upstreamToken)
+	tools := map[string]config.ToolResource{
+		"bridge": {Kind: "mcp", URL: config.UnixScheme + sock, CredentialSource: "static_env", TokenEnv: "BRIDGE_TOKEN"},
+	}
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+
+	const steps = 10
+	for i := 0; i < steps; i++ {
+		url, runToken, err := p.Start(testBinding(), testAgentDef("bridge"), func(engine.Event) {})
+		if err != nil {
+			t.Fatalf("step %d Start: %v", i, err)
+		}
+		sess, err := stubAgentSession(context.Background(), url, runToken)
+		if err != nil {
+			t.Fatalf("step %d agent connect: %v", i, err)
+		}
+		if _, err := sess.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "x"}}); err != nil {
+			t.Fatalf("step %d CallTool: %v", i, err)
+		}
+		_ = sess.Close()
+		p.Stop()
+	}
+	if got := conns.count(); got < steps {
+		t.Fatalf("upstream accepted %d connections over %d steps; each step must dial at least once", got, steps)
+	}
+	waitNoOpenConns(t, conns, "after the last Stop")
 }

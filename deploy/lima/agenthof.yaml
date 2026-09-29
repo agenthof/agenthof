@@ -1,0 +1,56 @@
+# Agenthof local test harness — a headless Ubuntu 24.04 VM running rootless
+# podman, for exercising the compartmented end-to-end tests on macOS. Docker
+# Desktop cannot bind-mount the governed Unix socket across its VM boundary, so
+# the compartment tests need a real Linux host; this is one. Ubuntu 24.04 is the
+# same distribution the CI e2es run on, so a green run here matches CI.
+#
+# Managed by deploy/lima/lima.sh (up, shell, e2e, build, clean, down, destroy).
+# lima.sh injects the host repository path at create time, so this file carries
+# no machine-specific path and is portable as-is.
+minimumLimaVersion: "2.0.0"
+
+# The image list is inherited from Lima's maintained Ubuntu 24.04 template
+# rather than pinned here, so the download URLs and digests never go stale.
+base:
+- template:_images/ubuntu-24.04
+
+vmType: "vz"
+cpus: 4
+memory: "4GiB"
+disk: "20GiB"
+
+mounts:
+# The repository, read-only. The e2es build into temp directories and write
+# their ledgers and artifacts outside the tree, so the VM never writes here.
+# lima.sh replaces `location` with the real host path at create time; the
+# placeholder below is only a well-formed default for direct `limactl` use.
+- location: "/tmp/agenthof-repo-placeholder"
+  mountPoint: "/agenthof"
+  writable: false
+
+provision:
+- mode: system
+  script: |
+    #!/usr/bin/env bash
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    # podman + uidmap for rootless; python3 and iproute2 are used by the e2es.
+    apt-get install -y podman uidmap python3 iproute2 ca-certificates curl
+    # Go, pinned to the repo toolchain. Keep GOVER in sync with go.mod.
+    GOVER=1.27.1
+    ARCH="$(dpkg --print-architecture)"   # arm64 | amd64 — matches Go's naming
+    curl -fsSL "https://go.dev/dl/go${GOVER}.linux-${ARCH}.tar.gz" -o /tmp/go.tgz
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf /tmp/go.tgz
+    rm -f /tmp/go.tgz
+    printf 'export PATH=$PATH:/usr/local/go/bin\n' >/etc/profile.d/go.sh
+- mode: user
+  script: |
+    #!/usr/bin/env bash
+    set -eux
+    # Let a detached compartment outlive the shell that started it.
+    sudo loginctl enable-linger "$(whoami)" || true
+    # Fail the build now, not at the first e2e, if rootless podman is broken.
+    podman info >/dev/null
+    /usr/local/go/bin/go version

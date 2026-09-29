@@ -302,3 +302,21 @@ func TestRenderLedgerIntegrityBroken(t *testing.T) {
 		t.Fatalf("missing broken integrity line in:\n%s", out)
 	}
 }
+
+func TestRenderToolCallRuntimeAttested(t *testing.T) {
+	att := &engine.RuntimeAttestation{Runtime: "refbridge", Session: "s1", Command: []string{"/stdio-tool", "-credential-env", "DEMO_TOKEN"},
+		PID: 4242, Spawn: 2, CredentialEnv: "DEMO_TOKEN", EnvNames: []string{"DEMO_TOKEN"}, Materialization: "respawn-on-rotation"}
+	events := []engine.Event{
+		{Type: "tool_call", Status: "succeeded", Tool: "echo", ArgsSHA: "abcdef1234567890", AuthMode: "static_env",
+			RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()},
+		{Type: "tool_call", Status: "failed", Tool: "echo", Reason: "boom", RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()},
+	}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	want := "[runtime-attested: refbridge /stdio-tool -credential-env DEMO_TOKEN pid 4242 spawn 2]"
+	if !strings.Contains(out, "tool echo — args abcdef12 (static_env) "+want) {
+		t.Fatalf("succeeded tool_call not rendered with its attestation:\n%s", out)
+	}
+	if !strings.Contains(out, "tool echo failed — boom "+want) {
+		t.Fatalf("failed tool_call not rendered with its attestation:\n%s", out)
+	}
+}

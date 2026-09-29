@@ -119,13 +119,13 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 		case "tool_call":
 			switch e.Status {
 			case "refused", "failed":
-				fmt.Fprintf(&sb, "  %s  tool %s %s — %s\n", t, e.Tool, e.Status, e.Reason)
+				fmt.Fprintf(&sb, "  %s  tool %s %s — %s%s\n", t, e.Tool, e.Status, e.Reason, runtimeAttested(e))
 			case "succeeded":
 				sha := e.ArgsSHA
 				if len(sha) > 8 {
 					sha = sha[:8]
 				}
-				fmt.Fprintf(&sb, "  %s  tool %s — args %s (%s)\n", t, e.Tool, sha, e.AuthMode)
+				fmt.Fprintf(&sb, "  %s  tool %s — args %s (%s)%s\n", t, e.Tool, sha, e.AuthMode, runtimeAttested(e))
 			default:
 				fmt.Fprintf(&sb, "  %s  tool %s %s\n", t, e.Tool, e.Status)
 			}
@@ -134,4 +134,18 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 		}
 	}
 	return sb.String()
+}
+
+// runtimeAttested renders a tool_call's trusted-runtime attestation, if any:
+// the party that ran the tool, its argv, the child that answered, and the
+// child's generation within the session. Rendered on succeeded and failed
+// lines alike — an error result is still a call the child answered. It is
+// the runtime's first-hand word, distinct from an exec event's "attested",
+// which is the agent's.
+func runtimeAttested(e engine.Event) string {
+	a := e.RuntimeAttestation
+	if a == nil {
+		return ""
+	}
+	return fmt.Sprintf(" [runtime-attested: %s %s pid %d spawn %d]", a.Runtime, strings.Join(a.Command, " "), a.PID, a.Spawn)
 }

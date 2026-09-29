@@ -1,13 +1,18 @@
 // Command probe is the CI check that runs inside the reference compartment.
 // It is not an agent. Distroless has no shell, so the e2e job execs this
-// binary to dial a TCP address or to create a file on the compartment tmpfs.
+// binary to dial a TCP address, to create a file on the compartment tmpfs,
+// or to count processes by name.
 package main
 
 import (
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -27,9 +32,36 @@ func touch(path string) error {
 	return f.Close()
 }
 
+// countProcs counts processes whose /proc/<pid>/comm equals name. The e2e
+// job uses it to show a bridge's child process is gone once its session
+// ended. A process that exits between the glob and the read is skipped. No
+// /proc entries at all is an error, not a count of zero: the probe itself
+// would appear if /proc were mounted.
+func countProcs(name string) (int, error) {
+	matches, err := filepath.Glob("/proc/[0-9]*/comm")
+	if err != nil {
+		return 0, err
+	}
+	if len(matches) == 0 {
+		return 0, errors.New("probe: /proc has no process entries; -procs cannot count")
+	}
+	n := 0
+	for _, m := range matches {
+		data, err := os.ReadFile(m)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(data)) == name {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func main() {
 	dial := flag.String("dial", "", "dial tcp host:port and exit 0 only if the connect succeeds")
 	touchPath := flag.String("touch", "", "create a file and exit")
+	procs := flag.String("procs", "", "print the number of processes whose /proc/<pid>/comm equals this name, then exit")
 	flag.Parse()
 
 	if *dial != "" {
@@ -44,5 +76,13 @@ func main() {
 		}
 		return
 	}
-	log.Fatal("set -dial host:port or -touch path")
+	if *procs != "" {
+		n, err := countProcs(*procs)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(n)
+		return
+	}
+	log.Fatal("set -dial host:port, -touch path, or -procs name")
 }

@@ -1,0 +1,10 @@
+name: bridge-user
+description: Calls a stdio MCP server through Agenthof and a refbridge compartment
+model: fast
+instruction: Run the call script.
+output: reply
+execution: fronted
+endpoint: unix:///run/agenthof-bridge-agent/agent.sock
+tools:
+  - resource: stdio-tool
+    mode: all

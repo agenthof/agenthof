@@ -96,7 +96,7 @@ sed -i "s|http://localhost:4000|http://$HOST_IP:$PROVIDER_PORT|" "$WORK/config/g
 # ignores its value; without one the route does not resolve and the door 502s.
 export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE"
 
-"$WORK/agenthof" apply --config "$WORK/config" --as ci --groups refbox-users
+"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups refbox-users
 OUT="$("$WORK/agenthof" run refbox-operator "$WORKFLOW" --input hi \
 	--as ci --groups refbox-users --config "$WORK/config" \
 	--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts")"
@@ -109,7 +109,7 @@ if [ "$MODEL_PROOF" = 1 ]; then
 	# the chat-completions route, and no X-Agenthof-* header. (c) — no other
 	# path out — is the probe dial to the provider's address below.
 	RUNID="$(echo "$OUT" | sed -n 's/^run \(r-[a-f0-9]*\) finished.*/\1/p')"
-	AUDIT="$("$WORK/agenthof" audit "$RUNID" --log-dir "$WORK/logs")"
+	AUDIT="$("$WORK/agenthof" audit "$RUNID" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
 	echo "$AUDIT"
 	echo "$AUDIT" | grep -qF "model fast — 3 prompt / 5 completion tokens" || fail "no succeeded model_call on the ledger"
 	echo "$AUDIT" | grep -q "ledger integrity: verified" || fail "ledger not verified"
