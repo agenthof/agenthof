@@ -117,6 +117,9 @@ func TestPodmanRunIsLockedDown(t *testing.T) {
 			t.Fatalf("podman args lack %q:\n%s", want, joined)
 		}
 	}
+	if strings.Count(joined, " -v ") != 1 || strings.Contains(joined, " --mount") {
+		t.Fatalf("exactly one -v and no --mount: %s", joined)
+	}
 	for _, never := range []string{"REFEXEC_TEST_UNSET", "REFEXEC_TEST_MARKER=1", "--privileged"} {
 		if strings.Contains(joined, never) {
 			t.Fatalf("podman args must not contain %q:\n%s", never, joined)

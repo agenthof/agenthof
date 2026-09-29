@@ -24,18 +24,20 @@ import (
 // The exec door's ledger reasons are fixed strings, so no path can put a
 // runtime's, the OS's or the agent's text into an event.
 const (
-	reasonExecNotAllowlisted    = "command is not on the exec allowlist"
-	reasonExecRunNotDeclared    = "first-hand exec is not declared for this agent"
-	reasonExecFirstHandOnly     = "exec on this agent is first-hand: authorize and attest are not available"
-	reasonExecSocketDir         = "exec runtime socket directory is not a private (0700) directory owned by this user"
-	reasonExecUnreachable       = "exec runtime unreachable"
-	reasonExecTimedOut          = "exec runtime call timed out"
-	reasonExecCancelled         = "exec runtime call was cancelled"
-	reasonExecErrorStatus       = "exec runtime returned an error status"
-	reasonExecResponseTooLarge  = "exec runtime response too large"
-	reasonExecResponseMalformed = "exec runtime response malformed"
-	reasonExecCommandMismatch   = "runtime attestation names a different command"
-	reasonExecOutputHash        = "exec runtime output hash does not match the output"
+	reasonExecNotAllowlisted       = "command is not on the exec allowlist"
+	reasonExecRunNotDeclared       = "first-hand exec is not declared for this agent"
+	reasonExecFirstHandOnly        = "exec on this agent is first-hand: authorize and attest are not available"
+	reasonExecSocketDir            = "exec runtime socket directory is not a private (0700) directory owned by this user"
+	reasonExecUnreachable          = "exec runtime unreachable"
+	reasonExecTimedOut             = "exec runtime call timed out"
+	reasonExecCancelled            = "exec runtime call was cancelled"
+	reasonExecErrorStatus          = "exec runtime returned an error status"
+	reasonExecResponseTooLarge     = "exec runtime response too large"
+	reasonExecResponseMalformed    = "exec runtime response malformed"
+	reasonExecCommandMismatch      = "runtime attestation names a different command"
+	reasonExecOutputHash           = "exec runtime output hash does not match the output"
+	reasonExecAttestationMissing   = "runtime attestation missing"
+	reasonExecAttestationMalformed = "runtime attestation malformed"
 )
 
 // maxExecRunResponse bounds what the gateway reads back from refexec. refexec
@@ -253,7 +255,12 @@ func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, app
 		}
 		att, err := decodeAttestation(res.RuntimeAttestation, agent.Exec.Runtime)
 		if err != nil {
-			fail(err.Error()) // errAttestationMissing or errAttestationMalformed: fixed strings
+			switch {
+			case errors.Is(err, errAttestationMissing):
+				fail(reasonExecAttestationMissing)
+			default:
+				fail(reasonExecAttestationMalformed)
+			}
 			return
 		}
 		if !slices.Equal(att.Command, argv) {

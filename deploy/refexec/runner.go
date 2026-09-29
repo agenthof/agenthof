@@ -211,7 +211,9 @@ func (r *runner) run(ctx context.Context, argv []string) (result, error) {
 // noise. podman's text may name the container; it never carries a value.
 func (r *runner) remove(session string) {
 	args := append(append([]string{}, r.podman[1:]...), "rm", "-f", session)
-	cmd := exec.Command(r.podman[0], args...)
+	rmCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(rmCtx, r.podman[0], args...)
 	cmd.Env = r.environ()
 	if err := cmd.Run(); err != nil {
 		r.logger.Warn("compartment not removed", "session", session, "error", err)
