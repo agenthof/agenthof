@@ -55,12 +55,31 @@ for n, line in enumerate(lines, 1):
     print("  %d: client_id=%s sha256=%s..." % (n, t["client_id"], hashlib.sha256(t["token"].encode()).hexdigest()[:12]))
 PY
 }
+# no_leak VALUE WHAT...: VALUE must appear in no ledger, artifact, process
+# log, or captured agenthof stdout. Never prints VALUE.
+no_leak() {
+	local value="$1"
+	shift
+	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK/bridge-static.err" "$WORK/bridge-rot.err" "$WORK/agent.err" "$WORK/tokens.err"; then
+		fail "$* reached the ledger, an artifact, or a process log"
+	fi
+	if printf '%s\n' "${OUT:-}" "${AUDIT:-}" "${OUT2:-}" "${AUDIT2:-}" | grep -qF -- "$value"; then
+		fail "$* reached agenthof's output"
+	fi
+}
+# ere_escape: a literal string made safe inside a grep -E pattern.
+ere_escape() { printf '%s' "$1" | sed 's/[][\\.*^$+?(){}|]/\\&/g'; }
 sha() { python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$1"; }
+command -v pgrep >/dev/null 2>&1 || fail "pgrep is required to prove every child is torn down"
 
 go build -o "$WORK/agenthof" ./cmd/agenthof
 go build -o "$WORK/refbridge" ./deploy/refbridge
 go build -o "$WORK/stdio-tool" ./examples/stdio-tool
 go build -o "$WORK/tool-agent" ./examples/tool-agent
+
+ARGV_JSON="\"command\":[\"$WORK/stdio-tool\",\"-credential-env\",\"DEMO_TOKEN\"]"
+ENV_JSON='"env_names":["DEMO_TOKEN","REFBRIDGE_E2E_MARKER"]'
+ATTESTED="\\[runtime-attested: refbridge $(ere_escape "$WORK/stdio-tool") -credential-env DEMO_TOKEN pid [0-9]+"
 
 NONCE="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 
@@ -243,16 +262,17 @@ for tool in echo credential environment; do
 	echo "$AUDIT" | grep -Eq "tool $tool — args [0-9a-f]{8} \(static_env\)" || fail "no succeeded tool_call for $tool"
 	# The bridge's first-hand attestation is on every call: audit renders it,
 	# the ledger carries the child's argv, pid, generation and env NAMES.
-	echo "$AUDIT" | grep -Eq "tool $tool — args [0-9a-f]{8} \(static_env\) \[runtime-attested: refbridge .* pid [0-9]+ spawn 1\]" || fail "no runtime attestation rendered for $tool"
+	echo "$AUDIT" | grep -Eq "tool $tool — args [0-9a-f]{8} \(static_env\) $ATTESTED spawn 1\]" || fail "no runtime attestation rendered for $tool"
 done
 [ "$(grep -c '"runtime_attestation":{"runtime":"refbridge"' "$WORK/logs/$RUNID.jsonl")" = 3 ] || fail "want three attested tool_call events in the ledger"
-grep -q '"env_names":\["DEMO_TOKEN","REFBRIDGE_E2E_MARKER"\]' "$WORK/logs/$RUNID.jsonl" || fail "attested env_names are not exactly the allowlist plus the credential"
+[ "$(grep -cF "$ARGV_JSON" "$WORK/logs/$RUNID.jsonl")" = 3 ] || fail "want the child's exact argv attested on all three tool_call events"
+[ "$(grep -cF "$ENV_JSON" "$WORK/logs/$RUNID.jsonl")" = 3 ] || fail "want env_names of exactly the allowlist plus the credential on all three tool_call events"
 if grep -q "LEAKED_SECRET" "$WORK/logs/$RUNID.jsonl"; then fail "a non-allowlisted variable was attested in the child's environment"; fi
 EXPECTED="$(printf 'hello-%s\n%s\nDEMO_TOKEN,REFBRIDGE_E2E_MARKER' "$NONCE" "$(sha "$E2E_TOOL_TOKEN")")"
 ART="$WORK/artifacts/$(sha "$EXPECTED")"
 [ -f "$ART" ] || { ls "$WORK/artifacts"; fail "no artifact with the expected content's hash (the child's env or credential differed)"; }
 [ "$(cat "$ART")" = "$EXPECTED" ] || fail "artifact differs from the expected three lines"
-if grep -rq "$E2E_TOOL_TOKEN" "$WORK/logs" "$WORK/artifacts"; then fail "the static credential value reached the ledger or an artifact"; fi
+no_leak "$E2E_TOOL_TOKEN" "the static credential value"
 if grep -q "LEAKED_SECRET" "$ART"; then fail "a non-allowlisted variable reached the child's environment"; fi
 echo "static: fingerprint, clean environment, three tool_call lines — ok"
 
@@ -266,22 +286,53 @@ echo "$OUT2" | grep -q "finished: succeeded" || fail "bridge-rotation did not su
 RUNID2="$(echo "$OUT2" | sed -n 's/^run \(r-[a-f0-9]*\) finished.*/\1/p')"
 AUDIT2="$("$WORK/agenthof" audit "$RUNID2" --log-dir "$WORK/logs")"
 echo "$AUDIT2"
+echo "$AUDIT2" | grep -q "ledger integrity: verified" || fail "rotation run ledger not verified"
 [ "$(echo "$AUDIT2" | grep -Ec "tool credential — args [0-9a-f]{8} \(client_credentials\)")" = 2 ] || fail "want two client_credentials tool_call lines"
-[ "$(wc -l <"$WORK/tokens.jsonl" | tr -d ' ')" = 2 ] || { tokens_redacted; fail "expected exactly two minted tokens (one per 10s window)"; }
+[ "$(wc -l <"$WORK/tokens.jsonl" | tr -d ' ')" = 2 ] || { tokens_redacted; fail "expected exactly two minted tokens (one mint per broker resolve past the 9s refresh point)"; }
 TOK1="$(python3 -c 'import json, sys; print(json.loads(open(sys.argv[1]).readline())["token"])' "$WORK/tokens.jsonl")"
 TOK2="$(python3 -c 'import json, sys; print(json.loads(open(sys.argv[1]).readlines()[1])["token"])' "$WORK/tokens.jsonl")"
 EXPECTED2="$(printf '%s\n%s' "$(sha "$TOK1")" "$(sha "$TOK2")")"
 ART2="$WORK/artifacts/$(sha "$EXPECTED2")"
 [ -f "$ART2" ] || { ls "$WORK/artifacts"; fail "the rotated token did not reach a respawned child within the step"; }
-for tok in "$TOK1" "$TOK2" "$E2E_CLIENT_SECRET"; do
-	if grep -rqF "$tok" "$WORK/logs" "$WORK/artifacts"; then fail "a client_credentials secret or minted token reached the ledger or an artifact"; fi
-done
+no_leak "$TOK1" "the first minted token"
+no_leak "$TOK2" "the second minted token"
+no_leak "$E2E_CLIENT_SECRET" "the client secret"
+no_leak "$E2E_TOOL_TOKEN" "the static credential value"
 grep -q "credential rotated; respawning child" "$WORK/bridge-rot.err" || fail "the rotating bridge never logged a respawn"
 if grep -q "respawning" "$WORK/bridge-static.err"; then fail "the env-at-spawn bridge respawned"; fi
 # The respawn is first-hand evidence in the ledger, not just a bridge log line.
-grep -q '"spawn":1' "$WORK/logs/$RUNID2.jsonl" || fail "the rotation run's first call must attest spawn 1"
-grep -q '"spawn":2' "$WORK/logs/$RUNID2.jsonl" || fail "the rotation run's second call must attest spawn 2 (the respawned child)"
-echo "$AUDIT2" | grep -Eq "\(client_credentials\) \[runtime-attested: refbridge .* spawn 2\]" || fail "audit does not show the respawned child"
+[ "$(grep -cF "$ARGV_JSON" "$WORK/logs/$RUNID2.jsonl")" = 2 ] || fail "want the child's exact argv attested on both rotation tool_call events"
+[ "$(grep -cF "$ENV_JSON" "$WORK/logs/$RUNID2.jsonl")" = 2 ] || fail "want env_names of exactly the allowlist plus the credential on both rotation tool_call events"
+python3 - "$WORK/logs/$RUNID2.jsonl" <<'PY' || fail "the rotation run's attestations are not spawn 1 then 2 of one session with a new pid"
+import json, sys
+
+def find(v):
+    if isinstance(v, dict):
+        if "runtime_attestation" in v:
+            return v["runtime_attestation"]
+        vs = v.values()
+    elif isinstance(v, list):
+        vs = v
+    else:
+        return None
+    for x in vs:
+        r = find(x)
+        if r is not None:
+            return r
+    return None
+
+atts = [a for a in (find(json.loads(l)) for l in open(sys.argv[1], encoding="utf-8") if l.strip()) if a is not None]
+ok = (len(atts) == 2
+      and [a["spawn"] for a in atts] == [1, 2]
+      and atts[0]["session"] and atts[0]["session"] == atts[1]["session"]
+      and atts[0]["pid"] != atts[1]["pid"]
+      and all(a["materialization"] == "respawn-on-rotation" for a in atts))
+if not ok:
+    print("attestations: %s" % [(a.get("spawn"), a.get("pid"), a.get("materialization")) for a in atts], file=sys.stderr)
+sys.exit(0 if ok else 1)
+PY
+[ "$(echo "$AUDIT2" | grep -Ec "\(client_credentials\) $ATTESTED spawn 1\]")" = 1 ] || fail "audit does not show the first child as spawn 1"
+[ "$(echo "$AUDIT2" | grep -Ec "\(client_credentials\) $ATTESTED spawn 2\]")" = 1 ] || fail "audit does not show the respawned child as spawn 2"
 echo "rotation: two tokens, two fingerprints, one session, spawn 1 then 2 — ok"
 
 # 3. Per-session teardown: no stdio-tool child survives its session.
@@ -290,6 +341,7 @@ for i in $(seq 1 20); do
 	[ "$i" = 20 ] && { pgrep -fl "$WORK/stdio-tool"; fail "a stdio-tool child outlived its session"; }
 	sleep 0.5
 done
-grep -q "session ended; child torn down" "$WORK/bridge-static.err" || fail "no teardown logged"
+grep -q "session ended; child torn down" "$WORK/bridge-static.err" || fail "the static bridge logged no teardown"
+grep -q "session ended; child torn down" "$WORK/bridge-rot.err" || fail "the rotating bridge logged no teardown"
 
 echo "e2e-refbridge-local: PASS"
