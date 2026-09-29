@@ -25,13 +25,15 @@ authorize, attest, and the rendered audit line — see the testscript
 
 ## When the door exists
 
-Any agent may declare `exec`; every agent is fronted. The block names
-`mode: attested` and a non-empty `allow` list. `enforced` — Agenthof running
-the command itself — is **not a planned capability** (exec containment is the
-operator's sandbox's job, not Agenthof's) and is rejected at `apply`. An `exec`
-block on
-an agent whose `execution` is not `fronted` (including the removed value
-`contained`) is rejected the same way.
+Any agent may declare `exec`; every agent is fronted. The block names a
+`mode` and a non-empty `allow` list. `mode: attested` is the door most of
+this page describes: the agent runs the command and reports it. `mode:
+runtime` is the first-hand door: a trusted operator-side runtime runs the
+command on the agent's behalf and attests it — see "The first-hand door"
+below. Agenthof itself running the command is not a mode and any other
+value is rejected at `apply`. An `exec` block on an agent whose `execution`
+is not `fronted` (including the removed value `contained`) is rejected the
+same way.
 
 For the duration of that agent's step, Agenthof starts a listener on
 `127.0.0.1` and an ephemeral port, reachable only from the host Agenthof
@@ -129,15 +131,28 @@ it.*
   record when the request reaches the door.
 - Attest is the agent's word, tagged `attested`. A buggy or compromised
   agent can report an exit code or an output hash that does not match what
-  ran.
+  ran. The first-hand door below is the runtime's word, tagged `runtime`.
 - The event joins the run's hash-chained ledger. What that chain does and
   does not prove is the same limit as every other event; see
   [`lifecycle.md`](lifecycle.md).
 
-## What ships today vs what is not planned
+## The first-hand door
 
-| Shipped today | Not a core capability |
+With `exec.mode: runtime` the agent does not run the command. It asks
+Agenthof to, and a trusted operator-side runtime the operator declared —
+`refexec`, in `deploy/refexec/`, a host process next to Agenthof — runs it
+in its own rootless-podman compartment with no network, on the workspace
+the recipe shares with the agent's compartment, and attests to Agenthof
+what ran. The ledger's `exec` line is then that runtime's first-hand
+account, carried as `runtime_attestation`, tagged `mode: runtime`. It is
+core, offline-only, and it trusts refexec the way a declared bridge is
+trusted on the tool door; it is not a claim that nothing could have been
+misreported.
+
+## What ships today vs what is not a capability
+
+| Shipped today | Not a capability |
 | --- | --- |
-| `mode: attested` — allowlist check on authorize, agent-reported outcome on attest, both on the per-run listener | `mode: enforced` — Agenthof running the command first-hand — **retired**; exec containment is the operator's sandbox's job, and it could return only as a commercial compliance-audit add-on, never core |
+| `mode: attested` — allowlist check on authorize, agent-reported outcome on attest, both on the per-run listener | Agenthof running the command itself — rejected at `apply`; exec containment is the operator's runtime's job, and Agenthof's job is to govern and record |
 
-Only the attested door is a guarantee.
+Only shipped behavior is a guarantee.

@@ -159,12 +159,12 @@ not contain it. The operator's sandbox is what confines execution.
 | Mode | `mode` | string | yes when `exec` is set | — |
 | Allow | `allow` | list of objects | yes, non-empty, when `mode` is set | — |
 
-`mode` accepts only `attested`. `enforced` (Agenthof running the command) is
-**not a planned capability** and is rejected at `apply` with `bad-exec-config`;
-the field keeps the two-value shape as a seam, but first-hand exec is at most a
-future commercial add-on, not core. Any other value,
-including an empty `mode` on a block that still lists `allow`, is rejected
-the same way.
+`mode` accepts `attested` (the agent runs the command in its sandbox and
+reports it — this section) and `runtime` (a trusted operator-side runtime
+runs it on the agent's behalf and attests it first-hand; its fields are
+described with it below). Both are core. Agenthof itself running the command
+is not a mode: any other value, including an empty `mode` on a block that
+still lists `allow`, is rejected at `apply` with `bad-exec-config`.
 
 Each `allow` entry:
 

@@ -166,13 +166,16 @@ provider key, and the tool gateway injects the resource credential. A
 non-conforming agent that already holds a key can still call a provider
 directly; the operator's sandbox is what prevents that, and Agenthof does
 not verify it.
-Allowlisted commands run in the operator's sandbox and each is recorded —
-attested by the agent. Agenthof records the report and does not run or
-contain the command. Enforced execution — Agenthof running the command
-itself — is **not a planned capability**: exec has no credential to starve, so
-containment is the operator's sandbox's job, and Agenthof governs and records
-the report rather than running the command. First-hand exec would be a
-commercial compliance add-on, never core. The agent runs in an operator-provided sandbox.
+Allowlisted commands run in the operator's runtime and each is recorded, in
+one of two ways. Under `exec.mode: attested` the agent runs the command in
+its sandbox and reports it; Agenthof records the report and does not run or
+contain the command. Under `exec.mode: runtime` a trusted operator-side
+runtime — the reference one is `refexec`, a rootless-podman supervisor on
+the operator's host — runs the command on the agent's behalf and attests
+first-hand what ran; Agenthof records that account. Both are core. Agenthof
+itself never runs the command: exec has no credential to starve, so
+containment is the operator's runtime's job, and the first-hand record
+trusts that runtime, as the tool door trusts a declared bridge. The agent runs in an operator-provided sandbox.
 That sandbox's network and exec confinement is required, and Agenthof does
 not verify it. A call that reaches the proxy for a tool the run cannot reach
 is recorded as a refusal too — the tool name and a fingerprint of the
