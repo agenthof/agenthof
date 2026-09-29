@@ -76,10 +76,15 @@ The governed core is real and runnable today:
   the party that runs the server, it attests first-hand on every call what
   it ran, which the ledger records on the `tool_call` event when the
   resource declares `runtime: refbridge`.
-- **Exec gateway, attested** — allowlisted commands: a fronted agent runs an
-  allowlisted command in its own operator sandbox and reports it; Agenthof
-  authorizes the command against the config allowlist and records it, but
-  does not run or contain it.
+- **Exec gateway, attested or first-hand** — allowlisted commands, two ways.
+  Attested: a fronted agent runs an allowlisted command in its own operator
+  sandbox and reports it; Agenthof authorizes the command against the config
+  allowlist and records the report. First-hand: the agent asks, and
+  `deploy/refexec` — a reference operator-side runtime on the host — runs
+  the allowlisted command in a rootless-podman compartment with no network
+  on a workspace shared with the agent's compartment, and attests what ran;
+  Agenthof records that account on the `exec` event. Agenthof itself runs
+  no command either way.
 
 ## Next
 

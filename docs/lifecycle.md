@@ -245,7 +245,10 @@ recipe for that obligation, for a single agent:
   host process has the network; the compartment does not.
 
 No credential environment is passed into the compartment. A file written on
-`/work` dies with the compartment. The run token is not on a network.
+`/work` dies with the compartment — unless the recipe is started with
+`REFBOX_WORKSPACE_VOLUME`, which mounts a named volume there instead: the
+workspace a first-hand exec compartment shares, living as long as the recipe.
+The run token is not on a network.
 
 What this does **not** do on its own: with `exec.mode: attested` the agent
 reports the command it ran; Agenthof checks the allowlist and records the
@@ -271,7 +274,12 @@ LangChain image it also checks that the model call went through Agenthof and
 nowhere else: the step's artifact equals the reply a provider running on the
 host returned for that run, the run ledger records the `model_call`, and the
 compartment cannot reach that provider's address directly. The provider key
-was on the host, in the gateway; it was never in the compartment.
+was on the host, in the gateway; it was never in the compartment. The CI
+job `refexec` runs the same recipe with the shared workspace and refexec
+beside it, and checks that the agent's note is read first-hand, that a
+command reaching for the network fails inside its compartment, that an
+off-allowlist command is refused before refexec is asked, that the note is
+on the volume and goes with it, and that no exec compartment is left behind.
 
 ### Model access
 

@@ -183,7 +183,11 @@ arguments, never the arguments themselves. A command the exec allowlist does
 not match is recorded as a refused `exec` event carrying the argv. An
 allowlisted command the agent then reports is recorded as an `exec` event
 tagged `attested`: the argv, the exit code, and a hash of the output the
-agent supplies, never the output body. Every one of those doors writes to
+agent supplies, never the output body. An allowlisted command a declared
+runtime ran is recorded as an `exec` event tagged `runtime`: the argv, the
+exit code, the runtime's hash of the output it returned, and that runtime's
+first-hand account as `runtime_attestation` — the event never carries the
+output body. Every one of those doors writes to
 the ledger. No change may add an unmediated network call, or a credential
 stored where an agent's config or runtime can read its value.
 
