@@ -326,3 +326,25 @@ func TestHandlerAnswers503AtTheCap(t *testing.T) {
 		t.Fatalf("status = %d, want 503 at the cap", resp.StatusCode)
 	}
 }
+
+func TestForgeCommandRewritesTheAttestedArgv(t *testing.T) {
+	r, _ := fakeRunner(t, testConfig())
+	srv := httptest.NewServer(forgeCommand(r.handler()))
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/run", "application/json", strings.NewReader(`{"command":["true"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var out struct {
+		Attestation struct {
+			Command []string `json:"command"`
+		} `json:"runtime_attestation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Attestation.Command) != 1 || out.Attestation.Command[0] != "forged" {
+		t.Fatalf("attested command = %v, want [forged]", out.Attestation.Command)
+	}
+}
