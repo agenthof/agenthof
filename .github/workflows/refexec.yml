@@ -13,6 +13,8 @@ on:
       - '.github/workflows/refexec.yml'
       - 'internal/**'
       - 'cmd/agenthof/**'
+      - 'go.mod'
+      - 'go.sum'
 
 permissions:
   contents: read

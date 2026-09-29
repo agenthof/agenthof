@@ -34,7 +34,7 @@ cleanup() {
 		kill "$REFEXEC_PID" >/dev/null 2>&1 || true
 		wait "$REFEXEC_PID" >/dev/null 2>&1 || true
 	fi
-	podman ps -aq --filter "name=refexec-" | xargs -r podman rm -f >/dev/null 2>&1 || true
+	podman ps -aq --filter 'name=^refexec-' | xargs -r podman rm -f >/dev/null 2>&1 || true
 	podman volume rm -f "$VOLUME" >/dev/null 2>&1 || true
 	rm -rf "$SOCK_DIR" "$EXEC_DIR" "$WORK"
 }
@@ -76,6 +76,7 @@ for i in $(seq 1 30); do
 	sleep 0.5
 done
 [ "$(stat -c %a "$EXEC_DIR/refexec.sock")" = 600 ] || fail "refexec socket is not mode 0600"
+[ "$(stat -c %a "$EXEC_DIR")" = 700 ] || fail "refexec socket dir is not 0700"
 podman volume inspect "$VOLUME" >/dev/null || fail "the launcher did not create the workspace volume"
 
 # The agent in refbox, with the shared workspace instead of a tmpfs.
@@ -119,6 +120,7 @@ grep -q '"credential_env":"","env_names":\[\],"materialization":""' "$WORK/logs/
 grep -q '"type":"exec"' "$WORK/logs/$RUNID.jsonl" || fail "no exec event in the ledger"
 if grep '"type":"exec"' "$WORK/logs/$RUNID.jsonl" | grep -q "hello-$NONCE"; then fail "the output body reached the exec event"; fi
 ART="$WORK/artifacts/$(printf 'hello-%s\n' "$NONCE" | sha_stdin)"
+grep -q "\"output_sha\":\"$(basename "$ART")\"" "$WORK/logs/$RUNID.jsonl" || fail "the exec event's output_sha is not the artifact's hash"
 [ -f "$ART" ] || { ls "$WORK/artifacts"; fail "no artifact equal to the note: the compartment did not see the agent's file"; }
 MP="$(podman volume inspect "$VOLUME" --format '{{.Mountpoint}}')"
 [ "$(cat "$MP/agent-note.txt")" = "hello-$NONCE" ] || fail "the note is not on the workspace volume"
@@ -159,7 +161,7 @@ fi
 
 # No exec compartment outlives its command; the workspace outlives the run
 # but not the recipe.
-[ -z "$(podman ps -aq --filter 'name=refexec-')" ] || { podman ps -a --filter 'name=refexec-'; fail "an exec compartment was left behind"; }
+[ -z "$(podman ps -aq --filter 'name=^refexec-')" ] || { podman ps -a --filter 'name=^refexec-'; fail "an exec compartment was left behind"; }
 podman rm -f "$NAME" >/dev/null
 [ "$(cat "$MP/agent-note.txt")" = "hello-$NONCE" ] || fail "the note must survive the agent compartment (the volume is recipe-scoped)"
 podman volume rm -f "$VOLUME" >/dev/null

@@ -251,6 +251,7 @@ if grep -q "LEAKED_SECRET" "$WORK/logs/$RUNID.jsonl"; then fail "a non-allowlist
 grep -q '"type":"exec"' "$WORK/logs/$RUNID.jsonl" || fail "no exec event in the ledger"
 if grep '"type":"exec"' "$WORK/logs/$RUNID.jsonl" | grep -q "REFEXEC_E2E_MARKER=1"; then fail "the output body reached the exec event"; fi
 ART="$WORK/artifacts/$(printf 'REFEXEC_E2E_MARKER=1\n' | sha_stdin)"
+grep -q "\"output_sha\":\"$(basename "$ART")\"" "$WORK/logs/$RUNID.jsonl" || fail "the exec event's output_sha is not the artifact's hash"
 [ -f "$ART" ] || { ls "$WORK/artifacts"; fail "no artifact equal to the command's output (the environment was not exactly the allowlist, or the store hashes differently)"; }
 [ "$(cat "$WS/agent-note.txt")" = "hello-$NONCE" ] || fail "the agent did not write its note"
 no_leak "not-for-the-command-$NONCE" "the non-allowlisted variable's value"
@@ -293,12 +294,12 @@ echo "$AUDIT" | grep -q "exec env failed — exec runtime socket directory is no
 
 # 7. The deadline: the gateway's exec.timeout cancels the call, the runtime
 #    removes the compartment, and no command process outlives it.
-run exec-slow "exec-run:sleep 30"
+run exec-slow "exec-run:sleep 3617"
 echo "$OUT" | grep -q "finished: failed" || fail "a timed-out command must fail the step"
-echo "$AUDIT" | grep -q "exec sleep 30 failed — exec runtime call timed out" || fail "timeout not recorded as failed"
+echo "$AUDIT" | grep -q "exec sleep 3617 failed — exec runtime call timed out" || fail "timeout not recorded as failed"
 for i in $(seq 1 20); do
-	grep -q "compartment removed" "$WORK/refexec.err" && ! pgrep -f "^sleep 30$" >/dev/null 2>&1 && break
-	[ "$i" = 20 ] && { pgrep -fl "^sleep 30$" || true; fail "the cancelled command's compartment was not removed"; }
+	grep -q "compartment removed" "$WORK/refexec.err" && ! pgrep -f "^sleep 3617$" >/dev/null 2>&1 && break
+	[ "$i" = 20 ] && { pgrep -fl "^sleep 3617$" || true; fail "the cancelled command's compartment was not removed"; }
 	sleep 0.5
 done
 
