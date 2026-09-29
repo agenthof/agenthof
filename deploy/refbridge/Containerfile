@@ -1,0 +1,17 @@
+# Build static refbridge + the reference stdio-tool payload and ship them in a
+# distroless base — no shell, no package manager. /probe is the CI perimeter
+# check (dial, touch, procs); it is not part of the bridge. No credential
+# enters this image: the bridge receives the tool credential per call from
+# Agenthof and hands it to the payload it spawns.
+FROM golang:1.27.1 AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/refbridge ./deploy/refbridge \
+	&& CGO_ENABLED=0 go build -o /out/stdio-tool ./examples/stdio-tool \
+	&& CGO_ENABLED=0 go build -o /out/probe ./deploy/refbox/probe
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=build /out/refbridge /refbridge
+COPY --from=build /out/stdio-tool /stdio-tool
+COPY --from=build /out/probe /probe
+ENTRYPOINT ["/refbridge", "-config", "/config/refbridge.yaml"]

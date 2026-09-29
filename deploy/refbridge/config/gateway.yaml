@@ -1,0 +1,20 @@
+# Agenthof's side of the demo: the bridge is an ordinary MCP tool resource
+# whose url is the bridge's Unix socket. The path must equal the bridge
+# config's `socket` (the e2e rewrites /run/agenthof-bridge to a temp dir).
+# runtime: refbridge says a trusted runtime fronts it: the bridge attests
+# first-hand what it ran on every result, Agenthof records that on the
+# tool_call event, and a result without it fails the call.
+tools:
+  stdio-tool:
+    kind: mcp
+    url: unix:///run/agenthof-bridge/stdio-tool.sock
+    runtime: refbridge
+    credential_source: static_env
+    token_env: DEMO_TOOL_TOKEN
+models:
+  fast:
+    endpoint: http://localhost:4000
+    model: fast
+    api_key_env: AGENTHOF_GATEWAY_KEY
+defaults:
+  model: fast

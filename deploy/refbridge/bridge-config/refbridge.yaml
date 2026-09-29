@@ -1,0 +1,17 @@
+# The reference bridge config. Every key is required; nothing is defaulted.
+# The socket lives in a directory bind-mounted at the SAME path on the host
+# (refbridge-run.sh, default $XDG_RUNTIME_DIR/agenthof-bridge) — never
+# Agenthof's refbox socket dir, which is mounted into agent compartments.
+# The demo path is a placeholder; the e2e rewrites it to a temp dir.
+socket: /run/agenthof-bridge/stdio-tool.sock
+command: ["/stdio-tool", "-credential-env", "DEMO_TOKEN"]
+credential:
+  env: DEMO_TOKEN
+  materialization: env-at-spawn
+env_passthrough: []
+egress:
+  allow: []          # [] → the recipe runs the compartment with --network none
+sessions:
+  max: 4
+  idle_timeout: 10m  # above Agenthof's default 5-minute step timeout
+  max_lifetime: 30m

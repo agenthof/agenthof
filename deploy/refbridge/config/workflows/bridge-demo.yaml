@@ -1,0 +1,5 @@
+name: bridge-demo
+description: One step that calls the bridged stdio server
+steps:
+  - name: call
+    agent: bridge-user
