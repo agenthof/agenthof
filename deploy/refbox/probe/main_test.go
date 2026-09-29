@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -30,5 +31,23 @@ func TestTouchCreatesFile(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCountProcsFindsSelfOnLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc is Linux-only; the compartment is Linux")
+	}
+	// The test binary's comm is "probe.test" (its basename).
+	n, err := countProcs("probe.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Fatalf("countProcs(probe.test) = %d, want at least this process", n)
+	}
+	n, err = countProcs("no-such-process-name")
+	if err != nil || n != 0 {
+		t.Fatalf("countProcs(no-such) = %d, %v; want 0, nil", n, err)
 	}
 }
