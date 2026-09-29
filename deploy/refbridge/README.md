@@ -17,7 +17,7 @@ credential:
   materialization: env-at-spawn  # env-at-spawn (static credential) | respawn-on-rotation (rotating credential)
 env_passthrough: []              # the ONLY variables copied from refbridge's own environment; [] = none
 egress:
-  allow: []                      # hosts the server may reach; [] = no network at all (see deploy/refbridge)
+  allow: []                      # hosts the server may reach; [] = no network at all (the compartment below enforces it)
 sessions:
   max: 4                         # concurrent sessions (= subprocesses)
   idle_timeout: 10m              # a session with no request for this long is ended — set it ABOVE Agenthof's step timeout (5m by default)
@@ -31,7 +31,7 @@ key fails there.
 The socket's directory is the access gate. refbridge checks at startup that
 it is mode 0700 and owned by the user refbridge runs as, and refuses to start
 otherwise. Never point `socket` into the refbox socket directory
-(`gateway.refbox_socket_dir`): that directory is mounted into the agent's
+(`refbox_socket_dir` in `gateway.yaml`): that directory is mounted into the agent's
 compartment, and the bridge's socket must never be reachable from there.
 
 ## The two materialization modes
@@ -82,6 +82,10 @@ tools:
     token_env: DEMO_TOKEN
 ```
 
+and export `DEMO_TOKEN` in Agenthof's environment: Agenthof reads the
+credential from there and injects it on each call; refbridge's own
+environment never supplies it.
+
 `scripts/e2e-refbridge-local.sh` runs this whole path against the real
 `agenthof` binary. The compartment recipe (`Containerfile`, `refbridge-run.sh`,
 `bridge-config/`) sits next to this program; `scripts/e2e-refbridge.sh` runs it
@@ -104,8 +108,15 @@ are the image's paths, not the local ones above.
   session id the attestation carries; what the server does with its
   credential upstream is attested by nobody.
 - Under `respawn-on-rotation`, closing the old subprocess holds the session's
-  lock for up to about ten seconds (five seconds to exit after its stdin
-  closes, five more after SIGTERM), so calls on that session wait.
+  lock for up to about fifteen seconds (five seconds to exit after its stdin
+  closes, five more after SIGTERM, five more after SIGKILL), so calls on
+  that session wait.
+- The subprocess's stderr is refbridge's stderr. A subprocess that prints
+  its environment writes the credential into the bridge's log.
+- When it ends a subprocess, refbridge kills that subprocess's process group,
+  so helpers it started go with it; a process that leaves that group (by
+  creating its own) is not reaped, because refbridge kills the group it
+  created, not one the subprocess created later.
 - The mirrored tool list is taken once, from the first subprocess, and is not
   refreshed when a rotation respawns it: the tool set is a property of the
   command, not of the credential.

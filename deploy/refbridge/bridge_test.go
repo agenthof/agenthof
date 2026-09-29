@@ -42,8 +42,8 @@ func testConfig(t *testing.T, mut func(*bridgeConfig)) bridgeConfig {
 }
 
 // startBridge serves the bridge over loopback TCP (httptest) — the transport
-// under test is the MCP session model, not the socket; Task 6 covers the UDS
-// listener. The bridge's own environment is fixed so pass-through is testable
+// under test is the MCP session model, not the socket; listen_test.go covers
+// the UDS listener. The bridge's own environment is fixed so pass-through is testable
 // and so LEAK proves non-allowlisted variables never reach a child.
 func startBridge(t *testing.T, cfg bridgeConfig) (*bridge, string) {
 	t.Helper()
@@ -320,8 +320,55 @@ func TestToolsListMirrorsChildTools(t *testing.T) {
 	for _, tool := range list.Tools {
 		names = append(names, tool.Name)
 	}
-	if got := strings.Join(names, ","); got != "credential,echo,environment,fail,forge,pid" {
-		t.Fatalf("mirrored tools = %q, want credential,echo,environment,fail,forge,pid", got)
+	if got := strings.Join(names, ","); got != "credential,echo,environment,fail,forge,grandchild,pid" {
+		t.Fatalf("mirrored tools = %q, want credential,echo,environment,fail,forge,grandchild,pid", got)
+	}
+}
+
+// startGrandchild has the session's child start a sleeping process it never
+// waits for, and returns that process's pid. The grandchild is killed at
+// cleanup whatever the test's outcome, so a failure never leaks a sleeper.
+func startGrandchild(t *testing.T, sess *mcp.ClientSession) int {
+	t.Helper()
+	gpid, err := strconv.Atoi(call(t, sess, "grandchild"))
+	if err != nil || gpid < 2 {
+		t.Fatalf("grandchild pid = %d (%v)", gpid, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(gpid, syscall.SIGKILL) })
+	if processGone(gpid) {
+		t.Fatal("the grandchild must be running before teardown")
+	}
+	return gpid
+}
+
+// TestSessionCloseReapsGrandchild pins that ending a session ends the whole
+// process group the bridge spawned, not only the direct child: a helper the
+// child started and left running would otherwise outlive the session,
+// holding the credential in its environment.
+func TestSessionCloseReapsGrandchild(t *testing.T) {
+	b, url := startBridge(t, testConfig(t, nil))
+	sess := mustConnect(t, url, &bearerRT{token: "tok-a"})
+	pid, _ := strconv.Atoi(call(t, sess, "pid"))
+	gpid := startGrandchild(t, sess)
+	_ = sess.Close()
+	eventually(t, "session teardown", func() bool { return b.liveSessions() == 0 && processGone(pid) })
+	eventually(t, "grandchild to be reaped", func() bool { return processGone(gpid) })
+}
+
+// TestRotationReapsOldGrandchild pins the same for respawn-on-rotation: the
+// replaced child's process group ends with it, while the session lives on.
+func TestRotationReapsOldGrandchild(t *testing.T) {
+	b, url := startBridge(t, testConfig(t, func(c *bridgeConfig) { c.Materialization = matRespawnOnRotation }))
+	rt := &bearerRT{token: "tok-a"}
+	sess := mustConnect(t, url, rt)
+	gpid := startGrandchild(t, sess)
+	rt.set("tok-b")
+	if got := call(t, sess, "credential"); got != fingerprint("tok-b") {
+		t.Fatalf("after rotation credential = %q, want sha256(tok-b)", got)
+	}
+	eventually(t, "old grandchild to be reaped", func() bool { return processGone(gpid) })
+	if b.liveSessions() != 1 {
+		t.Fatalf("live=%d, want 1: rotation must not end the session", b.liveSessions())
 	}
 }
 

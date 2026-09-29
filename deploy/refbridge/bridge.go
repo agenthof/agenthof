@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -268,7 +269,7 @@ func (s *session) ensure(bearer string) error {
 		return nil
 	}
 	if err := s.mirror(child); err != nil {
-		closeChild(child)
+		s.b.closeChild(child, pid)
 		s.child = nil
 		return err
 	}
@@ -324,6 +325,7 @@ func (s *session) spawn(bearer string) (child *mcp.ClientSession, pid int, envNa
 	cmd.Env = s.b.childEnv(bearer)
 	envNames = namesOf(cmd.Env)
 	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // its own group, so teardown reaps what it started
 	client := mcp.NewClient(&mcp.Implementation{Name: "refbridge", Version: "v0.1.0"}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), spawnTimeout)
 	defer cancel()
@@ -394,9 +396,9 @@ func (s *session) childFor(bearer string) (*mcp.ClientSession, attestation, erro
 	}
 	if bearer != s.bearer && s.b.cfg.Materialization == matRespawnOnRotation {
 		s.b.logger.Info("credential rotated; respawning child", "session", s.ss.ID())
-		old := s.child
+		old, oldPID := s.child, s.pid
 		s.child = nil
-		closeChild(old)
+		s.b.closeChild(old, oldPID)
 		fresh, pid, names, err := s.spawn(bearer)
 		if err != nil {
 			return nil, attestation{}, err
@@ -420,9 +422,19 @@ func (s *session) childFor(bearer string) (*mcp.ClientSession, attestation, erro
 // closing and lets any in-flight call finish; only once the session is
 // idle does the transport close the child's stdin, then wait for exit, then
 // SIGTERM and finally kill it. Stdin is never closed under a pending
-// response — the child's stdio transport would drop it.
-func closeChild(child *mcp.ClientSession) {
+// response — the child's stdio transport would drop it. Then whatever is
+// left of the child's process group (anything it started and did not wait
+// for) is killed, best effort: the group is the one spawn created with the
+// child as leader, never the bridge's own. A process that moved itself to
+// another group is out of reach.
+func (b *bridge) closeChild(child *mcp.ClientSession, pid int) {
 	_ = child.Close()
+	if pid <= 1 || pid == syscall.Getpgrp() {
+		return
+	}
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		b.logger.Warn("child process group not reaped", "pgid", pid, "error", err)
+	}
 }
 
 // teardown runs once, when the session has ended: it marks the session
@@ -435,12 +447,12 @@ func (s *session) teardown() {
 		return
 	}
 	s.ended = true
-	child := s.child
+	child, pid := s.child, s.pid
 	s.child = nil
 	s.mu.Unlock()
 	s.lifetime.Stop()
 	if child != nil {
-		closeChild(child)
+		s.b.closeChild(child, pid)
 	}
 	s.b.mu.Lock()
 	delete(s.b.sessions, s.ss)

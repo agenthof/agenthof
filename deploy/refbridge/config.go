@@ -15,7 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Credential materialization modes (spec: config is law; omission rejected).
+// Credential materialization modes (config is law: omission is rejected).
 const (
 	matEnvAtSpawn        = "env-at-spawn"        // static credential: set at spawn, held for the session
 	matRespawnOnRotation = "respawn-on-rotation" // rotating credential: respawn at the next call boundary when the bearer changes

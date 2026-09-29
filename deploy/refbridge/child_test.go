@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -20,7 +22,15 @@ import (
 // the environment, because the bridge hands the child an EMPTY environment.
 const childFlag = "-refbridge-test-child"
 
+// sleeperFlag re-executes this test binary as a grandchild that only sleeps:
+// what a child that starts a helper process and exits leaves behind.
+const sleeperFlag = "-refbridge-test-sleeper"
+
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == sleeperFlag {
+		time.Sleep(5 * time.Minute)
+		return
+	}
 	if len(os.Args) > 2 && os.Args[1] == childFlag {
 		poisonWhen := ""
 		if len(os.Args) > 3 {
@@ -73,6 +83,20 @@ func runTestChild(credEnv, poisonWhen string) {
 	mcp.AddTool(server, &mcp.Tool{Name: "pid", Description: "pid"},
 		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
 			return text(strconv.Itoa(os.Getpid())), nil, nil
+		})
+	// grandchild starts a sleeping process the child never waits for and
+	// answers with its pid, so a test can prove teardown reaps the group.
+	mcp.AddTool(server, &mcp.Tool{Name: "grandchild", Description: "a sleeping grandchild"},
+		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+			exe, err := os.Executable()
+			if err != nil {
+				return nil, nil, err
+			}
+			cmd := exec.Command(exe, sleeperFlag)
+			if err := cmd.Start(); err != nil {
+				return nil, nil, err
+			}
+			return text(strconv.Itoa(cmd.Process.Pid)), nil, nil
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "fail", Description: "an error result"},
 		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
