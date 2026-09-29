@@ -21,7 +21,7 @@ compartmented tests locally.
 
 ```sh
 deploy/lima/lima.sh up            # create + provision the VM (first run takes a few minutes)
-deploy/lima/lima.sh e2e           # run the refbox and refbridge e2es, then self-clean
+deploy/lima/lima.sh e2e           # run the refbox, refbridge and refexec e2es, then self-clean
 ```
 
 `up` provisions rootless podman, Go, and python3, and mounts the repository
@@ -33,7 +33,7 @@ automatically, so the VM definition carries no machine-specific path.
 | Command | What it does |
 | --- | --- |
 | `lima.sh up` | Create the VM on first run, or start it if it already exists. |
-| `lima.sh e2e [refbox\|refbridge\|all] [--keep]` | Run the compartment e2e(s) (default `all`), then self-clean unless `--keep`. |
+| `lima.sh e2e [refbox\|refbridge\|refexec\|all] [--keep]` | Run the compartment e2e(s) (default `all`), then self-clean unless `--keep`. |
 | `lima.sh build` | Compile `agenthof` (to `~/agenthof`) and build the compartment images, ready for manual runs. |
 | `lima.sh shell` | Open a shell in the VM at `/agenthof`, with Go, podman, and python3 on `PATH`. |
 | `lima.sh clean [--all]` | Remove stopped containers and dangling images; `--all` also drops cached base images. |
@@ -60,6 +60,7 @@ the agent process, then `apply` and `run`. Run one end to end:
 ```sh
 bash scripts/e2e-refbridge.sh   # a stdio tool, run in refbridge, over unix://
 bash scripts/e2e-refbox.sh      # the agent itself, run inside refbox
+bash scripts/e2e-refexec.sh     # a command run first-hand by refexec, on a workspace shared with refbox
 ```
 
 To drive Agenthof by hand, follow the same steps that script does. The detail a

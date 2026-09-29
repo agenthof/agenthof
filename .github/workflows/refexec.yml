@@ -1,0 +1,36 @@
+name: refexec
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'deploy/refexec/**'
+      - 'deploy/internal/refrunner/**'
+      - 'deploy/refbox/**'
+      - 'examples/echo-agent/**'
+      - 'scripts/e2e-refexec.sh'
+      - '.github/workflows/refexec.yml'
+      - 'internal/**'
+      - 'cmd/agenthof/**'
+
+permissions:
+  contents: read
+
+jobs:
+  refexec:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: podman
+        run: |
+          if ! command -v podman >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y podman
+          fi
+          podman --version
+      - run: ./scripts/e2e-refexec.sh
