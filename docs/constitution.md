@@ -11,12 +11,15 @@ credential, the agent never holds it. The tool/MCP gateway injects a resource
 credential per call. The model gateway injects the per-role provider key, so
 a fronted agent reaches models through Agenthof and never holds that key.
 Allowlisted commands run in the operator's
-sandbox and each is recorded — attested by the agent; Agenthof records
-but does not run or contain them. Agenthof runs no commands itself — exec
-containment is the operator's sandbox's job, not Agenthof's — so Agenthof-run
-("enforced") exec is **not a planned core capability**: `exec.mode` accepts only
-`attested`, and first-hand exec, if it ever exists, is a commercial
-compliance add-on outside this core, never a core guarantee. The
+runtime and each is recorded. `exec.mode` names whose account the record is:
+`attested` — the agent ran the command in its sandbox and reported it — or
+`runtime` — a trusted operator-side runtime (the reference one is `refexec`,
+a rootless-podman supervisor on the operator's host) ran the command on the
+agent's behalf and attested it first-hand. Both are core capabilities.
+Agenthof runs no commands itself — exec containment is the operator's
+runtime's job, not Agenthof's — so Agenthof-run exec stays rejected, and the
+first-hand record trusts that runtime the way the tool door trusts a declared
+bridge; no document may describe either record as tamper-proof. The
 agent runs in an operator-provided sandbox. That sandbox's network and exec
 confinement is required, and Agenthof does not verify it. No change may add
 an unmediated network call, or a credential stored where an agent's config or
