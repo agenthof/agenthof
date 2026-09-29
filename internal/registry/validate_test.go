@@ -486,9 +486,12 @@ func TestValidateToolResourceURLMustBeSecure(t *testing.T) {
 		{"https://mcp.example.com/", false},
 		{"http://127.0.0.1:8080/", false}, // loopback ok (tests/local)
 		{"http://localhost:8080/", false},
-		{"http://[::1]:8080/", false},     // ::1 is loopback too
-		{"http://mcp.example.com/", true}, // plaintext remote → rejected
-		{"", true},                        // empty → rejected (as today)
+		{"http://[::1]:8080/", false},                    // ::1 is loopback too
+		{"unix:///run/agenthof-bridge/tool.sock", false}, // a bridge socket only Agenthof can reach
+		{"unix://run/agenthof-bridge/tool.sock", true},   // relative socket path → rejected
+		{"unix://", true},                                // empty socket path → rejected
+		{"http://mcp.example.com/", true},                // plaintext remote → rejected
+		{"", true},                                       // empty → rejected (as today)
 	}
 	for _, tc := range cases {
 		t.Run(tc.url, func(t *testing.T) {
@@ -527,7 +530,7 @@ func TestValidateExecConfig(t *testing.T) {
 	}
 }
 
-func TestValidAgentEndpoint(t *testing.T) {
+func TestValidSecureOrUnixEndpoint(t *testing.T) {
 	cases := []struct {
 		in   string
 		want bool
@@ -541,14 +544,25 @@ func TestValidAgentEndpoint(t *testing.T) {
 		{"", false},
 	}
 	for _, c := range cases {
-		if got := validAgentEndpoint(c.in); got != c.want {
-			t.Errorf("validAgentEndpoint(%q) = %v, want %v", c.in, got, c.want)
+		if got := validSecureOrUnixEndpoint(c.in); got != c.want {
+			t.Errorf("validSecureOrUnixEndpoint(%q) = %v, want %v", c.in, got, c.want)
 		}
 	}
 }
 
-func TestUnixEndpointRejectedForToolResource(t *testing.T) {
+// A unix:// token_endpoint is never acceptable: it is a remote endpoint that
+// receives a client secret, so it keeps the https-or-loopback rule even now
+// that a tool url may be a local socket.
+func TestUnixTokenEndpointRejected(t *testing.T) {
 	if validSecureEndpoint("unix:///run/x.sock") {
-		t.Fatal("validSecureEndpoint accepted unix:// — tool/token endpoints must stay https/loopback only")
+		t.Fatal("validSecureEndpoint accepted unix:// — token endpoints must stay https/loopback only")
+	}
+	cfg := config.Config{Gateway: config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"t": {Kind: "mcp", URL: "https://mcp.example.com/", CredentialSource: "static_env",
+			GrantType: "client_credentials", ClientAuth: "client_secret_basic", Issuer: "https://issuer.example",
+			TokenEndpoint: "unix:///run/x.sock", ClientIDEnv: "ID", ClientSecretEnv: "SECRET"},
+	}}}
+	if !hasCode(Validate(cfg), "bad-tool-resource") {
+		t.Fatal("a unix:// token_endpoint must be bad-tool-resource")
 	}
 }

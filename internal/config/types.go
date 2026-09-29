@@ -6,7 +6,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// UnixScheme prefixes a gateway proxy URL or an AgentDef.Endpoint that names a
+// UnixScheme prefixes a gateway proxy URL, an AgentDef.Endpoint, or a ToolResource.URL that names a
 // Unix domain socket to dial. The value after it is the socket PATH only; HTTP
 // routes are fixed constants, never encoded in the URL.
 const UnixScheme = "unix://"

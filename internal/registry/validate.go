@@ -48,7 +48,7 @@ func Validate(cfg config.Config) []ValidationError {
 				msg = "agents are fronted and must declare an endpoint (the contained tier was removed)"
 			}
 			add(a.SourceFile, a.Name, "fronted-needs-endpoint", msg)
-		} else if !validAgentEndpoint(a.Endpoint) {
+		} else if !validSecureOrUnixEndpoint(a.Endpoint) {
 			add(a.SourceFile, a.Name, "bad-endpoint",
 				"endpoint must be https, loopback http, or unix:// socket")
 		}
@@ -157,9 +157,9 @@ func Validate(cfg config.Config) []ValidationError {
 			add("gateway.yaml", id, "bad-tool-resource",
 				fmt.Sprintf("tool resource %q must set kind: mcp", id))
 		}
-		if !validSecureEndpoint(r.URL) {
+		if !validSecureOrUnixEndpoint(r.URL) {
 			add("gateway.yaml", id, "bad-tool-resource",
-				fmt.Sprintf("tool resource %q: url must be set and https (or loopback http)", id))
+				fmt.Sprintf("tool resource %q: url must be set and https (or loopback http, or a unix:// socket)", id))
 		}
 		if r.CredentialSource != "static_env" {
 			add("gateway.yaml", id, "bad-tool-resource",
@@ -288,10 +288,11 @@ func Validate(cfg config.Config) []ValidationError {
 
 // validSecureEndpoint requires an https URL, or http only to a loopback host
 // (for tests and local development). It guards any endpoint that receives a
-// gateway-injected credential — both a client_credentials token endpoint and
-// a tool resource's upstream url. A credential over plaintext http to a
-// remote host is exactly the leak Article I guards against, so it is
-// rejected at apply time.
+// gateway-injected credential over the NETWORK: a client_credentials token
+// endpoint directly, and — through validSecureOrUnixEndpoint — a tool
+// resource's upstream url or an agent endpoint that is not a local socket. A
+// credential over plaintext http to a remote host is exactly the leak
+// Article I guards against, so it is rejected at apply time.
 func validSecureEndpoint(raw string) bool {
 	if raw == "" {
 		return false
@@ -310,11 +311,16 @@ func validSecureEndpoint(raw string) bool {
 	return false
 }
 
-// validAgentEndpoint is validSecureEndpoint plus a unix:// socket form, for the
-// fronted agent endpoint only. A refbox agent is reached over a bind-mounted
-// Unix socket (no network); tool/token endpoints keep the stricter
-// validSecureEndpoint rule since they receive a remote credential.
-func validAgentEndpoint(raw string) bool {
+// validSecureOrUnixEndpoint is validSecureEndpoint plus the unix://<absolute
+// socket path> form, for the two endpoints Agenthof dials on the operator's
+// own host: a fronted agent's endpoint (a refbox agent is reached over a
+// bind-mounted Unix socket) and a tool resource's url (a refbridge-fronted
+// stdio server is reached the same way). A local Unix socket never touches
+// the network and is gated by directory permissions and the mount namespace,
+// so it is at least as strict as loopback http, which any local user can
+// reach. token_endpoint keeps validSecureEndpoint: it is a remote endpoint
+// that receives a client secret.
+func validSecureOrUnixEndpoint(raw string) bool {
 	if path, ok := strings.CutPrefix(raw, config.UnixScheme); ok {
 		// The wire contract pins unix://<absolute-socket-path>. A relative path
 		// would resolve against the process working directory at dial time —
