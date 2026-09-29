@@ -566,3 +566,29 @@ func TestUnixTokenEndpointRejected(t *testing.T) {
 		t.Fatal("a unix:// token_endpoint must be bad-tool-resource")
 	}
 }
+
+func TestValidateToolResourceRuntime(t *testing.T) {
+	base := func(url, runtime string) config.Config {
+		return config.Config{Gateway: config.GatewayConfig{Tools: map[string]config.ToolResource{
+			"t": {Kind: "mcp", URL: url, CredentialSource: "static_env", TokenEnv: "TOK", Runtime: runtime},
+		}}}
+	}
+	cases := []struct {
+		name         string
+		url, runtime string
+		bad          bool
+	}{
+		{"no runtime, https", "https://mcp.example.com/", "", false},
+		{"refbridge over unix", "unix:///run/agenthof-bridge/tool.sock", "refbridge", false},
+		{"refbridge over https", "https://mcp.example.com/", "refbridge", true}, // a trusted runtime is socket-local by design
+		{"refbridge over loopback http", "http://127.0.0.1:8080/", "refbridge", true},
+		{"unknown runtime", "unix:///run/agenthof-bridge/tool.sock", "refbox", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := hasCode(Validate(base(c.url, c.runtime)), "bad-tool-resource"); got != c.bad {
+				t.Fatalf("bad-tool-resource = %v, want %v", got, c.bad)
+			}
+		})
+	}
+}

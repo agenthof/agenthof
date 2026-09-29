@@ -161,6 +161,20 @@ func Validate(cfg config.Config) []ValidationError {
 			add("gateway.yaml", id, "bad-tool-resource",
 				fmt.Sprintf("tool resource %q: url must be set and https (or loopback http, or a unix:// socket)", id))
 		}
+		switch r.Runtime {
+		case "":
+		case "refbridge":
+			// A trusted runtime is reached only over a local socket (its
+			// directory permissions are what make it trusted); a remote url
+			// declaring one would let a remote server write attestations.
+			if !strings.HasPrefix(r.URL, config.UnixScheme) {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: runtime refbridge requires a unix:// url", id))
+			}
+		default:
+			add("gateway.yaml", id, "bad-tool-resource",
+				fmt.Sprintf("tool resource %q: runtime %q is not implemented (only refbridge)", id, r.Runtime))
+		}
 		if r.CredentialSource != "static_env" {
 			add("gateway.yaml", id, "bad-tool-resource",
 				fmt.Sprintf("tool resource %q: credential_source %q is not implemented (only static_env)", id, r.CredentialSource))

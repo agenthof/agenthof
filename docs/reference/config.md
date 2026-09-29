@@ -415,7 +415,7 @@ for the runtime flow):
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
 | Kind | `kind` | string | yes | — |
-| URL | `url` | string | yes; must be `https`, or `http` to a loopback host | — |
+| URL | `url` | string | yes; must be https, http to a loopback host, or unix:// plus an absolute socket path | — |
 | CredentialSource | `credential_source` | string | yes | — |
 | TokenEnv | `token_env` | string | yes for the direct-bearer grant (`grant_type: ""`) | — |
 | GrantType | `grant_type` | string | no | `""` (direct-bearer) |
@@ -426,6 +426,7 @@ for the runtime flow):
 | ClientSecretEnv | `client_secret_env` | string | yes for `client_credentials` | — |
 | Scope | `scope` | string | no (not checked by `apply`) | — |
 | ReadOnlyTools | `read_only_tools` | list of strings | no | empty (no read-only grant) |
+| Runtime | `runtime` | string | no | `""` (no trusted runtime) |
 
 `read_only_tools` is the operator's list of the tools on this resource that
 a `mode: read-only` agent grant may use. A tool whose name is not in the
@@ -436,13 +437,28 @@ against the upstream, since it makes no network call. At run time a listed
 name the upstream does not expose is skipped with a warning, and a
 `mode: read-only` grant that matches no exposed tool fails the step.
 
+`runtime` declares that a trusted operator runtime fronts this resource and
+attests first-hand, on every result, what it ran. The only accepted value is
+`refbridge`, and it requires a `unix://` url — `apply` rejects
+`runtime: refbridge` on an `https` or loopback `http` url with
+`bad-tool-resource` ("runtime refbridge requires a unix:// url"), and any
+other value with `bad-tool-resource` ("runtime ... is not implemented (only
+refbridge)"). When set, every `tool_call` event that carries a result from
+this resource carries the runtime's attestation (`runtime_attestation`: the
+spawned command, the answering child's pid and generation, and environment
+variable NAMES — never a value); a result that arrives without a well-formed
+attestation fails the call with reason `runtime attestation missing` or
+`runtime attestation malformed`. Leave it unset for an ordinary MCP server:
+any such claim on its results is stripped and never recorded.
+
 `apply` requires `kind` to be exactly `"mcp"` and `url` to be set and
 `https` (or `http` only to a loopback host — `localhost`, `127.0.0.1`, or
-`::1`). The gateway injects a credential on every call to that url, so a
-plaintext url on a remote host is rejected at apply time, the same rule as
-`token_endpoint`. A resource that fails either check is rejected with
-`bad-tool-resource` ("tool resource ... must set kind: mcp", or "url must be
-set and https (or loopback http)"). `apply` separately requires
+`::1`, or `unix://` plus an absolute socket path). The gateway injects a
+credential on every call to that url, so a plaintext url on a remote host is
+rejected at apply time, the same rule as `token_endpoint`. A resource that
+fails either check is rejected with `bad-tool-resource` ("tool resource ...
+must set kind: mcp", or "url must be set and https (or loopback http, or a
+unix:// socket)"). `apply` separately requires
 `credential_source` to be exactly `"static_env"`, rejecting anything else
 (including empty) with `bad-tool-resource` ("credential_source ... is not
 implemented (only static_env)"). `apply` also validates `grant_type`: the

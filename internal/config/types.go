@@ -266,6 +266,13 @@ type ToolResource struct {
 	// grant. Operator-declared. A tool not listed is mutating. Empty means
 	// this resource has no read-only grant.
 	ReadOnlyTools []string `yaml:"read_only_tools"`
+	// Runtime declares that a trusted operator runtime fronts this resource
+	// and attests first-hand, on every result, what it ran; the tool door
+	// records that attestation on the tool_call event (runtime_attestation)
+	// and fails a call whose result carries none. "" (the default) means no
+	// runtime: any such claim on a result is stripped and never recorded.
+	// Only "refbridge" is implemented; it requires a unix:// url.
+	Runtime string `yaml:"runtime"`
 }
 
 type Config struct {

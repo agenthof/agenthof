@@ -3,7 +3,8 @@
 // here, which authenticates the step (a per-step run token), authorizes
 // against the agent's allowlist, injects a resource credential the agent
 // never sees (no-passthrough), forwards the call to the upstream MCP server,
-// and appends a tool_call event per call.
+// and appends a tool_call event per call (carrying a trusted runtime's
+// attestation when the resource declares one).
 package rungateway
 
 import (
@@ -46,7 +47,8 @@ const connectTimeout = 30 * time.Second
 // the granted tools — every tool of an all-tools grant, the resource's
 // read_only_tools under mode: read-only, only the named tools of a named
 // grant — onto an inbound MCP server gated by the run token, and forwards
-// calls, appending a tool_call event per call.
+// calls, appending a tool_call event per call (carrying a trusted runtime's
+// attestation when the resource declares one).
 type Gateway struct {
 	tools   map[string]config.ToolResource
 	broker  broker.Broker
@@ -457,7 +459,9 @@ func (p *Gateway) Stop() {
 // Start already filtered at mirror time), forwards the call to upstream with
 // the arguments passed through raw (never touching the run token), and
 // appends a tool_call event recording only a result hash + short preview —
-// never the call body or any credential.
+// never the call body or any credential. When the resource declares a
+// trusted runtime, the runtime's attestation is taken from the result's
+// _meta and recorded with the event; see attestation.go.
 func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow allowedTools, upstream *mcp.ClientSession, appendEvent func(engine.Event), logger *slog.Logger) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		p.mu.Lock()
@@ -502,6 +506,27 @@ func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID
 			Arguments: req.Params.Arguments, // raw passthrough — never the run token
 		})
 
+		// A trusted runtime's first-hand attestation rides on the result's
+		// _meta. It is taken out before anything else sees the result: the
+		// agent never gets it and the hash below covers the tool's own answer.
+		// A JSON-RPC failure has no result and so no attestation — recorded
+		// failed as before. A declared runtime that answered without one has
+		// broken its contract, so the call fails with a fixed reason rather
+		// than being recorded as a plain success (fail clearly, never
+		// recover silently); an undeclared resource's claim is dropped.
+		var attestation *engine.RuntimeAttestation
+		if callErr == nil {
+			att, dropped, attErr := takeRuntimeAttestation(result, p.tools[resourceID].Runtime)
+			switch {
+			case attErr != nil:
+				logger.Error("runtime attestation rejected", "resource", resourceID, "tool", req.Params.Name, "reason", attErr.Error())
+				result = &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: attErr.Error()}}}
+			case dropped:
+				logger.Warn("runtime attestation from an undeclared resource dropped", "resource", resourceID, "tool", req.Params.Name)
+			}
+			attestation = att
+		}
+
 		status := "succeeded"
 		var reason string
 		if callErr != nil {
@@ -517,17 +542,18 @@ func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID
 		sha, preview := hashResult(result, callErr)
 
 		appendEvent(engine.Event{
-			Type:             "tool_call",
-			Agent:            agent.Name,
-			AuthMode:         authModeFor(p.tools[resourceID]),
-			Status:           status,
-			Reason:           reason,
-			Tool:             req.Params.Name,
-			ArgsSHA:          argsSHA(req.Params.Arguments),
-			ResourcesTouched: []string{resourceID},
-			Binding:          bind,
-			ArtifactSHA:      sha,
-			Artifact:         preview,
+			Type:               "tool_call",
+			Agent:              agent.Name,
+			AuthMode:           authModeFor(p.tools[resourceID]),
+			Status:             status,
+			Reason:             reason,
+			Tool:               req.Params.Name,
+			ArgsSHA:            argsSHA(req.Params.Arguments),
+			ResourcesTouched:   []string{resourceID},
+			Binding:            bind,
+			ArtifactSHA:        sha,
+			Artifact:           preview,
+			RuntimeAttestation: attestation,
 		})
 
 		if callErr != nil {

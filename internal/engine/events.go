@@ -21,6 +21,20 @@ type Binding struct {
 	RunID    string           `json:"run_id"`
 }
 
+// RuntimeAttestation is a trusted operator runtime's first-hand account of
+// one tool call it served: refbridge's, today. Names, ids and argv only —
+// never a credential value, never a result body (Article III).
+type RuntimeAttestation struct {
+	Runtime         string   `json:"runtime"`         // "refbridge"
+	Session         string   `json:"session"`         // the runtime's MCP session id: the key into its own log (spawn, teardown, exit)
+	Command         []string `json:"command"`         // the argv the child was spawned with
+	PID             int      `json:"pid"`             // the child that answered
+	Spawn           int      `json:"spawn"`           // 1-based generation of the child within the session; 2 = respawned on rotation
+	CredentialEnv   string   `json:"credential_env"`  // the NAME of the variable the credential was materialized into
+	EnvNames        []string `json:"env_names"`       // the child's whole environment, NAMES only, sorted
+	Materialization string   `json:"materialization"` // env-at-spawn | respawn-on-rotation
+}
+
 type Event struct {
 	Time             time.Time `json:"time"`
 	Type             string    `json:"type"`
@@ -43,10 +57,16 @@ type Event struct {
 	Model            string    `json:"model,omitempty"`             // set by model_call: the logical model requested
 	PromptTokens     *int      `json:"prompt_tokens,omitempty"`     // set by model_call (non-streaming): usage
 	CompletionTokens *int      `json:"completion_tokens,omitempty"` // set by model_call (non-streaming): usage
-	Actor            string    `json:"actor,omitempty"`             // reserved: delegation — the acting agent
-	Principal        string    `json:"principal,omitempty"`         // reserved: delegation — the initiating human/system
-	Binding          Binding   `json:"binding"`
-	Prev             string    `json:"prev"`
+	// RuntimeAttestation is set by tool_call when the resource declares a
+	// trusted runtime (runtime: refbridge): that runtime's FIRST-HAND account
+	// of the call — which command it spawned, which child answered, with
+	// which environment variable NAMES. It is the runtime's word, not the
+	// agent's (exec's Mode "attested" is the agent's), and never a value.
+	RuntimeAttestation *RuntimeAttestation `json:"runtime_attestation,omitempty"`
+	Actor              string              `json:"actor,omitempty"`     // reserved: delegation — the acting agent
+	Principal          string              `json:"principal,omitempty"` // reserved: delegation — the initiating human/system
+	Binding            Binding             `json:"binding"`
+	Prev               string              `json:"prev"`
 }
 
 func NewRunID() string {
