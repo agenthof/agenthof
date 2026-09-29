@@ -1,0 +1,56 @@
+# The first-hand exec door: a fronted step asks Agenthof to run an allowlisted
+# command through the declared runtime, and the ledger records — and audit
+# renders — the exec event with the runtime's first-hand attestation. The
+# agent-asserted routes are refused on such an agent, and recorded.
+
+exec agenthof apply --config config
+stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+
+exec agenthof run se exec-demo --input 'exec-run:true' --as tester --config config --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+
+lastrun logs
+exec agenthof audit $RUNID --log-dir logs
+stdout 'exec true — exit 0 \(runtime\) \[runtime-attested: refexec true pid 4242 spawn 1\]'
+
+# backstop: the raw ledger carries the first-hand exec event
+grep '"type":"exec"' logs/${RUNID}.jsonl
+grep '"mode":"runtime"' logs/${RUNID}.jsonl
+grep '"runtime_attestation":{"runtime":"refexec"' logs/${RUNID}.jsonl
+! grep '"mode":"attested"' logs/${RUNID}.jsonl
+
+# the agent's own report has no place on a first-hand door: refused, recorded
+! exec agenthof run se exec-demo --input 'exec:true' --as tester --config config --log-dir logs --artifact-dir artifacts
+stdout 'finished: failed'
+lastrun logs
+exec agenthof audit $RUNID --log-dir logs
+stdout 'exec true refused — exec on this agent is first-hand'
+
+-- config/agents/runner.yaml --
+name: runner
+model: fast
+instruction: run a command
+output: out
+execution: fronted
+exec:
+  mode: runtime
+  runtime: refexec
+  url: unix:///refexec-stub.sock
+  timeout: 30s
+  allow:
+    - exe: "true"
+-- config/workflows/exec-demo.yaml --
+name: exec-demo
+steps:
+  - name: run
+    agent: runner
+-- config/roles/se.yaml --
+name: se
+workflows: [exec-demo]
+allowed_groups: ["*"]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

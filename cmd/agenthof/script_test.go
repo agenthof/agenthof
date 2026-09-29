@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -75,6 +79,7 @@ func TestScript(t *testing.T) {
 		})
 	mcpSrv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil))
 	t.Cleanup(mcpSrv.Close)
+	execSock := refexecStub(t)
 	testscript.Run(t, testscript.Params{
 		Dir: filepath.Join("testdata", "script"),
 		Setup: func(e *testscript.Env) error {
@@ -98,7 +103,10 @@ func TestScript(t *testing.T) {
 			if err := rewriteModelEndpoints(e.WorkDir, modelSrv.URL); err != nil {
 				return err
 			}
-			return rewriteToolURLs(e.WorkDir, mcpSrv.URL)
+			if err := rewriteToolURLs(e.WorkDir, mcpSrv.URL); err != nil {
+				return err
+			}
+			return rewriteExecURLs(e.WorkDir, execSock)
 		},
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			// lastrun <log-dir>: finds the single newest run log and exports
@@ -232,5 +240,67 @@ func copyDir(src, dst string) error {
 			return err
 		}
 		return os.WriteFile(target, b, 0o644)
+	})
+}
+
+// refexecStub serves refexec's /run contract on a Unix socket in a private
+// (0700) directory: it runs nothing, answering exit 0 (exit 1 for `false`)
+// with an attestation naming the command it was asked for, so
+// door_exec_runtime.txtar proves the gateway's first-hand door and audit's
+// rendering — not podman. It returns the socket path.
+func refexecStub(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "rxt") // 0700 and short: the socket dir gate, and the socket path length limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "exec.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Command []string `json:"command"`
+		}
+		if r.URL.Path != "/run" || json.NewDecoder(r.Body).Decode(&req) != nil || len(req.Command) == 0 {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		exit := 0
+		if req.Command[0] == "false" {
+			exit = 1
+		}
+		output := "ok\n"
+		sum := sha256.Sum256([]byte(output))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"exit_code": exit, "output": output, "output_sha": hex.EncodeToString(sum[:]),
+			"truncated": false, "output_bytes": len(output),
+			"runtime_attestation": map[string]any{
+				"runtime": "refexec", "session": "refexec-stub", "command": req.Command,
+				"pid": 4242, "spawn": 1, "credential_env": "", "env_names": []string{}, "materialization": "",
+			},
+		})
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return sock
+}
+
+// rewriteExecURLs repoints the placeholder unix:///refexec-stub.sock in every
+// agent file under root at the in-process stub's socket.
+func rewriteExecURLs(root, sock string) error {
+	return filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Base(filepath.Dir(p)) != "agents" || !strings.HasSuffix(d.Name(), ".yaml") {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		out := strings.ReplaceAll(string(b), "unix:///refexec-stub.sock", "unix://"+sock)
+		return os.WriteFile(p, []byte(out), 0o644)
 	})
 }
