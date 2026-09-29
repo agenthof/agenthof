@@ -62,7 +62,7 @@ type Gateway struct {
 
 	mu       sync.Mutex
 	srv      *http.Server
-	sessions []*mcp.ClientSession
+	sessions []upstream
 	closing  bool
 	// sockPath is set when this step's listener is a Unix socket. Stop removes
 	// it explicitly so the unlink is synchronous with Stop returning: srv.Close
@@ -191,10 +191,10 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 
 	inbound := mcp.NewServer(&mcp.Implementation{Name: "agenthof-tool-proxy", Version: "v0.1.0"}, nil)
 
-	var sessions []*mcp.ClientSession
+	var sessions []upstream
 	closeSessions := func() {
 		for _, s := range sessions {
-			_ = s.Close()
+			s.close()
 		}
 	}
 
@@ -219,13 +219,14 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 			continue
 		}
 
-		sess, err := p.connectUpstream(id, res)
+		up, err := p.connectUpstream(id, res)
 		if err != nil {
 			logger.Error("upstream connect failed", "resource", id, "class", errClass(err))
 			closeSessions()
 			return "", "", fmt.Errorf("connect upstream %q: %w", id, err)
 		}
-		sessions = append(sessions, sess)
+		sessions = append(sessions, up)
+		sess := up.sess
 
 		listCtx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 		list, err := sess.ListTools(listCtx, nil)
@@ -443,7 +444,7 @@ func (p *Gateway) Stop() {
 	p.inflight.Wait()
 
 	for _, s := range sessions {
-		_ = s.Close()
+		s.close()
 	}
 	if srv != nil {
 		logger.Info("gateway listener stopped")
@@ -536,11 +537,60 @@ func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID
 	}
 }
 
+// upstreamTransport selects the base transport for a tool resource's url. A
+// unix://<path> resource — a refbridge-fronted stdio server, reachable over a
+// Unix socket only Agenthof can see — is dialed through a transport whose
+// DialContext opens that socket, and the Streamable endpoint becomes the
+// fixed placeholder http://agenthof/ (the host is ignored; the route is the
+// resource's root, as for the adapter's agent socket). Keep-alives stay ON:
+// unlike the adapter's per-call client, this transport backs one MCP session
+// per step with a long-lived Streamable/SSE stream, so the POST connection is
+// pooled and reused across calls instead of re-dialed per request. That pool
+// is what the returned closeIdle releases: closing the MCP session cancels
+// the SSE GET but returns the last POST/DELETE connection to the pool, and
+// nothing else ever drains a per-step Transport — without closeIdle, every
+// step would leave one open socket and its two transport goroutines behind
+// for the life of the process. IdleConnTimeout bounds the damage if a close
+// path is ever missed. Any other url dials the shared http.DefaultTransport
+// unchanged, and its closeIdle is a no-op: the shared pool is never drained
+// on one step's behalf.
+func upstreamTransport(rawURL string) (base http.RoundTripper, endpoint string, closeIdle func()) {
+	if path, ok := strings.CutPrefix(rawURL, config.UnixScheme); ok {
+		tr := &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", path)
+			},
+			IdleConnTimeout: 90 * time.Second,
+		}
+		return tr, "http://agenthof/", tr.CloseIdleConnections
+	}
+	return http.DefaultTransport, rawURL, func() {}
+}
+
+// upstream is one connected tool resource: the MCP session plus the release
+// of the transport pool behind it. close is the only way a session is torn
+// down, so the pool cannot be forgotten on any path.
+type upstream struct {
+	sess      *mcp.ClientSession
+	closeIdle func()
+}
+
+// close ends the MCP session (DELETE, cancel the SSE stream) and then drains
+// the transport's idle pool, so the connection the DELETE rode back on is
+// closed rather than parked forever.
+func (u upstream) close() {
+	_ = u.sess.Close()
+	u.closeIdle()
+}
+
 // connectUpstream connects to res as an MCP client. The resource's credential
 // is resolved per outbound request by injectingTransport (the broker caches),
 // not once here — a client_credentials token is short-lived and a step may run
-// for minutes, so a token captured at connect could expire mid-step.
-func (p *Gateway) connectUpstream(id string, res config.ToolResource) (*mcp.ClientSession, error) {
+// for minutes, so a token captured at connect could expire mid-step. A unix://
+// url is dialed through upstreamTransport; the credential injection is the
+// same either way. The returned upstream owns the transport pool: on a failed
+// connect it is drained here, on success it is drained by upstream.close.
+func (p *Gateway) connectUpstream(id string, res config.ToolResource) (upstream, error) {
 	ref := broker.CredentialRef{
 		ResourceID:      id,
 		Source:          res.CredentialSource,
@@ -553,7 +603,8 @@ func (p *Gateway) connectUpstream(id string, res config.ToolResource) (*mcp.Clie
 		ClientIDEnv:     res.ClientIDEnv,
 		ClientSecretEnv: res.ClientSecretEnv,
 	}
-	httpClient := &http.Client{Transport: &injectingTransport{base: http.DefaultTransport, broker: p.broker, ref: ref}}
+	base, endpoint, closeIdle := upstreamTransport(res.URL)
+	httpClient := &http.Client{Transport: &injectingTransport{base: base, broker: p.broker, ref: ref}}
 	client := mcp.NewClient(&mcp.Implementation{Name: "agenthof-tool-proxy", Version: "v0.1.0"}, nil)
 
 	// The connect context only bounds the initialize/discover handshake, not
@@ -562,10 +613,15 @@ func (p *Gateway) connectUpstream(id string, res config.ToolResource) (*mcp.Clie
 	// session short later.
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
-	return client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint:   res.URL,
+	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:   endpoint,
 		HTTPClient: httpClient,
 	}, nil)
+	if err != nil {
+		closeIdle() // a half-done handshake can still have parked a connection
+		return upstream{}, err
+	}
+	return upstream{sess: sess, closeIdle: closeIdle}, nil
 }
 
 // injectingTransport resolves the resource's credential through the broker on
