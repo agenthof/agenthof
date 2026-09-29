@@ -136,6 +136,14 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 
 	logger := p.logger.With("run", bind.RunID, "agent", agent.Name)
 
+	// Registry validation already rejects a first-hand exec without a
+	// unix:// url or a timeout, but Start is reachable without the registry,
+	// so it fails closed on both rather than dialing nowhere or forever.
+	if agent.Exec.FirstHand() && (!strings.HasPrefix(agent.Exec.URL, config.UnixScheme) || agent.Exec.Timeout <= 0) {
+		logger.Error("gateway start refused", "reason", "first-hand exec needs a unix:// url and a positive timeout")
+		return "", "", fmt.Errorf("exec runtime %q requires a unix:// url and a positive timeout", agent.Exec.Runtime)
+	}
+
 	// Build the per-resource allowlist. Registry validation already rejects
 	// a grant with neither tools nor a mode, a resource granted twice when
 	// either grant limits tools, a mode it does not implement, and mode: all
@@ -309,6 +317,7 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil))
 	mux.HandleFunc("/exec/authorize", p.execAuthorizeHandler(bind, agent, appendEvent))
 	mux.HandleFunc("/exec/attest", p.execAttestHandler(bind, agent, appendEvent))
+	mux.HandleFunc("/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
 	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
 	handler := authMiddleware(mux, token)
 
@@ -361,58 +370,6 @@ func (p *Gateway) guardedAppend(appendEvent func(engine.Event), e engine.Event) 
 	p.mu.Unlock()
 	appendEvent(e)
 	p.inflight.Done()
-}
-
-func (p *Gateway) execAuthorizeHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Command []string `json:"command"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		allowed := agent.Exec.Allows(req.Command)
-		if !allowed {
-			p.guardedAppend(appendEvent, engine.Event{
-				Type: "exec", Agent: agent.Name, Status: "refused",
-				Reason:  "command is not on the exec allowlist",
-				Command: req.Command,
-				Mode:    "attested", Binding: bind,
-			})
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]bool{"allowed": allowed})
-	}
-}
-
-func (p *Gateway) execAttestHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Command   []string `json:"command"`
-			Exit      *int     `json:"exit"`
-			OutputSHA string   `json:"output_sha"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		if req.Exit == nil {
-			http.Error(w, "exit is required", http.StatusBadRequest)
-			return
-		}
-		status := "succeeded"
-		if *req.Exit != 0 {
-			status = "failed"
-		}
-		exit := *req.Exit
-		p.guardedAppend(appendEvent, engine.Event{
-			Type: "exec", Agent: agent.Name, Status: status,
-			Command: req.Command, ExitCode: &exit, OutputSHA: req.OutputSHA,
-			Mode: "attested", Binding: bind,
-		})
-		w.WriteHeader(http.StatusNoContent)
-	}
 }
 
 // Stop tears down the inbound listener and closes every upstream session. It
