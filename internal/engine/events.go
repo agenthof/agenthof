@@ -22,17 +22,18 @@ type Binding struct {
 }
 
 // RuntimeAttestation is a trusted operator runtime's first-hand account of
-// one tool call it served: refbridge's, today. Names, ids and argv only —
-// never a credential value, never a result body (Article III).
+// one call it served: refbridge's, on a tool_call, or refexec's, on an exec.
+// Names, ids and argv only — never a credential value, never a result or
+// output body (Article III).
 type RuntimeAttestation struct {
-	Runtime         string   `json:"runtime"`         // "refbridge"
-	Session         string   `json:"session"`         // the runtime's MCP session id: the key into its own log (spawn, teardown, exit)
-	Command         []string `json:"command"`         // the argv the child was spawned with
-	PID             int      `json:"pid"`             // the child that answered
-	Spawn           int      `json:"spawn"`           // children spawned in this session so far; increments on any respawn, including a rotation
-	CredentialEnv   string   `json:"credential_env"`  // the NAME of the variable the credential was materialized into
-	EnvNames        []string `json:"env_names"`       // the child's whole environment, NAMES only, sorted
-	Materialization string   `json:"materialization"` // env-at-spawn | respawn-on-rotation
+	Runtime         string   `json:"runtime"`         // "refbridge" | "refexec"
+	Session         string   `json:"session"`         // refbridge: its MCP session id; refexec: the per-request id, also the compartment's name — the key into the runtime's own log
+	Command         []string `json:"command"`         // the argv the runtime was asked to run
+	PID             int      `json:"pid"`             // the process the runtime holds first-hand: refbridge's child, or refexec's `podman run` client on the host — never a pid inside a compartment
+	Spawn           int      `json:"spawn"`           // refbridge: children spawned in this session so far (increments on a rotation respawn); refexec: always 1
+	CredentialEnv   string   `json:"credential_env"`  // refbridge: the NAME of the variable the credential was materialized into; refexec: empty (credential-less)
+	EnvNames        []string `json:"env_names"`       // the variable NAMES the runtime set on the process, sorted; refbridge: the child's whole environment; refexec: what it injected — an image's own ENV layer is not seen by refexec
+	Materialization string   `json:"materialization"` // refbridge: env-at-spawn | respawn-on-rotation; refexec: empty
 }
 
 type Event struct {
@@ -52,16 +53,18 @@ type Event struct {
 	ArgsSHA          string    `json:"args_sha,omitempty"`          // set by tool_call: sha256 of the raw call arguments (never the args themselves)
 	Command          []string  `json:"command,omitempty"`           // set by exec: the reported argv
 	ExitCode         *int      `json:"exit_code,omitempty"`         // set by exec attest: pointer so 0 (success) is distinct from absent
-	OutputSHA        string    `json:"output_sha,omitempty"`        // set by exec attest: sha256 of the reported command output (never the output)
-	Mode             string    `json:"mode,omitempty"`              // set by exec: "attested" (enforced reserved)
+	OutputSHA        string    `json:"output_sha,omitempty"`        // set by exec: sha256 of the command output as reported — by the agent (attested) or by the runtime over the output it returned (runtime); never the output
+	Mode             string    `json:"mode,omitempty"`              // set by exec: "attested" (the agent's report) or "runtime" (a declared runtime ran it first-hand; see RuntimeAttestation)
 	Model            string    `json:"model,omitempty"`             // set by model_call: the logical model requested
 	PromptTokens     *int      `json:"prompt_tokens,omitempty"`     // set by model_call (non-streaming): usage
 	CompletionTokens *int      `json:"completion_tokens,omitempty"` // set by model_call (non-streaming): usage
 	// RuntimeAttestation is set by tool_call when the resource declares a
-	// trusted runtime (runtime: refbridge): that runtime's FIRST-HAND account
-	// of the call — which command it spawned, which child answered, with
-	// which environment variable NAMES. It is the runtime's word, not the
-	// agent's (exec's Mode "attested" is the agent's), and never a value.
+	// trusted runtime (runtime: refbridge) and by exec when the agent's exec
+	// door is first-hand (exec.mode: runtime, served by refexec): that
+	// runtime's FIRST-HAND account of the call — which command it ran, which
+	// process it held, with which environment variable NAMES. It is the
+	// runtime's word, not the agent's (an exec with Mode "attested" is the
+	// agent's), and never a value.
 	RuntimeAttestation *RuntimeAttestation `json:"runtime_attestation,omitempty"`
 	Actor              string              `json:"actor,omitempty"`     // reserved: delegation — the acting agent
 	Principal          string              `json:"principal,omitempty"` // reserved: delegation — the initiating human/system
