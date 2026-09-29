@@ -52,7 +52,7 @@ compartment, and the bridge's socket must never be reachable from there.
 Save the config above as `refbridge.yaml`, then:
 
 ```
-go build -o /tmp/refbridge ./examples/refbridge
+go build -o /tmp/refbridge ./deploy/refbridge
 go build -o /tmp/stdio-tool ./examples/stdio-tool
 mkdir -m 0700 /tmp/agenthof-bridge
 /tmp/refbridge -config refbridge.yaml
@@ -70,8 +70,9 @@ tools:
 ```
 
 `scripts/e2e-refbridge-local.sh` runs this whole path against the real
-`agenthof` binary. `deploy/refbridge` runs the bridge in a rootless-podman
-compartment. Inside that image the socket is
+`agenthof` binary. The compartment recipe (`Containerfile`, `refbridge-run.sh`,
+`bridge-config/`) sits next to this program; `scripts/e2e-refbridge.sh` runs it
+in a rootless-podman compartment. Inside that image the socket is
 `/run/agenthof-bridge/stdio-tool.sock` and the server is `/stdio-tool`; those
 are the image's paths, not the local ones above.
 
