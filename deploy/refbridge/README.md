@@ -47,6 +47,18 @@ compartment, and the bridge's socket must never be reachable from there.
   state resets at that point, which is fine for the usual stateless tool
   server.
 
+## What the bridge tells Agenthof about each call
+
+With `runtime: refbridge` on the tool resource, every result the bridge
+relays carries the bridge's own first-hand account of the call, and
+Agenthof records it on the `tool_call` event as `runtime_attestation`: the
+command it spawned, the process that answered and whether it was respawned,
+the session id, the name of the variable the credential went into, and the
+complete list of the subprocess's environment variable names. Never a value.
+The agent never sees it. A resource declared `runtime: refbridge` whose
+result carries no such account fails the call — so an attested call is
+exactly what a governed stdio call is.
+
 ## Run it locally
 
 Save the config above as `refbridge.yaml`, then:
@@ -65,6 +77,7 @@ tools:
   stdio-tool:
     kind: mcp
     url: unix:///tmp/agenthof-bridge/stdio-tool.sock
+    runtime: refbridge   # the bridge attests first-hand what it ran; Agenthof records it on each tool_call
     credential_source: static_env
     token_env: DEMO_TOKEN
 ```
@@ -83,8 +96,13 @@ are the image's paths, not the local ones above.
   socket directory's permissions and the mount namespace are the gate.
 - An allowed egress host is a path the credential can leave through. Keep
   the list minimal.
-- The subprocess's own actions are not on Agenthof's ledger; `tool_call`
-  records the call the bridge received.
+- What the ledger holds about the stdio hop is this bridge's own first-hand
+  account, recorded on each `tool_call` as `runtime_attestation` when the
+  resource declares `runtime: refbridge`. The bridge is the trusted party: a
+  compromised bridge could misreport, as a compromised sandbox could. The
+  subprocess's exit and teardown stay in the bridge's log, keyed by the
+  session id the attestation carries; what the server does with its
+  credential upstream is attested by nobody.
 - Under `respawn-on-rotation`, closing the old subprocess holds the session's
   lock for up to about ten seconds (five seconds to exit after its stdin
   closes, five more after SIGTERM), so calls on that session wait.

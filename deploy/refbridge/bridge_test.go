@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -319,8 +320,8 @@ func TestToolsListMirrorsChildTools(t *testing.T) {
 	for _, tool := range list.Tools {
 		names = append(names, tool.Name)
 	}
-	if got := strings.Join(names, ","); got != "credential,echo,environment,pid" {
-		t.Fatalf("mirrored tools = %q, want credential,echo,environment,pid", got)
+	if got := strings.Join(names, ","); got != "credential,echo,environment,fail,forge,pid" {
+		t.Fatalf("mirrored tools = %q, want credential,echo,environment,fail,forge,pid", got)
 	}
 }
 
@@ -368,7 +369,7 @@ func TestEndedSessionNeverSpawns(t *testing.T) {
 	if err := s.ensure("tok-a"); err == nil || !strings.Contains(err.Error(), "session ended") {
 		t.Fatalf("ensure after teardown err = %v, want a session-ended refusal", err)
 	}
-	if _, err := s.childFor("tok-a"); err == nil || !strings.Contains(err.Error(), "session ended") {
+	if _, _, err := s.childFor("tok-a"); err == nil || !strings.Contains(err.Error(), "session ended") {
 		t.Fatalf("childFor after teardown err = %v, want a session-ended refusal", err)
 	}
 	if b.spawns.Load() != 0 {
@@ -394,5 +395,117 @@ func TestClosedBridgeRefusesInitialize(t *testing.T) {
 	}
 	if b.spawns.Load() != 1 || b.liveSessions() != 0 {
 		t.Fatalf("spawns=%d live=%d after close, want 1/0", b.spawns.Load(), b.liveSessions())
+	}
+}
+
+const attestationKey = "agenthof.dev/runtime-attestation" // the wire contract the gateway reads (internal/rungateway/attestation.go); pinned, not imported
+
+// attestationOf returns the _meta attestation on a result, failing the test
+// when it is absent or not an object.
+func attestationOf(t *testing.T, res *mcp.CallToolResult) map[string]any {
+	t.Helper()
+	att, ok := res.Meta[attestationKey].(map[string]any)
+	if !ok {
+		t.Fatalf("result carries no runtime attestation: meta = %v", res.Meta)
+	}
+	return att
+}
+
+func rawCall(t *testing.T, sess *mcp.ClientSession, name string) *mcp.CallToolResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("CallTool %s: %v", name, err)
+	}
+	return res
+}
+
+func TestEveryResultCarriesRuntimeAttestation(t *testing.T) {
+	_, url := startBridge(t, testConfig(t, nil))
+	sess := mustConnect(t, url, &bearerRT{token: "tok-a"})
+	pid, _ := strconv.Atoi(call(t, sess, "pid"))
+	res := rawCall(t, sess, "echo")
+	att := attestationOf(t, res)
+	exe, _ := os.Executable()
+	if att["runtime"] != "refbridge" || att["credential_env"] != "TEST_CRED" || att["materialization"] != matEnvAtSpawn {
+		t.Fatalf("attestation = %v", att)
+	}
+	if got := att["command"].([]any); len(got) != 3 || got[0] != exe || got[1] != childFlag {
+		t.Fatalf("command = %v, want the configured argv", got)
+	}
+	if att["pid"] != float64(pid) || att["spawn"] != float64(1) {
+		t.Fatalf("pid/spawn = %v/%v, want %d/1", att["pid"], att["spawn"], pid)
+	}
+	if got := att["env_names"].([]any); len(got) != 1 || got[0] != "TEST_CRED" {
+		t.Fatalf("env_names = %v, want exactly [TEST_CRED]", got)
+	}
+	if s, _ := att["session"].(string); s == "" {
+		t.Fatal("session id must be attested (it keys the bridge's own log)")
+	}
+	// The wire shape is pinned: exactly these keys.
+	for _, k := range []string{"runtime", "session", "command", "pid", "spawn", "credential_env", "env_names", "materialization"} {
+		if _, ok := att[k]; !ok {
+			t.Fatalf("attestation lacks %q: %v", k, att)
+		}
+	}
+	if len(att) != 8 {
+		t.Fatalf("attestation has %d keys, want 8: %v", len(att), att)
+	}
+}
+
+func TestErrorResultCarriesAttestation(t *testing.T) {
+	_, url := startBridge(t, testConfig(t, nil))
+	sess := mustConnect(t, url, &bearerRT{token: "tok-a"})
+	res := rawCall(t, sess, "fail")
+	if !res.IsError {
+		t.Fatal("the child's error result must be relayed as an error result")
+	}
+	attestationOf(t, res) // an answered call is attested, error or not
+}
+
+func TestAttestationSpawnIncrementsOnRotation(t *testing.T) {
+	_, url := startBridge(t, testConfig(t, func(c *bridgeConfig) { c.Materialization = matRespawnOnRotation }))
+	rt := &bearerRT{token: "tok-a"}
+	sess := mustConnect(t, url, rt)
+	first := attestationOf(t, rawCall(t, sess, "echo"))
+	rt.set("tok-b")
+	second := attestationOf(t, rawCall(t, sess, "echo"))
+	if first["spawn"] != float64(1) || second["spawn"] != float64(2) || first["pid"] == second["pid"] {
+		t.Fatalf("spawn/pid before %v/%v after %v/%v: a respawn must be visible", first["spawn"], first["pid"], second["spawn"], second["pid"])
+	}
+	if first["session"] != second["session"] {
+		t.Fatal("one session, two children: the session id must not change")
+	}
+}
+
+func TestAttestationCarriesEnvNamesNeverValues(t *testing.T) {
+	_, url := startBridge(t, testConfig(t, func(c *bridgeConfig) { c.EnvPassthrough = []string{"PATH"} }))
+	sess := mustConnect(t, url, &bearerRT{token: "tok-secret-value"})
+	att := attestationOf(t, rawCall(t, sess, "echo"))
+	if got := att["env_names"].([]any); len(got) != 2 || got[0] != "PATH" || got[1] != "TEST_CRED" {
+		t.Fatalf("env_names = %v, want [PATH TEST_CRED] sorted", got)
+	}
+	b, err := json.Marshal(att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"tok-secret-value", "/refbridge-own-path", "must-not-reach-child"} {
+		if strings.Contains(string(b), leak) {
+			t.Fatalf("attestation leaked a value: %s", b)
+		}
+	}
+}
+
+func TestAttestationOverridesChildClaim(t *testing.T) {
+	// A child that sets the attestation key itself (a payload trying to
+	// forge the runtime's word) is overwritten: only refbridge's account
+	// leaves the bridge. The test child's `forge` tool sets the key.
+	_, url := startBridge(t, testConfig(t, nil))
+	sess := mustConnect(t, url, &bearerRT{token: "tok-a"})
+	att := attestationOf(t, rawCall(t, sess, "forge"))
+	if att["runtime"] != "refbridge" || att["pid"] == float64(1) {
+		t.Fatalf("the child's forged attestation survived: %v", att)
 	}
 }

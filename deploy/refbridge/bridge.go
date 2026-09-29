@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,38 @@ var (
 	errSessionEnded  = errors.New("refbridge: session ended")
 	errBridgeClosing = errors.New("refbridge: bridge is closing")
 )
+
+// runtimeAttestationMetaKey is the _meta key the gateway reads the bridge's
+// attestation from (internal/rungateway/attestation.go). Pinned wire
+// contract; nothing is imported across the internal/ boundary.
+const runtimeAttestationMetaKey = "agenthof.dev/runtime-attestation"
+
+// attestation is what the bridge knows FIRST-HAND about the child that
+// answers a call: it built the environment, spawned the process, and relays
+// the call. Names, ids and argv only — never the credential's value.
+type attestation struct {
+	session         string
+	command         []string
+	pid             int
+	spawn           int // 1-based generation of the child within the session
+	credentialEnv   string
+	envNames        []string
+	materialization string
+}
+
+// meta is the wire form: exactly the keys internal/rungateway decodes.
+func (a attestation) meta() map[string]any {
+	return map[string]any{
+		"runtime":         "refbridge",
+		"session":         a.session,
+		"command":         a.command,
+		"pid":             a.pid,
+		"spawn":           a.spawn,
+		"credential_env":  a.credentialEnv,
+		"env_names":       a.envNames,
+		"materialization": a.materialization,
+	}
+}
 
 // bridge fronts one stdio MCP server command over Streamable HTTP. Each MCP
 // session Agenthof opens gets its own child process — never pooled, never
@@ -205,11 +238,14 @@ type session struct {
 	server   *mcp.Server
 	lifetime *time.Timer
 
-	mu       sync.Mutex
-	ended    bool               // teardown ran; nothing may spawn afterwards
-	bearer   string             // the credential the current child was spawned with
-	child    *mcp.ClientSession // nil until the first tools/* request
-	mirrored bool               // the child's tools have been added to server
+	mu         sync.Mutex
+	ended      bool               // teardown ran; nothing may spawn afterwards
+	bearer     string             // the credential the current child was spawned with
+	child      *mcp.ClientSession // nil until the first tools/* request
+	pid        int                // the current child's process id
+	generation int                // children spawned in this session so far; the current child's 1-based spawn
+	envNames   []string           // the current child's environment, NAMES only, sorted
+	mirrored   bool               // the child's tools have been added to server
 }
 
 // ensure spawns the child if there is none and mirrors its tools once.
@@ -222,11 +258,12 @@ func (s *session) ensure(bearer string) error {
 	if s.child != nil {
 		return nil
 	}
-	child, err := s.spawn(bearer)
+	child, pid, names, err := s.spawn(bearer)
 	if err != nil {
 		return err
 	}
-	s.child, s.bearer = child, bearer
+	s.child, s.bearer, s.pid, s.envNames = child, bearer, pid, names
+	s.generation++
 	if s.mirrored {
 		return nil
 	}
@@ -278,32 +315,48 @@ func addTool(srv *mcp.Server, tool *mcp.Tool, h mcp.ToolHandler) (err error) {
 // stdio. The child's stderr is refbridge's stderr (its diagnostics reach the
 // operator's log); its stdout is the MCP stream. The connect context bounds
 // only the handshake; the child lives until the session ends or, under
-// respawn-on-rotation, until the credential changes.
-func (s *session) spawn(bearer string) (*mcp.ClientSession, error) {
+// respawn-on-rotation, until the credential changes. It returns the child's
+// pid and the sorted NAMES of the environment it was given: what the bridge
+// attests about it.
+func (s *session) spawn(bearer string) (child *mcp.ClientSession, pid int, envNames []string, err error) {
 	argv := s.b.cfg.Command
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = s.b.childEnv(bearer)
+	envNames = namesOf(cmd.Env)
 	cmd.Stderr = os.Stderr
 	client := mcp.NewClient(&mcp.Implementation{Name: "refbridge", Version: "v0.1.0"}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), spawnTimeout)
 	defer cancel()
-	child, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	child, err = client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
 	if err != nil {
-		return nil, fmt.Errorf("refbridge: spawn %s: %w", argv[0], err)
+		return nil, 0, nil, fmt.Errorf("refbridge: spawn %s: %w", argv[0], err)
 	}
 	s.b.spawns.Add(1)
 	s.b.logger.Info("child spawned", "session", s.ss.ID(), "command", argv[0], "pid", cmd.Process.Pid, "credential_env", s.b.cfg.CredentialEnv)
-	return child, nil
+	return child, cmd.Process.Pid, envNames, nil
+}
+
+// namesOf lists the variable NAMES of an environment, sorted: what the
+// bridge attests it gave the child — never the values.
+func namesOf(env []string) []string {
+	names := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // forward relays one tools/call to the child, arguments passed through raw.
-// It is the call boundary at which respawn-on-rotation acts.
+// It is the call boundary at which respawn-on-rotation acts, and where the
+// bridge attaches its first-hand attestation to the result.
 func (s *session) forward(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	bearer, ok := bearerOf(req.Extra)
 	if !ok {
 		return nil, errors.New("refbridge: call carries no credential to materialize")
 	}
-	child, err := s.childFor(bearer)
+	child, att, err := s.childFor(bearer)
 	if err != nil {
 		return nil, err
 	}
@@ -311,35 +364,56 @@ func (s *session) forward(ctx context.Context, req *mcp.CallToolRequest) (*mcp.C
 	if len(req.Params.Arguments) > 0 {
 		args = req.Params.Arguments
 	}
-	return child.CallTool(ctx, &mcp.CallToolParams{Name: req.Params.Name, Arguments: args})
+	res, err := child.CallTool(ctx, &mcp.CallToolParams{Name: req.Params.Name, Arguments: args})
+	if err != nil {
+		return nil, err // a JSON-RPC failure carries no result and so no attestation
+	}
+	// The bridge's account of this call, error result or not. It overwrites
+	// anything the child put under the key: only the bridge's word leaves here.
+	if res.Meta == nil {
+		res.Meta = mcp.Meta{}
+	}
+	res.Meta[runtimeAttestationMetaKey] = att.meta()
+	return res, nil
 }
 
-// childFor returns the child to forward to. Under respawn-on-rotation a
-// bearer that differs from the one the child was spawned with replaces the
-// child first (the child's MCP state resets — the documented cost); under
-// env-at-spawn the bearer at spawn is the one the child keeps.
-func (s *session) childFor(bearer string) (*mcp.ClientSession, error) {
+// childFor returns the child to forward to, with the attestation for it
+// taken under the same lock, so a respawn and the account of which child
+// answered cannot race. Under respawn-on-rotation a bearer that differs from
+// the one the child was spawned with replaces the child first (the child's
+// MCP state resets — the documented cost); under env-at-spawn the bearer at
+// spawn is the one the child keeps.
+func (s *session) childFor(bearer string) (*mcp.ClientSession, attestation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ended {
-		return nil, errSessionEnded
+		return nil, attestation{}, errSessionEnded
 	}
 	if s.child == nil {
-		return nil, errors.New("refbridge: no child for this session")
+		return nil, attestation{}, errors.New("refbridge: no child for this session")
 	}
-	if bearer == s.bearer || s.b.cfg.Materialization != matRespawnOnRotation {
-		return s.child, nil
+	if bearer != s.bearer && s.b.cfg.Materialization == matRespawnOnRotation {
+		s.b.logger.Info("credential rotated; respawning child", "session", s.ss.ID())
+		old := s.child
+		s.child = nil
+		closeChild(old)
+		fresh, pid, names, err := s.spawn(bearer)
+		if err != nil {
+			return nil, attestation{}, err
+		}
+		s.child, s.bearer, s.pid, s.envNames = fresh, bearer, pid, names
+		s.generation++
 	}
-	s.b.logger.Info("credential rotated; respawning child", "session", s.ss.ID())
-	old := s.child
-	s.child = nil
-	closeChild(old)
-	child, err := s.spawn(bearer)
-	if err != nil {
-		return nil, err
+	att := attestation{
+		session:         s.ss.ID(),
+		command:         s.b.cfg.Command,
+		pid:             s.pid,
+		spawn:           s.generation,
+		credentialEnv:   s.b.cfg.CredentialEnv,
+		envNames:        s.envNames,
+		materialization: s.b.cfg.Materialization,
 	}
-	s.child, s.bearer = child, bearer
-	return child, nil
+	return s.child, att, nil
 }
 
 // closeChild ends a child. Closing the client session first marks it
