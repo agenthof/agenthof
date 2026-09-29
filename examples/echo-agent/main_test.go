@@ -34,7 +34,7 @@ func TestServesEchoOverUnixSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listenUnix: %v", err)
 	}
-	srv := &http.Server{Handler: newMux(false)}
+	srv := &http.Server{Handler: newMux(false, "")}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
@@ -88,7 +88,7 @@ func TestProbesGatewayWhenEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	asrv := &http.Server{Handler: newMux(true)}
+	asrv := &http.Server{Handler: newMux(true, "")}
 	go func() { _ = asrv.Serve(aLn) }()
 	t.Cleanup(func() { _ = asrv.Close() })
 
@@ -123,7 +123,7 @@ func TestProbesGatewayWhenEnabled(t *testing.T) {
 }
 
 func TestProbeFailsStepWhenGatewayUnreachable(t *testing.T) {
-	asrv := httptestUnix(t, newMux(true))
+	asrv := httptestUnix(t, newMux(true, ""))
 	body, err := json.Marshal(request{Input: "hi", Agent: "a"})
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ func httptestUnix(t *testing.T, h http.Handler) unixSrv {
 func TestHandleStepRejectsGET(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://agenthof/", nil)
 	rec := httptest.NewRecorder()
-	newMux(false).ServeHTTP(rec, req)
+	newMux(false, "").ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET status = %d, want 405", rec.Code)
 	}
@@ -180,8 +180,202 @@ func TestHandleStepRejectsGET(t *testing.T) {
 func TestHandleStepRejectsBadJSON(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "http://agenthof/", strings.NewReader("{not json"))
 	rec := httptest.NewRecorder()
-	newMux(false).ServeHTTP(rec, req)
+	newMux(false, "").ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad-JSON status = %d, want 400", rec.Code)
+	}
+}
+
+// fakeGateway serves the exec door's routes on a Unix socket: /exec/run
+// answers a fixed exit and output (or a status) after checking the run
+// token and the argv; /exec/attest and /exec/authorize answer a status.
+type fakeGateway struct {
+	sock       string
+	runStatus  int
+	runExit    int
+	runOutput  string
+	attest     int
+	authorize  int
+	mu         sync.Mutex
+	lastArgv   []string
+	lastRoute  string
+	authorized int
+}
+
+func newFakeGateway(t *testing.T, g *fakeGateway) *fakeGateway {
+	t.Helper()
+	// Zero statuses mean "the door's normal answer".
+	if g.runStatus == 0 {
+		g.runStatus = http.StatusOK
+	}
+	if g.attest == 0 {
+		g.attest = http.StatusNoContent
+	}
+	if g.authorize == 0 {
+		g.authorize = http.StatusOK
+	}
+	dir, err := os.MkdirTemp("/tmp", "eg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	g.sock = filepath.Join(dir, "gw.sock")
+	ln, err := listenUnix(g.sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok123" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var req struct {
+			Command []string `json:"command"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		g.mu.Lock()
+		g.lastArgv, g.lastRoute = req.Command, r.URL.Path
+		g.mu.Unlock()
+		switch r.URL.Path {
+		case "/exec/run":
+			if g.runStatus != http.StatusOK {
+				http.Error(w, "refused", g.runStatus)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"exit": g.runExit, "output": g.runOutput, "truncated": false})
+		case "/exec/attest":
+			w.WriteHeader(g.attest)
+		case "/exec/authorize":
+			g.mu.Lock()
+			g.authorized++
+			g.mu.Unlock()
+			if g.authorize != http.StatusOK {
+				http.Error(w, "refused", g.authorize)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]bool{"allowed": true})
+		default:
+			http.Error(w, "no", http.StatusNotFound)
+		}
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return g
+}
+
+// step posts one step with the given input to an agent mux over a Unix
+// socket and returns the decoded response.
+func step(t *testing.T, mux *http.ServeMux, gwSock, input string) response {
+	t.Helper()
+	asrv := httptestUnix(t, mux)
+	body, err := json.Marshal(request{Input: input, Agent: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://agenthof/", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Agenthof-Proxy-URL", "unix://"+gwSock)
+	req.Header.Set("X-Agenthof-Run-Token", "tok123")
+	resp, err := unixClient(asrv.sock).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var out response
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestScriptWritesNoteAndRunsExec(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusOK, runExit: 0, runOutput: "hello-1\n"})
+	ws := t.TempDir()
+	out := step(t, newMux(false, ws), gw.sock, "write:hello-1; exec-run:cat /work/agent-note.txt")
+	if !out.Success || out.Artifact != "hello-1\n" {
+		t.Fatalf("got %+v, want the command's output as the artifact", out)
+	}
+	note, err := os.ReadFile(filepath.Join(ws, "agent-note.txt"))
+	if err != nil || string(note) != "hello-1\n" {
+		t.Fatalf("note = %q err = %v", note, err)
+	}
+	gw.mu.Lock()
+	defer gw.mu.Unlock()
+	if gw.lastRoute != "/exec/run" || len(gw.lastArgv) != 2 || gw.lastArgv[0] != "cat" || gw.lastArgv[1] != "/work/agent-note.txt" {
+		t.Fatalf("gateway saw %s %v", gw.lastRoute, gw.lastArgv)
+	}
+}
+
+func TestExecRunNonZeroExitFailsStep(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusOK, runExit: 1, runOutput: "no\n"})
+	out := step(t, newMux(false, t.TempDir()), gw.sock, "exec-run:false")
+	if out.Success || !strings.Contains(out.Reason, "exec-run: false exited 1") {
+		t.Fatalf("got %+v, want a failed step naming the exit", out)
+	}
+}
+
+func TestExecRunRefusalFailsStepWithStatus(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusForbidden})
+	out := step(t, newMux(false, t.TempDir()), gw.sock, "exec-run:rm -rf /")
+	if out.Success || !strings.Contains(out.Reason, "exec-run: gateway returned 403") {
+		t.Fatalf("got %+v", out)
+	}
+}
+
+func TestExecRunEmptyCommandFailsStep(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusOK})
+	out := step(t, newMux(false, t.TempDir()), gw.sock, "exec-run:  ")
+	if out.Success || !strings.Contains(out.Reason, "exec-run: no command") {
+		t.Fatalf("got %+v", out)
+	}
+	gw.mu.Lock()
+	defer gw.mu.Unlock()
+	if gw.lastRoute != "" {
+		t.Fatalf("an empty command must not reach the gateway; it saw %s", gw.lastRoute)
+	}
+}
+
+func TestExecAttestReportsStatus(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{attest: http.StatusForbidden})
+	out := step(t, newMux(false, t.TempDir()), gw.sock, "exec-attest:cat x")
+	if !out.Success || out.Artifact != "attest:403" {
+		t.Fatalf("got %+v, want attest:403 as the artifact", out)
+	}
+	gw.mu.Lock()
+	defer gw.mu.Unlock()
+	if gw.lastRoute != "/exec/attest" {
+		t.Fatalf("gateway saw %s", gw.lastRoute)
+	}
+}
+
+func TestUnknownDirectiveFailsStep(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusOK})
+	out := step(t, newMux(false, t.TempDir()), gw.sock, "exec-run:true; explode:now")
+	if out.Success || !strings.Contains(out.Reason, `unknown directive "explode:now"`) {
+		t.Fatalf("got %+v", out)
+	}
+}
+
+func TestScriptStepSkipsTheProbe(t *testing.T) {
+	// A first-hand agent's gateway refuses /exec/authorize; a script step must
+	// not probe it (the script reaches the gateway itself), or every step of
+	// such an agent would land a refused line and fail.
+	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusOK, runOutput: "ok\n", authorize: http.StatusForbidden})
+	out := step(t, newMux(true, t.TempDir()), gw.sock, "exec-run:true")
+	if !out.Success || out.Artifact != "ok\n" {
+		t.Fatalf("got %+v", out)
+	}
+	gw.mu.Lock()
+	authorized := gw.authorized
+	gw.mu.Unlock()
+	if authorized != 0 {
+		t.Fatal("a script step must not probe /exec/authorize")
+	}
+	plain := step(t, newMux(true, t.TempDir()), gw.sock, "hello")
+	if plain.Success {
+		t.Fatal("a plain step still probes, and this gateway refuses the probe")
 	}
 }
