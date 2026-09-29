@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -241,9 +240,8 @@ func (s *session) ensure(bearer string) error {
 }
 
 // mirror lists the child's tools and adds each to the session's server with
-// forward as its handler. A tool whose input schema is not a JSON object is
-// refused before AddTool would panic on it: a misbehaving child must fail
-// its own session, never the bridge.
+// forward as its handler. A tool the server refuses fails this session's
+// request; a misbehaving child must fail its own session, never the bridge.
 func (s *session) mirror(child *mcp.ClientSession) error {
 	ctx, cancel := context.WithTimeout(context.Background(), spawnTimeout)
 	defer cancel()
@@ -252,28 +250,28 @@ func (s *session) mirror(child *mcp.ClientSession) error {
 		return fmt.Errorf("refbridge: list child tools: %w", err)
 	}
 	for _, tool := range list.Tools {
-		if !objectSchema(tool.InputSchema) {
-			return fmt.Errorf("refbridge: child tool %q has no object input schema", tool.Name)
+		if err := addTool(s.server, tool, s.forward); err != nil {
+			return err
 		}
-	}
-	for _, tool := range list.Tools {
-		s.server.AddTool(tool, s.forward)
 	}
 	s.b.logger.Info("child tools mirrored", "session", s.ss.ID(), "tools", len(list.Tools))
 	return nil
 }
 
-// objectSchema reports whether a tool's input schema, as received over the
-// wire, declares type "object" — the only shape the server accepts.
-func objectSchema(schema any) bool {
-	raw, err := json.Marshal(schema)
-	if err != nil {
-		return false
-	}
-	var m struct {
-		Type string `json:"type"`
-	}
-	return json.Unmarshal(raw, &m) == nil && m.Type == "object"
+// addTool registers one mirrored tool. The SDK's AddTool panics on a tool it
+// will not serve (a non-object input schema, a malformed x-mcp-header
+// annotation, ...) and it runs here on a connection goroutine with no
+// recovery above it, so the panic is converted into the returned error: the
+// child chose the schema, and only the child's session pays for it. The
+// panic text names the tool and its schema shape, never the credential.
+func addTool(srv *mcp.Server, tool *mcp.Tool, h mcp.ToolHandler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("refbridge: child tool %q rejected: %v", tool.Name, r)
+		}
+	}()
+	srv.AddTool(tool, h)
+	return nil
 }
 
 // spawn starts one child with a clean environment and connects to it over

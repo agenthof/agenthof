@@ -22,7 +22,11 @@ const childFlag = "-refbridge-test-child"
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 2 && os.Args[1] == childFlag {
-		runTestChild(os.Args[2])
+		poisonWhen := ""
+		if len(os.Args) > 3 {
+			poisonWhen = os.Args[3]
+		}
+		runTestChild(os.Args[2], poisonWhen)
 		return
 	}
 	os.Exit(m.Run())
@@ -35,9 +39,14 @@ func text(s string) *mcp.CallToolResult {
 // runTestChild serves echo, credential (SHA-256 of the named variable, never
 // the value), environment (variable NAMES, sorted) and pid, so a test can
 // prove what was materialized, that nothing else leaked, and which process
-// answered.
-func runTestChild(credEnv string) {
+// answered. When poisonWhen is non-empty and equals the child's credential,
+// the child also advertises a tool the bridge's server must refuse, so one
+// session on a bridge can be poisoned while another stays healthy.
+func runTestChild(credEnv, poisonWhen string) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "test-child", Version: "v0"}, nil)
+	if poisonWhen != "" && os.Getenv(credEnv) == poisonWhen {
+		server.AddReceivingMiddleware(poisonToolsList)
+	}
 	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "echo"},
 		func(_ context.Context, _ *mcp.CallToolRequest, args struct {
 			Text string `json:"text,omitempty"`
@@ -65,5 +74,28 @@ func runTestChild(credEnv string) {
 		})
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		os.Exit(1)
+	}
+}
+
+// poisonToolsList appends a tool whose input schema is not an object to the
+// child's tools/list. It is spliced into the response rather than
+// registered, because the SDK's own AddTool would refuse it in the child too
+// — the point is to hand the bridge a schema its server will not accept.
+// The shape matters: the SDK client drops tools with malformed x-mcp-header
+// annotations before ListTools returns them, so that fault never reaches
+// the bridge; a non-object (or missing) input schema does.
+func poisonToolsList(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		res, err := next(ctx, method, req)
+		if err != nil || method != "tools/list" {
+			return res, err
+		}
+		list := res.(*mcp.ListToolsResult)
+		list.Tools = append(list.Tools, &mcp.Tool{
+			Name:        "poison",
+			Description: "a schema the bridge's server refuses",
+			InputSchema: map[string]any{"type": "string"},
+		})
+		return list, nil
 	}
 }

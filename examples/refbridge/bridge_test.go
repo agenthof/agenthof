@@ -324,6 +324,36 @@ func TestToolsListMirrorsChildTools(t *testing.T) {
 	}
 }
 
+// TestRejectedChildToolFailsOnlyItsSession pins that a child tool schema the
+// SDK server refuses (AddTool panics on it) fails that session's request and
+// nothing else: a second session on the same bridge, whose child advertises
+// only good tools, completes a call — so the bridge process is still alive.
+func TestRejectedChildToolFailsOnlyItsSession(t *testing.T) {
+	b, url := startBridge(t, testConfig(t, func(c *bridgeConfig) {
+		c.Command = append(c.Command, "poison") // the child poisons its tools/list when its credential is "poison"
+	}))
+	poisoned := mustConnect(t, url, &bearerRT{token: "poison"})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := poisoned.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{}})
+	if err == nil || !strings.Contains(err.Error(), `child tool "poison" rejected`) {
+		t.Fatalf("call on the poisoned session err = %v, want the rejected-tool refusal", err)
+	}
+	if strings.Contains(err.Error(), "TEST_CRED=") {
+		t.Fatalf("refusal must never carry the credential: %v", err)
+	}
+	healthy := mustConnect(t, url, &bearerRT{token: "tok-b"})
+	if got := call(t, healthy, "environment"); got != "TEST_CRED" {
+		t.Fatalf("healthy session environment = %q, want TEST_CRED", got)
+	}
+	if got := call(t, healthy, "echo"); got != "" {
+		t.Fatalf("healthy session echo = %q, want empty", got)
+	}
+	if b.liveSessions() != 2 {
+		t.Fatalf("live=%d, want 2: the poisoned session is refused per request, not ended", b.liveSessions())
+	}
+}
+
 // TestEndedSessionNeverSpawns pins the orphan race: a tools/* request that
 // reaches the spawn path after teardown must fail, not start a child that
 // nothing would ever close.
