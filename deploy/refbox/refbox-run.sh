@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # refbox-run: run the reference agent in a locked-down rootless-podman
 # compartment. No network. No credential environment. An ephemeral tmpfs at
-# /work. Agenthof is reached only through the bind-mounted socket directory.
-# Requires podman and a Linux host. The CI job runs this script.
+# /work — or, with REFBOX_WORKSPACE_VOLUME set, a named podman volume there,
+# the workspace a first-hand exec runtime (deploy/refexec) shares with this
+# compartment for the recipe's lifetime. Agenthof is reached only through the
+# bind-mounted socket directory. Requires podman and a Linux host. The CI job
+# runs this script.
 set -euo pipefail
 
 # $XDG_RUNTIME_DIR (/run/user/<uid>) is user-owned. /run itself is root-owned,
@@ -23,6 +26,15 @@ mkdir -p "$SOCK_DIR"
 # The compartment recreates the agent socket.
 rm -f "$SOCK_DIR"/gw-*.sock "$SOCK_DIR/$SOCKET"
 
+# /work is an ephemeral tmpfs unless REFBOX_WORKSPACE_VOLUME names a podman
+# volume, which is then mounted there instead (created by the refexec
+# launcher; removed when the recipe is torn down). Unset, nothing changes.
+if [ -n "${REFBOX_WORKSPACE_VOLUME:-}" ]; then
+	workspace=(-v "$REFBOX_WORKSPACE_VOLUME:/work")
+else
+	workspace=(--tmpfs /work)
+fi
+
 # --user is the host uid: --userns=keep-id maps that uid into the container,
 # and the distroless image's own nonroot user cannot create a socket in a
 # directory owned by the host user. The cgroup flags and --timeout bound a
@@ -31,7 +43,7 @@ common=(
 	--name "$NAME"
 	--network none
 	--read-only
-	--tmpfs /work
+	"${workspace[@]}"
 	--cap-drop=ALL
 	--security-opt no-new-privileges
 	--userns=keep-id
