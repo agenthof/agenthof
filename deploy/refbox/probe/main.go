@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -33,11 +34,16 @@ func touch(path string) error {
 
 // countProcs counts processes whose /proc/<pid>/comm equals name. The e2e
 // job uses it to show a bridge's child process is gone once its session
-// ended. A process that exits between the glob and the read is skipped.
+// ended. A process that exits between the glob and the read is skipped. No
+// /proc entries at all is an error, not a count of zero: the probe itself
+// would appear if /proc were mounted.
 func countProcs(name string) (int, error) {
 	matches, err := filepath.Glob("/proc/[0-9]*/comm")
 	if err != nil {
 		return 0, err
+	}
+	if len(matches) == 0 {
+		return 0, errors.New("probe: /proc has no process entries; -procs cannot count")
 	}
 	n := 0
 	for _, m := range matches {

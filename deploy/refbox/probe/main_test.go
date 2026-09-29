@@ -51,3 +51,14 @@ func TestCountProcsFindsSelfOnLinux(t *testing.T) {
 		t.Fatalf("countProcs(no-such) = %d, %v; want 0, nil", n, err)
 	}
 }
+
+func TestCountProcsFailsWithoutProc(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("/proc is mounted on Linux")
+	}
+	n, err := countProcs("probe.test")
+	const want = "probe: /proc has no process entries; -procs cannot count"
+	if err == nil || err.Error() != want {
+		t.Fatalf("countProcs without /proc = %d, %v; want error %q", n, err, want)
+	}
+}
