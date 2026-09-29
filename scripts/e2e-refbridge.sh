@@ -53,7 +53,7 @@ sed '/materialization:/d' "$WORK/bridge-config/refbridge.yaml" >"$WORK/bad-confi
 if podman run --rm --network none --userns=keep-id --user "$(id -u):$(id -g)" -v "$WORK/bad-config:/config:ro" "$IMAGE" -check >/dev/null 2>"$WORK/check.err"; then
 	fail "a bridge config without credential.materialization was accepted"
 fi
-grep -q "credential.materialization" "$WORK/check.err" || fail "the refusal did not name credential.materialization"
+grep -q "credential.materialization" "$WORK/check.err" || { cat "$WORK/check.err" >&2; fail "the refusal did not name credential.materialization"; }
 
 REFBRIDGE_DETACH=1 REFBRIDGE_IMAGE="$IMAGE" REFBRIDGE_NAME="$NAME" deploy/refbridge/refbridge-run.sh >/dev/null
 for i in $(seq 1 30); do
@@ -87,14 +87,14 @@ NONCE="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 export DEMO_TOOL_TOKEN="tool-secret-$NONCE"
 export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE"
 
-"$WORK/agenthof" apply --config "$WORK/config" --as ci --groups bridge-users
+"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups bridge-users
 OUT="$("$WORK/agenthof" run bridge-operator bridge-demo --input "call echo hello-$NONCE; call credential; call environment" \
 	--as ci --groups bridge-users --config "$WORK/config" \
 	--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts")"
 echo "$OUT"
 echo "$OUT" | grep -q "finished: succeeded" || { podman logs "$NAME" || true; fail "run did not succeed"; }
 RUNID="$(echo "$OUT" | sed -n 's/^run \(r-[a-f0-9]*\) finished.*/\1/p')"
-AUDIT="$("$WORK/agenthof" audit "$RUNID" --log-dir "$WORK/logs")"
+AUDIT="$("$WORK/agenthof" audit "$RUNID" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
 echo "$AUDIT"
 echo "$AUDIT" | grep -q "ledger integrity: verified" || fail "ledger not verified"
 for tool in echo credential environment; do

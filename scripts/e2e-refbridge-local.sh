@@ -220,7 +220,7 @@ export E2E_CLIENT_ID="e2e-client"
 export E2E_CLIENT_SECRET="e2e-client-secret-$NONCE"
 export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE"   # the model route is never called; the key only lets it resolve
 
-"$WORK/agenthof" apply --config "$WORK/config" --as ci --groups bridge-users
+"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups bridge-users
 
 # Config is law at apply too: a relative unix:// url and a unix:// token_endpoint are rejected.
 mkdir -p "$WORK/badcfg" && cp -R "$WORK/config/." "$WORK/badcfg/"
@@ -230,7 +230,7 @@ p = sys.argv[1]
 s = open(p, encoding="utf-8").read().replace("url: unix:///", "url: unix://", 1)
 open(p, "w", encoding="utf-8").write(s)
 EOF
-if "$WORK/agenthof" apply --config "$WORK/badcfg" --as ci --groups bridge-users >"$WORK/apply-bad.out" 2>&1; then
+if "$WORK/agenthof" apply --config "$WORK/badcfg" --control-log "$WORK/control.jsonl" --as ci --groups bridge-users >"$WORK/apply-bad.out" 2>&1; then
 	fail "apply accepted a relative unix:// tool url"
 fi
 grep -q 'tool resource "stdio-tool": url must be set and https (or loopback http, or a unix:// socket)' "$WORK/apply-bad.out" || { cat "$WORK/apply-bad.out"; fail "apply did not reject the relative unix:// url with the url validation error"; }
@@ -242,7 +242,7 @@ s = open(p, encoding="utf-8").read()
 s = s.replace("token_endpoint: http://127.0.0.1", "token_endpoint: unix:///tmp/never", 1)
 open(p, "w", encoding="utf-8").write(s)
 EOF
-if "$WORK/agenthof" apply --config "$WORK/badcfg" --as ci --groups bridge-users >"$WORK/apply-bad2.out" 2>&1; then
+if "$WORK/agenthof" apply --config "$WORK/badcfg" --control-log "$WORK/control.jsonl" --as ci --groups bridge-users >"$WORK/apply-bad2.out" 2>&1; then
 	fail "apply accepted a unix:// token_endpoint"
 fi
 grep -q 'tool resource "stdio-tool-rot": token_endpoint must be set and https (or loopback http)' "$WORK/apply-bad2.out" || { cat "$WORK/apply-bad2.out"; fail "apply did not reject the unix:// token_endpoint with the token_endpoint validation error"; }
@@ -255,7 +255,7 @@ OUT="$("$WORK/agenthof" run bridge-operator bridge-demo --input "call echo hello
 echo "$OUT"
 echo "$OUT" | grep -q "finished: succeeded" || fail "bridge-demo did not succeed"
 RUNID="$(echo "$OUT" | sed -n 's/^run \(r-[a-f0-9]*\) finished.*/\1/p')"
-AUDIT="$("$WORK/agenthof" audit "$RUNID" --log-dir "$WORK/logs")"
+AUDIT="$("$WORK/agenthof" audit "$RUNID" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
 echo "$AUDIT"
 echo "$AUDIT" | grep -q "ledger integrity: verified" || fail "ledger not verified"
 for tool in echo credential environment; do
@@ -284,7 +284,7 @@ OUT2="$("$WORK/agenthof" run bridge-operator bridge-rotation --input "call crede
 echo "$OUT2"
 echo "$OUT2" | grep -q "finished: succeeded" || fail "bridge-rotation did not succeed"
 RUNID2="$(echo "$OUT2" | sed -n 's/^run \(r-[a-f0-9]*\) finished.*/\1/p')"
-AUDIT2="$("$WORK/agenthof" audit "$RUNID2" --log-dir "$WORK/logs")"
+AUDIT2="$("$WORK/agenthof" audit "$RUNID2" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
 echo "$AUDIT2"
 echo "$AUDIT2" | grep -q "ledger integrity: verified" || fail "rotation run ledger not verified"
 [ "$(echo "$AUDIT2" | grep -Ec "tool credential — args [0-9a-f]{8} \(client_credentials\)")" = 2 ] || fail "want two client_credentials tool_call lines"
