@@ -40,6 +40,17 @@ jobs:
         env:
           PYTHON: python
 
+  refbridge-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: python3 -m unittest discover -s scripts -p 'test_fake_token*' -v
+      - run: ./scripts/e2e-refbridge-local.sh
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
