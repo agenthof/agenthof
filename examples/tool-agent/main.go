@@ -96,6 +96,14 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(req)
 }
 
+// CloseIdleConnections lets http.Client.CloseIdleConnections reach the base
+// transport; without it the client's call stops at this wrapper.
+func (t *bearerTransport) CloseIdleConnections() {
+	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
+}
+
 // gatewayClient returns the HTTP client and MCP endpoint for the proxy URL:
 // for unix://<path> a transport that dials that socket and the placeholder
 // endpoint http://agenthof/ (the route is the gateway's root either way).

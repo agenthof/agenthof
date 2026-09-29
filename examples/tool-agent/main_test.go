@@ -43,8 +43,9 @@ func TestParseScript(t *testing.T) {
 }
 
 // stubGateway is a stand-in for the per-run gateway's inbound MCP server on a
-// Unix socket: one echo tool that records the bearer, and a count of sessions.
-func stubGateway(t *testing.T) (sock string, sessions *atomic.Int32, lastAuth func() string) {
+// Unix socket: one echo tool that records the bearer, a count of sessions, and
+// a count of connections currently open on the listener.
+func stubGateway(t *testing.T) (sock string, sessions *atomic.Int32, lastAuth func() string, open *atomic.Int32) {
 	t.Helper()
 	var mu sync.Mutex
 	var auth string
@@ -77,14 +78,25 @@ func stubGateway(t *testing.T) (sock string, sessions *atomic.Int32, lastAuth fu
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)}
+	var conns atomic.Int32
+	srv := &http.Server{
+		Handler: mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil),
+		ConnState: func(_ net.Conn, s http.ConnState) {
+			switch s {
+			case http.StateNew:
+				conns.Add(1)
+			case http.StateClosed, http.StateHijacked:
+				conns.Add(-1)
+			}
+		},
+	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	return sock, &n, func() string { mu.Lock(); defer mu.Unlock(); return auth }
+	return sock, &n, func() string { mu.Lock(); defer mu.Unlock(); return auth }, &conns
 }
 
 func TestRunScriptIsOneSessionPerStep(t *testing.T) {
-	sock, sessions, lastAuth := stubGateway(t)
+	sock, sessions, lastAuth, _ := stubGateway(t)
 	cmds, _ := parseScript("call echo one; call echo two")
 	out, err := runScript(context.Background(), "unix://"+sock, "run-token-test", cmds)
 	if err != nil {
@@ -98,6 +110,21 @@ func TestRunScriptIsOneSessionPerStep(t *testing.T) {
 	}
 	if lastAuth() != "Bearer run-token-test" {
 		t.Fatalf("gateway saw %q, want the run token", lastAuth())
+	}
+}
+
+func TestRunScriptLeavesNoGatewayConnectionOpen(t *testing.T) {
+	sock, _, _, open := stubGateway(t)
+	cmds, _ := parseScript("call echo one")
+	if _, err := runScript(context.Background(), "unix://"+sock, "run-token-test", cmds); err != nil {
+		t.Fatalf("runScript: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for open.Load() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d gateway connections still open after the step ended", open.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -119,7 +146,7 @@ func post(t *testing.T, srv *httptest.Server, body []byte, headers map[string]st
 }
 
 func TestStepEndToEnd(t *testing.T) {
-	sock, _, _ := stubGateway(t)
+	sock, _, _, _ := stubGateway(t)
 	srv := httptest.NewServer(newMux())
 	defer srv.Close()
 	body, _ := json.Marshal(request{Input: "call echo hi", Agent: "ta"})
