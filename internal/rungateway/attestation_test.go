@@ -95,6 +95,10 @@ func TestTakeRuntimeAttestation(t *testing.T) {
 		"too many env names":        func(m map[string]any) { m["env_names"] = make([]any, 65) },
 		"unknown materialization":   func(m map[string]any) { m["materialization"] = "inherit" },
 		"oversized session":         func(m map[string]any) { m["session"] = strings.Repeat("s", 201) },
+		"control char in argv":      func(m map[string]any) { m["command"] = []any{"/bin/tool", "a\nforged: line"} },
+		"escape in argv":            func(m map[string]any) { m["command"] = []any{"/bin/tool\x1b[2J"} },
+		"control char in session":   func(m map[string]any) { m["session"] = "abc\r\ndef" },
+		"C1 control in session":     func(m map[string]any) { m["session"] = "abc\u0085def" },
 	}
 	for name, mut := range malformed {
 		t.Run("malformed: "+name, func(t *testing.T) {

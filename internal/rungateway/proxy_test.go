@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -539,6 +541,54 @@ func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 	}
 	if ev.Reason == "" {
 		t.Fatal("event.Reason must be set on a failed tool_call")
+	}
+}
+
+// TestProxyForwardCapsReasonOnCallError pins that a JSON-RPC failure's text —
+// upstream-controlled, of any length — enters the ledger capped at the same
+// 200 runes as every other upstream string.
+func TestProxyForwardCapsReasonOnCallError(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "failing-stub", Version: "v0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "echo"}, func(_ context.Context, _ *mcp.CallToolRequest, args EchoArgs) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: args.Text}}}, nil, nil
+	})
+	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/call" {
+				return nil, errors.New(strings.Repeat("é", 1000))
+			}
+			return next(ctx, method, req)
+		}
+	})
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	t.Cleanup(ts.Close)
+	client := mcp.NewClient(&mcp.Implementation{Name: "rungateway-test", Version: "v0.1.0"}, nil)
+	upstream, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("connect upstream: %v", err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	tools := map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
+	}
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	var events []engine.Event
+	handler := p.forward(testBinding(), testAgentDef("github"), "github", allowedTools{"github": nil}, upstream,
+		func(e engine.Event) { events = append(events, e) }, obs.Discard())
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}
+	if _, err := handler(context.Background(), req); err == nil {
+		t.Fatal("forward: want the upstream's JSON-RPC error")
+	}
+	if len(events) != 1 || events[0].Status != "failed" {
+		t.Fatalf("events = %+v, want one failed tool_call", events)
+	}
+	reason := events[0].Reason
+	if n := utf8.RuneCountInString(reason); n == 0 || n > 200 {
+		t.Fatalf("Reason has %d runes, want 1..200: %q", n, reason)
+	}
+	if !utf8.ValidString(reason) {
+		t.Fatalf("Reason is not valid UTF-8: %q", reason)
 	}
 }
 

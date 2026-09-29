@@ -531,7 +531,7 @@ func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID
 		var reason string
 		if callErr != nil {
 			status = "failed"
-			reason = callErr.Error()
+			reason = capRunes(callErr.Error(), 200)
 			// Class only: callErr can wrap a *url.Error carrying the upstream URL.
 			logger.Warn("tool call failed", "resource", resourceID, "tool", req.Params.Name, "class", errClass(callErr))
 		} else if result != nil && result.IsError {
@@ -697,8 +697,8 @@ func mintToken() (string, error) {
 
 // capRunes truncates s to at most n runes. It is the one place the ledger
 // caps agent- or upstream-controlled text before it enters an event, so
-// hashResult's preview, resultErrorText's failure text, and the model door's
-// echoed model name all share the same bound.
+// hashResult's preview, resultErrorText's failure text, a tool call's error
+// text, and the model door's echoed model name all share the same bound.
 func capRunes(s string, n int) string {
 	if r := []rune(s); len(r) > n {
 		return string(r[:n])

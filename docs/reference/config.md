@@ -455,7 +455,8 @@ any such claim on its results is stripped and never recorded.
 `https` (or `http` only to a loopback host — `localhost`, `127.0.0.1`, or
 `::1`, or `unix://` plus an absolute socket path). The gateway injects a
 credential on every call to that url, so a plaintext url on a remote host is
-rejected at apply time, the same rule as `token_endpoint`. A resource that
+rejected at apply time, as for `token_endpoint` (which, unlike `url`, does
+not admit `unix://`). A resource that
 fails either check is rejected with `bad-tool-resource` ("tool resource ...
 must set kind: mcp", or "url must be set and https (or loopback http, or a
 unix:// socket)"). `apply` separately requires

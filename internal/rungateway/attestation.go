@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strings"
+	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -83,14 +85,14 @@ func validAttestation(a *engine.RuntimeAttestation, declared string) bool {
 	if a.Runtime != declared || a.Runtime != runtimeRefbridge {
 		return false
 	}
-	if len([]rune(a.Session)) > maxAttestedRunes {
+	if len([]rune(a.Session)) > maxAttestedRunes || hasControl(a.Session) {
 		return false
 	}
 	if len(a.Command) == 0 || len(a.Command) > maxAttestedArgv {
 		return false
 	}
 	for _, arg := range a.Command {
-		if len([]rune(arg)) > maxAttestedRunes {
+		if len([]rune(arg)) > maxAttestedRunes || hasControl(arg) {
 			return false
 		}
 	}
@@ -113,4 +115,10 @@ func validAttestation(a *engine.RuntimeAttestation, declared string) bool {
 		return true
 	}
 	return false
+}
+
+// hasControl reports whether s holds a control character: a newline or
+// escape in an attested string would forge structure in whatever renders it.
+func hasControl(s string) bool {
+	return strings.ContainsFunc(s, unicode.IsControl)
 }

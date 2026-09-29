@@ -29,7 +29,7 @@ type RuntimeAttestation struct {
 	Session         string   `json:"session"`         // the runtime's MCP session id: the key into its own log (spawn, teardown, exit)
 	Command         []string `json:"command"`         // the argv the child was spawned with
 	PID             int      `json:"pid"`             // the child that answered
-	Spawn           int      `json:"spawn"`           // 1-based generation of the child within the session; 2 = respawned on rotation
+	Spawn           int      `json:"spawn"`           // children spawned in this session so far; increments on any respawn, including a rotation
 	CredentialEnv   string   `json:"credential_env"`  // the NAME of the variable the credential was materialized into
 	EnvNames        []string `json:"env_names"`       // the child's whole environment, NAMES only, sorted
 	Materialization string   `json:"materialization"` // env-at-spawn | respawn-on-rotation
