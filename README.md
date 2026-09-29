@@ -54,7 +54,9 @@ Pre-release, and the governed core is real and runnable today:
   socket; a minimal reference agent ships in `examples/echo-agent`;
 - **agents are credential-starved and reach everything through gateways** — the
   **model** and **tool/MCP** doors are *enforced* (Agenthof sits in the call path
-  and injects the per-role or per-resource credential the agent never holds); the
+  and injects the per-role or per-resource credential the agent never holds); a
+  stdio-only MCP server is reached the same way through the reference bridge in
+  `deploy/refbridge`, which attests first-hand what it ran on every call; the
   **exec** door is *attested* (the agent reports the allowlisted command it ran
   and Agenthof records that report, without running it); and sub-agent calls carry
   the caller's delegation binding;

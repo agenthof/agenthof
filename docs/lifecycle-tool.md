@@ -10,6 +10,8 @@ a real upstream MCP server, the injected credential, and the rendered
 (a `mode: all` grant) and
 [`cmd/agenthof/testdata/script/door_tool_allowlist.txtar`](../cmd/agenthof/testdata/script/door_tool_allowlist.txtar)
 (a grant restricted to named tools, with the left-out tool refused).
+For a stdio-only MCP server reached through the reference bridge, see
+[`scripts/e2e-refbridge-local.sh`](../scripts/e2e-refbridge-local.sh).
 
 ```
   agent                         Agenthof                     MCP resource
@@ -143,6 +145,7 @@ below.
 | `resources_touched` | the id of the resource the call went to |
 | `artifact_sha` | the SHA-256 of the result — or, when the call itself failed, of the error text |
 | `artifact` | a single-line preview of that same body, capped at 200 characters |
+| `runtime_attestation` | only when the resource declares `runtime: refbridge`: the bridge's first-hand account of the call — `runtime`, `session`, `command` (the spawned argv), `pid`, `spawn` (the child's generation within the session), `credential_env` (a variable name), `env_names` (the child's whole environment, names only), `materialization` |
 | `status` | `succeeded`, `failed`, or `refused` |
 
 A refused call is recorded before any resource is chosen, so it carries only
@@ -160,12 +163,91 @@ neither `artifact_sha` nor `artifact`.
 
 `audit <run-id>` renders a forwarded call as
 `tool echo — args abcdef12 (static_env)`, with the first eight hex characters
-of `args_sha`. A refused or failed call renders as `tool <name> refused —
-<reason>` or `tool <name> failed — <reason>`.
+of `args_sha`. A call attested by a bridge carries a suffix:
+`[runtime-attested: refbridge /stdio-tool -credential-env DEMO_TOKEN pid 4242 spawn 1]` —
+the runtime, the argv it spawned, the child that answered, and its generation
+within the session — on succeeded and failed lines alike. A refused or failed
+call renders as `tool <name> refused — <reason>` or `tool <name> failed — <reason>`.
 The event carries the run's delegation binding, like every other event.
 
 Never in the event: the arguments, the full result body, the run token, or
 the resource's credential.
+
+## A stdio server behind a bridge
+
+Many MCP servers speak only stdio: they are a local command, not a URL.
+Agenthof itself never runs a command (Article I), so such a server is
+governed through a bridge that lives in the operator's runtime, the way an
+agent lives in its sandbox. The reference bridge is `refbridge`
+(`deploy/refbridge`: the program and its compartment recipe together).
+
+```
+ Agenthof tool door                refbridge (operator's runtime)          stdio server
+    |  unix:// socket, only          |                                      |
+    |  Agenthof can reach it         |                                      |
+    |-- initialize ----------------->|  admit the session (a cap applies)   |
+    |-- tools/list ----------------->|  spawn ONE subprocess for this       |
+    |   Authorization: Bearer        |  session: clean environment +        |
+    |     <resource credential>      |  the credential as one variable ---->| starts
+    | <-- the server's tools --------|<-- tools/list ------------------------|
+    |-- tools/call ----------------->|-- tools/call ----------------------->|
+    | <-- result --------------------|<-- result ---------------------------|
+    |-- session ends (DELETE) ------>|  end the subprocess                  | exits
+```
+
+To Agenthof the bridge is an ordinary tool resource whose `url` is
+`unix://` plus the bridge's socket path. Everything on this page applies
+unchanged: the grant, the mirroring, the per-call credential injection,
+the `tool_call` event. What the bridge adds:
+
+- **Reachable only by Agenthof.** The socket lives in a directory the bridge
+  requires to be mode `0700` and owned by the user it runs as; the bridge
+  refuses to start otherwise. That directory is never one an agent
+  compartment mounts, and the agent compartment has no network, so the agent
+  has no path to the bridge. The bridge does not validate the bearer as a
+  caller identity — the directory is the gate.
+- **The credential reaches the server as one environment variable, and
+  nothing else does.** The subprocess environment is built from an explicit
+  list of variable names plus that one variable; an empty list means an
+  empty environment. The bridge never inherits its own environment into the
+  server.
+- **One subprocess per MCP session, never shared.** Agenthof opens one
+  session per step, so a step's tool calls go to a subprocess that exists
+  for that step alone and is ended when the session ends. A session that is
+  never closed (Agenthof stopped without saying so) is ended by the bridge's
+  idle timeout, and every session by its maximum lifetime. The number of
+  concurrent sessions is capped.
+- **Two ways to hand over a credential, chosen in the bridge's config.**
+  `env-at-spawn` sets the value from the session's first call and keeps it —
+  right for a static bearer. `respawn-on-rotation` is for a rotating
+  (`client_credentials`) token: Agenthof injects the current token on every
+  call, and when it changes the bridge ends the subprocess and starts a new
+  one with the new value before forwarding that call. The subprocess's own
+  state resets at that point.
+- **Egress is the compartment's.** The bridge config names the hosts the
+  server may reach; an empty list runs the compartment with no network at
+  all, which is what the reference recipe proves. A non-empty list is
+  enforced by a network the operator restricts (`REFBRIDGE_NETWORK`), or
+  the recipe refuses.
+- **The bridge attests first-hand what it ran.** The bridge is the party
+  that built the subprocess's environment, started it, and relayed the
+  call, so on every result it hands back it states what it did, and
+  Agenthof records that on the `tool_call` event as `runtime_attestation`
+  when the resource declares `runtime: refbridge`: the command it spawned,
+  the process that answered and its generation within the session (a
+  respawn after a rotation is visible as generation 2), the session id, the
+  name of the variable the credential went into, and the complete list of
+  the subprocess's environment variable names. Names and ids only, never a
+  value, and the agent never sees it — Agenthof takes it out of the result
+  before the agent does. This is the runtime's own word, not the agent's:
+  an exec event's `mode: attested` is what the agent reported, while a
+  `runtime_attestation` is what the operator's runtime reports about
+  itself. A resource declared `runtime: refbridge` whose result carries no
+  such account fails the call, so a recorded stdio call is always an
+  attested one.
+
+Every one of these is configuration the bridge requires; a config that
+omits any of them is refused before the bridge starts.
 
 ## Honest limits
 
@@ -183,6 +265,34 @@ then does.
 A refused `tool_call` is first-hand evidence that the attempt reached this
 door. An agent that ignores the proxy entirely leaves no such record.
 
+Through a bridge, what the ledger holds about the stdio hop is the bridge's
+own first-hand account (`runtime_attestation`), and it is exactly as
+trustworthy as the bridge: a compromised bridge could misreport what it
+spawned, as a compromised sandbox could misreport what it contains. That is
+the operator-runtime boundary this whole page rests on, not a new one; what
+Agenthof adds is that only a resource the operator declared `runtime:
+refbridge`, reached over a local socket, can put such an account in the
+ledger — a claim on any other resource's result is discarded, never
+recorded, never shown to the agent. Two things stay outside it: the
+subprocess's exit and teardown are the bridge's log, keyed by the session id
+the attestation carries, because they happen after the last result has
+gone; and what the server does with its credential upstream is attested by
+nobody, exactly as what any upstream MCP server does with a call is outside
+this door. Teardown kills the process group the bridge created for the
+subprocess, so a descendant that moved itself to another group is not
+reached. Whoever can reach the bridge's socket decides which credential its
+subprocess gets, so the socket directory's permissions carry that weight.
+An allowed egress host is a path the credential can leave through. A
+rotating token frozen at spawn can expire before a long step ends; that is
+why a rotating credential uses `respawn-on-rotation`, and even then a token
+that expires while a single call is in flight fails that call. The bridge
+passes the resource's credential on to the server it fronts, which is a
+stated deviation from the letter of the MCP authorization rule against
+transiting tokens: the token is Agenthof's own resource credential, never a
+caller's, delivered over a private socket to the server it was issued for,
+so the confused-deputy and audience hazards that rule guards against do not
+arise, and the ledger still records the injection.
+
 The event joins the run's hash-chained ledger. What that chain does and does
 not prove is the same limit as every other event; see
 [`lifecycle.md`](lifecycle.md).
@@ -192,7 +302,7 @@ not prove is the same limit as every other event; see
 | Shipped today | Reserved for later |
 | --- | --- |
 | a grant is `mode: all` (every tool the resource advertises), `mode: read-only` (the resource's `read_only_tools`, as the operator lists them), or a `tools` list (only those names); a resource id on its own is rejected at `apply` | |
-| an HTTP (streamable) MCP transport | a stdio transport, where the MCP server would be a local subprocess |
+| an HTTP (streamable) MCP transport, over TCP or a `unix://` socket; a stdio MCP server through the reference bridge (`deploy/refbridge`), which attests first-hand on every call what it ran (`runtime_attestation`) | a bridge that keeps the credential to itself and relays it onto the server's outbound calls; the subprocess's exit on the ledger |
 | `static_env` and `client_credentials` credentials, injected outbound | |
 
 Only shipped behavior is a guarantee.

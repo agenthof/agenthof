@@ -68,6 +68,13 @@ The governed core is real and runnable today:
   allowlist, injects the resource credential (a static bearer or an OAuth
   `client_credentials`-minted token) the agent never sees, and records every
   call — and every denied attempt.
+  A stdio-only MCP server is governed the same way through `deploy/refbridge`,
+  a reference bridge that fronts it over a Unix socket only Agenthof dials,
+  starts it once per session with a clean environment plus the injected
+  credential, respawns it when a rotating credential changes, and ends it
+  with the session. Agenthof still runs nothing — and because the bridge is
+  the party that runs the server, it attests first-hand on every call what
+  it ran, which the ledger records on the `tool_call` event.
 - **Exec gateway, attested** — allowlisted commands: a fronted agent runs an
   allowlisted command in its own operator sandbox and reports it; Agenthof
   authorizes the command against the config allowlist and records it, but

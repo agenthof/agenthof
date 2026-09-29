@@ -51,7 +51,7 @@ say so ([below](#where-agenthof-deliberately-diverges)).
 
 | Reference | What it is | How Agenthof aligns |
 | --- | --- | --- |
-| [MCP Authorization spec (2026-07-28)](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization) | The Model Context Protocol's rule that a server must not accept or transit tokens meant for others. | The tool/MCP door mints a per-call resource credential and never forwards the agent's run token — directly the spec's mandate. |
+| [MCP Authorization spec (2026-07-28)](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization) | The Model Context Protocol's rule that a server must not accept or transit tokens meant for others. | The tool/MCP door mints a per-call resource credential and never forwards the agent's run token — directly the spec's mandate. One stated deviation from the letter: the reference bridge for stdio servers (`deploy/refbridge`) passes Agenthof's own resource credential on to the server it fronts, over a private Unix socket, so that server can use it. That token is never a caller's, is never treated as the caller's identity, and the ledger records the injection, so the confused-deputy and audience hazards the rule exists for do not arise; see [`lifecycle-tool.md`](lifecycle-tool.md#a-stdio-server-behind-a-bridge). |
 | [MCP Security Best Practices](https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/security_best_practices) | Guidance on token passthrough, the confused-deputy problem, and local (stdio) servers. | The tool door is built around exactly these hazards; per-tool allowlisting and least privilege bound what an agent may call. |
 
 ## AI governance & agent threats

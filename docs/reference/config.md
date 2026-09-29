@@ -136,8 +136,10 @@ must be `https`, `http` whose host is `localhost`, `127.0.0.1`, or `::1`, or
 a `unix://` socket path (the path after `unix://` must be absolute; it names
 only the socket, not an HTTP route). Anything else is rejected with
 `bad-endpoint` ("endpoint must be https, loopback http, or unix:// socket").
-A `unix://` value is accepted only here. Tool and token endpoints stay on the
-stricter https-or-loopback rule, because those calls carry a remote credential.
+A tool resource's `url` accepts the same `unix://` form (a bridge socket,
+see [`tools`](#tools-1) below). `token_endpoint` stays on the stricter
+https-or-loopback rule, because that call carries a client secret to a
+remote host.
 
 Every fronted step receives `X-Agenthof-Proxy-URL` and
 `X-Agenthof-Run-Token`, whether or not the agent declares `tools` or `exec`.
@@ -415,7 +417,7 @@ for the runtime flow):
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
 | Kind | `kind` | string | yes | — |
-| URL | `url` | string | yes; must be https, http to a loopback host, or unix:// plus an absolute socket path | — |
+| URL | `url` | string | yes; must be `https`, `http` to a loopback host, or `unix://` plus an absolute socket path | — |
 | CredentialSource | `credential_source` | string | yes | — |
 | TokenEnv | `token_env` | string | yes for the direct-bearer grant (`grant_type: ""`) | — |
 | GrantType | `grant_type` | string | no | `""` (direct-bearer) |
@@ -456,10 +458,14 @@ any such claim on its results is stripped and never recorded.
 `::1`, or `unix://` plus an absolute socket path). The gateway injects a
 credential on every call to that url, so a plaintext url on a remote host is
 rejected at apply time, as for `token_endpoint` (which, unlike `url`, does
-not admit `unix://`). A resource that
-fails either check is rejected with `bad-tool-resource` ("tool resource ...
-must set kind: mcp", or "url must be set and https (or loopback http, or a
-unix:// socket)"). `apply` separately requires
+not admit `unix://`). A `unix://` url names a socket on Agenthof's own host
+— a stdio MCP server fronted by the reference bridge, `deploy/refbridge` —
+that never touches the network and is reachable only through that socket's
+directory permissions; the path after `unix://` is the socket only (the MCP
+route is the socket's root), and a relative path is rejected. A resource
+that fails either check is rejected with `bad-tool-resource` ("tool resource
+... must set kind: mcp", or "url must be set and https (or loopback http, or
+a unix:// socket)"). `apply` separately requires
 `credential_source` to be exactly `"static_env"`, rejecting anything else
 (including empty) with `bad-tool-resource` ("credential_source ... is not
 implemented (only static_env)"). `apply` also validates `grant_type`: the
