@@ -202,10 +202,11 @@ the `tool_call` event. What the bridge adds:
 
 - **Reachable only by Agenthof.** The socket lives in a directory the bridge
   requires to be mode `0700` and owned by the user it runs as; the bridge
-  refuses to start otherwise. That directory is never one an agent
-  compartment mounts, and the agent compartment has no network, so the agent
-  has no path to the bridge. The bridge does not validate the bearer as a
-  caller identity — the directory is the gate.
+  refuses to start otherwise. That directory must never be one an agent
+  compartment mounts (the reference recipe keeps them apart), and the
+  reference sandbox gives the agent no network, so the agent has no path to
+  the bridge. The bridge does not validate the bearer as a caller identity —
+  the directory is the gate.
 - **The credential reaches the server as one environment variable, and
   nothing else does.** The subprocess environment is built from an explicit
   list of variable names plus that one variable; an empty list means an
@@ -218,8 +219,8 @@ the `tool_call` event. What the bridge adds:
   idle timeout, and every session by its maximum lifetime. The number of
   concurrent sessions is capped.
 - **Two ways to hand over a credential, chosen in the bridge's config.**
-  `env-at-spawn` sets the value from the session's first call and keeps it —
-  right for a static bearer. `respawn-on-rotation` is for a rotating
+  `env-at-spawn` sets the value from the session's first tool request and
+  keeps it — right for a static bearer. `respawn-on-rotation` is for a rotating
   (`client_credentials`) token: Agenthof injects the current token on every
   call, and when it changes the bridge ends the subprocess and starts a new
   one with the new value before forwarding that call. The subprocess's own
@@ -243,11 +244,13 @@ the `tool_call` event. What the bridge adds:
   an exec event's `mode: attested` is what the agent reported, while a
   `runtime_attestation` is what the operator's runtime reports about
   itself. A resource declared `runtime: refbridge` whose result carries no
-  such account fails the call, so a recorded stdio call is always an
-  attested one.
+  such account fails the call (reason `runtime attestation missing` or
+  `runtime attestation malformed`), so such a call is never recorded as
+  succeeded without one.
 
-Every one of these is configuration the bridge requires; a config that
-omits any of them is refused before the bridge starts.
+The socket, command, credential variable and mode, environment list,
+egress list, and session limits are all required; a config that omits any
+of them is refused before the bridge starts.
 
 ## Honest limits
 

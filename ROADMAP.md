@@ -74,7 +74,8 @@ The governed core is real and runnable today:
   credential, respawns it when a rotating credential changes, and ends it
   with the session. Agenthof still runs nothing — and because the bridge is
   the party that runs the server, it attests first-hand on every call what
-  it ran, which the ledger records on the `tool_call` event.
+  it ran, which the ledger records on the `tool_call` event when the
+  resource declares `runtime: refbridge`.
 - **Exec gateway, attested** — allowlisted commands: a fronted agent runs an
   allowlisted command in its own operator sandbox and reports it; Agenthof
   authorizes the command against the config allowlist and records it, but
