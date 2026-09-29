@@ -50,23 +50,27 @@ deploy/lima/lima.sh shell         # you are now in the VM, in /agenthof
 ```
 
 Inside the shell, `~/agenthof` is the built binary and the compartment images
-(`refbridge:test`, `refbox-echo:test`) are ready. From there you run the pieces
-yourself — for example, start a bridge compartment and then apply a config and
-launch a run against it:
+(`refbridge:test`, `refbox-echo:test`) are ready.
+
+The e2e scripts are the canonical worked examples of a full governed run: they
+set up the socket directories, rewrite the demo config to point at them, export
+the tool credential into Agenthof's environment (never the compartment's), start
+the agent process, then `apply` and `run`. Run one end to end:
 
 ```sh
-REFBRIDGE_DETACH=1 deploy/refbridge/refbridge-run.sh
-~/agenthof apply --config deploy/refbridge/config --control-log /tmp/control.jsonl --as you --groups bridge-users
-~/agenthof run bridge-operator bridge-demo --input "call echo hi" \
-  --as you --groups bridge-users --config deploy/refbridge/config \
-  --log-dir /tmp/logs --artifact-dir /tmp/artifacts
+bash scripts/e2e-refbridge.sh   # a stdio tool, run in refbridge, over unix://
+bash scripts/e2e-refbox.sh      # the agent itself, run inside refbox
 ```
 
-Write run state (`--control-log`, `--log-dir`, `--artifact-dir`) to a writable
-path such as `/tmp`, since the repository is mounted read-only.
-
-The `scripts/e2e-refbox.sh` and `scripts/e2e-refbridge.sh` scripts are the
-worked, end-to-end examples of the full sequence.
+To drive Agenthof by hand, follow the same steps that script does. The detail a
+from-scratch attempt trips on: the bridge's `socket:` and `refbridge-run.sh`'s
+socket directory must be the *same* writable path (the compartment mounts it at
+that path inside and out), and the shipped
+`deploy/refbridge/bridge-config/refbridge.yaml` carries a placeholder path — so
+point both at a directory you own (e.g. `$XDG_RUNTIME_DIR/agenthof-bridge`)
+before starting the bridge. Write run state (`--control-log`, `--log-dir`,
+`--artifact-dir`) to a writable path such as `/tmp`, since the repository is
+mounted read-only.
 
 ## Keeping disk usage in check
 

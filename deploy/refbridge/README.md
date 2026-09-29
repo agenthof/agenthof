@@ -89,9 +89,12 @@ environment never supplies it.
 `scripts/e2e-refbridge-local.sh` runs this whole path against the real
 `agenthof` binary. The compartment recipe (`Containerfile`, `refbridge-run.sh`,
 `bridge-config/`) sits next to this program; `scripts/e2e-refbridge.sh` runs it
-in a rootless-podman compartment. Inside that image the socket is
-`/run/agenthof-bridge/stdio-tool.sock` and the server is `/stdio-tool`; those
-are the image's paths, not the local ones above.
+in a rootless-podman compartment. `refbridge-run.sh` bind-mounts the socket
+directory (`REFBRIDGE_SOCKET_DIR`) at the same path inside and out, so the
+config's `socket:` is valid for both the bridge and Agenthof; the shipped
+`bridge-config/refbridge.yaml` carries a placeholder socket path, which the e2e
+rewrites to a temporary directory it owns. The stdio server is the `/stdio-tool`
+binary baked into the image.
 
 ## Limits, stated
 
