@@ -206,6 +206,8 @@ and the run token. Agenthof, in order:
 5. appends the `exec` event and answers the agent with
    `{"exit": 0, "output": "…", "truncated": false}`.
 
+A body that is not JSON is answered `400` and records nothing, as on authorize.
+
 refexec, per call, starts one compartment: `--network none`, a read-only
 root with a tmpfs scratch at `/tmp`, every capability dropped, no new
 privileges, the host user's id, the operator's memory / CPU / pid caps,
@@ -251,11 +253,13 @@ way.
 ### The workspace
 
 For a first-hand agent the workspace is a named podman volume, mounted
-read-write at the same path into the agent's refbox compartment
-(`REFBOX_WORKSPACE_VOLUME` on the refbox recipe) and into every refexec
+read-write at `/work` into the agent's refbox compartment
+(`REFBOX_WORKSPACE_VOLUME` on the refbox recipe) and at refexec's
+`workspace.path`, which must also be `/work`, into every refexec
 compartment. Its life is the recipe's, not a run's: refexec's launcher
-creates it, every run shares it, and it is removed (`podman volume rm`)
-when the recipe is torn down — one refbox, one refexec, one volume.
+creates it, every run shares it, and the operator removes it
+(`podman volume rm`) when tearing the recipe down — nothing removes it
+automatically. One refbox, one refexec, one volume.
 refbox starts before any run exists, so nothing can mint a volume per run.
 Agenthof stays out of storage.
 

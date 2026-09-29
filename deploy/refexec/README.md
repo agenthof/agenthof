@@ -74,14 +74,22 @@ recipe down (`podman volume rm`) drops it. One refexec per refbox.
 
 ## Run it locally (Linux host with rootless podman)
 
+The reference config's `socket` is `/run/agenthof-exec/refexec.sock`: that
+is the reference placement, and creating it needs root. As a rootless user,
+copy `deploy/refexec/exec-config/refexec.yaml` somewhere writable and set
+`socket` in the copy to `$XDG_RUNTIME_DIR/agenthof-exec/refexec.sock`,
+written out as the absolute path (refexec does not expand variables):
+
 ```
 go build -o /tmp/refexec ./deploy/refexec
 podman pull docker.io/library/busybox:1.36.1
-REFEXEC_BIN=/tmp/refexec deploy/refexec/refexec-run.sh
+sed "s|/run/agenthof-exec|$XDG_RUNTIME_DIR/agenthof-exec|" deploy/refexec/exec-config/refexec.yaml >/tmp/refexec.yaml
+REFEXEC_BIN=/tmp/refexec REFEXEC_CONFIG=/tmp/refexec.yaml deploy/refexec/refexec-run.sh
 ```
 
-`refexec-run.sh` validates the config, prepares the socket's 0700 directory,
-creates the workspace volume and hands over to refexec. Then start the agent
+`refexec-run.sh` validates the config, prepares the 0700 directory of the
+config's `socket`, creates the workspace volume and hands over to refexec.
+The agent's `exec.url` must name the same socket path. Then start the agent
 with `REFBOX_WORKSPACE_VOLUME=agenthof-work deploy/refbox/refbox-run.sh`, and
 declare the door on the agent:
 

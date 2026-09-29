@@ -392,7 +392,7 @@ flag and exit-code reference.
 | Shipped today | Reserved for later |
 |---|---|
 | fronted agents: every step is an HTTP call to the agent's endpoint, with identity headers and `execution: fronted` stamped on the step events. Every fronted step also receives the per-run listener coordinates. The listener is TCP loopback unless `refbox_socket_dir` is set, in which case it is a Unix socket | streamed model-call usage (a streamed call is recorded without token counts) |
-| refbox reference compartment: a rootless-podman recipe (`deploy/refbox/`) with no network, no injected credentials, and an ephemeral workspace. The agent reaches Agenthof only over the socket directory; a Go echo agent and a Python LangChain agent both run there from their own images, the latter making its model call through the gateway socket in that directory. Exec inside it is the agent's report, or first-hand through `refexec` when the agent declares `exec.mode: runtime` | a network allowlist for first-hand commands |
+| refbox reference compartment: a rootless-podman recipe (`deploy/refbox/`) with no network, no injected credentials, and an ephemeral workspace (or, with `REFBOX_WORKSPACE_VOLUME`, a named volume shared with `refexec`). The agent reaches Agenthof only over the socket directory; a Go echo agent and a Python LangChain agent both run there from their own images, the latter making its model call through the gateway socket in that directory. Exec inside it is the agent's report, or first-hand through `refexec` when the agent declares `exec.mode: runtime` | a network allowlist for first-hand commands |
 | model gateway: the agent calls `<proxy URL>v1/chat/completions` with the run token; Agenthof authorizes the logical model, injects the per-role provider key, and records `model_call`. Non-streaming calls record token counts. Budgets are the upstream gateway's, via the provisioned role key | Agenthof-side spend caps; a per-role list of models; OAuth-protected model providers |
 | inbound MCP proxy for an agent's declared tools — allowlisted, credential-injecting, ledgered, and able to mint its own upstream token via the `client_credentials` grant | on-behalf-of / token-exchange agent auth to IdP-protected resources (RFC 8693) |
 | exec, two ways: `mode: attested` — an allowlist check, then an agent-reported outcome recorded as `exec`; `mode: runtime` — the allowlist check, then `refexec` runs the command first-hand in a no-network compartment and Agenthof records its account as `exec` with `runtime_attestation`. Agenthof itself never runs the command | Agenthof running a command itself |
@@ -405,7 +405,7 @@ Only shipped behavior is a guarantee.
 
 ## See also
 
-- [`lifecycle-exec.md`](lifecycle-exec.md) — the life of an exec: authorize, the operator's sandbox, attest, the ledger.
+- [`lifecycle-exec.md`](lifecycle-exec.md) — the life of an exec: authorize, the operator's sandbox, attest, the ledger — and the first-hand door through `refexec`.
 - [`lifecycle-model.md`](lifecycle-model.md) — the life of a model call: authorize the logical model, inject the provider key, record `model_call`.
 - [`lifecycle-tool.md`](lifecycle-tool.md) — the life of a tool call: mirror the resource's tools, inject the resource credential, record `tool_call`.
 - [`control-plane-lifecycle.md`](control-plane-lifecycle.md) — the life of a control action (the governance plane that decides what may run).
