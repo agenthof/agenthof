@@ -36,6 +36,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Execution | `execution` | string | no | `fronted` |
 | Endpoint | `endpoint` | string | yes | — |
 | Exec | `exec` | object | no | none |
+| MaySpawn | `may_spawn` | list of `{role, workflow}` objects | no | none (the agent spawns nothing) |
 
 ### `name`
 
@@ -269,6 +270,26 @@ tools:
 # resource may repeat only when every grant of it is mode: all.
 ```
 
+### `may_spawn`
+
+Optional list of `{role, workflow}` objects. Each names one child run the
+agent may ask the **spawn door** (`POST <proxy-url>/spawn`) to start: the
+`role` the child runs as and the `workflow` it runs. An agent with no
+`may_spawn` spawns nothing — the door refuses and records the attempt. Both
+values are matched exactly. A child run is a full governed run: it passes the
+same registry gate as a root run (the role must own the workflow and admit the
+invoker), under the **same invoker** as the parent — a child never gains
+authority the invoking human does not have. Each child gets its own run id,
+its own hash-chained ledger in the same run-log directory, and a binding that
+names its parent (`parent_run_id`) and its depth (`depth`; a root run is 0).
+The binding is forwarded to the agent as request headers; it is not signed.
+
+`apply` rejects, with `bad-spawn-target`: an entry missing `role` or
+`workflow`; a `role` that does not exist; a `workflow` that does not exist; a
+pair the role does not own; the same pair listed twice. Declaring
+`may_spawn` anywhere makes the gateway's [`spawn`](#spawn) block required.
+See [the life of a spawn](../lifecycle-spawn.md).
+
 ## Workflows (`config/workflows/*.yaml` → `WorkflowDef` / `Step`)
 
 `WorkflowDef` fields:
@@ -418,6 +439,8 @@ budget_usd_month: 20
 | Tools | `tools` | map of string → `ToolResource` | no | — |
 | Defaults.Model | `defaults.model` | string | no | — |
 | RefboxSocketDir | `refbox_socket_dir` | string | no | empty (TCP loopback) |
+| Spawn | `spawn` | object (`max_depth`, `max_parallel`, `max_total_spawns`, `reject_cycles`) | yes when any agent declares `may_spawn`; otherwise ignored | — |
+| StepTimeout | `step_timeout` | duration string | no | `5m` |
 
 `ModelRoute` fields:
 
@@ -565,6 +588,52 @@ compartment listens. The checked-in demo config
 uses `/run/agenthof` as a placeholder, because YAML cannot expand
 `$XDG_RUNTIME_DIR`. The two paths must match. See
 [the life of a run](../lifecycle.md#a-reference-compartment-refbox).
+
+### `spawn`
+
+The bounds of the delegation tree the spawn door may build. **Required as
+soon as any agent declares [`may_spawn`](#may_spawn)** — including when there
+is no `gateway.yaml` at all: config is law, and a missing cap is rejected at
+`apply` with `spawn-policy-required`, never read as unbounded. With no
+`may_spawn` anywhere the block is not needed.
+
+| Field | YAML key | Type | Required | Default |
+|---|---|---|---|---|
+| MaxDepth | `max_depth` | integer ≥ 1 | yes when spawn is in use | — |
+| MaxParallel | `max_parallel` | integer ≥ 1 | yes when spawn is in use | — |
+| MaxTotalSpawns | `max_total_spawns` | integer ≥ 1 | yes when spawn is in use | — |
+| RejectCycles | `reject_cycles` | bool | no | `false` |
+
+- `max_depth` — how deep the tree may go. A root run is depth 0 and its
+  children are 1; a spawn whose child would sit deeper than `max_depth` is
+  refused. `max_depth: 1` lets a root run spawn and its children not.
+- `max_parallel` — how many children one run may have in flight at once.
+  Checked and reserved atomically, so N simultaneous requests cannot each
+  see room for one more.
+- `max_total_spawns` — how many children one run may start over its whole
+  life, across all of its steps. A refused attempt starts nothing and does
+  not count; a child that started counts whatever its outcome (it has a
+  ledger of its own). The whole tree under one root is bounded by the sum
+  over k = 1..`max_depth` of `max_total_spawns`^k.
+- `reject_cycles` — when `true`, `apply` rejects (`spawn-cycle`) any cycle in
+  the agent-type spawn graph: an edge A → B exists when A's `may_spawn` names
+  a workflow with a step run by B; a self-loop counts. When `false` (the
+  default) such reuse of a type deeper in the tree is allowed and `max_depth`
+  bounds it. Because `may_spawn` fully determines what can be reached, this
+  static check is complete; there is no runtime check.
+
+A negative cap is rejected with `bad-spawn-policy` whether or not spawn is in
+use. Every refusal at the door is recorded on the parent's ledger as a
+`spawn` event with a fixed reason.
+
+### `step_timeout`
+
+Optional duration string, default `5m`; at least `1s` or `apply` rejects it
+with `bad-step-timeout`. The deadline every step runs under — it is at once
+the engine's per-step deadline and the timeout on the request Agenthof makes
+to the agent's endpoint, one knob. A spawned child runs under the step that
+asked for it, so a whole subtree shares the invoking step's deadline: size
+`step_timeout` for the subtree, not for one step.
 
 ### `defaults` / `defaults.model`
 

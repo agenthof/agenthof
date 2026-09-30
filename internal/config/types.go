@@ -13,17 +13,27 @@ import (
 const UnixScheme = "unix://"
 
 type AgentDef struct {
-	Name        string      `yaml:"name"`
-	Description string      `yaml:"description"`
-	Enabled     *bool       `yaml:"enabled"` // nil means true
-	Model       string      `yaml:"model"`
-	Instruction string      `yaml:"instruction"`
-	Tools       []ToolGrant `yaml:"tools"` // mode: all, mode: read-only, tools: [...], or tools + read-only
-	Output      string      `yaml:"output"`
-	Execution   string      `yaml:"execution"` // "", or "fronted"; "" means fronted
-	Endpoint    string      `yaml:"endpoint"`  // required: the agent's HTTP endpoint
-	Exec        ExecConfig  `yaml:"exec"`      // fronted only: allowlisted exec (attested, or first-hand via a runtime)
-	SourceFile  string      `yaml:"-"`
+	Name        string        `yaml:"name"`
+	Description string        `yaml:"description"`
+	Enabled     *bool         `yaml:"enabled"` // nil means true
+	Model       string        `yaml:"model"`
+	Instruction string        `yaml:"instruction"`
+	Tools       []ToolGrant   `yaml:"tools"` // mode: all, mode: read-only, tools: [...], or tools + read-only
+	Output      string        `yaml:"output"`
+	Execution   string        `yaml:"execution"` // "", or "fronted"; "" means fronted
+	Endpoint    string        `yaml:"endpoint"`  // required: the agent's HTTP endpoint
+	Exec        ExecConfig    `yaml:"exec"`      // fronted only: allowlisted exec (attested, or first-hand via a runtime)
+	MaySpawn    []SpawnTarget `yaml:"may_spawn"` // spawn door: the {role, workflow} child runs this agent may start; empty means none (default-deny)
+	SourceFile  string        `yaml:"-"`
+}
+
+// SpawnTarget is one entry in an agent's `may_spawn:` list: a child run the
+// agent may ask the spawn door to start, named as the role it runs as and
+// the workflow it runs. Both are matched exactly. An agent with no
+// may_spawn spawns nothing.
+type SpawnTarget struct {
+	Role     string `yaml:"role"`
+	Workflow string `yaml:"workflow"`
 }
 
 // ToolGrant is one entry in an agent's `tools:` list. Every entry is an
@@ -148,6 +158,17 @@ func (g *ToolGrant) UnmarshalYAML(value *yaml.Node) error {
 
 func (a AgentDef) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
+// MaySpawnTarget reports whether {role, workflow} is on the agent's
+// may_spawn list: exact match on both, and an empty list allows nothing.
+func (a AgentDef) MaySpawnTarget(role, workflow string) bool {
+	for _, t := range a.MaySpawn {
+		if t.Role == role && t.Workflow == workflow {
+			return true
+		}
+	}
+	return false
+}
+
 // EffectiveExecution normalizes the execution tier: empty means fronted.
 func (a AgentDef) EffectiveExecution() string {
 	if a.Execution == "" {
@@ -247,6 +268,28 @@ type ModelRoute struct {
 	APIKeyEnv string `yaml:"api_key_env"`
 }
 
+// DefaultStepTimeout is the per-step deadline when gateway.yaml sets no
+// step_timeout. The engine applies the same default on its own.
+const DefaultStepTimeout = 5 * time.Minute
+
+// SpawnPolicy bounds the delegation tree the spawn door may build. Config is
+// law: as soon as any agent declares may_spawn, all three caps are required
+// (a missing cap is rejected at apply, never read as unbounded). A run's
+// depth rides its binding — a root run is 0 — and max_depth refuses a child
+// whose depth would exceed it. max_parallel caps one run's in-flight
+// children. max_total_spawns caps how many children one run may start over
+// its whole life; a refused attempt starts nothing and does not count. The
+// tree under one root is therefore bounded by the sum over k = 1..max_depth
+// of max_total_spawns^k. reject_cycles turns on the static type-cycle check
+// at apply (off, a type reused deeper in the tree is allowed; depth bounds
+// it).
+type SpawnPolicy struct {
+	MaxDepth       int  `yaml:"max_depth"`
+	MaxParallel    int  `yaml:"max_parallel"`
+	MaxTotalSpawns int  `yaml:"max_total_spawns"`
+	RejectCycles   bool `yaml:"reject_cycles"`
+}
+
 type GatewayConfig struct {
 	Models   map[string]ModelRoute   `yaml:"models"`
 	Tools    map[string]ToolResource `yaml:"tools"`
@@ -258,6 +301,23 @@ type GatewayConfig struct {
 	// refbox compartment can reach it with no network. Empty means TCP loopback
 	// (the default, unchanged).
 	RefboxSocketDir string `yaml:"refbox_socket_dir"`
+	// Spawn bounds the spawn door; required (all three caps) once any agent
+	// declares may_spawn. See SpawnPolicy.
+	Spawn SpawnPolicy `yaml:"spawn"`
+	// StepTimeout is the deadline every step runs under: the engine's step
+	// context AND the fronted adapter's request timeout, one knob (a context
+	// keeps the earlier of two deadlines, so the two must be the same
+	// number). Zero means DefaultStepTimeout. A spawned subtree runs under
+	// its invoking step's deadline, so size it for the subtree.
+	StepTimeout time.Duration `yaml:"step_timeout"`
+}
+
+// EffectiveStepTimeout is StepTimeout, or DefaultStepTimeout when unset.
+func (g GatewayConfig) EffectiveStepTimeout() time.Duration {
+	if g.StepTimeout == 0 {
+		return DefaultStepTimeout
+	}
+	return g.StepTimeout
 }
 
 // ToolResource is a declared tool/MCP resource in the gateway catalog. Kind,
