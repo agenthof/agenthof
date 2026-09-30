@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -353,17 +355,17 @@ func Validate(cfg config.Config) []ValidationError {
 		}
 	}
 
-	roleNames := map[string]bool{}
+	roles := map[string]config.RoleDef{}
 	for _, r := range cfg.Roles {
 		if r.Name == "" {
 			add(r.SourceFile, "(role)", "missing-name", "role has no name")
 			continue
 		}
-		if roleNames[r.Name] {
+		if _, dup := roles[r.Name]; dup {
 			add(r.SourceFile, r.Name, "duplicate-name", "role name already defined")
 			continue
 		}
-		roleNames[r.Name] = true
+		roles[r.Name] = r
 		if len(r.Workflows) == 0 {
 			add(r.SourceFile, r.Name, "no-workflows", "role owns no workflows")
 		}
@@ -378,7 +380,138 @@ func Validate(cfg config.Config) []ValidationError {
 			}
 		}
 	}
+
+	// Spawn: each may_spawn target must resolve to a role that exists and
+	// owns a workflow that exists; the policy caps are required as soon as
+	// any agent declares may_spawn (config is law — a gateway.yaml that is
+	// missing altogether arrives here as a zero policy and is rejected the
+	// same way); the optional static type-cycle check runs last.
+	spawnDeclared := false
+	for _, a := range cfg.Agents {
+		if a.Name == "" {
+			continue
+		}
+		seen := map[config.SpawnTarget]bool{}
+		for _, t := range a.MaySpawn {
+			spawnDeclared = true
+			if t.Role == "" || t.Workflow == "" {
+				add(a.SourceFile, a.Name, "bad-spawn-target", "may_spawn entries must name both a role and a workflow")
+				continue
+			}
+			if seen[t] {
+				add(a.SourceFile, a.Name, "bad-spawn-target",
+					fmt.Sprintf("may_spawn lists %s/%s more than once", t.Role, t.Workflow))
+				continue
+			}
+			seen[t] = true
+			ro, ok := roles[t.Role]
+			if !ok {
+				add(a.SourceFile, a.Name, "bad-spawn-target",
+					fmt.Sprintf("may_spawn names role %q, which does not exist", t.Role))
+				continue
+			}
+			if _, ok := workflows[t.Workflow]; !ok {
+				add(a.SourceFile, a.Name, "bad-spawn-target",
+					fmt.Sprintf("may_spawn names workflow %q, which does not exist", t.Workflow))
+				continue
+			}
+			if !slices.Contains(ro.Workflows, t.Workflow) {
+				add(a.SourceFile, a.Name, "bad-spawn-target",
+					fmt.Sprintf("may_spawn names %s/%s, but role %q does not own workflow %q", t.Role, t.Workflow, t.Role, t.Workflow))
+			}
+		}
+	}
+	policy := cfg.Gateway.Spawn
+	for _, c := range []struct {
+		key string
+		val int
+	}{{"max_depth", policy.MaxDepth}, {"max_parallel", policy.MaxParallel}, {"max_total_spawns", policy.MaxTotalSpawns}} {
+		switch {
+		case c.val < 0:
+			add("gateway.yaml", "spawn", "bad-spawn-policy", fmt.Sprintf("spawn.%s must not be negative", c.key))
+		case c.val == 0 && spawnDeclared:
+			add("gateway.yaml", "spawn", "spawn-policy-required",
+				fmt.Sprintf("an agent declares may_spawn, so gateway.yaml must set spawn.%s to at least 1: a missing cap is never unbounded", c.key))
+		}
+	}
+	if cfg.Gateway.StepTimeout != 0 && cfg.Gateway.StepTimeout < time.Second {
+		add("gateway.yaml", "step_timeout", "bad-step-timeout", "step_timeout must be a duration of at least 1s, such as 5m")
+	}
+	if policy.RejectCycles {
+		if cycle := spawnCycle(agents, workflows); cycle != nil {
+			add("gateway.yaml", "spawn", "spawn-cycle",
+				fmt.Sprintf("spawn.reject_cycles is set and the may_spawn graph has a cycle: %s", strings.Join(cycle, " -> ")))
+		}
+	}
 	return errs
+}
+
+// spawnCycle finds a directed cycle in the agent-type spawn graph: an edge
+// A -> B exists when A's may_spawn names a workflow that has a step run by
+// B. It returns one cycle as a path with its first node repeated at the end,
+// or nil. Because may_spawn fully determines what a run can reach, this
+// static check is complete. Nodes and edges are visited in sorted order so
+// the reported cycle is deterministic.
+func spawnCycle(agents map[string]config.AgentDef, workflows map[string]config.WorkflowDef) []string {
+	edges := map[string][]string{}
+	for name, a := range agents {
+		seen := map[string]bool{}
+		for _, t := range a.MaySpawn {
+			wf, ok := workflows[t.Workflow]
+			if !ok {
+				continue // already reported as bad-spawn-target
+			}
+			for _, s := range wf.Steps {
+				if !seen[s.Agent] {
+					seen[s.Agent] = true
+					edges[name] = append(edges[name], s.Agent)
+				}
+			}
+		}
+		sort.Strings(edges[name])
+	}
+	const (
+		white = iota
+		grey
+		black
+	)
+	color := map[string]int{}
+	var stack []string
+	var walk func(n string) []string
+	walk = func(n string) []string {
+		color[n] = grey
+		stack = append(stack, n)
+		for _, m := range edges[n] {
+			switch color[m] {
+			case grey:
+				for i, s := range stack {
+					if s == m {
+						return append(append([]string{}, stack[i:]...), m)
+					}
+				}
+			case white:
+				if c := walk(m); c != nil {
+					return c
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		color[n] = black
+		return nil
+	}
+	names := make([]string, 0, len(agents))
+	for name := range agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if color[name] == white {
+			if c := walk(name); c != nil {
+				return c
+			}
+		}
+	}
+	return nil
 }
 
 // validSecureEndpoint requires an https URL, or http only to a loopback host
