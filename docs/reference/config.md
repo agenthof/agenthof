@@ -812,7 +812,12 @@ normalization, no substring matching:
 
 - `--invoker <subject>` matches the invoker's subject exactly as recorded.
 - `--agent <name>` matches the agent name exactly.
-- `--run <run-id>` narrows the timeline to a single run's log.
+- `--run <run-id>` narrows the timeline to that run **and every run spawned
+  under it** (a delegation tree: each child ledger names its parent, so the
+  tree is walked down from the id you give; a child whose parent's log was
+  pruned still appears under the parent's id). Control events are left out.
+  In the text timeline, a spawned child's lines are indented two spaces per
+  level of depth and carry a `parent=<run-id>` tag.
 - `--config-hash <sha256:…>` matches the full `config_hash` string exactly.
 - `--outcome <value>` matches an event's outcome exactly — and **the literal
   you need depends on which kind of event you're after**, because run
@@ -943,7 +948,9 @@ Field notes:
   log, or `seq` within the control log — so 8 steps recorded in the same
   second still come out in a stable order). Each event carries whichever of
   `run_id`, `role`, `workflow`, `agent`, `outcome`, `reason`, `config_hash`,
-  `artifact_sha`, or `seq` applies to it (all `omitempty`); `invoker` is
+  `artifact_sha`, `seq`, `parent_run_id`, or `depth` applies to it (all
+  `omitempty`; `parent_run_id` and `depth` place a spawned child run in its
+  delegation tree, and a root run has neither); `invoker` is
   always present, with `subject`, `issuer`, `method`, and — for a control
   event recorded with `--as` — `asserted_as`. All timestamps are RFC3339
   UTC. There is **no `witness` field** — it is deliberately left out of this
