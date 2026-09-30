@@ -246,6 +246,17 @@ func TestOIDCAuthenticateAudience(t *testing.T) {
 		}
 	})
 
+	t.Run("d: an unset client id matches no audience", func(t *testing.T) {
+		noClientID := OIDC{IssuerURL: srv.URL, Audience: resourceAud, HTTP: srv.Client()}
+		_, err := noClientID.Authenticate(ctx, mint([]string{""}))
+		if err == nil {
+			t.Fatal("with ClientID unset, a token audienced to the empty string must be rejected")
+		}
+		if !strings.Contains(err.Error(), "does not include the client id or the configured audience") {
+			t.Fatalf("expected the fixed audience message, got: %v", err)
+		}
+	})
+
 	t.Run("client id still accepted when Audience is set", func(t *testing.T) {
 		if _, err := withAud.Authenticate(ctx, mint("agenthof")); err != nil {
 			t.Fatalf("Authenticate: %v", err)

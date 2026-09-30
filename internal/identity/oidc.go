@@ -60,7 +60,10 @@ func (o OIDC) Authenticate(ctx context.Context, rawToken string) (Invoker, error
 		if err != nil {
 			return Invoker{}, fmt.Errorf("oidc verify: %w", err)
 		}
-		if !slices.Contains(idToken.Audience, o.ClientID) && !slices.Contains(idToken.Audience, o.Audience) {
+		// An unset client id matches nothing: without the guard, a token
+		// whose aud is the empty string would satisfy the check.
+		clientIDMatch := o.ClientID != "" && slices.Contains(idToken.Audience, o.ClientID)
+		if !clientIDMatch && !slices.Contains(idToken.Audience, o.Audience) {
 			return Invoker{}, errors.New("oidc verify: token audience does not include the client id or the configured audience")
 		}
 	}

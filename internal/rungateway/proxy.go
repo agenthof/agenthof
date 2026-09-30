@@ -590,15 +590,16 @@ func (p *Gateway) connectUpstream(id string, res config.ToolResource) (upstream,
 		Issuer:          res.Issuer,
 		TokenURL:        res.TokenEndpoint,
 		Scope:           res.Scope,
-		Audience:        res.Audience,
 		TokenEnv:        res.TokenEnv,
 		ClientIDEnv:     res.ClientIDEnv,
 		ClientSecretEnv: res.ClientSecretEnv,
 	}
-	// The invoker's token travels only on a token_exchange ref. Every other
-	// grant resolves without it, so no other broker can see it.
+	// The invoker's token travels only on a token_exchange ref, and so does
+	// the audience it is exchanged for. Every other grant resolves without
+	// either, so no other broker can see them.
 	if res.GrantType == "token_exchange" {
 		ref.SubjectToken = p.subjectToken
+		ref.Audience = res.Audience
 	}
 	base, endpoint, closeIdle := upstreamTransport(res.URL)
 	httpClient := &http.Client{Transport: &injectingTransport{base: base, broker: p.broker, ref: ref}}

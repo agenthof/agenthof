@@ -2255,10 +2255,14 @@ func (r *refRecordingBroker) Resolve(_ context.Context, ref broker.CredentialRef
 	return r.token, nil
 }
 
-func (r *refRecordingBroker) ref(id string) broker.CredentialRef {
+// ref reports the ref this resource was resolved with, and whether the
+// broker was ever asked for it at all — so a check on an absent resource
+// cannot pass on a zero CredentialRef.
+func (r *refRecordingBroker) ref(id string) (broker.CredentialRef, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.refs[id]
+	got, ok := r.refs[id]
+	return got, ok
 }
 
 func TestAuthModeFor(t *testing.T) {
@@ -2300,15 +2304,23 @@ func TestProxySubjectTokenOnlyOnTokenExchangeRefs(t *testing.T) {
 	}
 	defer p.Stop()
 
-	if got := rb.ref("plain"); got.SubjectToken != "" || got.Audience != "" {
-		t.Fatalf("static resource's ref must carry neither subject token nor audience: %+v", got)
+	plain, resolved := rb.ref("plain")
+	if !resolved {
+		t.Fatal("the broker was never asked for the static resource, so the check below would prove nothing")
 	}
-	got := rb.ref("obo")
+	if plain.SubjectToken != "" || plain.Audience != "" {
+		t.Fatalf("static resource's ref must carry neither subject token nor audience: subject token set=%v audience=%q",
+			plain.SubjectToken != "", plain.Audience)
+	}
+	got, resolved := rb.ref("obo")
+	if !resolved {
+		t.Fatal("the broker was never asked for the token_exchange resource")
+	}
 	if got.SubjectToken != subject {
 		t.Fatal("token_exchange resource's ref must carry the run's subject token")
 	}
 	if got.Audience != "https://obo.example" || got.Grant != "token_exchange" {
-		t.Fatalf("token_exchange ref lost its coordinates: %+v", got.Grant)
+		t.Fatalf("token_exchange ref lost its coordinates: audience=%q grant=%q", got.Audience, got.Grant)
 	}
 }
 

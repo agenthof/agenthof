@@ -59,9 +59,10 @@ func oboTestConfig(grant string) config.Config {
 		},
 		Workflows: []config.WorkflowDef{
 			{Name: "with-planner", Steps: []config.Step{{Name: "plan", Agent: "planner"}, {Name: "code", Agent: "coder"}}},
+			{Name: "planner-last", Steps: []config.Step{{Name: "code", Agent: "coder"}, {Name: "plan", Agent: "planner"}}},
 			{Name: "coder-only", Steps: []config.Step{{Name: "code", Agent: "coder"}}},
 		},
-		Roles:   []config.RoleDef{{Name: "se", Workflows: []string{"with-planner", "coder-only"}, AllowedGroups: []string{"*"}}},
+		Roles:   []config.RoleDef{{Name: "se", Workflows: []string{"with-planner", "planner-last", "coder-only"}, AllowedGroups: []string{"*"}}},
 		Gateway: config.GatewayConfig{Tools: tools, Models: map[string]config.ModelRoute{"fast": {Endpoint: "https://x/v1", Model: "m", APIKeyEnv: "K"}}},
 	}
 }
@@ -74,6 +75,11 @@ func TestWorkflowRequiresOBO(t *testing.T) {
 	}
 	if !workflowRequiresOBO(cfg, reg, "with-planner") {
 		t.Fatal("a workflow whose step agent grants a token_exchange resource requires OBO")
+	}
+	// Every step is examined, not just the first: the refusal happens
+	// before the engine, so a later step's grant must be seen up front.
+	if !workflowRequiresOBO(cfg, reg, "planner-last") {
+		t.Fatal("a workflow whose SECOND step grants a token_exchange resource requires OBO")
 	}
 	if workflowRequiresOBO(cfg, reg, "coder-only") {
 		t.Fatal("a workflow whose agents grant no token_exchange resource does not require OBO")

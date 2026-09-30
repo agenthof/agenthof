@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -218,6 +219,24 @@ func (p *idp) verify(raw string) (map[string]any, error) {
 	return claims, nil
 }
 
+// loopbackHosts are the only hosts this stub will bind to. It mints a token
+// for whoever asks, so reaching it off the machine would hand out identities
+// to the network.
+var loopbackHosts = map[string]bool{"127.0.0.1": true, "localhost": true, "::1": true}
+
+// requireLoopback rejects an -addr that is not one of those hosts, including
+// a bare ":port", which would listen on every interface.
+func requireLoopback(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("-addr %q must be host:port", addr)
+	}
+	if !loopbackHosts[host] {
+		return fmt.Errorf("-addr host %q is not loopback: this stub issuer listens only on 127.0.0.1, localhost, or ::1", host)
+	}
+	return nil
+}
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8090", "loopback address to listen on; the issuer is http://<addr>")
 	clientID := flag.String("client-id", "agenthof-broker", "the OAuth client id Agenthof exchanges with")
@@ -227,6 +246,10 @@ func main() {
 	lifetime := flag.Duration("lifetime", time.Hour, "lifetime of minted and exchanged tokens")
 	tokenLogPath := flag.String("token-log", "", "append one JSON line per exchanged token here (for a proof's no-leak grep); empty = off")
 	flag.Parse()
+
+	if err := requireLoopback(*addr); err != nil {
+		log.Fatalf("obo-idp: %v", err)
+	}
 
 	secret := os.Getenv(*clientSecretEnv)
 	if secret == "" {

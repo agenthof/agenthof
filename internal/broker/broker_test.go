@@ -86,7 +86,7 @@ func TestDispatchRoutesOnGrant(t *testing.T) {
 		t.Fatalf("token_exchange routed wrong: got %q err %v", got, err)
 	}
 	if te.last != oboRef {
-		t.Fatalf("token_exchange broker got ref %+v, want it unmodified (subject token and audience included)", te.last)
+		t.Fatalf("token_exchange broker got ref for resource %q grant %q, want it unmodified (subject token and audience included)", te.last.ResourceID, te.last.Grant)
 	}
 	if static.last != staticRef || cc.last != ccGrantRef {
 		t.Fatal("other brokers' last refs changed unexpectedly")

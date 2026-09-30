@@ -130,7 +130,7 @@ func TestResolveInvokerForRunSubjectToken(t *testing.T) {
 
 	r := resolveInvokerForRun("ignored", "ignored", token)
 	if r.refused || r.usageErr || r.inv.Method != "oidc" {
-		t.Fatalf("expected a verified invoker, got %+v", r)
+		t.Fatalf("expected a verified invoker, got method=%q refused=%v usageErr=%v", r.inv.Method, r.refused, r.usageErr)
 	}
 	if r.subjectToken != token {
 		t.Fatal("subjectToken must be the raw token that was verified")
@@ -145,7 +145,7 @@ func TestResolveInvokerForRunSubjectToken(t *testing.T) {
 
 	r = resolveInvokerForRun("dana@example.com", "eng", "")
 	if r.inv.Method != "asserted" || r.subjectToken != "" {
-		t.Fatalf("asserted invoker must carry no subject token: %+v", r)
+		t.Fatalf("asserted invoker must carry no subject token: method=%q refused=%v usageErr=%v", r.inv.Method, r.refused, r.usageErr)
 	}
 
 	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -163,7 +163,7 @@ func TestResolveInvokerForRunSubjectToken(t *testing.T) {
 	t.Setenv("AGENTHOF_OIDC_ISSUER", "")
 	r = resolveInvokerForRun("", "", token)
 	if !r.usageErr || r.subjectToken != "" {
-		t.Fatalf("usage error must carry no subject token: %+v", r)
+		t.Fatalf("usage error must carry no subject token: method=%q refused=%v usageErr=%v", r.inv.Method, r.refused, r.usageErr)
 	}
 }
 
@@ -190,6 +190,6 @@ func TestResolveInvokerForRunAudienceEnv(t *testing.T) {
 	t.Setenv("AGENTHOF_OIDC_AUDIENCE", aud)
 	r := resolveInvokerForRun("", "", token)
 	if r.refused || r.inv.Method != "oidc" || r.subjectToken != token {
-		t.Fatalf("with AGENTHOF_OIDC_AUDIENCE set, the token must verify: %+v", r)
+		t.Fatalf("with AGENTHOF_OIDC_AUDIENCE set, the token must verify: method=%q refused=%v usageErr=%v", r.inv.Method, r.refused, r.usageErr)
 	}
 }

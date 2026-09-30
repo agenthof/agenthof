@@ -46,15 +46,16 @@ wait_port() { # $1 = port, $2 = what
 		sleep 0.2
 	done
 }
-# no_leak VALUE WHAT...: VALUE must appear in no ledger, artifact, process
-# log, agenthof operational log, or captured agenthof stdout. Never prints
-# VALUE. Absence proves something only where those places are populated, so
-# section 8 asserts that before it calls this.
+# no_leak VALUE WHAT...: VALUE must appear in no ledger, artifact, control
+# log, apply-rejection output, process log, agenthof operational log, or
+# captured agenthof stdout. Never prints VALUE. Absence proves something only
+# where those places are populated, so section 8 asserts that before it calls
+# this.
 no_leak() {
 	local value="$1"
 	shift
-	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK"/*.err 2>/dev/null; then
-		fail "$* reached the ledger, an artifact, or a process log"
+	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK/control.jsonl" "$WORK/apply-bad.out" "$WORK"/*.err 2>/dev/null; then
+		fail "$* reached the ledger, an artifact, the control log, the apply output, or a process log"
 	fi
 	if printf '%s\n' "${OUTS[@]}" | grep -qF -- "$value"; then
 		fail "$* reached agenthof's output"
@@ -291,9 +292,14 @@ grep -q 'msg="upstream connect failed".*resource=obo-idp-rejects class=other' "$
 # 4xx for an audience it does not issue for, and its error_description
 # really does carry the sentinel, so section 8's absence check cannot pass
 # on words that were never written.
-REJECTION="$(python3 - "$ISSUER/token" "$OBO_CLIENT_ID" "$OBO_CLIENT_SECRET" "$NOWHERE_AUD" "$TOKEN" <<'PY'
-import base64, json, sys, urllib.error, urllib.parse, urllib.request
-url, client_id, client_secret, audience, subject = sys.argv[1:6]
+# The client secret and the subject token go in the environment, never in
+# argv: argv is world-readable in the process table.
+REJECTION="$(PROBE_CLIENT_SECRET="$OBO_CLIENT_SECRET" PROBE_SUBJECT_TOKEN="$TOKEN" \
+	python3 - "$ISSUER/token" "$OBO_CLIENT_ID" "$NOWHERE_AUD" <<'PY'
+import base64, json, os, sys, urllib.error, urllib.parse, urllib.request
+url, client_id, audience = sys.argv[1:4]
+client_secret = os.environ["PROBE_CLIENT_SECRET"]
+subject = os.environ["PROBE_SUBJECT_TOKEN"]
 form = urllib.parse.urlencode({
     "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
     "subject_token": subject,
@@ -340,6 +346,8 @@ grep -rqF "acting as: u-dana" "$WORK/artifacts" || fail "no artifact carries the
 # grep across it worthless.
 [ -s "$WORK/agenthof.err" ] || fail "the operational log is empty, so the absence checks would search nothing"
 grep -q "level=DEBUG" "$WORK/agenthof.err" || fail "the operational log carries no debug records, so the absence checks would search only what info-level says"
+[ -s "$WORK/control.jsonl" ] || fail "the control log is empty, so the absence checks would search nothing there"
+[ -s "$WORK/apply-bad.out" ] || fail "the apply-rejection output is empty, so the absence checks would search nothing there"
 no_leak "$TOKEN" "the subject token"
 no_leak "$RS_TOKEN" "the resource-audienced subject token"
 no_leak "never-in-a-ledger" "the issuer's error_description"
