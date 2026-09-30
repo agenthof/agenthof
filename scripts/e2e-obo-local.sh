@@ -350,6 +350,7 @@ grep -q "level=DEBUG" "$WORK/agenthof.err" || fail "the operational log carries 
 [ -s "$WORK/apply-bad.out" ] || fail "the apply-rejection output is empty, so the absence checks would search nothing there"
 no_leak "$TOKEN" "the subject token"
 no_leak "$RS_TOKEN" "the resource-audienced subject token"
+no_leak "$NOGROUPS_TOKEN" "the no-groups subject token"
 no_leak "never-in-a-ledger" "the issuer's error_description"
 [ -s "$WORK/issued.jsonl" ] || fail "the issuer logged no exchanged token"
 grep -q '"sub":"u-dana"' "$WORK/issued.jsonl" || fail "the issuer exchanged for nobody in particular"
