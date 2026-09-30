@@ -129,7 +129,7 @@ func cmdApply(args []string, out io.Writer) int {
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
-	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -315,7 +315,7 @@ func cmdRegistry(args []string, out io.Writer) int {
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path (enable/disable only)")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
-	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -541,7 +541,17 @@ func newBroker(subjectTokenType string) broker.Broker {
 	// forever: an explicit client with a timeout is required here,
 	// mirroring the proxy's own connectTimeout, rather than nil (which
 	// falls back to http.DefaultClient, which has no timeout).
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	// token_exchange is the first grant to put a secret (the invoker's subject
+	// token) in the POST body. Go re-sends a body across a 307/308 redirect
+	// while stripping only the Authorization header, so a redirecting token
+	// endpoint could carry the human's token to another host. Refuse to follow
+	// redirects: a 3xx then lands in the broker's fixed-vocabulary failure path.
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	return broker.Dispatch{
 		StaticEnv:         broker.StaticEnv{},
 		ClientCredentials: broker.NewClientCredentials(httpClient),
@@ -562,7 +572,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	input := fs.String("input", "", "task input for the workflow")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
-	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	cfgDir := fs.String("config", "./config", "config directory")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
@@ -959,7 +969,7 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
-	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
