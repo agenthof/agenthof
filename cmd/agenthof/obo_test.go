@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/agenthof/agenthof/internal/broker"
+	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/registry"
 )
 
 func TestSubjectTokenTypeFromEnv(t *testing.T) {
@@ -40,5 +42,51 @@ func TestNewBrokerRoutesTokenExchange(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "zq9subjectAAAA") {
 		t.Fatalf("error leaked the subject token: %v", err)
+	}
+}
+
+func oboTestConfig(grant string) config.Config {
+	tools := map[string]config.ToolResource{
+		"plain": {Kind: "mcp", URL: "https://mcp.example.com/", CredentialSource: "static_env", TokenEnv: "T"},
+		"obo": {Kind: "mcp", URL: "https://mcp.example.com/", CredentialSource: "static_env", GrantType: "token_exchange",
+			ClientAuth: "client_secret_basic", TokenEndpoint: "https://idp.example.com/token", Audience: "https://mcp.example.com",
+			ClientIDEnv: "TE_ID", ClientSecretEnv: "TE_SECRET"},
+	}
+	return config.Config{
+		Agents: []config.AgentDef{
+			{Name: "planner", Model: "fast", Endpoint: "https://example.test/run", Tools: []config.ToolGrant{{Resource: grant, Mode: "all"}}},
+			{Name: "coder", Model: "fast", Endpoint: "https://example.test/run"},
+		},
+		Workflows: []config.WorkflowDef{
+			{Name: "with-planner", Steps: []config.Step{{Name: "plan", Agent: "planner"}, {Name: "code", Agent: "coder"}}},
+			{Name: "coder-only", Steps: []config.Step{{Name: "code", Agent: "coder"}}},
+		},
+		Roles:   []config.RoleDef{{Name: "se", Workflows: []string{"with-planner", "coder-only"}, AllowedGroups: []string{"*"}}},
+		Gateway: config.GatewayConfig{Tools: tools, Models: map[string]config.ModelRoute{"fast": {Endpoint: "https://x/v1", Model: "m", APIKeyEnv: "K"}}},
+	}
+}
+
+func TestWorkflowRequiresOBO(t *testing.T) {
+	cfg := oboTestConfig("obo")
+	reg, errs := registry.Build(cfg)
+	if reg == nil {
+		t.Fatal(errs)
+	}
+	if !workflowRequiresOBO(cfg, reg, "with-planner") {
+		t.Fatal("a workflow whose step agent grants a token_exchange resource requires OBO")
+	}
+	if workflowRequiresOBO(cfg, reg, "coder-only") {
+		t.Fatal("a workflow whose agents grant no token_exchange resource does not require OBO")
+	}
+	if workflowRequiresOBO(cfg, reg, "nope") {
+		t.Fatal("an unknown workflow is the engine's refusal, not an OBO one")
+	}
+	plain := oboTestConfig("plain")
+	regPlain, errs := registry.Build(plain)
+	if regPlain == nil {
+		t.Fatal(errs)
+	}
+	if workflowRequiresOBO(plain, regPlain, "with-planner") {
+		t.Fatal("a static_env grant does not require OBO")
 	}
 }

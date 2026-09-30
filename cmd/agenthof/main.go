@@ -593,7 +593,8 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	logger := obs.New(stderr, level, format)
 	logger.Debug("run invoked", "role", role, "workflow", workflow)
 
-	inv, _, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
+	r := resolveInvokerForRun(*as, *groups, *token)
+	inv, refused, usageErr, verifyErr := r.inv, r.refused, r.usageErr, r.verifyErr
 	if usageErr {
 		_, _ = fmt.Fprintln(out, "run: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
 		return 2
@@ -636,6 +637,20 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(out, "run %s refused: configuration invalid\n", runID)
 		return 1
 	}
+	// An on-behalf-of resource needs the invoker's verified token to
+	// exchange; a dev --as identity (or no token at all) has none. Refuse
+	// here, before the engine starts — a proper refused run with a fixed
+	// reason, not a mid-run "tool proxy start failed" — and never contact
+	// the exchange endpoint.
+	if inv.Method != "oidc" && workflowRequiresOBO(cfg, reg, workflow) {
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, oboRefusalReason)
+		if refErr != nil {
+			_, _ = fmt.Fprintln(out, refErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "run %s refused: %s\n", runID, oboRefusalReason)
+		return 1
+	}
 	exec := agentrt.AdapterExecutor{}
 	// A hash failure here yields an empty join key, not a run failure: the
 	// run's config already validated above, so the run proceeds regardless.
@@ -644,9 +659,11 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	// holds per-run listener state, so a shared instance would let one run
 	// close another's. keyRoot is ".", the same working directory gateway
 	// provision writes role keys under (EnsureRoleKey(".", role)) — not
-	// --config, which would miss those keys.
+	// --config, which would miss those keys. The verified subject token is
+	// per run too: it goes to the gateway here and nowhere else — never to
+	// the engine, Binding, or the ledger.
 	b := newBroker(subjectTokenTypeFromEnv(os.Getenv))
-	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger, "") }
+	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger, r.subjectToken) }
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway, Logger: logger})
 	if err != nil && status == "refused" {
