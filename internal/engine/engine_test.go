@@ -63,10 +63,10 @@ func engCfg() *registry.Registry {
 func TestRunHappyPath(t *testing.T) {
 	dir := t.TempDir()
 	ex := &fakeExec{fail: map[string]int{}}
-	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "fix the login bug",
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "fix the login bug",
 		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("status=%q err=%v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("status=%q err=%v", res.Status, err)
 	}
 	if len(ex.calls) != 3 || ex.calls[0] != "planner" || ex.calls[2] != "reviewer" {
 		t.Fatalf("calls: %v", ex.calls)
@@ -74,7 +74,7 @@ func TestRunHappyPath(t *testing.T) {
 	if ex.seen[1]["plan"] != "artifact-from-planner" {
 		t.Fatalf("coder must receive the planner's artifact: %v", ex.seen[1])
 	}
-	events, _, err := ReadLog(dir, id)
+	events, _, err := ReadLog(dir, res.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,12 +104,12 @@ func TestRunRefusals(t *testing.T) {
 		{"se", "ghost"},
 	}
 	for _, c := range cases {
-		id, status, err := Run(context.Background(), engCfg(), c.role, c.wf, "x",
+		res, err := Run(context.Background(), engCfg(), c.role, c.wf, "x",
 			identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
-		if err == nil || status != "refused" {
-			t.Fatalf("%v: status=%q err=%v", c, status, err)
+		if err == nil || res.Status != "refused" {
+			t.Fatalf("%v: status=%q err=%v", c, res.Status, err)
 		}
-		events, _, rerr := ReadLog(dir, id)
+		events, _, rerr := ReadLog(dir, res.RunID)
 		if rerr != nil || len(events) != 1 || events[0].Type != "run_refused" {
 			t.Fatalf("%v: refusals must be ledgered as exactly one run_refused event: %v %v", c, events, rerr)
 		}
@@ -122,17 +122,17 @@ func TestRunRefusals(t *testing.T) {
 func TestRunFailBackThenSucceed(t *testing.T) {
 	dir := t.TempDir()
 	ex := &fakeExec{fail: map[string]int{"coder": 1}} // coder fails once, then succeeds
-	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
 		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("status=%q err=%v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("status=%q err=%v", res.Status, err)
 	}
 	// planner, coder(fail), planner(again), coder, reviewer
 	want := []string{"planner", "coder", "planner", "coder", "reviewer"}
 	if len(ex.calls) != len(want) {
 		t.Fatalf("calls: %v", ex.calls)
 	}
-	events, _, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, res.RunID)
 	var bounced *Event
 	for i := range events {
 		if events[i].Type == "bounced_back" {
@@ -147,12 +147,12 @@ func TestRunFailBackThenSucceed(t *testing.T) {
 func TestRunBounceExhaustion(t *testing.T) {
 	dir := t.TempDir()
 	ex := &fakeExec{fail: map[string]int{"reviewer": 99}} // reviewer max_bounces: 1
-	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
 		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
-	if err != nil || status != "failed" {
-		t.Fatalf("status=%q err=%v", status, err)
+	if err != nil || res.Status != "failed" {
+		t.Fatalf("status=%q err=%v", res.Status, err)
 	}
-	events, _, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, res.RunID)
 	last := events[len(events)-1]
 	if last.Type != "workflow_finished" || last.Status != "failed" || !strings.Contains(last.Reason, "review") {
 		t.Fatalf("exhaustion must fail honestly naming the step: %+v", last)
@@ -162,10 +162,10 @@ func TestRunBounceExhaustion(t *testing.T) {
 func TestRunFirstStepFailureFails(t *testing.T) {
 	dir := t.TempDir()
 	ex := &fakeExec{fail: map[string]int{"planner": 99}}
-	_, status, _ := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+	res, _ := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
 		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
-	if status != "failed" {
-		t.Fatalf("first-step failure with no fail-back target must fail, got %q", status)
+	if res.Status != "failed" {
+		t.Fatalf("first-step failure with no fail-back target must fail, got %q", res.Status)
 	}
 }
 
@@ -178,10 +178,10 @@ func (hangExec) Execute(ctx context.Context, _ Binding, agent config.AgentDef, i
 
 func TestRunStepTimeout(t *testing.T) {
 	dir := t.TempDir()
-	_, status, _ := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+	res, _ := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
 		identity.Static("dev@x"), hangExec{}, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts"), StepTimeout: 50 * time.Millisecond})
-	if status != "failed" {
-		t.Fatalf("timeout must fail the run, got %q", status)
+	if res.Status != "failed" {
+		t.Fatalf("timeout must fail the run, got %q", res.Status)
 	}
 }
 
@@ -189,12 +189,12 @@ func TestRunStoresArtifactsOutOfLedger(t *testing.T) {
 	dir := t.TempDir()
 	arts := filepath.Join(dir, "arts")
 	ex := &fakeExec{fail: map[string]int{}}
-	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
 		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: arts})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("%q %v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("%q %v", res.Status, err)
 	}
-	events, _, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, res.RunID)
 	var succ []Event
 	for _, e := range events {
 		if e.Type == "step_succeeded" {
@@ -219,7 +219,7 @@ func TestRunStoresArtifactsOutOfLedger(t *testing.T) {
 			t.Fatalf("body: %s", body)
 		}
 	}
-	if _, _, err := ReadLog(dir, id); err != nil {
+	if _, _, err := ReadLog(dir, res.RunID); err != nil {
 		t.Fatalf("chain: %v", err)
 	}
 	// full bodies still flow to later steps in memory
@@ -241,16 +241,16 @@ func (b *bindingSpy) Execute(_ context.Context, binding Binding, agent config.Ag
 func TestRunThreadsBindingToExecutor(t *testing.T) {
 	dir := t.TempDir()
 	spy := &bindingSpy{}
-	runID, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
 		identity.Static("dev@x"), spy, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if status != "succeeded" {
-		t.Fatalf("status = %q, want succeeded", status)
+	if res.Status != "succeeded" {
+		t.Fatalf("status = %q, want succeeded", res.Status)
 	}
-	if spy.got.RunID != runID {
-		t.Errorf("binding.RunID = %q, want %q", spy.got.RunID, runID)
+	if spy.got.RunID != res.RunID {
+		t.Errorf("binding.RunID = %q, want %q", spy.got.RunID, res.RunID)
 	}
 	if spy.got.Role != "se" || spy.got.Workflow != "fix-bug" {
 		t.Errorf("binding role/workflow = %q/%q, want se/fix-bug", spy.got.Role, spy.got.Workflow)
@@ -285,12 +285,12 @@ func TestRunRBACRefusesWrongGroup(t *testing.T) {
 	dir := t.TempDir()
 	ex := &fakeExec{fail: map[string]int{}}
 	inv := identity.Invoker{Subject: "dev@x", Groups: []string{"engineering"}}
-	id, status, err := Run(context.Background(), rbacCfg(), "fin", "simple", "x", inv, ex,
+	res, err := Run(context.Background(), rbacCfg(), "fin", "simple", "x", inv, ex,
 		Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
-	if err == nil || status != "refused" {
-		t.Fatalf("status=%q err=%v", status, err)
+	if err == nil || res.Status != "refused" {
+		t.Fatalf("status=%q err=%v", res.Status, err)
 	}
-	events, _, rerr := ReadLog(dir, id)
+	events, _, rerr := ReadLog(dir, res.RunID)
 	if rerr != nil || len(events) != 1 || events[0].Type != "run_refused" {
 		t.Fatalf("RBAC refusal must be ledgered as exactly one run_refused event: %v %v", events, rerr)
 	}
@@ -313,10 +313,10 @@ func TestRunRBACAllowsMatchingGroup(t *testing.T) {
 	dir := t.TempDir()
 	ex := &fakeExec{fail: map[string]int{}}
 	inv := identity.Invoker{Subject: "dev@x", Groups: []string{"finance"}}
-	_, status, err := Run(context.Background(), rbacCfg(), "fin", "simple", "x", inv, ex,
+	res, err := Run(context.Background(), rbacCfg(), "fin", "simple", "x", inv, ex,
 		Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("status=%q err=%v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("status=%q err=%v", res.Status, err)
 	}
 }
 
@@ -349,15 +349,15 @@ func (f *configErrExec) Execute(_ context.Context, _ Binding, agent config.Agent
 func TestRunStepConfigErrorFailsWithoutBouncing(t *testing.T) {
 	dir := t.TempDir()
 	ex := &configErrExec{}
-	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
 		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
-	if err != nil || status != "failed" {
-		t.Fatalf("status=%q err=%v", status, err)
+	if err != nil || res.Status != "failed" {
+		t.Fatalf("status=%q err=%v", res.Status, err)
 	}
 	if len(ex.calls) != 2 || ex.calls[0] != "planner" || ex.calls[1] != "coder" {
 		t.Fatalf("fail-back step must not be re-attempted after a config error: %v", ex.calls)
 	}
-	events, _, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, res.RunID)
 	var types []string
 	for _, e := range events {
 		types = append(types, e.Type)
@@ -383,12 +383,12 @@ func TestRunStepConfigErrorFailsWithoutBouncing(t *testing.T) {
 func TestWorkflowStartedCarriesConfigHash(t *testing.T) {
 	dir := t.TempDir()
 	ex := &fakeExec{fail: map[string]int{}}
-	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "fix the login bug",
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "fix the login bug",
 		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts"), ConfigHash: "sha256:deadbeef"})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("status=%q err=%v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("status=%q err=%v", res.Status, err)
 	}
-	events, _, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, res.RunID)
 	found := false
 	for _, e := range events {
 		if e.Type == "workflow_started" {
@@ -408,12 +408,12 @@ func TestWorkflowStartedCarriesConfigHash(t *testing.T) {
 func TestRunEventsCarryExecutionTier(t *testing.T) {
 	dir := t.TempDir()
 	ex := &fakeExec{fail: map[string]int{}}
-	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "fix the login bug",
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "fix the login bug",
 		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("status=%q err=%v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("status=%q err=%v", res.Status, err)
 	}
-	events, _, _ := ReadLog(dir, id)
+	events, _, _ := ReadLog(dir, res.RunID)
 	seen := 0
 	for _, e := range events {
 		if e.Type == "step_started" || e.Type == "step_succeeded" {

@@ -13,13 +13,13 @@ import (
 func TestRunAppliesParentLinkage(t *testing.T) {
 	dir := t.TempDir()
 	parent := &Binding{Invoker: identity.Static("dev@x"), Role: "lead", Workflow: "parent-wf", RunID: "r-parent", Depth: 1}
-	id, status, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
 		identity.Static("dev@x"), &fakeExec{fail: map[string]int{}},
 		Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts"), Parent: parent})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("status=%q err=%v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("status=%q err=%v", res.Status, err)
 	}
-	events, _, err := ReadLog(dir, id)
+	events, _, err := ReadLog(dir, res.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,8 +27,8 @@ func TestRunAppliesParentLinkage(t *testing.T) {
 		t.Fatal("no events")
 	}
 	for _, e := range events {
-		if e.Binding.RunID != id {
-			t.Fatalf("event %s carries run %q, want the child's own id %q", e.Type, e.Binding.RunID, id)
+		if e.Binding.RunID != res.RunID {
+			t.Fatalf("event %s carries run %q, want the child's own id %q", e.Type, e.Binding.RunID, res.RunID)
 		}
 		if e.Binding.ParentRunID != "r-parent" || e.Binding.Depth != 2 {
 			t.Fatalf("event %s binding = %+v, want parent r-parent at depth 2", e.Type, e.Binding)
@@ -42,12 +42,12 @@ func TestRunAppliesParentLinkage(t *testing.T) {
 func TestRunRefusedChildStillRecordsLinkage(t *testing.T) {
 	dir := t.TempDir()
 	parent := &Binding{Invoker: identity.Static("dev@x"), Role: "lead", Workflow: "parent-wf", RunID: "r-parent"}
-	id, status, err := Run(context.Background(), engCfg(), "ghost", "fix-bug", "x",
+	res, err := Run(context.Background(), engCfg(), "ghost", "fix-bug", "x",
 		identity.Static("dev@x"), &fakeExec{}, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts"), Parent: parent})
-	if err == nil || status != "refused" {
-		t.Fatalf("status=%q err=%v, want a refusal", status, err)
+	if err == nil || res.Status != "refused" {
+		t.Fatalf("status=%q err=%v, want a refusal", res.Status, err)
 	}
-	events, _, err := ReadLog(dir, id)
+	events, _, err := ReadLog(dir, res.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}

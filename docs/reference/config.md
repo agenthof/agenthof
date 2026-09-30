@@ -749,7 +749,9 @@ normalization, no substring matching:
   you need depends on which kind of event you're after**, because run
   events and control events were never recorded with the same outcome
   vocabulary: a **run** event's outcome is one of
-  `succeeded | failed | refused`; a **control** event's (`apply`,
+  `succeeded | failed | refused | cancelled` (`cancelled` is a run whose
+  context ended between steps — a spawned child torn down with its parent,
+  for instance); a **control** event's (`apply`,
   `enable`/`disable`, `repair`) outcome is one of
   `success | refused | rejected | error`. `--outcome succeeded` selects only
   successfully finished runs, `--outcome failed` selects only failed runs,

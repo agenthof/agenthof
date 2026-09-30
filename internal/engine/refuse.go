@@ -18,6 +18,11 @@ import (
 // a misconfigured step cannot succeed.
 var ErrStepConfig = errors.New("step configuration error")
 
+// ErrLedgerWrite marks an error Run returns because the run's ledger could
+// not be appended. A caller that must tell "refused, and recorded" from
+// "refused, and the record itself failed" checks errors.Is(err, ErrLedgerWrite).
+var ErrLedgerWrite = errors.New("ledger write failed")
+
 // Refuse records a run refusal that happens before (or independent of) a
 // call to Run — for example a caller that pre-checks authorization and never
 // starts a workflow at all. It opens a fresh log under logDir, writes exactly

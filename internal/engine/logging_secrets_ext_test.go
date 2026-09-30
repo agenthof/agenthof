@@ -333,12 +333,12 @@ func TestOperationalLogCarriesNoSecret(t *testing.T) {
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				_, status, err := engine.Run(ctx, reg, "se", "wf", "x", identity.Static("dev@x"), ex, opts)
+				res, err := engine.Run(ctx, reg, "se", "wf", "x", identity.Static("dev@x"), ex, opts)
 				if err != nil {
 					t.Fatalf("Run returned an error (only refusals and ledger failures do): %v", err)
 				}
-				if status != s.wantStatus {
-					t.Fatalf("status = %q, want %q\nlog:\n%s", status, s.wantStatus, sink.String())
+				if res.Status != s.wantStatus {
+					t.Fatalf("status = %q, want %q\nlog:\n%s", res.Status, s.wantStatus, sink.String())
 				}
 
 				out := sink.String()

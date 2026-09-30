@@ -69,12 +69,12 @@ func TestRunUsesAFreshGatewayPerRun(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			id, status, err := Run(context.Background(), reg, "se", "wf", "x", staticInvoker(), &coordExec{}, opts)
-			if err != nil || status != "succeeded" {
-				t.Errorf("run %d: status=%q err=%v", i, status, err)
+			res, err := Run(context.Background(), reg, "se", "wf", "x", staticInvoker(), &coordExec{}, opts)
+			if err != nil || res.Status != "succeeded" {
+				t.Errorf("run %d: status=%q err=%v", i, res.Status, err)
 				return
 			}
-			ids[i] = id
+			ids[i] = res.RunID
 		}(i)
 	}
 	wg.Wait()
@@ -97,10 +97,10 @@ func TestRunUsesAFreshGatewayPerRun(t *testing.T) {
 func TestRunNilFactoryRunsWithoutGateway(t *testing.T) {
 	dir := t.TempDir()
 	ce := &coordExec{}
-	_, status, err := Run(context.Background(), frontedReg(), "se", "wf", "x",
+	res, err := Run(context.Background(), frontedReg(), "se", "wf", "x",
 		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a"})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("run: status=%q err=%v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("run: status=%q err=%v", res.Status, err)
 	}
 	if ce.ok {
 		t.Fatal("nil factory must not hand the step proxy coordinates")

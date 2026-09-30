@@ -674,18 +674,18 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	// the engine, Binding, or the ledger.
 	b := newBroker(subjectTokenTypeFromEnv(os.Getenv))
 	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger, r.subjectToken) }
-	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
+	res, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway, Logger: logger})
-	if err != nil && status == "refused" {
-		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", runID, err)
+	if err != nil && res.Status == "refused" {
+		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", res.RunID, err)
 		return 1
 	}
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "run %s error: %v\n", runID, err)
+		_, _ = fmt.Fprintf(out, "run %s error: %v\n", res.RunID, err)
 		return 1
 	}
-	_, _ = fmt.Fprintf(out, "run %s finished: %s\n", runID, status)
-	if status != "succeeded" {
+	_, _ = fmt.Fprintf(out, "run %s finished: %s\n", res.RunID, res.Status)
+	if res.Status != "succeeded" {
 		return 1
 	}
 	return 0
