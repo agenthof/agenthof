@@ -5,8 +5,9 @@ declares `exec.mode: runtime` never runs the command itself: it asks
 Agenthof, Agenthof checks the allowlist and asks refexec over a Unix socket
 only Agenthof dials, refexec runs the command in its own rootless-podman
 compartment on the operator's host and attests what ran, and Agenthof
-records that account on the run's ledger. The agent has no path to refexec:
-it talks to Agenthof only.
+records that account on the run's ledger. When the agent runs inside refbox
+(its own mount namespace, no network), it has no path to refexec — it reaches
+Agenthof only, and the socket is never mounted into its compartment.
 
 refexec is a **host process**, like `agenthof` — it invokes `podman` itself,
 so it is not containerized. It is credential-less: no bearer is injected and

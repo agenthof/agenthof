@@ -22,7 +22,7 @@ type AgentDef struct {
 	Output      string      `yaml:"output"`
 	Execution   string      `yaml:"execution"` // "", or "fronted"; "" means fronted
 	Endpoint    string      `yaml:"endpoint"`  // required: the agent's HTTP endpoint
-	Exec        ExecConfig  `yaml:"exec"`      // fronted only: allowlisted attested exec
+	Exec        ExecConfig  `yaml:"exec"`      // fronted only: allowlisted exec (attested, or first-hand via a runtime)
 	SourceFile  string      `yaml:"-"`
 }
 

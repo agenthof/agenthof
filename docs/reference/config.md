@@ -149,10 +149,13 @@ An agent uses the doors it needs and ignores the rest. See
 
 ### `exec`
 
-Optional, and only on a `fronted` agent. Declares commands the agent may
-report running in the operator's sandbox. Agenthof checks the reported argv
-against `allow` and records the result. It does not run the command and does
-not contain it. The operator's sandbox is what confines execution.
+Optional, and only on a `fronted` agent. Declares the commands the agent may
+run in the operator's sandbox. Agenthof authorizes every command against
+`allow` and records the result; it never runs the command itself. With
+`mode: attested` the agent runs the command and reports it, and the operator's
+sandbox is what confines execution. With `mode: runtime` a trusted
+operator-side runtime (`refexec`) runs the command first-hand over a `unix://`
+socket and Agenthof records that first-hand account (`runtime_attestation`).
 
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
@@ -534,7 +537,7 @@ loopback port, and the proxy URL stays `http://127.0.0.1:<port>/`. When set,
 each fronted step's gateway listens on a Unix domain socket in this directory
 instead, and the proxy URL is `unix://` plus that socket's path. The value
 after `unix://` is the socket path only; the HTTP routes stay fixed (`/`,
-`/exec/authorize`, `/exec/attest`, `/v1/chat/completions`). The run token
+`/exec/authorize`, `/exec/attest`, `/exec/run`, `/v1/chat/completions`). The run token
 still travels in the `Authorization` header. `apply` does not check that the
 directory exists. Keep the directory's path short: a Unix socket path has a
 small operating-system length limit, and a path that exceeds it fails the

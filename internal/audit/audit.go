@@ -94,11 +94,10 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 			case e.Status == "refused":
 				fmt.Fprintf(&sb, "  %s  exec %s refused — %s\n", t, cmd, e.Reason)
 			case e.Status == "failed" && e.Reason != "":
-				// The door itself failed — the runtime was unreachable, or
-				// its answer was rejected — so there is no exit code to
-				// show, only why; a runtime's attestation, if one survived
-				// validation, still renders.
-				fmt.Fprintf(&sb, "  %s  exec %s failed — %s%s\n", t, cmd, e.Reason, runtimeAttested(e))
+				// The door itself failed — the runtime was unreachable or its
+				// answer was rejected — so there is no exit code and no
+				// first-hand attestation to record, only why.
+				fmt.Fprintf(&sb, "  %s  exec %s failed — %s\n", t, cmd, e.Reason)
 			default:
 				exit := "?"
 				if e.ExitCode != nil {
