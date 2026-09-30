@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -127,5 +128,109 @@ func TestVerifyRejectsForeignAndExpiredTokens(t *testing.T) {
 	}
 	if strings.Count(good, ".") != 2 {
 		t.Fatal("not a compact JWT")
+	}
+}
+
+func exchange(t *testing.T, srv *httptest.Server, user, pass string, form url.Values) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(url.QueryEscape(user), url.QueryEscape(pass))
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
+
+func exchangeForm(subject, audience string) url.Values {
+	return url.Values{
+		"grant_type":         {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"subject_token":      {subject},
+		"subject_token_type": {"urn:ietf:params:oauth:token-type:id_token"},
+		"audience":           {audience},
+	}
+}
+
+func TestExchangeIssuesTokenForSubject(t *testing.T) {
+	var tokenLog bytes.Buffer
+	p, srv := newTestIDP(t, &tokenLog)
+	_, minted := mint(t, srv, map[string]any{"sub": "u-dana", "aud": "agenthof"})
+	subject, _ := minted["token"].(string)
+
+	status, out := exchange(t, srv, "agenthof-broker", "shh secret", exchangeForm(subject, "https://obo-upstream.example"))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d body=%v", status, out)
+	}
+	if out["issued_token_type"] != "urn:ietf:params:oauth:token-type:access_token" || out["token_type"] != "Bearer" {
+		t.Fatalf("RFC 8693 response shape: %v", out)
+	}
+	if exp, _ := out["expires_in"].(float64); exp != 3600 {
+		t.Fatalf("expires_in = %v, want 3600", out["expires_in"])
+	}
+	access, _ := out["access_token"].(string)
+	claims, err := p.verify(access)
+	if err != nil {
+		t.Fatalf("exchanged token must be decodable and signed by the issuer: %v", err)
+	}
+	if claims["sub"] != "u-dana" || claims["aud"] != "https://obo-upstream.example" {
+		t.Fatalf("exchanged token must carry the subject's sub and the requested aud: %v", claims)
+	}
+	if access == subject {
+		t.Fatal("the exchanged token must be a new token, not the subject token passed through")
+	}
+	var line struct {
+		Sub, Aud, Token string
+	}
+	if err := json.Unmarshal(tokenLog.Bytes(), &line); err != nil || line.Token != access || line.Sub != "u-dana" || line.Aud != "https://obo-upstream.example" {
+		t.Fatalf("token log line = %q (err %v)", tokenLog.String(), err)
+	}
+}
+
+func TestExchangeRejections(t *testing.T) {
+	_, srv := newTestIDP(t, nil)
+	_, minted := mint(t, srv, map[string]any{"sub": "u-dana", "aud": "agenthof"})
+	subject, _ := minted["token"].(string)
+	good := func() url.Values { return exchangeForm(subject, "https://obo-upstream.example") }
+
+	cases := []struct {
+		name       string
+		user, pass string
+		form       url.Values
+		status     int
+		code       string
+	}{
+		{"wrong secret", "agenthof-broker", "nope", good(), http.StatusUnauthorized, "invalid_client"},
+		{"unknown client", "someone-else", "shh secret", good(), http.StatusUnauthorized, "invalid_client"},
+		{"wrong grant", "agenthof-broker", "shh secret", func() url.Values { f := good(); f.Set("grant_type", "client_credentials"); return f }(), http.StatusBadRequest, "unsupported_grant_type"},
+		{"wrong subject type", "agenthof-broker", "shh secret", func() url.Values {
+			f := good()
+			f.Set("subject_token_type", "urn:ietf:params:oauth:token-type:access_token")
+			return f
+		}(), http.StatusBadRequest, "invalid_request"},
+		{"garbage subject", "agenthof-broker", "shh secret", exchangeForm("garbage", "https://obo-upstream.example"), http.StatusBadRequest, "invalid_grant"},
+		{"unlisted audience", "agenthof-broker", "shh secret", exchangeForm(subject, "https://nowhere.example"), http.StatusBadRequest, "invalid_target"},
+		{"missing audience", "agenthof-broker", "shh secret", exchangeForm(subject, ""), http.StatusBadRequest, "invalid_target"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			status, out := exchange(t, srv, c.user, c.pass, c.form)
+			if status != c.status || out["error"] != c.code {
+				t.Fatalf("status=%d error=%v, want %d %s", status, out["error"], c.status, c.code)
+			}
+			desc, _ := out["error_description"].(string)
+			if !strings.Contains(desc, "never-in-a-ledger") {
+				t.Fatalf("error_description must carry the sentinel a proof greps for: %q", desc)
+			}
+			if _, ok := out["access_token"]; ok {
+				t.Fatal("a rejection must issue no token")
+			}
+		})
 	}
 }

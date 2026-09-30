@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -47,7 +48,8 @@ type idp struct {
 	subjectTokenType string
 	lifetime         time.Duration
 	now              func() time.Time
-	tokenLog         io.Writer // JSONL of every issued upstream token; nil = none
+	tokenLog         io.Writer  // JSONL of every issued upstream token; nil = none
+	mu               sync.Mutex // serializes tokenLog writes
 }
 
 // newIDP generates the signing key. tokenLog, when non-nil, receives one
