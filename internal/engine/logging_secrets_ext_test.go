@@ -329,7 +329,7 @@ func TestOperationalLogCarriesNoSecret(t *testing.T) {
 				ex := &doorExec{call: s.call}
 				opts := engine.Options{
 					LogDir: dir, ArtifactDir: dir + "/a", StepTimeout: 20 * time.Second, Logger: logger,
-					NewGateway: func() engine.ToolProxy { return rungateway.New(s.gateway, keyRoot, b, logger) },
+					NewGateway: func() engine.ToolProxy { return rungateway.New(s.gateway, keyRoot, b, logger, "") },
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()

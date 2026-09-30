@@ -646,7 +646,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	// provision writes role keys under (EnsureRoleKey(".", role)) — not
 	// --config, which would miss those keys.
 	b := newBroker(subjectTokenTypeFromEnv(os.Getenv))
-	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger) }
+	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger, "") }
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway, Logger: logger})
 	if err != nil && status == "refused" {
