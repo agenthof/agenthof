@@ -1,0 +1,19 @@
+name: refbox-exec
+description: The reference agent in a refbox compartment whose exec door is first-hand, served by refexec
+model: fast
+instruction: Write a note on the workspace, then run the command.
+output: output
+execution: fronted
+endpoint: unix:///run/agenthof/refbox-echo.sock
+# mode runtime: the agent never runs the command. Agenthof authorizes it and
+# asks refexec (over its socket — exec-config/refexec.yaml `socket`, never a
+# path under refbox_socket_dir) to run it in a no-network compartment on the
+# shared workspace; the ledger gets refexec's first-hand account.
+exec:
+  mode: runtime
+  runtime: refexec
+  url: unix:///run/agenthof-exec/refexec.sock
+  timeout: 2m
+  allow:
+    - exe: cat
+    - exe: wget

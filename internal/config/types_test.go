@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -361,5 +362,46 @@ func TestToolGrantErrorNamesTheLine(t *testing.T) {
 	err := yaml.Unmarshal([]byte(src), &got)
 	if err == nil || !strings.Contains(err.Error(), "line 4") {
 		t.Fatalf("error should name the offending key's line (4): %v", err)
+	}
+}
+
+func TestExecConfigDeclaredCountsRuntimeFields(t *testing.T) {
+	cases := map[string]ExecConfig{
+		"runtime only": {Runtime: "refexec"},
+		"url only":     {URL: "unix:///run/agenthof-exec/refexec.sock"},
+		"timeout only": {Timeout: time.Minute},
+	}
+	for name, ec := range cases {
+		if !ec.Declared() {
+			t.Errorf("%s: a {%+v}-only exec must count as declared, or apply never sees it", name, ec)
+		}
+	}
+	if (ExecConfig{Mode: "runtime", Runtime: "refexec"}).FirstHand() != true {
+		t.Error("runtime refexec must be first-hand")
+	}
+	if (ExecConfig{Mode: "attested"}).FirstHand() {
+		t.Error("an attested exec is not first-hand")
+	}
+}
+
+func TestExecConfigRuntimeYAML(t *testing.T) {
+	var a AgentDef
+	err := yaml.Unmarshal([]byte(`name: builder
+execution: fronted
+endpoint: unix:///run/agenthof/agent.sock
+exec:
+  mode: runtime
+  runtime: refexec
+  url: unix:///run/agenthof-exec/refexec.sock
+  timeout: 5m
+  allow:
+    - exe: go
+      args_prefix: [test]
+`), &a)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if a.Exec.Mode != "runtime" || a.Exec.Runtime != "refexec" || a.Exec.URL != "unix:///run/agenthof-exec/refexec.sock" || a.Exec.Timeout != 5*time.Minute {
+		t.Fatalf("exec = %+v", a.Exec)
 	}
 }

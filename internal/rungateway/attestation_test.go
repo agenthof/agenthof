@@ -123,6 +123,63 @@ func TestTakeRuntimeAttestation(t *testing.T) {
 	}
 }
 
+// goodExecAttestation is exactly what refexec's Meta() produces: credential-less.
+func goodExecAttestation() map[string]any {
+	return map[string]any{
+		"runtime": "refexec", "session": "refexec-0a1b2c3d",
+		"command": []any{"cat", "/work/agent-note.txt"},
+		"pid":     float64(4242), "spawn": float64(1),
+		"credential_env": "", "env_names": []any{},
+		"materialization": "",
+	}
+}
+
+func TestDecodeAttestationPerRuntime(t *testing.T) {
+	t.Run("refexec: credential-less is well-formed", func(t *testing.T) {
+		att, err := decodeAttestation(goodExecAttestation(), "refexec")
+		if err != nil || att == nil || att.Runtime != "refexec" || att.PID != 4242 || att.CredentialEnv != "" || att.Materialization != "" {
+			t.Fatalf("att=%+v err=%v", att, err)
+		}
+	})
+	t.Run("refbridge: still decodes through the same path", func(t *testing.T) {
+		att, err := decodeAttestation(goodAttestation(), "refbridge")
+		if err != nil || att == nil || att.CredentialEnv != "DEMO_TOKEN" {
+			t.Fatalf("att=%+v err=%v", att, err)
+		}
+	})
+	t.Run("nil raw is missing", func(t *testing.T) {
+		if _, err := decodeAttestation(nil, "refexec"); err == nil || err.Error() != "runtime attestation missing" {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	malformed := map[string]struct {
+		raw      map[string]any
+		declared string
+	}{
+		"refexec claiming a credential variable":    {mut(goodExecAttestation(), "credential_env", "DEMO_TOKEN"), "refexec"},
+		"refexec claiming a materialization":        {mut(goodExecAttestation(), "materialization", "env-at-spawn"), "refexec"},
+		"refexec answering a refbridge declaration": {goodExecAttestation(), "refbridge"},
+		"refbridge answering a refexec declaration": {goodAttestation(), "refexec"},
+		"refbridge without a credential variable":   {mut(goodAttestation(), "credential_env", ""), "refbridge"},
+		"unknown runtime declared and spoken":       {mut(goodExecAttestation(), "runtime", "refbox"), "refbox"},
+		"refexec zero pid":                          {mut(goodExecAttestation(), "pid", float64(0)), "refexec"},
+		"refexec empty command":                     {mut(goodExecAttestation(), "command", []any{}), "refexec"},
+	}
+	for name, tc := range malformed {
+		t.Run("malformed: "+name, func(t *testing.T) {
+			if _, err := decodeAttestation(tc.raw, tc.declared); err == nil || err.Error() != "runtime attestation malformed" {
+				t.Fatalf("err = %v, want runtime attestation malformed", err)
+			}
+		})
+	}
+}
+
+// mut returns m with one key replaced.
+func mut(m map[string]any, key string, value any) map[string]any {
+	m[key] = value
+	return m
+}
+
 // newAttestingUpstream serves one echo tool whose every result carries the
 // given _meta value (nil = none), as a refbridge would; it also records the
 // last result it returned so the test can hash what the tool itself said.

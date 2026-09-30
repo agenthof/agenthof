@@ -13,14 +13,12 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
+
+	"github.com/agenthof/agenthof/deploy/internal/refrunner"
 )
 
 func main() {
@@ -42,32 +40,17 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	ln, err := listenSocket(cfg.Socket)
+	ln, err := refrunner.Listen(cfg.Socket)
 	if err != nil {
 		logger.Error("listen failed", "error", err)
 		os.Exit(1)
 	}
 	b := newBridge(cfg, logger)
-	srv := &http.Server{Handler: b.handler()}
-
-	done := make(chan struct{})
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-stop
-		logger.Info("shutting down")
-		_ = srv.Close()
-		b.close()
-		_ = os.Remove(cfg.Socket)
-		close(done)
-	}()
-
 	logger.Info("refbridge listening", "socket", cfg.Socket, "command", cfg.Command[0],
 		"materialization", cfg.Materialization, "egress", cfg.egressLine(),
 		"max_sessions", cfg.MaxSessions, "idle_timeout", cfg.IdleTimeout, "max_lifetime", cfg.MaxLifetime)
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := refrunner.Serve(ln, b.handler(), logger, b.close); err != nil {
 		logger.Error("serve failed", "error", err)
 		os.Exit(1)
 	}
-	<-done
 }

@@ -149,22 +149,38 @@ An agent uses the doors it needs and ignores the rest. See
 
 ### `exec`
 
-Optional, and only on a `fronted` agent. Declares commands the agent may
-report running in the operator's sandbox. Agenthof checks the reported argv
-against `allow` and records the result. It does not run the command and does
-not contain it. The operator's sandbox is what confines execution.
+Optional, and only on a `fronted` agent. Declares the commands the agent may
+run in the operator's sandbox. Agenthof authorizes every command against
+`allow` and records the result; it never runs the command itself. With
+`mode: attested` the agent runs the command and reports it, and the operator's
+sandbox is what confines execution. With `mode: runtime` a trusted
+operator-side runtime (`refexec`) runs the command first-hand over a `unix://`
+socket and Agenthof records that first-hand account (`runtime_attestation`).
 
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
 | Mode | `mode` | string | yes when `exec` is set | — |
 | Allow | `allow` | list of objects | yes, non-empty, when `mode` is set | — |
+| Runtime | `runtime` | string | yes when `mode` is `runtime`; must be absent otherwise | — |
+| URL | `url` | string | yes when `mode` is `runtime`; must be absent otherwise | — |
+| Timeout | `timeout` | duration string | yes when `mode` is `runtime`; must be absent otherwise | — |
 
-`mode` accepts only `attested`. `enforced` (Agenthof running the command) is
-**not a planned capability** and is rejected at `apply` with `bad-exec-config`;
-the field keeps the two-value shape as a seam, but first-hand exec is at most a
-future commercial add-on, not core. Any other value,
-including an empty `mode` on a block that still lists `allow`, is rejected
-the same way.
+`mode` accepts `attested` (the agent runs the command in its sandbox and
+reports it — this section) and `runtime` (a trusted operator-side runtime
+runs it on the agent's behalf and attests it first-hand; its fields are
+described with it below). Both are core. Agenthof itself running the command
+is not a mode: any other value, including an empty `mode` on a block that
+still lists `allow`, is rejected at `apply` with `bad-exec-config`.
+
+With `mode: runtime`, `runtime` names the trusted operator-side runtime that
+runs the command — only `refexec` is implemented — `url` is that runtime's
+Unix socket as `unix://<absolute path>` (a trusted runtime is reached only
+over a local socket, as `runtime: refbridge` on a tool resource; never a
+path under `refbox_socket_dir`, which is mounted into agent compartments),
+and `timeout` is the per-command deadline Agenthof enforces on its call to
+the runtime: a duration string of at least `1s`, such as `5m`. Keep it below
+the step timeout, which otherwise fails the step first. All three are
+rejected with `mode: attested`.
 
 Each `allow` entry:
 
@@ -181,9 +197,12 @@ that `exe`. An argv shorter than the prefix does not match.
 `apply` rejects, all with `bad-exec-config`:
 
 - `exec` on an agent whose effective execution is not `fronted`;
-- `mode` set to anything other than `attested`;
+- `mode` set to anything other than `attested` or `runtime`;
 - `mode` set with an empty `allow`;
-- an `allow` entry whose `exe` is empty.
+- an `allow` entry whose `exe` is empty;
+- `runtime`, `url` or `timeout` set with `mode: attested`;
+- with `mode: runtime`: `runtime` other than `refexec`, a `url` that is not an
+  absolute `unix://` path, or a `timeout` below `1s` (or absent).
 
 Allowlisting an executable trusts that program's whole capability surface.
 `exe: go` with `args_prefix: [test]` still permits `go test` with whatever
@@ -518,7 +537,7 @@ loopback port, and the proxy URL stays `http://127.0.0.1:<port>/`. When set,
 each fronted step's gateway listens on a Unix domain socket in this directory
 instead, and the proxy URL is `unix://` plus that socket's path. The value
 after `unix://` is the socket path only; the HTTP routes stay fixed (`/`,
-`/exec/authorize`, `/exec/attest`, `/v1/chat/completions`). The run token
+`/exec/authorize`, `/exec/attest`, `/exec/run`, `/v1/chat/completions`). The run token
 still travels in the `Authorization` header. `apply` does not check that the
 directory exists. Keep the directory's path short: a Unix socket path has a
 small operating-system length limit, and a path that exceeds it fails the

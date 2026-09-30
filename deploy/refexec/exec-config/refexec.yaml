@@ -1,0 +1,20 @@
+# The reference refexec config. Every key is required; nothing is defaulted.
+# refexec is a HOST process: `socket` must live in a directory that is mode
+# 0700 and owned by the user refexec (and Agenthof) runs as — never under
+# Agenthof's refbox socket dir, which is mounted into agent compartments.
+# The demo path is a placeholder; the e2e rewrites it to a temp dir.
+socket: /run/agenthof-exec/refexec.sock
+# The image every compartment runs. Pull it yourself (refexec runs podman with
+# --pull=never, so a compartment never fetches anything).
+image: docker.io/library/busybox:1.36.1
+workspace:
+  volume: agenthof-work   # the podman volume shared with the agent's refbox compartment (REFBOX_WORKSPACE_VOLUME)
+  path: /work             # mounted rw here, the working directory of every command
+timeout: 2m               # podman --timeout backstop; set it to the agents' exec.timeout
+limits:
+  memory: 256m
+  cpus: "1"
+  pids: 64
+compartments:
+  max: 2                  # concurrent compartments; a request past the cap is refused, never queued
+env_allow: []             # the ONLY variable names passed to the command, copied from refexec's own environment

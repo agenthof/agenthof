@@ -412,3 +412,30 @@ func TestEventModelCallFieldsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestEventExecRuntimeRoundTrip(t *testing.T) {
+	zero := 0
+	e := Event{Type: "exec", Status: "succeeded", Command: []string{"cat", "/work/agent-note.txt"}, ExitCode: &zero,
+		OutputSHA: "abc", Mode: "runtime",
+		RuntimeAttestation: &RuntimeAttestation{Runtime: "refexec", Session: "refexec-0a1b", Command: []string{"cat", "/work/agent-note.txt"},
+			PID: 4242, Spawn: 1, EnvNames: []string{}}}
+	data, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"mode":"runtime"`,
+		`"runtime_attestation":{"runtime":"refexec","session":"refexec-0a1b","command":["cat","/work/agent-note.txt"],"pid":4242,"spawn":1,"credential_env":"","env_names":[],"materialization":""}`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing %s in %s", want, data)
+		}
+	}
+	var got Event
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Mode != "runtime" || got.RuntimeAttestation == nil || got.RuntimeAttestation.Runtime != "refexec" || got.RuntimeAttestation.CredentialEnv != "" {
+		t.Fatalf("round-trip lost fields: %+v", got)
+	}
+}

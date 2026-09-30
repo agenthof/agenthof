@@ -58,9 +58,11 @@ Pre-release, and the governed core is real and runnable today:
   stdio-only MCP server is reached the same way through the reference bridge in
   `deploy/refbridge`, which attests first-hand what it ran on every call, recorded
   when the resource declares `runtime: refbridge`; the
-  **exec** door is *attested* (the agent reports the allowlisted command it ran
-  and Agenthof records that report, without running it); and sub-agent calls carry
-  the caller's delegation binding;
+  **exec** door is *attested* (the agent reports the allowlisted command it ran)
+  or *first-hand* through the reference runtime in `deploy/refexec`, which runs
+  the allowlisted command in a no-network rootless-podman compartment and attests
+  what ran — Agenthof records either account and never runs the command itself;
+  and sub-agent calls carry the caller's delegation binding;
 - **isolated agents** — a reference sandbox runtime (`deploy/refbox`) runs an
   agent — a Go echo agent or a Python LangChain agent, both shipped as
   reference images — with **no network at all**, reaching Agenthof only over a

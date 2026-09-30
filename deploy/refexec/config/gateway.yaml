@@ -1,0 +1,13 @@
+# The per-run gateway listens on a Unix socket under this dir. It MUST equal
+# the refbox recipe's socket dir (deploy/refbox/refbox-run.sh, default
+# $XDG_RUNTIME_DIR/agenthof); the agent endpoint is unix:// plus that dir plus
+# the agent's socket file. The demo value is a placeholder: the e2e rewrites
+# every /run/agenthof path to a temp dir; an operator sets both to one path.
+refbox_socket_dir: /run/agenthof
+models:
+  fast:
+    endpoint: http://localhost:4000
+    model: fast
+    api_key_env: AGENTHOF_GATEWAY_KEY
+defaults:
+  model: fast

@@ -1,4 +1,4 @@
-package main
+package refrunner
 
 import (
 	"net"
@@ -8,9 +8,11 @@ import (
 	"testing"
 )
 
+// socketDir makes a short-pathed directory with the given mode. Short on
+// purpose: Unix socket paths have a small OS length limit.
 func socketDir(t *testing.T, mode os.FileMode) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "rbl") // short: Unix socket path length limit
+	dir, err := os.MkdirTemp("/tmp", "rrl")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,23 +23,23 @@ func socketDir(t *testing.T, mode os.FileMode) string {
 	return dir
 }
 
-func TestListenSocketRequires0700Dir(t *testing.T) {
+func TestListenRequires0700Dir(t *testing.T) {
 	dir := socketDir(t, 0o755)
-	_, err := listenSocket(filepath.Join(dir, "b.sock"))
+	_, err := Listen(filepath.Join(dir, "b.sock"))
 	if err == nil || !strings.Contains(err.Error(), "mode 0755, want 0700") {
 		t.Fatalf("err = %v, want a 0700 refusal naming the mode", err)
 	}
 }
 
-func TestListenSocketListensWith0600AndReplacesStale(t *testing.T) {
+func TestListenListensWith0600AndReplacesStale(t *testing.T) {
 	dir := socketDir(t, 0o700)
 	path := filepath.Join(dir, "b.sock")
 	if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil { // a leftover from a killed process
 		t.Fatal(err)
 	}
-	ln, err := listenSocket(path)
+	ln, err := Listen(path)
 	if err != nil {
-		t.Fatalf("listenSocket: %v", err)
+		t.Fatalf("Listen: %v", err)
 	}
 	defer func() { _ = ln.Close() }()
 	fi, err := os.Stat(path)

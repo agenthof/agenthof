@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
 )
@@ -137,9 +138,45 @@ func Validate(cfg config.Config) []ValidationError {
 			if effectiveExec != "fronted" {
 				add(a.SourceFile, a.Name, "bad-exec-config", "exec is only valid on fronted agents")
 			}
-			if a.Exec.Mode != "attested" {
+			switch a.Exec.Mode {
+			case "attested":
+				if a.Exec.Runtime != "" || a.Exec.URL != "" || a.Exec.Timeout != 0 {
+					add(a.SourceFile, a.Name, "bad-exec-config",
+						"exec.mode attested takes no runtime, url or timeout; those belong to mode: runtime")
+				}
+			case "runtime":
+				// A trusted runtime is reached only over a local socket (its
+				// directory permissions are what make it trusted), exactly as
+				// runtime: refbridge on a tool resource.
+				if a.Exec.Runtime != "refexec" {
+					add(a.SourceFile, a.Name, "bad-exec-config",
+						fmt.Sprintf("exec.runtime %q is not implemented (only refexec)", a.Exec.Runtime))
+				}
+				if !strings.HasPrefix(a.Exec.URL, config.UnixScheme) || !validSecureOrUnixEndpoint(a.Exec.URL) {
+					add(a.SourceFile, a.Name, "bad-exec-config",
+						"exec.url must be a unix:// socket path (absolute) when exec.mode is runtime")
+				}
+				if a.Exec.Timeout < time.Second {
+					add(a.SourceFile, a.Name, "bad-exec-config",
+						"exec.timeout is required with exec.mode runtime: a duration of at least 1s, such as 5m")
+				}
+				// The refexec socket must live outside gateway.refbox_socket_dir:
+				// that directory is bind-mounted into the agent's compartment, so a
+				// socket inside it would let the agent dial the runtime directly —
+				// un-allowlisted and un-recorded. Make it impossible, not merely
+				// forbidden in prose.
+				if cfg.Gateway.RefboxSocketDir != "" && strings.HasPrefix(a.Exec.URL, config.UnixScheme) {
+					sockDir := filepath.Clean(filepath.Dir(strings.TrimPrefix(a.Exec.URL, config.UnixScheme)))
+					refboxDir := filepath.Clean(cfg.Gateway.RefboxSocketDir)
+					if rel, err := filepath.Rel(refboxDir, sockDir); err == nil &&
+						rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+						add(a.SourceFile, a.Name, "bad-exec-config",
+							"exec.url must not be inside gateway.refbox_socket_dir: that directory is mounted into the agent's compartment, so the agent could reach the runtime directly")
+					}
+				}
+			default:
 				add(a.SourceFile, a.Name, "bad-exec-config",
-					fmt.Sprintf("exec.mode %q is not implemented (only attested)", a.Exec.Mode))
+					fmt.Sprintf("exec.mode %q is not implemented (attested or runtime)", a.Exec.Mode))
 			}
 			if len(a.Exec.Allow) == 0 {
 				add(a.SourceFile, a.Name, "bad-exec-config", "exec.mode is set but exec.allow is empty")

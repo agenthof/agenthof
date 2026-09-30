@@ -1,0 +1,5 @@
+name: refbox-exec
+description: One step through the reference agent in a refbox compartment; its command runs first-hand in a refexec compartment
+steps:
+  - name: run
+    agent: refbox-exec

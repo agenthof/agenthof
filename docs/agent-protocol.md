@@ -123,6 +123,17 @@ allow: [...]}`) calls `POST <proxy-url>/exec/authorize` with `{"command": [argv]
 containment of what actually runs is the operator's sandbox's job. See
 [`docs/lifecycle-exec.md`](lifecycle-exec.md).
 
+### Exec door — first-hand
+
+An agent whose config declares `exec: {mode: runtime, runtime: refexec, url: unix://…,
+timeout: …, allow: [...]}` does not run the command: it calls `POST
+<proxy-url>/exec/run` with `{"command": [argv]}` and gets `200 {"exit": <int>, "output":
+"<string>", "truncated": <bool>}` once the operator's runtime has run it in a no-network
+compartment on the shared workspace — or `403` (off the allowlist, recorded) or `502`
+(the runtime call failed, recorded). On such an agent `/exec/authorize` and `/exec/attest`
+answer `403` and are recorded as refusals. See
+[`docs/lifecycle-exec.md`](lifecycle-exec.md#the-first-hand-door).
+
 ## Configuring your agent
 
 Point an agent's `endpoint` at where your service listens (see

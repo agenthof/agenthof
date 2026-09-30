@@ -3,6 +3,7 @@ package registry
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
 )
@@ -509,24 +510,59 @@ func TestValidateExecConfig(t *testing.T) {
 		mut(&a)
 		return config.Config{Agents: []config.AgentDef{a}}
 	}
+	firstHand := func(a *config.AgentDef) {
+		a.Exec.Mode, a.Exec.Runtime = "runtime", "refexec"
+		a.Exec.URL, a.Exec.Timeout = "unix:///run/agenthof-exec/refexec.sock", 5*time.Minute
+	}
 	cases := []struct {
 		name string
 		mut  func(*config.AgentDef)
 		bad  bool
 	}{
 		{"valid", func(*config.AgentDef) {}, false},
-		{"enforced reserved", func(a *config.AgentDef) { a.Exec.Mode = "enforced" }, true},
+		{"enforced is not a mode", func(a *config.AgentDef) { a.Exec.Mode = "enforced" }, true},
 		{"empty mode", func(a *config.AgentDef) { a.Exec.Mode = "" }, true},
 		{"empty allow", func(a *config.AgentDef) { a.Exec.Allow = nil }, true},
 		{"empty exe", func(a *config.AgentDef) { a.Exec.Allow = []config.ExecEntry{{Exe: ""}} }, true},
 		{"exec on contained", func(a *config.AgentDef) { a.Execution = "contained"; a.Endpoint = "" }, true},
+		{"runtime valid", firstHand, false},
+		{"runtime without runtime name", func(a *config.AgentDef) { firstHand(a); a.Exec.Runtime = "" }, true},
+		{"runtime not refexec", func(a *config.AgentDef) { firstHand(a); a.Exec.Runtime = "refbox" }, true},
+		{"runtime without url", func(a *config.AgentDef) { firstHand(a); a.Exec.URL = "" }, true},
+		{"runtime relative unix url", func(a *config.AgentDef) { firstHand(a); a.Exec.URL = "unix://run/refexec.sock" }, true},
+		{"runtime https url", func(a *config.AgentDef) { firstHand(a); a.Exec.URL = "https://exec.example/run" }, true},
+		{"runtime loopback http url", func(a *config.AgentDef) { firstHand(a); a.Exec.URL = "http://127.0.0.1:9/run" }, true},
+		{"runtime without timeout", func(a *config.AgentDef) { firstHand(a); a.Exec.Timeout = 0 }, true},
+		{"runtime timeout below 1s", func(a *config.AgentDef) { firstHand(a); a.Exec.Timeout = 500 * time.Millisecond }, true},
+		{"runtime with empty allow", func(a *config.AgentDef) { firstHand(a); a.Exec.Allow = nil }, true},
+		{"attested with runtime", func(a *config.AgentDef) { a.Exec.Runtime = "refexec" }, true},
+		{"attested with url", func(a *config.AgentDef) { a.Exec.URL = "unix:///run/agenthof-exec/refexec.sock" }, true},
+		{"attested with timeout", func(a *config.AgentDef) { a.Exec.Timeout = time.Minute }, true},
+		{"runtime fields with no mode", func(a *config.AgentDef) { firstHand(a); a.Exec.Mode = "" }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := hasCode(Validate(agent(tc.mut)), "bad-exec-config"); got != tc.bad {
-				t.Fatalf("bad-exec-config = %v, want %v", got, tc.bad)
+				t.Fatalf("bad-exec-config = %v, want %v: %v", got, tc.bad, Validate(agent(tc.mut)))
 			}
 		})
+	}
+}
+
+func TestValidateExecURLInsideRefboxSocketDir(t *testing.T) {
+	build := func(url string) config.Config {
+		a := config.AgentDef{Name: "a", Execution: "fronted", Endpoint: "https://a.internal/run",
+			Exec: config.ExecConfig{Mode: "runtime", Runtime: "refexec", URL: url, Timeout: 5 * time.Minute,
+				Allow: []config.ExecEntry{{Exe: "go", ArgsPrefix: []string{"test"}}}}}
+		return config.Config{Gateway: config.GatewayConfig{RefboxSocketDir: "/run/agenthof"}, Agents: []config.AgentDef{a}}
+	}
+	// Inside the refbox socket dir (mounted into the agent's compartment) → rejected.
+	if !hasCode(Validate(build("unix:///run/agenthof/refexec.sock")), "bad-exec-config") {
+		t.Fatal("a refexec socket inside refbox_socket_dir must be rejected")
+	}
+	// A sibling directory is fine.
+	if errs := Validate(build("unix:///run/agenthof-exec/refexec.sock")); hasCode(errs, "bad-exec-config") {
+		t.Fatalf("a refexec socket outside refbox_socket_dir must be accepted: %v", errs)
 	}
 }
 

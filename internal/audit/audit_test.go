@@ -320,3 +320,24 @@ func TestRenderToolCallRuntimeAttested(t *testing.T) {
 		t.Fatalf("failed tool_call not rendered with its attestation:\n%s", out)
 	}
 }
+
+func TestRenderExecRuntimeAttested(t *testing.T) {
+	att := &engine.RuntimeAttestation{Runtime: "refexec", Session: "refexec-0a1b", Command: []string{"cat", "/work/agent-note.txt"}, PID: 4242, Spawn: 1, EnvNames: []string{}}
+	zero, one := 0, 1
+	events := []engine.Event{
+		{Type: "exec", Status: "succeeded", Command: []string{"cat", "/work/agent-note.txt"}, ExitCode: &zero, Mode: "runtime", RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()},
+		{Type: "exec", Status: "failed", Command: []string{"cat", "/work/agent-note.txt"}, ExitCode: &one, Mode: "runtime", RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()},
+		{Type: "exec", Status: "failed", Command: []string{"cat", "/work/agent-note.txt"}, Reason: "exec runtime unreachable", Mode: "runtime", Time: time.Unix(0, 0).UTC()},
+	}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	want := "[runtime-attested: refexec cat /work/agent-note.txt pid 4242 spawn 1]"
+	for _, line := range []string{
+		"exec cat /work/agent-note.txt — exit 0 (runtime) " + want,
+		"exec cat /work/agent-note.txt — exit 1 (runtime) " + want,
+		"exec cat /work/agent-note.txt failed — exec runtime unreachable",
+	} {
+		if !strings.Contains(out, line) {
+			t.Fatalf("missing %q in:\n%s", line, out)
+		}
+	}
+}

@@ -49,6 +49,12 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if cmd, ok := strings.CutPrefix(req.Input, "exec-run:"); ok {
+		if err := stubCallExecRun(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), cmd); err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "exec door: " + err.Error()})
+			return
+		}
+	}
 	if model, ok := strings.CutPrefix(req.Input, "model:"); ok {
 		if err := stubCallModel(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), model); err != nil {
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "model door: " + err.Error()})
@@ -157,6 +163,43 @@ func stubCallExec(proxyURL, token, cmd string) error {
 	defer func() { _ = attestResp.Body.Close() }()
 	if attestResp.StatusCode/100 != 2 {
 		return fmt.Errorf("/exec/attest returned %d", attestResp.StatusCode)
+	}
+	return nil
+}
+
+// stubCallExecRun drives the first-hand exec door: one POST /exec/run. A 200
+// with exit 0 means the declared runtime ran the command and Agenthof
+// recorded its account; anything else fails the step.
+func stubCallExecRun(proxyURL, token, cmd string) error {
+	if proxyURL == "" {
+		return fmt.Errorf("no proxy url")
+	}
+	b, err := json.Marshal(map[string]any{"command": strings.Fields(cmd)})
+	if err != nil {
+		return err
+	}
+	rq, err := http.NewRequest(http.MethodPost, strings.TrimRight(proxyURL, "/")+"/exec/run", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	rq.Header.Set("Content-Type", "application/json")
+	rq.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(rq)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("/exec/run returned %d", resp.StatusCode)
+	}
+	var out struct {
+		Exit int `json:"exit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("/exec/run decode: %w", err)
+	}
+	if out.Exit != 0 {
+		return fmt.Errorf("/exec/run exited %d", out.Exit)
 	}
 	return nil
 }

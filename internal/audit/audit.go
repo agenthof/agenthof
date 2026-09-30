@@ -89,14 +89,21 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 		case "run_refused":
 			fmt.Fprintf(&sb, "  %s  run refused — %s\n", t, e.Reason)
 		case "exec":
-			if e.Status == "refused" {
-				fmt.Fprintf(&sb, "  %s  exec %s refused — %s\n", t, strings.Join(e.Command, " "), e.Reason)
-			} else {
+			cmd := strings.Join(e.Command, " ")
+			switch {
+			case e.Status == "refused":
+				fmt.Fprintf(&sb, "  %s  exec %s refused — %s\n", t, cmd, e.Reason)
+			case e.Status == "failed" && e.Reason != "":
+				// The door itself failed — the runtime was unreachable or its
+				// answer was rejected — so there is no exit code and no
+				// first-hand attestation to record, only why.
+				fmt.Fprintf(&sb, "  %s  exec %s failed — %s\n", t, cmd, e.Reason)
+			default:
 				exit := "?"
 				if e.ExitCode != nil {
 					exit = strconv.Itoa(*e.ExitCode)
 				}
-				fmt.Fprintf(&sb, "  %s  exec %s — exit %s (%s)\n", t, strings.Join(e.Command, " "), exit, e.Mode)
+				fmt.Fprintf(&sb, "  %s  exec %s — exit %s (%s)%s\n", t, cmd, exit, e.Mode, runtimeAttested(e))
 			}
 		case "model_call":
 			switch e.Status {
@@ -136,10 +143,10 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 	return sb.String()
 }
 
-// runtimeAttested renders a tool_call's trusted-runtime attestation, if any:
-// the party that ran the tool, its argv, the child that answered, and the
-// child's generation within the session. Rendered on succeeded and failed
-// lines alike — an error result is still a call the child answered. It is
+// runtimeAttested renders a trusted runtime's attestation on a tool_call or
+// an exec line, if any: the party that ran it, its argv, the process it
+// held, and that process's generation. Rendered on succeeded and failed
+// lines alike — a non-zero exit is still a command the runtime ran. It is
 // the runtime's first-hand word, distinct from an exec event's "attested",
 // which is the agent's.
 func runtimeAttested(e engine.Event) string {
