@@ -25,6 +25,7 @@ import (
 // runtime's, the OS's or the agent's text into an event.
 const (
 	reasonExecNotAllowlisted       = "command is not on the exec allowlist"
+	reasonExecCommandUnrecordable  = "command exceeds the ledger's argv bounds"
 	reasonExecRunNotDeclared       = "first-hand exec is not declared for this agent"
 	reasonExecFirstHandOnly        = "exec on this agent is first-hand: authorize and attest are not available"
 	reasonExecSocketDir            = "exec runtime socket directory is not a private (0700) directory owned by this user"
@@ -199,6 +200,15 @@ func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, app
 		}
 		if !agent.Exec.Allows(argv) {
 			refuse(reasonExecNotAllowlisted)
+			return
+		}
+		// A command the ledger cannot carry must be refused BEFORE it runs:
+		// otherwise the attestation validation below would reject the
+		// (truthful) attestation of a command that already ran, recording a
+		// false first-hand failure of a completed action and blaming the
+		// runtime for a gateway bound. Same bounds validAttestation enforces.
+		if !argvRecordable(argv) {
+			refuse(reasonExecCommandUnrecordable)
 			return
 		}
 		sockPath := strings.TrimPrefix(agent.Exec.URL, config.UnixScheme)

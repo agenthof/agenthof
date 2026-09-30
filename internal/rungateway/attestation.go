@@ -138,6 +138,22 @@ func validAttestation(a *engine.RuntimeAttestation, declared string) bool {
 	return false
 }
 
+// argvRecordable reports whether argv fits the ledger's argv bounds — exactly
+// the bounds validAttestation enforces on an attested Command. The exec door
+// checks this before it runs a command, so a command the ledger cannot carry
+// is refused up front rather than run first and then rejected after the fact.
+func argvRecordable(argv []string) bool {
+	if len(argv) == 0 || len(argv) > maxAttestedArgv {
+		return false
+	}
+	for _, a := range argv {
+		if len([]rune(a)) > maxAttestedRunes || hasControl(a) {
+			return false
+		}
+	}
+	return true
+}
+
 // hasControl reports whether s holds a control character: a newline or
 // escape in an attested string would forge structure in whatever renders it.
 func hasControl(s string) bool {

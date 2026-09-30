@@ -191,6 +191,26 @@ func TestExecRunOffAllowlistIsRefusedNotDialed(t *testing.T) {
 	}
 }
 
+func TestExecRunUnrecordableCommandIsRefusedNotDialed(t *testing.T) {
+	stub := newRefexecStub(t, echoRefexec)
+	rec := &eventRecorder{}
+	base, token, _ := startAgentProxy(t, firstHandAgent(stub.url, 5*time.Second, config.ExecEntry{Exe: "cat"}), rec)
+	// Allowlisted (cat), but an argument past the ledger's 200-rune bound: the
+	// command must be refused BEFORE it runs, so the ledger never carries a
+	// false failure of a completed action.
+	code, _ := execPost(t, base, "exec/run", token, `{"command":["cat","`+strings.Repeat("x", 201)+`"]}`)
+	if code != 403 {
+		t.Fatalf("code=%d, want 403", code)
+	}
+	e := onlyExec(t, rec)
+	if e.Status != "refused" || e.Reason != reasonExecCommandUnrecordable || e.RuntimeAttestation != nil {
+		t.Fatalf("event = %+v", e)
+	}
+	if stub.calls.Load() != 0 {
+		t.Fatal("refexec must not be asked to run a command the ledger cannot carry")
+	}
+}
+
 func TestExecRunRefusedWhenNotDeclared(t *testing.T) {
 	rec := &eventRecorder{}
 	attested := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
