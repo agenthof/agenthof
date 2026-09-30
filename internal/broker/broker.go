@@ -6,28 +6,43 @@ package broker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 )
 
 // CredentialRef describes which credential to resolve and how, along three
 // orthogonal axes (grant type × client-auth method × credential source) plus
-// the (resource, issuer) key. It is internal (never published config or
-// ledger), so its shape may change freely as new grants land. Only the
-// direct-bearer path (Grant == "") and client_credentials are implemented.
+// the cache key. It is internal (never published config or ledger), so its
+// shape may change freely as new grants land. Three grants are implemented:
+// the direct-bearer path (Grant == ""), client_credentials, and
+// token_exchange (on behalf of the invoker).
 type CredentialRef struct {
-	ResourceID string // (resource, issuer) cache-key component; never a secret
+	ResourceID string // cache-key component; never a secret
 	Source     string // credential source: "static_env" (the only source today)
-	Grant      string // "" = env value IS the bearer; "client_credentials" = mint
-	ClientAuth string // client_credentials: "client_secret_basic" (only method today)
-	Issuer     string // AS identity; (resource, issuer) cache-key component
-	TokenURL   string // client_credentials: token endpoint
-	Scope      string // client_credentials: optional, space-delimited
+	Grant      string // "" = env value IS the bearer; "client_credentials" = mint; "token_exchange" = exchange the invoker's token
+	ClientAuth string // client_credentials / token_exchange: "client_secret_basic" (only method today)
+	Issuer     string // client_credentials: AS identity; (resource, issuer) cache-key component
+	TokenURL   string // client_credentials / token_exchange: token endpoint
+	Scope      string // client_credentials / token_exchange: optional, space-delimited
+	Audience   string // token_exchange: the audience the exchanged token is for (RFC 8693 audience)
 
 	// Environment-variable NAMES (never values); only names may appear in errors.
 	TokenEnv        string // direct-bearer secret (Grant == "")
-	ClientIDEnv     string // client_credentials
-	ClientSecretEnv string // client_credentials
+	ClientIDEnv     string // client_credentials / token_exchange
+	ClientSecretEnv string // client_credentials / token_exchange
+
+	// SubjectToken is the invoker's verified inbound token — the RFC 8693
+	// subject token. It is a VALUE, not a name: the gateway sets it only on
+	// a token_exchange ref, and LogValue below keeps it out of any log line.
+	SubjectToken string
 }
+
+// LogValue makes a CredentialRef render as "REDACTED" when it is passed to
+// a slog.Logger as an attribute value, so a ref can never put its
+// SubjectToken in an operational log line — the pattern gateway.Route uses
+// for its APIKey. Defense in depth: it fires for slog attribute values, not
+// for fmt verbs; the no-leak tests in rungateway are the guarantee.
+func (CredentialRef) LogValue() slog.Value { return slog.StringValue("REDACTED") }
 
 // Broker resolves a credential value for a resource at call time. The returned
 // string is a secret: callers inject it into an outbound transport and never

@@ -206,3 +206,22 @@ func TestClientCredentialsRejectsNonBearerTokenType(t *testing.T) {
 		t.Fatalf("error should name the unexpected token_type and resource: %q", msg)
 	}
 }
+
+func TestCacheRefreshAt(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	cases := []struct {
+		expiresIn int
+		want      time.Time
+	}{
+		{0, time.Time{}},  // no usable lifetime: never cache
+		{-5, time.Time{}}, // nonsense lifetime: never cache
+		{3600, now.Add(3600*time.Second - 30*time.Second)}, // margin capped at 30s
+		{60, now.Add(60*time.Second - 6*time.Second)},      // 10% of lifetime < 30s
+		{10, now.Add(10*time.Second - 1*time.Second)},
+	}
+	for _, c := range cases {
+		if got := cacheRefreshAt(now, c.expiresIn); !got.Equal(c.want) {
+			t.Errorf("cacheRefreshAt(%d) = %v, want %v", c.expiresIn, got, c.want)
+		}
+	}
+}

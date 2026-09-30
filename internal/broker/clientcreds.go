@@ -43,6 +43,22 @@ type cachedToken struct {
 	refreshAt time.Time
 }
 
+// cacheRefreshAt is when a token obtained at now with the given expires_in
+// must be replaced: now + lifetime - margin, margin = min(refreshMargin, 10%
+// of lifetime). Zero means the token has no usable lifetime and must not be
+// cached. Shared by every caching broker so their refresh rules cannot drift.
+func cacheRefreshAt(now time.Time, expiresIn int) time.Time {
+	if expiresIn <= 0 {
+		return time.Time{}
+	}
+	lifetime := time.Duration(expiresIn) * time.Second
+	margin := refreshMargin
+	if m := lifetime / 10; m < margin {
+		margin = m
+	}
+	return now.Add(lifetime - margin)
+}
+
 var _ Broker = (*ClientCredentials)(nil)
 
 // NewClientCredentials builds the broker over client (nil → http.DefaultClient).
@@ -82,13 +98,8 @@ func (c *ClientCredentials) Resolve(ctx context.Context, ref CredentialRef) (str
 	if err != nil {
 		return "", err
 	}
-	if expiresIn > 0 {
-		lifetime := time.Duration(expiresIn) * time.Second
-		margin := refreshMargin
-		if m := lifetime / 10; m < margin {
-			margin = m
-		}
-		c.cache[key] = cachedToken{token: tok, refreshAt: c.now().Add(lifetime - margin)}
+	if at := cacheRefreshAt(c.now(), expiresIn); !at.IsZero() {
+		c.cache[key] = cachedToken{token: tok, refreshAt: at}
 	} else {
 		// No usable lifetime: do not cache; mint on every resolve.
 		delete(c.cache, key)

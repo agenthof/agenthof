@@ -1,7 +1,9 @@
 package broker
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -82,5 +84,25 @@ func TestDispatchRoutesOnGrant(t *testing.T) {
 
 	if _, err := d.Resolve(context.Background(), CredentialRef{Grant: "token_exchange"}); err == nil {
 		t.Fatal("unknown grant should error")
+	}
+}
+
+// TestCredentialRefLogValueRedacts: a CredentialRef carries a subject-token
+// VALUE (unlike every other field, which is a name), so it must render as
+// REDACTED whenever it is passed to slog as an attribute value — as a bare
+// value and via slog.Any.
+func TestCredentialRefLogValueRedacts(t *testing.T) {
+	const subject = "zq9subjecttokenAAAA1111"
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	ref := CredentialRef{ResourceID: "github", Grant: "token_exchange", Audience: "https://up.example", SubjectToken: subject}
+	logger.Debug("resolving", "ref", ref)
+	logger.Debug("resolving", slog.Any("ref", ref))
+	out := buf.String()
+	if strings.Contains(out, subject) {
+		t.Fatalf("subject token reached the log: %s", out)
+	}
+	if strings.Count(out, "REDACTED") != 2 {
+		t.Fatalf("expected both log lines to render the ref as REDACTED:\n%s", out)
 	}
 }
