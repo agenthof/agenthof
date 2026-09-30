@@ -229,7 +229,7 @@ func TestProxyRoundTripNoPassthrough(t *testing.T) {
 
 	bind := testBinding()
 	agent := testAgentDef("github")
-	url, runToken, err := p.Start(bind, agent, appendEvent)
+	url, runToken, err := p.Start(context.Background(), bind, agent, appendEvent)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestProxyRejectsBadRunToken(t *testing.T) {
 	}
 	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 
-	url, _, err := p.Start(testBinding(), testAgentDef("github"), func(engine.Event) {})
+	url, _, err := p.Start(context.Background(), testBinding(), testAgentDef("github"), func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestProxyStopWaitsForInFlightForward(t *testing.T) {
 
 	bind := testBinding()
 	agent := testAgentDef("github")
-	if _, _, err := p.Start(bind, agent, appendEvent); err != nil {
+	if _, _, err := p.Start(context.Background(), bind, agent, appendEvent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -626,7 +626,7 @@ func TestProxyClientCredentialsMintsSeparateUpstreamToken(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", b, nil, "")
 
 	var events []engine.Event
-	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) {
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), testAgentDef("up"), func(e engine.Event) {
 		events = append(events, e)
 	})
 	if err != nil {
@@ -678,7 +678,7 @@ func TestProxyDirectBearerRegression(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
-	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) {
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), testAgentDef("up"), func(e engine.Event) {
 		events = append(events, e)
 	})
 	if err != nil {
@@ -724,7 +724,7 @@ func TestProxyForwardRecordsToolAndArgsSHA(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
-	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -775,7 +775,7 @@ func TestProxyDeniedToolRecordsRefusedEvent(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
-	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -831,7 +831,7 @@ func TestProxyExposedToolEmitsExactlyOneEvent(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
-	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -927,7 +927,7 @@ func TestProxyStartMirrorsOnlyAllowlistedTools(t *testing.T) {
 	var events []engine.Event
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
 		Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"echo"}}}}
-	proxyURL, runToken, err := p.Start(testBinding(), agent, func(e engine.Event) {
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), agent, func(e engine.Event) {
 		mu.Lock()
 		events = append(events, e)
 		mu.Unlock()
@@ -981,7 +981,7 @@ func TestProxyStartFailsWhenAllowlistedToolIsNotExposed(t *testing.T) {
 
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
 		Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"echo", "list_issue", "get_issue"}}}}
-	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	_, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	want := `resource "up" does not expose allowlisted tool "list_issue"`
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("Start error = %v, want it to contain %q", err, want)
@@ -1006,14 +1006,14 @@ func TestProxyStartAllowlistResolvesCollision(t *testing.T) {
 	// Without the filter this exact grant list fails Start with the
 	// collision error, so first prove the collision guard still fires for
 	// two mode: all grants.
-	if _, _, err := p.Start(testBinding(), testAgentDef("a", "b"), func(engine.Event) {}); err == nil || !strings.Contains(err.Error(), `tool "other" is exposed by both resource "a" and "b"`) {
+	if _, _, err := p.Start(context.Background(), testBinding(), testAgentDef("a", "b"), func(engine.Event) {}); err == nil || !strings.Contains(err.Error(), `tool "other" is exposed by both resource "a" and "b"`) {
 		t.Fatalf("two mode: all grants exposing the same name must still collide, got %v", err)
 	}
 	p.Stop()
 
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
 		Tools: []config.ToolGrant{{Resource: "a", Tools: []string{"echo"}}, {Resource: "b", Mode: "all"}}}
-	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start with the collision allowlisted away: %v", err)
 	}
@@ -1047,7 +1047,7 @@ func TestProxyStartRejectsRestrictedDuplicateGrant(t *testing.T) {
 	}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
 		Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}, {Resource: "up", Tools: []string{"echo"}}}}
-	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	_, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), `resource "up" is granted more than once`) {
 		t.Fatalf("Start error = %v, want the restricted-duplicate rejection", err)
 	}
@@ -1069,7 +1069,7 @@ func TestProxyStartRejectsGrantWithoutScope(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x", Tools: grants}
-			_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+			_, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 			if err == nil || !strings.Contains(err.Error(), `resource "up" grant names no tools and sets no mode; list tools or set mode: all`) {
 				t.Fatalf("Start error = %v, want the no-scope rejection naming both remedies", err)
 			}
@@ -1094,7 +1094,7 @@ func TestProxyStartAcceptsDuplicateModeAllGrant(t *testing.T) {
 
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
 		Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}, {Resource: "up", Mode: "all"}}}
-	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start with two mode: all grants of one resource: %v", err)
 	}
@@ -1136,7 +1136,7 @@ func TestProxyStartReadOnlyMirrorsClassifiedTools(t *testing.T) {
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
-	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1160,7 +1160,7 @@ func TestProxyStartModeAllMirrorsEveryTool(t *testing.T) {
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}}}
-	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1187,7 +1187,7 @@ func TestProxyStartReadOnlySkipsAbsentAndWarns(t *testing.T) {
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo", "gone"}}
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, logger, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
-	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1215,7 +1215,7 @@ func TestProxyStartReadOnlyEmptyIntersectionFails(t *testing.T) {
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
-	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	_, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	// Stop unconditionally: a regression that lets Start succeed here leaves
 	// an upstream session open, which would block the stub server's cleanup
 	// instead of reporting the failure.
@@ -1233,7 +1233,7 @@ func TestProxyStartRejectsMutatingToolUnderReadOnly(t *testing.T) {
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}},
 	}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"other"}, Mode: "read-only"}}}
-	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	_, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), "not classified read-only") {
 		t.Fatalf("Start error = %v, want classification rejection", err)
 	}
@@ -1248,7 +1248,7 @@ func TestProxyStartReadOnlyNarrowedMirrorsSubset(t *testing.T) {
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo", "other"}}
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"echo"}, Mode: "read-only"}}}
-	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1275,7 +1275,7 @@ func TestProxyStartRejectsNamedReadOnlyDuplicateGrant(t *testing.T) {
 		{Resource: "up", Tools: []string{"echo"}},
 		{Resource: "up", Mode: "read-only"},
 	}}
-	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	_, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), "granted more than once") {
 		t.Fatalf("Start error = %v, want duplicate-grant rejection", err)
 	}
@@ -1289,7 +1289,7 @@ func TestProxyStartRejectsModeAllWithTools(t *testing.T) {
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
 	}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "all", Tools: []string{"echo"}}}}
-	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	_, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), "mode all") {
 		t.Fatalf("Start error = %v, want mode-all contradiction", err)
 	}
@@ -1303,7 +1303,7 @@ func TestProxyStartRejectsReadOnlyDuplicateGrant(t *testing.T) {
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}},
 	}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}, {Resource: "up", Mode: "read-only"}}}
-	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
+	_, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), `resource "up" is granted more than once`) {
 		t.Fatalf("Start error = %v, want duplicate rejection", err)
 	}
@@ -1331,7 +1331,7 @@ func TestProxyStartReadOnlyHintWarnsOnlyWhenAnnotated(t *testing.T) {
 			res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
 			p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, logger, "")
 			agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
-			proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
+			proxyURL, runToken, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1405,7 +1405,7 @@ func startExecProxy(t *testing.T, allow []config.ExecEntry, record func(engine.E
 	agent := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
 		Exec: config.ExecConfig{Mode: "attested", Allow: allow}}
 	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
-	url, token, err := p.Start(testBinding(), agent, record)
+	url, token, err := p.Start(context.Background(), testBinding(), agent, record)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1510,7 +1510,7 @@ func TestExecAndToolCallRecordInCallOrder(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var ev []engine.Event
-	base, token, err := p.Start(testBinding(), agent, func(e engine.Event) {
+	base, token, err := p.Start(context.Background(), testBinding(), agent, func(e engine.Event) {
 		mu.Lock()
 		ev = append(ev, e)
 		mu.Unlock()
@@ -1560,7 +1560,7 @@ func TestExecStopWaitsForInFlightAttest(t *testing.T) {
 	agent := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
 		Exec: config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "go"}}}}
 	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
-	base, token, err := p.Start(testBinding(), agent, appendEvent)
+	base, token, err := p.Start(context.Background(), testBinding(), agent, appendEvent)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1681,7 +1681,7 @@ func startModelGateway(t *testing.T, up *modelUpstream, agent config.AgentDef, k
 	p := New(gw, keyRoot, broker.StaticEnv{}, nil, "")
 	var mu sync.Mutex
 	var events []engine.Event
-	base, token, err := p.Start(testBinding(), agent, func(e engine.Event) {
+	base, token, err := p.Start(context.Background(), testBinding(), agent, func(e engine.Event) {
 		mu.Lock()
 		events = append(events, e)
 		mu.Unlock()
@@ -1914,7 +1914,7 @@ func TestModelProxyUpstreamUnreachableRecordsFailedEvent(t *testing.T) {
 
 	var mu sync.Mutex
 	var events []engine.Event
-	base, token, err := p.Start(testBinding(), agent, func(e engine.Event) {
+	base, token, err := p.Start(context.Background(), testBinding(), agent, func(e engine.Event) {
 		mu.Lock()
 		events = append(events, e)
 		mu.Unlock()
@@ -2017,7 +2017,7 @@ func TestModelProxyStopWaitsForInFlightAppend(t *testing.T) {
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	base, token, err := p.Start(testBinding(), agent, func(engine.Event) {
+	base, token, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {
 		select {
 		case <-entered:
 		default:
@@ -2118,7 +2118,7 @@ func TestProxyRoundTripOverUnixSocket(t *testing.T) {
 		defer mu.Unlock()
 		events = append(events, e)
 	}
-	url, runToken, err := p.Start(testBinding(), testAgentDef("bridge"), appendEvent)
+	url, runToken, err := p.Start(context.Background(), testBinding(), testAgentDef("bridge"), appendEvent)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -2197,7 +2197,7 @@ func TestUnixUpstreamReleasesConnectionsAcrossSteps(t *testing.T) {
 
 	const steps = 10
 	for i := 0; i < steps; i++ {
-		url, runToken, err := p.Start(testBinding(), testAgentDef("bridge"), func(engine.Event) {})
+		url, runToken, err := p.Start(context.Background(), testBinding(), testAgentDef("bridge"), func(engine.Event) {})
 		if err != nil {
 			t.Fatalf("step %d Start: %v", i, err)
 		}
@@ -2298,7 +2298,7 @@ func TestProxySubjectTokenOnlyOnTokenExchangeRefs(t *testing.T) {
 	}
 	rb := &refRecordingBroker{token: "any"}
 	p := New(config.GatewayConfig{Tools: tools}, "", rb, nil, subject)
-	_, _, err := p.Start(testBinding(), testAgentDef("plain", "obo"), func(engine.Event) {})
+	_, _, err := p.Start(context.Background(), testBinding(), testAgentDef("plain", "obo"), func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -2365,7 +2365,7 @@ func TestProxyTokenExchangeInjectsExchangedToken(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", b, logger, subjectToken)
 
 	var events []engine.Event
-	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) {
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), testAgentDef("up"), func(e engine.Event) {
 		events = append(events, e)
 	})
 	if err != nil {
@@ -2445,7 +2445,7 @@ func TestProxyTokenExchangeStartFailureNoLeak(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", b, logger, subjectToken)
 
-	_, _, err := p.Start(testBinding(), testAgentDef("up"), func(engine.Event) {})
+	_, _, err := p.Start(context.Background(), testBinding(), testAgentDef("up"), func(engine.Event) {})
 	if err == nil {
 		p.Stop()
 		t.Fatal("Start must fail when the exchange is rejected")

@@ -21,7 +21,7 @@ type spyProxy struct {
 	gotAgent string
 }
 
-func (s *spyProxy) Start(_ Binding, agent config.AgentDef, _ func(Event)) (string, string, error) {
+func (s *spyProxy) Start(_ context.Context, _ Binding, agent config.AgentDef, _ func(Event)) (string, string, error) {
 	s.started++
 	s.gotAgent = agent.Name
 	return "http://127.0.0.1:12345/mcp", "tok-abc", nil
@@ -31,7 +31,7 @@ func (s *spyProxy) Stop() { s.stopped++ }
 // failProxy fails Start, so Run must fail the step without ever calling Stop.
 type failProxy struct{ stopped int }
 
-func (f *failProxy) Start(_ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
+func (f *failProxy) Start(_ context.Context, _ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
 	return "", "", errors.New("upstream unreachable")
 }
 func (f *failProxy) Stop() { f.stopped++ }
@@ -42,7 +42,7 @@ func (f *failProxy) Stop() { f.stopped++ }
 // echoes it.
 type urlLeakProxy struct{}
 
-func (urlLeakProxy) Start(_ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
+func (urlLeakProxy) Start(_ context.Context, _ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
 	return "", "", fmt.Errorf("connect upstream %q: %w", "github",
 		&url.Error{Op: "Get", URL: "https://mcp/x?key=SUPERSECRET", Err: errors.New("connection refused")})
 }

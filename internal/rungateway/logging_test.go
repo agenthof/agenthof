@@ -2,6 +2,7 @@ package rungateway
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"net"
 	"strings"
@@ -17,7 +18,7 @@ import (
 
 func TestNewNilLoggerDoesNotPanic(t *testing.T) {
 	gw := New(config.GatewayConfig{}, ".", broker.StaticEnv{}, nil, "")
-	url, _, err := gw.Start(engine.Binding{RunID: "r-nil"}, config.AgentDef{Name: "a"}, func(engine.Event) {})
+	url, _, err := gw.Start(context.Background(), engine.Binding{RunID: "r-nil"}, config.AgentDef{Name: "a"}, func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -31,7 +32,7 @@ func TestStartStopLogListenerLifecycle(t *testing.T) {
 	var buf bytes.Buffer
 	logger := obs.New(&buf, slog.LevelDebug, obs.FormatText)
 	gw := New(config.GatewayConfig{}, ".", broker.StaticEnv{}, logger, "")
-	url, token, err := gw.Start(engine.Binding{RunID: "r-log"}, config.AgentDef{Name: "a"}, func(engine.Event) {})
+	url, token, err := gw.Start(context.Background(), engine.Binding{RunID: "r-log"}, config.AgentDef{Name: "a"}, func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestStartStopSilentAtWarnLevel(t *testing.T) {
 	var buf bytes.Buffer
 	logger := obs.New(&buf, slog.LevelWarn, obs.FormatText)
 	gw := New(config.GatewayConfig{}, ".", broker.StaticEnv{}, logger, "")
-	if _, _, err := gw.Start(engine.Binding{RunID: "r-quiet"}, config.AgentDef{Name: "a"}, func(engine.Event) {}); err != nil {
+	if _, _, err := gw.Start(context.Background(), engine.Binding{RunID: "r-quiet"}, config.AgentDef{Name: "a"}, func(engine.Event) {}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	gw.Stop()
@@ -82,7 +83,7 @@ func TestStartUpstreamConnectFailureLogsClassNotURL(t *testing.T) {
 		"up": {Kind: "mcp", URL: "http://" + addr + "/?key=" + querySecret, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
 	}
 	gw := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, logger, "")
-	_, _, err = gw.Start(testBinding(), testAgentDef("up"), func(engine.Event) {})
+	_, _, err = gw.Start(context.Background(), testBinding(), testAgentDef("up"), func(engine.Event) {})
 	if err == nil {
 		t.Fatal("Start must fail when the upstream is unreachable")
 	}
@@ -110,7 +111,7 @@ func TestToolCallRoutingLoggedAtDebugWithoutCredential(t *testing.T) {
 	var buf bytes.Buffer
 	logger := obs.New(&buf, slog.LevelDebug, obs.FormatText)
 	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, logger, "")
-	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("github"), func(engine.Event) {})
+	proxyURL, runToken, err := p.Start(context.Background(), testBinding(), testAgentDef("github"), func(engine.Event) {})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

@@ -1,6 +1,7 @@
 package rungateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -116,7 +117,7 @@ func firstHandAgent(url string, timeout time.Duration, allow ...config.ExecEntry
 func startAgentProxy(t *testing.T, agent config.AgentDef, rec *eventRecorder) (base, token string, p *Gateway) {
 	t.Helper()
 	p = New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
-	base, token, err := p.Start(testBinding(), agent, rec.record)
+	base, token, err := p.Start(context.Background(), testBinding(), agent, rec.record)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -397,7 +398,7 @@ func TestStartRefusesFirstHandAgentWithoutTimeoutOrUnixURL(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
-			if _, _, err := p.Start(testBinding(), agent, func(engine.Event) {}); err == nil || !strings.Contains(err.Error(), "requires a unix:// url and a positive timeout") {
+			if _, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {}); err == nil || !strings.Contains(err.Error(), "requires a unix:// url and a positive timeout") {
 				t.Fatalf("Start err = %v, want the fail-closed refusal", err)
 			}
 		})

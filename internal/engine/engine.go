@@ -212,7 +212,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 				e.Binding = bind
 				_ = log.Append(e)
 			}
-			url, token, perr := gw.Start(bind, agent, appendEvent)
+			url, token, perr := gw.Start(stepCtx, bind, agent, appendEvent)
 			if perr != nil {
 				cancel()
 				// perr is transport-derived (upstream connect / listen) and can

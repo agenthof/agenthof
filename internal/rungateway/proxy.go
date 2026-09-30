@@ -133,10 +133,12 @@ func readOnlySet(res config.ToolResource) map[string]struct{} {
 // Start serves one fronted step. It mints a run token, connects to each
 // resource the agent's tool grants name as an upstream MCP client, mirrors
 // their tools onto an inbound MCP server gated by that token, and binds an
-// ephemeral localhost listener. It returns the URL the agent must call and
-// the token it must present — the token travels only in the HTTP
+// ephemeral localhost listener. ctx is the step's context; the spawn door
+// derives each child run's context from it, so the step's deadline or
+// cancel tears the children down. It returns the URL the agent must call
+// and the token it must present — the token travels only in the HTTP
 // Authorization header, never on Binding or the ledger.
-func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) (string, string, error) {
+func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) (string, string, error) {
 	token, err := mintToken()
 	if err != nil {
 		return "", "", fmt.Errorf("mint run token: %w", err)
