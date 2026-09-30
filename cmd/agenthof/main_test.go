@@ -90,6 +90,15 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if spec, ok := strings.CutPrefix(req.Input, "spawn:"); ok {
+		line, err := stubCallSpawn(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), spec)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "spawn door: " + err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "artifact": line})
+		return
+	}
 	line := req.Input
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
 		line = line[:i]
@@ -1729,4 +1738,56 @@ func TestRunOBOEndToEndInProcess(t *testing.T) {
 			t.Fatalf("a token reached the ledger or the CLI output (prefix %s)", secret[:8])
 		}
 	}
+}
+
+// stubCallSpawn drives the spawn door from the demo stub: spec is
+// <role>/<workflow>:<input>. The artifact line is the door's answer —
+// status, child run id, and the child's preview (or the refusal reason) —
+// so a test can read the outcome off the parent's step artifact. A refusal
+// (403) is an answer the line carries, not an error: the ledger proves it.
+func stubCallSpawn(proxyURL, token, spec string) (string, error) {
+	target, input, ok := strings.Cut(spec, ":")
+	if !ok {
+		return "", fmt.Errorf("spawn spec %q needs <role>/<workflow>:<input>", spec)
+	}
+	role, workflow, ok := strings.Cut(target, "/")
+	if !ok {
+		return "", fmt.Errorf("spawn spec %q needs <role>/<workflow>:<input>", spec)
+	}
+	body, err := json.Marshal(map[string]string{"role": role, "workflow": workflow, "input": input})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(proxyURL, "/")+"/spawn", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusForbidden {
+		return "", fmt.Errorf("gateway returned %d", resp.StatusCode)
+	}
+	var out struct {
+		Status        string `json:"status"`
+		ChildRunID    string `json:"child_run_id"`
+		OutputPreview string `json:"output_preview"`
+		Reason        string `json:"reason"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	id := out.ChildRunID
+	if id == "" {
+		id = "-"
+	}
+	detail := out.OutputPreview
+	if out.Status != "succeeded" {
+		detail = out.Reason
+	}
+	return strings.TrimSpace(fmt.Sprintf("spawn %s %s %s", out.Status, id, detail)), nil
 }
