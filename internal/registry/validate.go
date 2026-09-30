@@ -160,6 +160,20 @@ func Validate(cfg config.Config) []ValidationError {
 					add(a.SourceFile, a.Name, "bad-exec-config",
 						"exec.timeout is required with exec.mode runtime: a duration of at least 1s, such as 5m")
 				}
+				// The refexec socket must live outside gateway.refbox_socket_dir:
+				// that directory is bind-mounted into the agent's compartment, so a
+				// socket inside it would let the agent dial the runtime directly —
+				// un-allowlisted and un-recorded. Make it impossible, not merely
+				// forbidden in prose.
+				if cfg.Gateway.RefboxSocketDir != "" && strings.HasPrefix(a.Exec.URL, config.UnixScheme) {
+					sockDir := filepath.Clean(filepath.Dir(strings.TrimPrefix(a.Exec.URL, config.UnixScheme)))
+					refboxDir := filepath.Clean(cfg.Gateway.RefboxSocketDir)
+					if rel, err := filepath.Rel(refboxDir, sockDir); err == nil &&
+						rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+						add(a.SourceFile, a.Name, "bad-exec-config",
+							"exec.url must not be inside gateway.refbox_socket_dir: that directory is mounted into the agent's compartment, so the agent could reach the runtime directly")
+					}
+				}
 			default:
 				add(a.SourceFile, a.Name, "bad-exec-config",
 					fmt.Sprintf("exec.mode %q is not implemented (attested or runtime)", a.Exec.Mode))

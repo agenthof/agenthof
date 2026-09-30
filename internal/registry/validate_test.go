@@ -549,6 +549,23 @@ func TestValidateExecConfig(t *testing.T) {
 	}
 }
 
+func TestValidateExecURLInsideRefboxSocketDir(t *testing.T) {
+	build := func(url string) config.Config {
+		a := config.AgentDef{Name: "a", Execution: "fronted", Endpoint: "https://a.internal/run",
+			Exec: config.ExecConfig{Mode: "runtime", Runtime: "refexec", URL: url, Timeout: 5 * time.Minute,
+				Allow: []config.ExecEntry{{Exe: "go", ArgsPrefix: []string{"test"}}}}}
+		return config.Config{Gateway: config.GatewayConfig{RefboxSocketDir: "/run/agenthof"}, Agents: []config.AgentDef{a}}
+	}
+	// Inside the refbox socket dir (mounted into the agent's compartment) → rejected.
+	if !hasCode(Validate(build("unix:///run/agenthof/refexec.sock")), "bad-exec-config") {
+		t.Fatal("a refexec socket inside refbox_socket_dir must be rejected")
+	}
+	// A sibling directory is fine.
+	if errs := Validate(build("unix:///run/agenthof-exec/refexec.sock")); hasCode(errs, "bad-exec-config") {
+		t.Fatalf("a refexec socket outside refbox_socket_dir must be accepted: %v", errs)
+	}
+}
+
 func TestValidSecureOrUnixEndpoint(t *testing.T) {
 	cases := []struct {
 		in   string
