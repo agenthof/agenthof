@@ -439,7 +439,7 @@ for the runtime flow):
 | URL | `url` | string | yes; must be `https`, `http` to a loopback host, or `unix://` plus an absolute socket path | — |
 | CredentialSource | `credential_source` | string | yes | — |
 | TokenEnv | `token_env` | string | yes for the direct-bearer grant (`grant_type: ""`); must not be set for `token_exchange` | — |
-| GrantType | `grant_type` | string | no | `""` (direct-bearer) |
+| GrantType | `grant_type` | string | no | `""` (direct-bearer); the other accepted values are `client_credentials` and `token_exchange` |
 | ClientAuth | `client_auth` | string | yes for `client_credentials` and `token_exchange` (must be `client_secret_basic`) | — |
 | Issuer | `issuer` | string | yes for `client_credentials`; must not be set for `token_exchange` | — |
 | TokenEndpoint | `token_endpoint` | string | yes for `client_credentials` and `token_exchange`; must be `https`, or `http` to a loopback host | — |
@@ -497,10 +497,14 @@ not `apply`, with a broker error); `"client_credentials"` requires
 `token_endpoint`, `client_id_env`, and `client_secret_env` all set, with
 `token_endpoint` required to be `https` (or `http` only to a loopback host —
 a client secret over plaintext http to a remote host is rejected at apply
-time); `"token_exchange"` requires the same client coordinates plus
+time); `"token_exchange"` — a resource called *on behalf of the invoker*
+(see [`lifecycle-tool.md`](../lifecycle-tool.md#on-behalf-of-the-invoker)) —
+requires the same client coordinates plus
 `audience` (the RFC 8693 audience the exchanged upstream token is for —
 distinct from `AGENTHOF_OIDC_AUDIENCE`, which governs tokens presented to
-Agenthof), and rejects `token_env` and `issuer`; any other `grant_type` is
+Agenthof), and rejects `token_env` (an on-behalf-of resource has no direct
+bearer) and `issuer` (the exchange is keyed by the invoker's token, not by
+an issuer); any other `grant_type` is
 rejected as not implemented. Setting `audience` on the direct-bearer or
 `client_credentials` grant is rejected. `scope` is optional and not
 validated or required by `apply`; when set on a `client_credentials` or
@@ -625,6 +629,40 @@ org's default authorization server uses the literal segment `default` in
 place of an id). Okta custom scopes are declared on that authorization
 server and requested the same way, as a space-delimited `scope` string.
 
+**Example (illustrative, a `token_exchange` tool resource): a per-user
+service — every human has their own account there — that the agent must
+reach as the invoking human, not as a service identity. Agenthof exchanges
+the invoker's verified token for one audienced to this upstream (RFC 8693)
+and injects that:**
+
+```yaml
+tools:
+  crm-mcp:
+    kind: mcp
+    url: https://crm.internal/mcp
+    credential_source: static_env
+    grant_type: token_exchange
+    client_auth: client_secret_basic
+    token_endpoint: https://idp.example.com/oauth2/token
+    audience: https://crm.internal
+    client_id_env: CRM_MCP_CLIENT_ID
+    client_secret_env: CRM_MCP_CLIENT_SECRET
+    scope: crm.read
+```
+
+The run must be invoked with `--token` (a token the configured
+`AGENTHOF_OIDC_ISSUER` verifies): a run that would reach this resource with
+a dev `--as` identity is refused before it starts, and the refusal is
+recorded (`run_refused`, reason `obo requires a verified invoker token`).
+The exchanged token is cached per invoker and re-exchanged, from the *same*
+inbound token, shortly before the exchanged token expires — so a cached
+token stays in use until its own refresh point even if the inbound token has
+expired by then, and it is the next exchange that fails, recording the call
+`failed`. There is no refresh token and no re-authentication. The upstream,
+not Agenthof, is what checks that the exchanged token's audience is itself.
+See [`lifecycle-tool.md`](../lifecycle-tool.md#on-behalf-of-the-invoker) for
+the life of an on-behalf-of call.
+
 ## Control-plane CLI
 
 `agenthof apply` and `agenthof registry enable|disable` — the kill switch —
@@ -663,7 +701,18 @@ nothing here on its own. `--token` authenticates the invoker from a raw
 OIDC ID token instead (env `AGENTHOF_TOKEN` fallback); when given, identity
 comes from the verified token rather than `--as`/`--groups`, and
 `AGENTHOF_OIDC_ISSUER` must be set in the environment or the command exits
-2 (a usage error, no control event recorded) before doing anything else. A
+2 (a usage error, no control event recorded) before doing anything else.
+`AGENTHOF_OIDC_CLIENT_ID` (default `agenthof`) is the audience a token must
+name; `AGENTHOF_OIDC_AUDIENCE`, when set, is a second accepted audience —
+the resource-server audience of an access token minted for Agenthof's API
+rather than for the login client — and changes nothing when unset. Both
+apply wherever `--token` does, `agenthof run` included. For `agenthof run`
+only, `AGENTHOF_OIDC_SUBJECT_TOKEN_TYPE` names the kind of inbound token
+this deployment presents when exchanging it on the invoker's behalf (RFC
+8693 `subject_token_type`; default
+`urn:ietf:params:oauth:token-type:access_token`; an ID-token deployment sets
+`urn:ietf:params:oauth:token-type:id_token`). The verified token itself is
+held only for the run and is never recorded. A
 `--token` that fails verification does not fail silently: it is recorded
 as a `refused` control event (reason `token_verification_failed`) and the
 command exits nonzero.

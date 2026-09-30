@@ -65,8 +65,10 @@ The governed core is real and runnable today:
   tools an agent's grant names, or — with `mode: read-only` — only the tools
   the operator lists as `read_only_tools` (the upstream's own read-only hint
   does not decide this), authorizes each call against that per-agent
-  allowlist, injects the resource credential (a static bearer or an OAuth
-  `client_credentials`-minted token) the agent never sees, and records every
+  allowlist, injects the resource credential (a static bearer, an OAuth
+  `client_credentials`-minted token, or — on behalf of the invoking human —
+  a per-user token exchanged from their verified OIDC token via RFC 8693)
+  the agent never sees, and records every
   call — and every denied attempt.
   A stdio-only MCP server is governed the same way through `deploy/refbridge`,
   a reference bridge that fronts it over a Unix socket only Agenthof dials,

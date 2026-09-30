@@ -122,7 +122,10 @@ On the way out, Agenthof's own MCP client sets the request's `Authorization`
 to the resource's credential, resolved through the broker on every outbound
 request: for `credential_source: static_env` that is the value of the
 resource's `token_env` variable; for `grant_type: client_credentials` it is
-an upstream token the broker mints itself and refreshes before it expires.
+an upstream token the broker mints itself and refreshes before it expires;
+for `grant_type: token_exchange` it is a per-user token the broker obtains by
+exchanging the invoker's own verified token (see
+[On behalf of the invoker](#on-behalf-of-the-invoker)).
 Resolving per request, rather than once at connect, is what lets a token that
 expires mid-step be replaced. The agent's run token is never forwarded in
 that credential's place.
@@ -130,6 +133,78 @@ that credential's place.
 This is enforcement by credential-starvation, not by inspection: Agenthof
 never hands the agent a credential of its own, so the door is the only route
 to the resource that Agenthof itself provides.
+
+## On behalf of the invoker
+
+Some upstreams are not the organization's: each human has their own account
+there, with their own data and permissions, and the service's own logs must
+name the person. A resource declared `grant_type: token_exchange` is called
+*on behalf of the invoker*: the upstream sees the human, not a service
+identity, and applies that human's permissions. Authorization inside
+Agenthof is unchanged — the role's `allowed_groups` still decide *whether*
+the run may happen; on-behalf-of decides *whose identity the upstream sees*
+when it does.
+
+```
+human ── --token ──▶ agenthof run ── verify (issuer, audience) ──▶ invoker = the human
+                          │  keeps the verified token for this run only
+                          ▼
+                    per-run gateway ── at step start, for each token_exchange resource:
+                          │    POST token_endpoint  (RFC 8693: subject_token = the human's token,
+                          │                          audience = the resource's audience)
+                          │    ◀── a per-user token for that upstream
+                          ▼
+                    every call: inject the per-user token ──▶ upstream sees the human
+```
+
+Step by step:
+
+1. **The run is invoked with `--token`.** Agenthof verifies it against
+   `AGENTHOF_OIDC_ISSUER` and its audience (`AGENTHOF_OIDC_CLIENT_ID`, or
+   `AGENTHOF_OIDC_AUDIENCE` when set). The invoker in the binding comes from
+   the token's own claims — its `email`, or its opaque subject when there is
+   none — the same identity that was already recorded on every event;
+   on-behalf-of adds nothing to it and never derives it from any
+   upstream token. The verified token is kept for the run, in memory, and
+   handed to the per-run gateway. It goes nowhere else: not to the engine,
+   not into the signed binding, not into any event.
+2. **Before the engine starts,** Agenthof checks whether any agent stepping
+   in the workflow grants a `token_exchange` resource. If so and the invoker
+   is not a verified token — a dev `--as` identity, or no token at all — the
+   run is refused right there: one `run_refused` event with the fixed reason
+   `obo requires a verified invoker token`. No exchange is attempted.
+3. **When a step starts,** the gateway connects to each granted resource.
+   For a `token_exchange` resource it asks the resource's `token_endpoint`
+   to exchange the human's token for one audienced to that upstream
+   (`audience`), authenticating as an OAuth client with the configured
+   `client_id_env` / `client_secret_env`, and sending
+   `AGENTHOF_OIDC_SUBJECT_TOKEN_TYPE` as the inbound token's kind. This is
+   impersonation, not delegation: no actor token is sent, so the upstream
+   sees the human as if they acted directly. Agenthof's own ledger still
+   names the agent, the role, and the run.
+4. **Every call to that resource** carries the exchanged, per-user token —
+   never the human's inbound token, never the run token. The token is
+   cached per resource and per invoker, and re-exchanged from the *same*
+   inbound token shortly before the exchanged token expires.
+5. **The `tool_call` event** records `auth_mode: token_exchange`. The
+   tokens themselves are never recorded.
+
+What can go wrong, and where it shows:
+
+- The exchange fails when the step starts (the token endpoint is down, or
+  it rejects the request): the step fails with reason `tool proxy start
+  failed`, exactly as any other upstream-connect failure. The endpoint's
+  own words never enter the ledger.
+- The exchange fails mid-step (the cached token needed refreshing and the
+  inbound token had expired): the call is recorded `failed` with a fixed
+  reason naming the resource and the outcome — `rejected by the
+  authorization server`, `failed at the authorization server`, `returned
+  an unusable response`, or a bare `failed` when the request could not be
+  made at all — never the server's own text.
+- The upstream rejects the exchanged token: that is the upstream's answer
+  and is recorded as the call's failure, like any other error result.
+  Agenthof does not inspect the exchanged token's audience; the upstream is
+  the party that enforces it.
 
 ## What the ledger records
 
@@ -141,7 +216,7 @@ below.
 | --- | --- |
 | `tool` | the tool name called, or attempted |
 | `args_sha` | the SHA-256 of the raw arguments. The arguments themselves are never recorded |
-| `auth_mode` | how the resource's credential was obtained: `static_env` or `client_credentials` |
+| `auth_mode` | how the resource's credential was obtained: `static_env`, `client_credentials`, or `token_exchange` |
 | `resources_touched` | the id of the resource the call went to |
 | `artifact_sha` | the SHA-256 of the result — or, when the call itself failed, of the error text |
 | `artifact` | a single-line preview of that same body, capped at 200 characters |
@@ -268,6 +343,22 @@ then does.
 A refused `tool_call` is first-hand evidence that the attempt reached this
 door. An agent that ignores the proxy entirely leaves no such record.
 
+On behalf of the invoker, the upstream's own account of the call names the
+human and only the human: the agent is invisible in *that* service's logs,
+because Agenthof sends no actor token. Agenthof's ledger is where the agent,
+role, and run are named. The per-user token outlives the inbound token only
+as far as its own lifetime: a cached exchanged token keeps being used until
+its refresh point, even if the inbound token has expired by then, and it is
+the next exchange — a cache miss or that refresh — that re-sends the same
+expired inbound token and fails clearly. There is no refresh token and no
+re-authentication, so a run long enough to need one cannot finish. A
+first-contact exchange failure is recorded as a generic start failure,
+indistinguishable in the ledger from any other upstream that could not be
+reached. A token that carries no `email` claim is recorded under its opaque
+subject, and a token with no `groups` claim asserts no groups. And Agenthof
+trusts its configured issuer and each resource's token endpoint as it trusts
+any configured provider: a hostile one could mint what it likes.
+
 Through a bridge, what the ledger holds about the stdio hop is the bridge's
 own first-hand account (`runtime_attestation`), and it is exactly as
 trustworthy as the bridge: a compromised bridge could misreport what it
@@ -306,6 +397,6 @@ not prove is the same limit as every other event; see
 | --- | --- |
 | a grant is `mode: all` (every tool the resource advertises), `mode: read-only` (the resource's `read_only_tools`, as the operator lists them), or a `tools` list (only those names); a resource id on its own is rejected at `apply` | |
 | an HTTP (streamable) MCP transport, over TCP or a `unix://` socket; a stdio MCP server through the reference bridge (`deploy/refbridge`), which attests first-hand on every call what it ran (`runtime_attestation`) | a bridge that keeps the credential to itself and relays it onto the server's outbound calls; the subprocess's exit on the ledger |
-| `static_env` and `client_credentials` credentials, injected outbound | |
+| `static_env`, `client_credentials`, and — on behalf of the invoker — `token_exchange` credentials, injected outbound; on-behalf-of is impersonation (the upstream sees the human) | delegation with an actor token (the upstream sees the agent acting for the human); re-authentication when the inbound token expires mid-run |
 
 Only shipped behavior is a guarantee.
