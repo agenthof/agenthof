@@ -189,7 +189,7 @@ func TestRenderLedgerIntegrityVerified(t *testing.T) {
 func TestRenderRefuseHelper(t *testing.T) {
 	dir := t.TempDir()
 	inv := identity.Invoker{Subject: "dev@x", Groups: []string{"engineering"}}
-	id, err := engine.Refuse(dir, "fin", "simple", inv, `role "fin" does not allow the invoker: allowed groups [finance]`)
+	id, err := engine.Refuse(dir, "fin", "simple", inv, `role "fin" does not allow the invoker: allowed groups [finance]`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -614,7 +614,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		// echo the go-oidc error text into the ledger below — it can
 		// echo claim values from the (unverified) token.
 		_, _ = fmt.Fprintf(out, "run: token authentication failed: %v\n", verifyErr)
-		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, "token verification failed")
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, "token verification failed", nil)
 		if refErr != nil {
 			_, _ = fmt.Fprintln(out, refErr)
 			return 1
@@ -639,7 +639,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 			firstErr = valErrs[0].Error()
 		}
 		reason := "configuration invalid: " + firstErr
-		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, reason)
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, reason, nil)
 		if refErr != nil {
 			_, _ = fmt.Fprintln(out, refErr)
 			return 1
@@ -653,7 +653,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	// reason, not a mid-run "tool proxy start failed" — and never contact
 	// the exchange endpoint.
 	if inv.Method != "oidc" && workflowRequiresOBO(cfg, reg, workflow) {
-		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, oboRefusalReason)
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, oboRefusalReason, nil)
 		if refErr != nil {
 			_, _ = fmt.Fprintln(out, refErr)
 			return 1

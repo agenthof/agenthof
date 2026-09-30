@@ -70,6 +70,11 @@ type Options struct {
 	// Logger receives operational diagnostics for this run — never audit
 	// events, which go to the run ledger under LogDir. Nil means discard.
 	Logger *slog.Logger
+	// Parent, when set, links this run under a spawning parent: the run's
+	// binding carries Parent.RunID as ParentRunID and Parent.Depth+1 as
+	// Depth, and the invoker is expected to be the parent's, unchanged. Nil
+	// means a root run.
+	Parent *Binding
 }
 
 const defaultMaxBounces = 2
@@ -87,7 +92,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		opts.ArtifactDir = ".agenthof/artifacts"
 	}
 	runID := NewRunID()
-	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}
+	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}.linkedTo(opts.Parent)
 	logger := obs.OrDiscard(opts.Logger).With("run", runID, "role", role, "workflow", workflow)
 	log, err := OpenLog(opts.LogDir, runID)
 	if err != nil {
