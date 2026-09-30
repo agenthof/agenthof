@@ -11,8 +11,9 @@
 # --groups is ignored when a token is present; AGENTHOF_OIDC_AUDIENCE admits
 # a token audienced to the resource server and is a no-op when unset; an
 # exchanged token for the wrong audience is rejected BY THE UPSTREAM and
-# recorded failed; an exchange the issuer rejects and an issuer that is down
-# are each recorded as a failed step; the subject token, every exchanged
+# recorded failed; an exchange the issuer rejects in its own 4xx words and an
+# issuer nothing listens for are each recorded as a failed step naming its
+# own resource in the operational log; the subject token, every exchanged
 # token, and the issuer's own error text appear in no ledger, artifact,
 # operational log, or output; and config is law at apply. Requires go and
 # python3. Runs on macOS and Linux.
@@ -74,6 +75,7 @@ DOWN_PORT="$(free_port)"   # nothing ever listens here
 ISSUER="http://127.0.0.1:$IDP_PORT"
 UP_AUD="https://obo-upstream.example"
 OTHER_AUD="https://other-upstream.example"   # the issuer will exchange for it; the upstream is not it
+NOWHERE_AUD="https://nowhere.example"        # on no allowlist: the issuer rejects an exchange for it
 RS_AUD="https://agenthof.example/api"        # a resource-server audience for the inbound token
 export OBO_IDP_CLIENT_SECRET="idp-side-secret-$NONCE"
 export OBO_CLIENT_ID="agenthof-broker"
@@ -140,7 +142,7 @@ tools:
 EOF
 	resource obo "$UP_AUD" "$ISSUER/token"
 	resource obo-wrong-aud "$OTHER_AUD" "$ISSUER/token"
-	resource obo-idp-rejects "https://nowhere.example" "$ISSUER/token"
+	resource obo-idp-rejects "$NOWHERE_AUD" "$ISSUER/token"
 	resource obo-down "$UP_AUD" "http://127.0.0.1:$DOWN_PORT/token"
 }
 gateway_yaml >"$WORK/config/gateway.yaml"
@@ -270,11 +272,51 @@ grep -q "\"aud\":\"$OTHER_AUD\"" "$WORK/issued.jsonl" || fail "the issuer did no
 run obo-rejects "call whoami" --token "$TOKEN"
 echo "$OUT" | grep -q "finished: failed" || fail "a rejected exchange must fail the step"
 echo "$AUDIT" | grep -q "step call (agent obo-rejects) failed — tool proxy start failed" || fail "rejected exchange not recorded as a start failure"
+grep -q 'msg="upstream connect failed".*resource=obo-idp-rejects class=other' "$WORK/agenthof.err" || fail "the operational log does not name obo-idp-rejects as the resource that could not be reached"
+# The ledger reason is fixed, and so is the log's class: the broker's error
+# is fixed text with no wrapped cause (the cause carries the token
+# endpoint's URL), so errClass never sees a transport error and BOTH this
+# case and an unreachable issuer are class=other. What actually tells them
+# apart is asked here directly — this authorization server is up, it answers
+# 4xx for an audience it does not issue for, and its error_description
+# really does carry the sentinel, so section 8's absence check cannot pass
+# on words that were never written.
+REJECTION="$(python3 - "$ISSUER/token" "$OBO_CLIENT_ID" "$OBO_CLIENT_SECRET" "$NOWHERE_AUD" "$TOKEN" <<'PY'
+import base64, json, sys, urllib.error, urllib.parse, urllib.request
+url, client_id, client_secret, audience, subject = sys.argv[1:6]
+form = urllib.parse.urlencode({
+    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+    "subject_token": subject,
+    "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+    "audience": audience,
+}).encode()
+basic = urllib.parse.quote(client_id) + ":" + urllib.parse.quote(client_secret)
+req = urllib.request.Request(url, data=form, headers={
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Authorization": "Basic " + base64.b64encode(basic.encode()).decode(),
+})
+try:
+    urllib.request.urlopen(req)
+except urllib.error.HTTPError as e:
+    body = json.load(e)
+    print(e.code, body.get("error", ""), body.get("error_description", ""))
+PY
+)"
+echo "$REJECTION" | grep -q '^4[0-9][0-9] invalid_target ' || fail "the issuer did not answer 4xx invalid_target for an unlisted audience, so a rejected exchange is indistinguishable from an unreachable one"
+echo "$REJECTION" | grep -q "never-in-a-ledger" || fail "the issuer's rejection carried no error_description sentinel, so the absence check in section 8 would prove nothing"
+echo "rejected exchange: the issuer answered 4xx invalid_target in its own words — ok"
 
-# 7. The issuer is unreachable: same fixed reason.
+# 7. The issuer is unreachable: the same fixed reason for a different cause.
+#    Nothing has ever listened on this resource's token endpoint, which is
+#    what separates it from the rejection above.
+if python3 -c "import socket; socket.create_connection(('127.0.0.1', $DOWN_PORT), 1).close()" >/dev/null 2>&1; then
+	fail "something is listening on the unreachable issuer's port, so this case proves nothing"
+fi
 run obo-unreachable "call whoami" --token "$TOKEN"
 echo "$OUT" | grep -q "finished: failed" || fail "an unreachable issuer must fail the step"
 echo "$AUDIT" | grep -q "step call (agent obo-unreachable) failed — tool proxy start failed" || fail "unreachable issuer not recorded as a start failure"
+grep -q 'msg="upstream connect failed".*resource=obo-down class=other' "$WORK/agenthof.err" || fail "the operational log does not name obo-down as the resource that could not be reached"
+echo "unreachable issuer: nothing listened, and the log names obo-down — ok"
 
 # 8. Nothing secret, and nothing the issuer said, reached anywhere it must
 #    not. An absence proves something only where the places searched are
@@ -283,11 +325,17 @@ echo "$AUDIT" | grep -q "step call (agent obo-unreachable) failed — tool proxy
 #    best-effort, must actually name the tokens to grep for.
 grep -rqF "acting as: u-dana" "$WORK/artifacts" || fail "no artifact carries the upstream's answer, so the absence checks would search an empty tree"
 [ "$(find "$WORK/logs" -name '*.jsonl' | wc -l | tr -d ' ')" -ge 8 ] || fail "fewer ledgers than runs, so the absence checks would search an incomplete tree"
+# The operational log is the widest of the three, and the runs above asked
+# for every debug record there is: an empty or info-only one would make the
+# grep across it worthless.
+[ -s "$WORK/agenthof.err" ] || fail "the operational log is empty, so the absence checks would search nothing"
+grep -q "level=DEBUG" "$WORK/agenthof.err" || fail "the operational log carries no debug records, so the absence checks would search only what info-level says"
 no_leak "$TOKEN" "the subject token"
 no_leak "$RS_TOKEN" "the resource-audienced subject token"
 no_leak "never-in-a-ledger" "the issuer's error_description"
 [ -s "$WORK/issued.jsonl" ] || fail "the issuer logged no exchanged token"
 grep -q '"sub":"u-dana"' "$WORK/issued.jsonl" || fail "the issuer exchanged for nobody in particular"
+grep -q "\"aud\":\"$UP_AUD\"" "$WORK/issued.jsonl" || fail "the issuer exchanged for no token audienced to the upstream"
 # Tokens are base64url: no whitespace, so word-splitting the output is safe,
 # and a plain for loop (not a piped while) runs no_leak in THIS shell, where
 # its fail exits the script.
@@ -296,8 +344,10 @@ for exchanged in $(python3 -c 'import json, sys; [print(json.loads(l)["token"]) 
 	no_leak "$exchanged" "an exchanged token"
 	EXCHANGED=$((EXCHANGED + 1))
 done
-# One exchange per on-behalf-of run that reached the upstream (sections 1, 3,
-# 4 and 5); fewer means the greps above ran on a token the run never used.
-[ "$EXCHANGED" -ge 4 ] || fail "the issuer's token log named $EXCHANGED exchanged tokens, fewer than the runs that exchanged one — the absence check above proved nothing"
+# At least one, never zero: the loop above proves nothing over an empty
+# list. The floor stays at one on purpose — how MANY tokens exist is the
+# broker cache's business, and the greps just above already pin what they
+# are (u-dana's, audienced to the upstream).
+[ "$EXCHANGED" -ge 1 ] || fail "the issuer's token log named no exchanged token, so the absence check above proved nothing"
 echo "exchanged tokens: $EXCHANGED (none reached a ledger, artifact, log, or output)"
 echo "e2e-obo-local: PASS"
