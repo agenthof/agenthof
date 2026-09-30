@@ -1427,7 +1427,7 @@ func TestNewBrokerRoutesClientCredentialsGrant(t *testing.T) {
 		ClientIDEnv:     "AGENTHOF_TEST_UNSET_CLIENT_ID",
 		ClientSecretEnv: "AGENTHOF_TEST_UNSET_CLIENT_SECRET",
 	}
-	_, err := newBroker().Resolve(context.Background(), ref)
+	_, err := newBroker(broker.SubjectTokenTypeAccessToken).Resolve(context.Background(), ref)
 	if err == nil {
 		t.Fatal("resolve must fail with the client-id env unset")
 	}

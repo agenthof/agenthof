@@ -21,7 +21,7 @@ type CredentialRef struct {
 	Source     string // credential source: "static_env" (the only source today)
 	Grant      string // "" = env value IS the bearer; "client_credentials" = mint; "token_exchange" = exchange the invoker's token
 	ClientAuth string // client_credentials / token_exchange: "client_secret_basic" (only method today)
-	Issuer     string // client_credentials: AS identity; (resource, issuer) cache-key component
+	Issuer     string // client_credentials: AS identity; (resource, issuer) cache-key component. token_exchange does not use Issuer.
 	TokenURL   string // client_credentials / token_exchange: token endpoint
 	Scope      string // client_credentials / token_exchange: optional, space-delimited
 	Audience   string // token_exchange: the audience the exchanged token is for (RFC 8693 audience)
@@ -78,11 +78,13 @@ func (StaticEnv) Resolve(_ context.Context, ref CredentialRef) (string, error) {
 }
 
 // Dispatch routes a CredentialRef to the concrete broker for its grant type:
-// the direct-bearer path (Grant == "") to StaticEnv, client_credentials to the
-// minting broker. It is the broker the tool proxy is constructed with.
+// the direct-bearer path (Grant == "") to StaticEnv, client_credentials to
+// the minting broker, token_exchange to the on-behalf-of broker. It is the
+// broker the tool proxy is constructed with.
 type Dispatch struct {
 	StaticEnv         Broker
 	ClientCredentials Broker
+	TokenExchange     Broker
 }
 
 var _ Broker = Dispatch{}
@@ -93,6 +95,8 @@ func (d Dispatch) Resolve(ctx context.Context, ref CredentialRef) (string, error
 		return d.StaticEnv.Resolve(ctx, ref)
 	case "client_credentials":
 		return d.ClientCredentials.Resolve(ctx, ref)
+	case "token_exchange":
+		return d.TokenExchange.Resolve(ctx, ref)
 	default:
 		return "", fmt.Errorf("broker: unsupported grant type %q", ref.Grant)
 	}

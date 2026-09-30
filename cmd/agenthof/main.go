@@ -525,19 +525,27 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 }
 
 // newBroker builds the process credential broker. Dispatch routes each
-// resource's grant to the right sub-broker: a direct-bearer (static_env) grant
-// to StaticEnv, a client_credentials grant to ClientCredentials. Extracted so
-// the routing is unit-testable without a live run (the tool-proxy path records
-// only a fixed failure reason, so a broker's error text is no longer observable
-// end-to-end).
-func newBroker() broker.Broker {
+// resource's grant to the right sub-broker: a direct-bearer (static_env)
+// grant to StaticEnv, a client_credentials grant to ClientCredentials, and a
+// token_exchange grant to TokenExchange, which exchanges the invoker's
+// verified token (subjectTokenType names its kind) for a per-user upstream
+// token. Extracted so the routing is unit-testable without a live run.
+//
+// A broker's error text can reach the ledger: a failure while the tool
+// proxy starts is recorded under the fixed reason "tool proxy start failed",
+// but a failure mid-step is recorded as the tool_call's reason verbatim
+// (capped at 200 runes) — which is why TokenExchange speaks only a fixed
+// vocabulary and never echoes the authorization server.
+func newBroker(subjectTokenType string) broker.Broker {
+	// A hung upstream token endpoint must not block the outbound call
+	// forever: an explicit client with a timeout is required here,
+	// mirroring the proxy's own connectTimeout, rather than nil (which
+	// falls back to http.DefaultClient, which has no timeout).
+	httpClient := &http.Client{Timeout: 30 * time.Second}
 	return broker.Dispatch{
-		StaticEnv: broker.StaticEnv{},
-		// A hung upstream token endpoint must not block the outbound call
-		// forever: an explicit client with a timeout is required here,
-		// mirroring the proxy's own connectTimeout, rather than nil (which
-		// falls back to http.DefaultClient, which has no timeout).
-		ClientCredentials: broker.NewClientCredentials(&http.Client{Timeout: 30 * time.Second}),
+		StaticEnv:         broker.StaticEnv{},
+		ClientCredentials: broker.NewClientCredentials(httpClient),
+		TokenExchange:     broker.NewTokenExchange(httpClient, subjectTokenType),
 	}
 }
 
@@ -637,7 +645,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	// close another's. keyRoot is ".", the same working directory gateway
 	// provision writes role keys under (EnsureRoleKey(".", role)) — not
 	// --config, which would miss those keys.
-	b := newBroker()
+	b := newBroker(subjectTokenTypeFromEnv(os.Getenv))
 	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger) }
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway, Logger: logger})

@@ -56,7 +56,8 @@ func (f *fakeBroker) Resolve(_ context.Context, ref CredentialRef) (string, erro
 func TestDispatchRoutesOnGrant(t *testing.T) {
 	static := &fakeBroker{token: "static-tok"}
 	cc := &fakeBroker{token: "minted-tok"}
-	d := Dispatch{StaticEnv: static, ClientCredentials: cc}
+	te := &fakeBroker{token: "exchanged-tok"}
+	d := Dispatch{StaticEnv: static, ClientCredentials: cc, TokenExchange: te}
 
 	staticRef := CredentialRef{Grant: "", ResourceID: "static-resource"}
 	got, err := d.Resolve(context.Background(), staticRef)
@@ -66,8 +67,8 @@ func TestDispatchRoutesOnGrant(t *testing.T) {
 	if static.last != staticRef {
 		t.Fatalf("static broker got ref %+v, want %+v (ref must reach it unmodified)", static.last, staticRef)
 	}
-	if cc.last != (CredentialRef{}) {
-		t.Fatalf("client_credentials broker should not have been called yet, got %+v", cc.last)
+	if cc.last != (CredentialRef{}) || te.last != (CredentialRef{}) {
+		t.Fatal("only the static broker should have been called so far")
 	}
 
 	ccGrantRef := CredentialRef{Grant: "client_credentials", ResourceID: "cc-resource"}
@@ -78,11 +79,20 @@ func TestDispatchRoutesOnGrant(t *testing.T) {
 	if cc.last != ccGrantRef {
 		t.Fatalf("client_credentials broker got ref %+v, want %+v (ref must reach it unmodified)", cc.last, ccGrantRef)
 	}
-	if static.last != staticRef {
-		t.Fatalf("static broker's last ref changed unexpectedly: got %+v, want %+v", static.last, staticRef)
+
+	oboRef := CredentialRef{Grant: "token_exchange", ResourceID: "obo-resource", SubjectToken: "subj", Audience: "https://up"}
+	got, err = d.Resolve(context.Background(), oboRef)
+	if err != nil || got != "exchanged-tok" {
+		t.Fatalf("token_exchange routed wrong: got %q err %v", got, err)
+	}
+	if te.last != oboRef {
+		t.Fatalf("token_exchange broker got ref %+v, want it unmodified (subject token and audience included)", te.last)
+	}
+	if static.last != staticRef || cc.last != ccGrantRef {
+		t.Fatal("other brokers' last refs changed unexpectedly")
 	}
 
-	if _, err := d.Resolve(context.Background(), CredentialRef{Grant: "token_exchange"}); err == nil {
+	if _, err := d.Resolve(context.Background(), CredentialRef{Grant: "device_code"}); err == nil {
 		t.Fatal("unknown grant should error")
 	}
 }
