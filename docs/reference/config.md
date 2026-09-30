@@ -570,7 +570,7 @@ loopback port, and the proxy URL stays `http://127.0.0.1:<port>/`. When set,
 each fronted step's gateway listens on a Unix domain socket in this directory
 instead, and the proxy URL is `unix://` plus that socket's path. The value
 after `unix://` is the socket path only; the HTTP routes stay fixed (`/`,
-`/exec/authorize`, `/exec/attest`, `/exec/run`, `/v1/chat/completions`). The run token
+`/exec/authorize`, `/exec/attest`, `/exec/run`, `/v1/chat/completions`, `/spawn`). The run token
 still travels in the `Authorization` header. `apply` does not check that the
 directory exists. Keep the directory's path short: a Unix socket path has a
 small operating-system length limit, and a path that exceeds it fails the

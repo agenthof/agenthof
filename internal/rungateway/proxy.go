@@ -1,10 +1,12 @@
-// Package rungateway is Agenthof's enforced inbound MCP proxy: a
-// credential-starved agent reaches a declared tool/MCP resource only through
-// here, which authenticates the step (a per-step run token), authorizes
-// against the agent's allowlist, injects a resource credential the agent
-// never sees (no-passthrough), forwards the call to the upstream MCP server,
-// and appends a tool_call event per call (carrying a trusted runtime's
-// attestation when the resource declares one).
+// Package rungateway is Agenthof's per-run listener: the doors a fronted,
+// credential-starved agent reaches during one step. The tool door is an
+// enforced inbound MCP proxy (authenticate the step by its run token,
+// authorize against the agent's allowlist, inject a resource credential the
+// agent never sees, forward upstream, append a tool_call per call — carrying
+// a trusted runtime's attestation when the resource declares one); the exec
+// and model doors ride the same listener; and the spawn door starts a
+// governed child run through a Spawner. Every door records what it did on
+// the run's ledger.
 package rungateway
 
 import (
@@ -56,7 +58,7 @@ type Gateway struct {
 	keyRoot string
 	// subjectToken is the invoker's verified inbound token for this run —
 	// the RFC 8693 subject token. Per run, never per step: it is handed to
-	// New once, never placed on engine.Binding (signed, rides every step
+	// New once, never placed on engine.Binding (forwarded, rides every step
 	// header) or Start, and reaches a broker only on the ref of a
 	// token_exchange resource. Empty when the invoker was not OIDC-verified.
 	subjectToken string
@@ -82,6 +84,14 @@ type Gateway struct {
 	// them to finish independent of how the underlying HTTP server treats
 	// in-flight connections when closed.
 	inflight sync.WaitGroup
+	// spawner runs a child run for the spawn door; nil means the door
+	// refuses (fail-closed). Set once by WithSpawner, before the first Start.
+	spawner Spawner
+	// spawnInflight and spawnTotal are the spawn door's cap accounting, under
+	// mu. They live for the whole run: Start does NOT reset them, because
+	// max_total_spawns bounds a run's whole life, not one step.
+	spawnInflight int
+	spawnTotal    int
 }
 
 // New builds a Gateway over the gateway config. Tool resources come from
@@ -329,6 +339,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	mux.HandleFunc("/exec/attest", p.execAttestHandler(bind, agent, appendEvent))
 	mux.HandleFunc("/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
 	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
+	mux.HandleFunc("/spawn", p.spawnHandler(ctx, bind, agent, appendEvent, logger))
 	handler := authMiddleware(mux, token)
 
 	var ln net.Listener
