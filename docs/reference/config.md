@@ -654,11 +654,11 @@ The run must be invoked with `--token` (a token the configured
 `AGENTHOF_OIDC_ISSUER` verifies): a run that would reach this resource with
 a dev `--as` identity is refused before it starts, and the refusal is
 recorded (`run_refused`, reason `obo requires a verified invoker token`).
-The exchanged token is cached per invoker and re-exchanged, from the *same*
-inbound token, shortly before the exchanged token expires — so a cached
-token stays in use until its own refresh point even if the inbound token has
-expired by then, and it is the next exchange that fails, recording the call
-`failed`. There is no refresh token and no re-authentication. The upstream,
+The exchanged token is cached per resource and per invoker, and
+re-exchanged, from the *same* inbound token, shortly before the exchanged
+token expires — so a cached token stays in use until its own refresh point
+even if the inbound token has expired by then, and it is the next exchange
+that fails, recording the call `failed`. There is no refresh token and no re-authentication. The upstream,
 not Agenthof, is what checks that the exchanged token's audience is itself.
 See [`lifecycle-tool.md`](../lifecycle-tool.md#on-behalf-of-the-invoker) for
 the life of an on-behalf-of call.

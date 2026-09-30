@@ -160,12 +160,13 @@ human ── --token ──▶ agenthof run ── verify (issuer, audience) ─
 Step by step:
 
 1. **The run is invoked with `--token`.** Agenthof verifies it against
-   `AGENTHOF_OIDC_ISSUER` and its audience (`AGENTHOF_OIDC_CLIENT_ID`, or
-   `AGENTHOF_OIDC_AUDIENCE` when set). The invoker in the binding comes from
-   the token's own claims — its `email`, or its opaque subject when there is
+   `AGENTHOF_OIDC_ISSUER` and its audience (the client id,
+   `AGENTHOF_OIDC_CLIENT_ID`; when `AGENTHOF_OIDC_AUDIENCE` is also set, a
+   token may name either). The invoker in the binding comes from the
+   token's own claims — its `email`, or its opaque subject when there is
    none — the same identity that was already recorded on every event;
-   on-behalf-of adds nothing to it and never derives it from any
-   upstream token. The verified token is kept for the run, in memory, and
+   on-behalf-of adds nothing to it and never derives it from any upstream
+   token. The verified token is kept for the run, in memory, and
    handed to the per-run gateway. It goes nowhere else: not to the engine,
    not into the signed binding, not into any event.
 2. **Before the engine starts,** Agenthof checks whether any agent stepping
@@ -196,11 +197,13 @@ What can go wrong, and where it shows:
   failed`, exactly as any other upstream-connect failure. The endpoint's
   own words never enter the ledger.
 - The exchange fails mid-step (the cached token needed refreshing and the
-  inbound token had expired): the call is recorded `failed` with a fixed
-  reason naming the resource and the outcome — `rejected by the
-  authorization server`, `failed at the authorization server`, `returned
-  an unusable response`, or a bare `failed` when the request could not be
-  made at all — never the server's own text.
+  inbound token had expired): the call is recorded `failed`, and the reason
+  is the tool call's own error. Its broker part is fixed text naming the
+  resource and the outcome — `rejected by the authorization server`,
+  `failed at the authorization server`, `returned an unusable response`, or
+  a bare `failed` when the request could not be made at all — and it may be
+  prefixed by the upstream request the failed exchange interrupted. Never
+  the authorization server's own text.
 - The upstream rejects the exchanged token: that is the upstream's answer
   and is recorded as the call's failure, like any other error result.
   Agenthof does not inspect the exchanged token's audience; the upstream is
@@ -348,13 +351,13 @@ human and only the human: the agent is invisible in *that* service's logs,
 because Agenthof sends no actor token. Agenthof's ledger is where the agent,
 role, and run are named. The per-user token outlives the inbound token only
 as far as its own lifetime: a cached exchanged token keeps being used until
-its refresh point, even if the inbound token has expired by then, and it is
-the next exchange — a cache miss or that refresh — that re-sends the same
-expired inbound token and fails clearly. There is no refresh token and no
-re-authentication, so a run long enough to need one cannot finish. A
-first-contact exchange failure is recorded as a generic start failure,
-indistinguishable in the ledger from any other upstream that could not be
-reached. A token that carries no `email` claim is recorded under its opaque
+its refresh point, even if the inbound token has expired by then. Once the
+inbound token has expired, it is the next exchange — a cache miss or that
+refresh — that re-sends it and fails: a later step fails to start (`tool
+proxy start failed`), or a mid-step call is recorded `failed`. There is no
+refresh token, and Agenthof does not re-authenticate. A first-contact
+exchange failure is recorded as a generic start failure, indistinguishable
+in the ledger from any other upstream that could not be reached. A token that carries no `email` claim is recorded under its opaque
 subject, and a token with no `groups` claim asserts no groups. And Agenthof
 trusts its configured issuer and each resource's token endpoint as it trusts
 any configured provider: a hostile one could mint what it likes.
