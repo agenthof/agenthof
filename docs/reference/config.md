@@ -438,14 +438,15 @@ for the runtime flow):
 | Kind | `kind` | string | yes | — |
 | URL | `url` | string | yes; must be `https`, `http` to a loopback host, or `unix://` plus an absolute socket path | — |
 | CredentialSource | `credential_source` | string | yes | — |
-| TokenEnv | `token_env` | string | yes for the direct-bearer grant (`grant_type: ""`) | — |
+| TokenEnv | `token_env` | string | yes for the direct-bearer grant (`grant_type: ""`); must not be set for `token_exchange` | — |
 | GrantType | `grant_type` | string | no | `""` (direct-bearer) |
-| ClientAuth | `client_auth` | string | yes for `client_credentials` (must be `client_secret_basic`) | — |
-| Issuer | `issuer` | string | yes for `client_credentials` | — |
-| TokenEndpoint | `token_endpoint` | string | yes for `client_credentials`; must be `https`, or `http` to a loopback host | — |
-| ClientIDEnv | `client_id_env` | string | yes for `client_credentials` | — |
-| ClientSecretEnv | `client_secret_env` | string | yes for `client_credentials` | — |
+| ClientAuth | `client_auth` | string | yes for `client_credentials` and `token_exchange` (must be `client_secret_basic`) | — |
+| Issuer | `issuer` | string | yes for `client_credentials`; must not be set for `token_exchange` | — |
+| TokenEndpoint | `token_endpoint` | string | yes for `client_credentials` and `token_exchange`; must be `https`, or `http` to a loopback host | — |
+| ClientIDEnv | `client_id_env` | string | yes for `client_credentials` and `token_exchange` | — |
+| ClientSecretEnv | `client_secret_env` | string | yes for `client_credentials` and `token_exchange` | — |
 | Scope | `scope` | string | no (not checked by `apply`) | — |
+| Audience | `audience` | string | yes for `token_exchange`; must not be set on other grants | — |
 | ReadOnlyTools | `read_only_tools` | list of strings | no | empty (no read-only grant) |
 | Runtime | `runtime` | string | no | `""` (no trusted runtime) |
 
@@ -496,9 +497,14 @@ not `apply`, with a broker error); `"client_credentials"` requires
 `token_endpoint`, `client_id_env`, and `client_secret_env` all set, with
 `token_endpoint` required to be `https` (or `http` only to a loopback host —
 a client secret over plaintext http to a remote host is rejected at apply
-time); any other `grant_type` is rejected as not implemented. `scope` is
-optional and not validated or required by `apply`; when set on a
-`client_credentials` resource, the broker forwards it verbatim, as a single
+time); `"token_exchange"` requires the same client coordinates plus
+`audience` (the RFC 8693 audience the exchanged upstream token is for —
+distinct from `AGENTHOF_OIDC_AUDIENCE`, which governs tokens presented to
+Agenthof), and rejects `token_env` and `issuer`; any other `grant_type` is
+rejected as not implemented. Setting `audience` on the direct-bearer or
+`client_credentials` grant is rejected. `scope` is optional and not
+validated or required by `apply`; when set on a `client_credentials` or
+`token_exchange` resource, the broker forwards it verbatim, as a single
 space-delimited string, in the token request's `scope` parameter (empty
 means the request omits `scope` entirely and the authorization server's own
 default applies). `TokenEnv`,
