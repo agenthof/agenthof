@@ -197,6 +197,16 @@ func (r *runner) run(ctx context.Context, argv []string) (result, error) {
 			return result{}, fmt.Errorf("refexec: podman: %w", waitErr)
 		}
 		exit = ee.ExitCode()
+		// 125 is podman's own reserved code for "podman itself failed" — the
+		// image is absent under --pull=never, a storage error, a bad flag: the
+		// command never ran. Attesting 125 as the command's exit (with a real
+		// argv and pid) would be a false first-hand record, so return an error
+		// and let the gateway record a door failure instead. A command that
+		// itself exits 125 is indistinguishable and treated the same; 125 is
+		// podman-reserved, so a real command rarely uses it.
+		if exit == 125 {
+			return result{}, fmt.Errorf("refexec: podman did not run the command (exit 125)")
+		}
 	}
 	output, truncated := out.output()
 	r.logger.Info("compartment finished", "session", session, "exit", exit, "output_bytes", out.total, "truncated", truncated)

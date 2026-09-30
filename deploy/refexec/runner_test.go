@@ -98,6 +98,16 @@ func TestRunReturnsExitOutputAndAttestation(t *testing.T) {
 	}
 }
 
+func TestRunPodmanSelfFailureIsDoorFailure(t *testing.T) {
+	r, _ := fakeRunner(t, testConfig())
+	// 125 is podman's own reserved failure code (missing image, storage error):
+	// the command never ran, so refexec must return an error — the gateway then
+	// records a door failure — rather than attest 125 as the command's exit.
+	if _, err := r.run(context.Background(), []string{"sh", "-c", "exit 125"}); err == nil {
+		t.Fatal("exit 125 must be a runner error, not an attested exit")
+	}
+}
+
 func TestPodmanRunIsLockedDown(t *testing.T) {
 	t.Setenv("REFEXEC_TEST_MARKER", "1")
 	r, log := fakeRunner(t, testConfig())
