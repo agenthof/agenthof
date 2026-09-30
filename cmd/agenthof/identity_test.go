@@ -66,6 +66,11 @@ func TestResolveInvokerVerifiedToken(t *testing.T) {
 	if aa != "ignored-as" {
 		t.Fatalf("assertedAs = %q, want the --as value", aa)
 	}
+	// --groups is ignored just as --as is: the token carries no groups
+	// claim, so the verified invoker asserts none.
+	if len(inv.Groups) != 0 {
+		t.Fatalf("Groups = %v, want none (--groups must not be merged into a verified invoker)", inv.Groups)
+	}
 }
 
 // TestResolveInvokerFailedToken covers the verification-failed path:

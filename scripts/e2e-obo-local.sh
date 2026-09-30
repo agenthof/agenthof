@@ -245,9 +245,19 @@ if grep -q '"type":"workflow_started"\|"type":"step_' "$WORK/logs/$RUNID.jsonl";
 echo "$AUDIT" | grep -q "run refused — obo requires a verified invoker token" || fail "refusal not rendered"
 
 # 3. --groups is ignored when a verified token is present: the token's
-#    groups (obo-users) authorize, not the flag's.
+#    groups (obo-users) authorize, not the flag's. Both directions, so a run
+#    that MERGED the two sets could not pass either. The flag naming a group
+#    the role forbids does not spoil a token that carries the allowed one;
+#    and for the SAME subject, a token carrying no groups at all is refused
+#    on membership even though the flag names the very group the role
+#    requires — the flag cannot supply what the token does not carry.
 run obo-run "call whoami" --token "$TOKEN" --groups nope
 echo "$OUT" | grep -q "finished: succeeded" || fail "--groups must be ignored when a token is present"
+NOGROUPS_TOKEN="$(mint u-dana agenthof)"
+[ -n "$NOGROUPS_TOKEN" ] || fail "the issuer minted no group-less token"
+run obo-run "call whoami" --token "$NOGROUPS_TOKEN" --groups obo-users
+echo "$OUT" | grep -qF 'refused: role "obo-operator" requires membership in one of its allowed groups (obo-users)' || fail "--groups must not supply groups the verified token does not carry"
+[ "$(grep -c '"type":"run_refused"' "$WORK/logs/$RUNID.jsonl")" = 1 ] || fail "expected exactly one run_refused event for the group-less token"
 
 # 4. The additive inbound audience: a token audienced to the resource
 #    server is refused until AGENTHOF_OIDC_AUDIENCE names it.
@@ -324,7 +334,7 @@ echo "unreachable issuer: nothing listened, and the log names obo-down — ok"
 #    asserted first — and the issuer's token log, whose write is
 #    best-effort, must actually name the tokens to grep for.
 grep -rqF "acting as: u-dana" "$WORK/artifacts" || fail "no artifact carries the upstream's answer, so the absence checks would search an empty tree"
-[ "$(find "$WORK/logs" -name '*.jsonl' | wc -l | tr -d ' ')" -ge 8 ] || fail "fewer ledgers than runs, so the absence checks would search an incomplete tree"
+[ "$(find "$WORK/logs" -name '*.jsonl' | wc -l | tr -d ' ')" -ge 9 ] || fail "fewer ledgers than runs, so the absence checks would search an incomplete tree"
 # The operational log is the widest of the three, and the runs above asked
 # for every debug record there is: an empty or info-only one would make the
 # grep across it worthless.
