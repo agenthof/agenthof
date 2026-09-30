@@ -261,25 +261,33 @@ type GatewayConfig struct {
 }
 
 // ToolResource is a declared tool/MCP resource in the gateway catalog. Kind,
-// CredentialSource=="static_env", and the direct-bearer and client_credentials
-// grants are validated at config load; the tool proxy reads URL and TokenEnv
-// (or mints an upstream token via GrantType=="client_credentials") to connect
-// to the upstream MCP server and inject its credential. The remaining fields
-// are the three-axis (grant × client-auth × source) + multi-IdP shape,
-// reserved so later additions to this catalog stay additive. Credential
-// coordinates are env-var NAMES, never values (Article II).
+// CredentialSource=="static_env", and the three grants — direct-bearer,
+// client_credentials, and token_exchange — are validated at config load; the
+// tool proxy reads URL and TokenEnv (or mints an upstream token via
+// client_credentials, or exchanges the invoker's verified token for a
+// per-user one via token_exchange) to connect to the upstream MCP server and
+// inject its credential. The remaining fields are the three-axis (grant ×
+// client-auth × source) + multi-IdP shape, reserved so later additions to
+// this catalog stay additive. Credential coordinates are env-var NAMES,
+// never values (Article II).
 type ToolResource struct {
 	Kind             string `yaml:"kind"` // "mcp"
 	URL              string `yaml:"url"`
 	CredentialSource string `yaml:"credential_source"` // "static_env" | vault|spiffe|sts (reserved)
-	TokenEnv         string `yaml:"token_env"`         // static_env bearer env NAME
-	GrantType        string `yaml:"grant_type"`        // "" (direct-bearer) | "client_credentials" | other (reserved)
-	ClientAuth       string `yaml:"client_auth"`       // client_credentials: "client_secret_basic" (other values reserved)
-	Issuer           string `yaml:"issuer"`            // client_credentials: (resource,issuer) key
-	TokenEndpoint    string `yaml:"token_endpoint"`    // client_credentials: https, or http to loopback only
-	ClientIDEnv      string `yaml:"client_id_env"`     // client_credentials: env NAME
-	ClientSecretEnv  string `yaml:"client_secret_env"` // client_credentials: client secret env NAME
-	Scope            string `yaml:"scope"`             // client_credentials: optional, space-delimited
+	TokenEnv         string `yaml:"token_env"`         // static_env bearer env NAME (direct-bearer grant only)
+	GrantType        string `yaml:"grant_type"`        // "" (direct-bearer) | "client_credentials" | "token_exchange"
+	ClientAuth       string `yaml:"client_auth"`       // client_credentials / token_exchange: "client_secret_basic" (other values reserved)
+	Issuer           string `yaml:"issuer"`            // client_credentials: (resource,issuer) key; rejected on token_exchange
+	TokenEndpoint    string `yaml:"token_endpoint"`    // client_credentials / token_exchange: https, or http to loopback only
+	ClientIDEnv      string `yaml:"client_id_env"`     // client_credentials / token_exchange: env NAME
+	ClientSecretEnv  string `yaml:"client_secret_env"` // client_credentials / token_exchange: client secret env NAME
+	Scope            string `yaml:"scope"`             // client_credentials / token_exchange: optional, space-delimited
+	// Audience is, for grant_type token_exchange, the audience the exchanged
+	// per-user token is for (the RFC 8693 audience parameter — the upstream
+	// this resource fronts). Required there; rejected on every other grant.
+	// Distinct from AGENTHOF_OIDC_AUDIENCE, which is what tokens presented
+	// TO Agenthof may name.
+	Audience string `yaml:"audience"`
 	// ReadOnlyTools names the tools that are safe under a mode: read-only
 	// grant. Operator-declared. A tool not listed is mutating. Empty means
 	// this resource has no read-only grant.

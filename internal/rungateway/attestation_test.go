@@ -203,7 +203,7 @@ func newAttestingUpstream(t *testing.T, meta map[string]any, isError bool) *http
 func runOneCall(t *testing.T, res config.ToolResource) (*mcp.CallToolResult, []engine.Event, error) {
 	t.Helper()
 	t.Setenv("ATT_TOKEN", "upstream-secret")
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"bridge": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"bridge": res}}, "", broker.StaticEnv{}, nil, "")
 	var mu sync.Mutex
 	var events []engine.Event
 	appendEvent := func(e engine.Event) { mu.Lock(); defer mu.Unlock(); events = append(events, e) }

@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1427,7 +1429,7 @@ func TestNewBrokerRoutesClientCredentialsGrant(t *testing.T) {
 		ClientIDEnv:     "AGENTHOF_TEST_UNSET_CLIENT_ID",
 		ClientSecretEnv: "AGENTHOF_TEST_UNSET_CLIENT_SECRET",
 	}
-	_, err := newBroker().Resolve(context.Background(), ref)
+	_, err := newBroker(broker.SubjectTokenTypeAccessToken).Resolve(context.Background(), ref)
 	if err == nil {
 		t.Fatal("resolve must fail with the client-id env unset")
 	}
@@ -1556,5 +1558,175 @@ func TestRunToolProxyAddrFlagParsesButIsUnused(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "finished: succeeded") {
 		t.Fatalf("run with no gateway tools must be unaffected by the flag: %s", out.String())
+	}
+}
+
+// writeOBOSample writes a one-step config whose planner grants a
+// token_exchange resource at upstreamURL, exchanged at exchangeURL. The
+// agent stub is echoCompatHandler, whose "tool:<name>" input calls that
+// tool through the door.
+func writeOBOSample(t *testing.T, exchangeURL, upstreamURL string) string {
+	t.Helper()
+	stub := httptest.NewServer(http.HandlerFunc(echoCompatHandler))
+	t.Cleanup(stub.Close)
+	root := t.TempDir()
+	files := map[string]string{
+		"agents/planner.yaml": "name: planner\nmodel: fast\ninstruction: plan\noutput: plan\nendpoint: " + stub.URL + "\ntools:\n  - resource: crm\n    mode: all\n",
+		"workflows/crm.yaml":  "name: crm\nsteps:\n  - name: plan\n    agent: planner\n",
+		"roles/se.yaml":       "name: software-engineer\nworkflows: [crm]\nallowed_groups: [\"*\"]\n",
+		"gateway.yaml": "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\n" +
+			"tools:\n  crm:\n    kind: mcp\n    url: " + upstreamURL + "\n    credential_source: static_env\n    grant_type: token_exchange\n" +
+			"    client_auth: client_secret_basic\n    token_endpoint: " + exchangeURL + "\n    audience: https://crm.example\n" +
+			"    client_id_env: OBO_TEST_CLIENT_ID\n    client_secret_env: OBO_TEST_CLIENT_SECRET\n",
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// TestRunOBOResourceRefusesAssertedInvoker: an OBO workflow with a dev --as
+// invoker is a proper refused run — one run_refused event with the fixed
+// reason — before the engine, the gateway, or the exchange endpoint is ever
+// touched.
+func TestRunOBOResourceRefusesAssertedInvoker(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_TOKEN", "")
+	var exchanges int32
+	exchange := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&exchanges, 1)
+		http.Error(w, "must not be called", http.StatusInternalServerError)
+	}))
+	defer exchange.Close()
+	root := writeOBOSample(t, exchange.URL, "http://127.0.0.1:9/mcp")
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "crm", "--input", "tool:whoami", "--as", "dana@example.com", "--groups", "eng",
+		"--config", root, "--log-dir", logs}, &out, io.Discard)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d\n%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused: obo requires a verified invoker token`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out must carry the run id and the fixed OBO reason: %s", out.String())
+	}
+	events, _, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != "run_refused" || events[0].Reason != oboRefusalReason {
+		t.Fatalf("expected a single run_refused with the fixed reason, got %+v", events)
+	}
+	if atomic.LoadInt32(&exchanges) != 0 {
+		t.Fatal("the exchange endpoint must not be contacted for a refused run")
+	}
+}
+
+// TestRunOBOEndToEndInProcess: a verified --token run exchanges the token,
+// the upstream sees the EXCHANGED token (never the subject token), the
+// ledger records auth_mode token_exchange, and neither token appears in the
+// run log or the CLI output.
+func TestRunOBOEndToEndInProcess(t *testing.T) {
+	t.Chdir(t.TempDir())
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	idp := cmdTestOIDCServer(t, key)
+	subject := cmdMintToken(t, key, map[string]any{
+		"iss": idp.URL, "aud": "agenthof", "exp": time.Now().Add(time.Hour).Unix(),
+		"sub": "u-123", "email": "dana@example.com",
+	})
+	t.Setenv("AGENTHOF_OIDC_ISSUER", idp.URL)
+	t.Setenv("AGENTHOF_OIDC_CLIENT_ID", "agenthof")
+	t.Setenv("AGENTHOF_OIDC_SUBJECT_TOKEN_TYPE", "urn:ietf:params:oauth:token-type:id_token")
+	t.Setenv("OBO_TEST_CLIENT_ID", "agenthof-broker")
+	t.Setenv("OBO_TEST_CLIENT_SECRET", "client-secret")
+
+	const exchanged = "zq9exchangedtokenBBBB2222"
+	var mu sync.Mutex
+	var sawSubject, sawType string
+	exchange := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		sawSubject, sawType = r.Form.Get("subject_token"), r.Form.Get("subject_token_type")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"` + exchanged + `","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer exchange.Close()
+
+	var lastAuth string
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "crm-stub", Version: "v0.1.0"}, nil)
+	mcp.AddTool(upstream, &mcp.Tool{Name: "whoami", Description: "who the bearer is"},
+		func(_ context.Context, req *mcp.CallToolRequest, _ struct {
+			Text string `json:"text,omitempty"`
+		}) (*mcp.CallToolResult, any, error) {
+			var auth string
+			if req.Extra != nil && req.Extra.Header != nil {
+				auth = req.Extra.Header.Get("Authorization")
+			}
+			mu.Lock()
+			lastAuth = auth
+			mu.Unlock()
+			if auth != "Bearer "+exchanged {
+				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "unauthorized"}}}, nil, nil
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "acting as: u-123"}}}, nil, nil
+		})
+	up := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return upstream }, nil))
+	defer up.Close()
+
+	cfg := writeOBOSample(t, exchange.URL, up.URL)
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "crm", "--input", "tool:whoami", "--token", subject,
+		"--config", cfg, "--log-dir", logs}, &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+	mu.Lock()
+	gotAuth, gotSubject, gotType := lastAuth, sawSubject, sawType
+	mu.Unlock()
+	if gotAuth != "Bearer "+exchanged {
+		t.Fatalf("upstream saw %q, want the exchanged token", gotAuth)
+	}
+	if gotSubject != subject || gotType != "urn:ietf:params:oauth:token-type:id_token" {
+		t.Fatalf("exchange must carry the verified token as subject_token with the deployment's subject_token_type (type=%q)", gotType)
+	}
+	events, _, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	var found bool
+	for _, e := range events {
+		if e.Type == "tool_call" {
+			found = true
+			if e.AuthMode != "token_exchange" || e.Status != "succeeded" {
+				t.Fatalf("tool_call = %+v", e)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no tool_call event")
+	}
+	raw, err := os.ReadFile(filepath.Join(logs, m[1]+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{subject, exchanged} {
+		if strings.Contains(string(raw), secret) || strings.Contains(out.String(), secret) {
+			t.Fatalf("a token reached the ledger or the CLI output (prefix %s)", secret[:8])
+		}
 	}
 }

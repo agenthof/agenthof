@@ -54,6 +54,12 @@ type Gateway struct {
 	broker  broker.Broker
 	gwcfg   config.GatewayConfig
 	keyRoot string
+	// subjectToken is the invoker's verified inbound token for this run —
+	// the RFC 8693 subject token. Per run, never per step: it is handed to
+	// New once, never placed on engine.Binding (signed, rides every step
+	// header) or Start, and reaches a broker only on the ref of a
+	// token_exchange resource. Empty when the invoker was not OIDC-verified.
+	subjectToken string
 
 	// logger is the operational logger New was given (never nil — New
 	// applies obs.OrDiscard). stepLogger is logger scoped to the current
@@ -82,10 +88,12 @@ type Gateway struct {
 // gw.Tools. keyRoot is the working directory gateway provision writes role
 // keys under (".", the same root as EnsureRoleKey), not the --config directory.
 // logger receives operational diagnostics (never ledger events); nil means
-// discard.
-func New(gw config.GatewayConfig, keyRoot string, b broker.Broker, logger *slog.Logger) *Gateway {
+// discard. subjectToken is the invoker's verified inbound token, exchanged
+// per user for each token_exchange resource; "" when the invoker has none
+// (cmdRun refuses an OBO workflow before it gets here in that case).
+func New(gw config.GatewayConfig, keyRoot string, b broker.Broker, logger *slog.Logger, subjectToken string) *Gateway {
 	l := obs.OrDiscard(logger)
-	return &Gateway{tools: gw.Tools, broker: b, gwcfg: gw, keyRoot: keyRoot, logger: l, stepLogger: l}
+	return &Gateway{tools: gw.Tools, broker: b, gwcfg: gw, keyRoot: keyRoot, logger: l, stepLogger: l, subjectToken: subjectToken}
 }
 
 // allowedTools is what Start derives from the agent's tool grants: resource
@@ -586,6 +594,13 @@ func (p *Gateway) connectUpstream(id string, res config.ToolResource) (upstream,
 		ClientIDEnv:     res.ClientIDEnv,
 		ClientSecretEnv: res.ClientSecretEnv,
 	}
+	// The invoker's token travels only on a token_exchange ref, and so does
+	// the audience it is exchanged for. Every other grant resolves without
+	// either, so no other broker can see them.
+	if res.GrantType == "token_exchange" {
+		ref.SubjectToken = p.subjectToken
+		ref.Audience = res.Audience
+	}
 	base, endpoint, closeIdle := upstreamTransport(res.URL)
 	httpClient := &http.Client{Transport: &injectingTransport{base: base, broker: p.broker, ref: ref}}
 	client := mcp.NewClient(&mcp.Implementation{Name: "agenthof-tool-proxy", Version: "v0.1.0"}, nil)
@@ -743,13 +758,21 @@ func argsSHA(raw json.RawMessage) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// authModeFor reports the ledger AuthMode string for a resource: the grant used
-// to obtain the upstream credential. Kept in lockstep with the broker's grants.
+// authModeFor reports the ledger AuthMode string for a resource: the grant
+// used to obtain the upstream credential. A fail-closed switch kept in
+// lockstep with the broker's grants: a grant this function does not know is
+// recorded as configured, never mislabeled static_env.
 func authModeFor(res config.ToolResource) string {
-	if res.GrantType == "client_credentials" {
+	switch res.GrantType {
+	case "":
+		return "static_env"
+	case "client_credentials":
 		return "client_credentials"
+	case "token_exchange":
+		return "token_exchange"
+	default:
+		return res.GrantType
 	}
-	return "static_env"
 }
 
 // resultErrorText extracts a short failure message from an upstream

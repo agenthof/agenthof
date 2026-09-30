@@ -243,9 +243,53 @@ func Validate(cfg config.Config) []ValidationError {
 				add("gateway.yaml", id, "bad-tool-resource",
 					fmt.Sprintf("tool resource %q: token_endpoint must be set and https (or loopback http)", id))
 			}
+		case "token_exchange":
+			// On behalf of the invoker: the invoker's verified token is
+			// exchanged at token_endpoint for a token audienced to this
+			// upstream. Agenthof authenticates as an OAuth client, so the
+			// client coordinates are required exactly as for
+			// client_credentials; audience is what the exchange is FOR and
+			// must be stated (config is law — no default upstream).
+			if r.ClientAuth != "client_secret_basic" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: client_auth %q is not implemented (only client_secret_basic)", id, r.ClientAuth))
+			}
+			if r.Audience == "" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: audience is required for token_exchange", id))
+			}
+			if r.ClientIDEnv == "" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: client_id_env is required for token_exchange", id))
+			}
+			if r.ClientSecretEnv == "" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: client_secret_env is required for token_exchange", id))
+			}
+			if !validSecureEndpoint(r.TokenEndpoint) {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: token_endpoint must be set and https (or loopback http)", id))
+			}
+			// An on-behalf-of resource has exactly one credential path — the
+			// exchanged token. A direct bearer beside it is contradictory,
+			// and issuer is the client_credentials cache key (token_exchange
+			// keys by the subject token and reaches the server through
+			// token_endpoint), so both are rejected rather than ignored.
+			if r.TokenEnv != "" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: token_env must not be set with grant_type token_exchange (an on-behalf-of resource has no direct bearer)", id))
+			}
+			if r.Issuer != "" {
+				add("gateway.yaml", id, "bad-tool-resource",
+					fmt.Sprintf("tool resource %q: issuer must not be set with grant_type token_exchange (the exchange is keyed by the subject token, not an issuer)", id))
+			}
 		default:
 			add("gateway.yaml", id, "bad-tool-resource",
-				fmt.Sprintf("tool resource %q: grant_type %q is not implemented (only client_credentials)", id, r.GrantType))
+				fmt.Sprintf("tool resource %q: grant_type %q is not implemented (client_credentials or token_exchange)", id, r.GrantType))
+		}
+		if r.GrantType != "token_exchange" && r.Audience != "" {
+			add("gateway.yaml", id, "bad-tool-resource",
+				fmt.Sprintf("tool resource %q: audience is only valid with grant_type token_exchange", id))
 		}
 		seenRO := map[string]bool{}
 		for _, name := range r.ReadOnlyTools {

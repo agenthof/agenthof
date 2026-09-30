@@ -341,3 +341,17 @@ func TestRenderExecRuntimeAttested(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderToolCallTokenExchangeMode pins that the on-behalf-of mode
+// renders as configured: Render prints AuthMode verbatim, so no rendering
+// code changes with a new grant, but the contract is worth a line.
+func TestRenderToolCallTokenExchangeMode(t *testing.T) {
+	events := []engine.Event{{
+		Type: "tool_call", Status: "succeeded", Tool: "whoami",
+		ArgsSHA: "abcdef1234567890", AuthMode: "token_exchange", Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil)
+	if !strings.Contains(out, "tool whoami — args abcdef12 (token_exchange)") {
+		t.Fatalf("token_exchange mode not rendered:\n%s", out)
+	}
+}

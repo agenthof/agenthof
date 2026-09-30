@@ -217,7 +217,7 @@ func TestProxyRoundTripNoPassthrough(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 
 	var mu sync.Mutex
 	var events []engine.Event
@@ -325,7 +325,7 @@ func TestProxyRejectsBadRunToken(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 
 	url, _, err := p.Start(testBinding(), testAgentDef("github"), func(engine.Event) {})
 	if err != nil {
@@ -349,7 +349,7 @@ func TestProxyForwardDeniesNonAllowlistedResource(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
 	appendEvent := func(e engine.Event) { events = append(events, e) }
@@ -420,7 +420,7 @@ func TestProxyStopWaitsForInFlightForward(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 
 	var mu sync.Mutex
 	appendCount := 0
@@ -512,7 +512,7 @@ func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
 	appendEvent := func(e engine.Event) { events = append(events, e) }
@@ -572,7 +572,7 @@ func TestProxyForwardCapsReasonOnCallError(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 	var events []engine.Event
 	handler := p.forward(testBinding(), testAgentDef("github"), "github", allowedTools{"github": nil}, upstream,
 		func(e engine.Event) { events = append(events, e) }, obs.Discard())
@@ -623,7 +623,7 @@ func TestProxyClientCredentialsMintsSeparateUpstreamToken(t *testing.T) {
 		ClientIDEnv: "CC_ID", ClientSecretEnv: "CC_SECRET",
 	}
 	b := broker.Dispatch{StaticEnv: broker.StaticEnv{}, ClientCredentials: broker.NewClientCredentials(nil)}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", b, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", b, nil, "")
 
 	var events []engine.Event
 	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) {
@@ -675,7 +675,7 @@ func TestProxyDirectBearerRegression(t *testing.T) {
 	defer ts.Close()
 
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
 	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) {
@@ -721,7 +721,7 @@ func TestProxyForwardRecordsToolAndArgsSHA(t *testing.T) {
 	t.Setenv("UP_TOKEN", upstreamToken)
 
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
 	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
@@ -772,7 +772,7 @@ func TestProxyDeniedToolRecordsRefusedEvent(t *testing.T) {
 	t.Setenv("UP_TOKEN", upstreamToken)
 
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
 	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
@@ -828,7 +828,7 @@ func TestProxyExposedToolEmitsExactlyOneEvent(t *testing.T) {
 	t.Setenv("UP_TOKEN", upstreamToken)
 
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
 	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) { events = append(events, e) })
@@ -921,7 +921,7 @@ func TestProxyStartMirrorsOnlyAllowlistedTools(t *testing.T) {
 	ts := newMultiToolUpstream(t, "up", "echo", "other")
 	t.Setenv("UP_TOKEN", "up-tok")
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	var mu sync.Mutex
 	var events []engine.Event
@@ -977,7 +977,7 @@ func TestProxyStartFailsWhenAllowlistedToolIsNotExposed(t *testing.T) {
 	ts := newMultiToolUpstream(t, "up", "echo")
 	t.Setenv("UP_TOKEN", "up-tok")
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
 		Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"echo", "list_issue", "get_issue"}}}}
@@ -1001,7 +1001,7 @@ func TestProxyStartAllowlistResolvesCollision(t *testing.T) {
 		"a": {Kind: "mcp", URL: a.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
 		"b": {Kind: "mcp", URL: b.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
 	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 
 	// Without the filter this exact grant list fails Start with the
 	// collision error, so first prove the collision guard still fires for
@@ -1044,7 +1044,7 @@ func TestProxyStartAllowlistResolvesCollision(t *testing.T) {
 func TestProxyStartRejectsRestrictedDuplicateGrant(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
-	}}, "", broker.StaticEnv{}, nil)
+	}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
 		Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}, {Resource: "up", Tools: []string{"echo"}}}}
 	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
@@ -1061,7 +1061,7 @@ func TestProxyStartRejectsRestrictedDuplicateGrant(t *testing.T) {
 func TestProxyStartRejectsGrantWithoutScope(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
-	}}, "", broker.StaticEnv{}, nil)
+	}}, "", broker.StaticEnv{}, nil, "")
 	for name, grants := range map[string][]config.ToolGrant{
 		"single":                 {{Resource: "up"}},
 		"duplicate":              {{Resource: "up"}, {Resource: "up"}},
@@ -1090,7 +1090,7 @@ func TestProxyStartAcceptsDuplicateModeAllGrant(t *testing.T) {
 	ts, _ := newStubUpstream(t, upstreamToken)
 	t.Setenv("UP_TOKEN", upstreamToken)
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 
 	agent := config.AgentDef{Name: "fe", Execution: "fronted", Endpoint: "https://x",
 		Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}, {Resource: "up", Mode: "all"}}}
@@ -1134,7 +1134,7 @@ func TestProxyStartReadOnlyMirrorsClassifiedTools(t *testing.T) {
 	ts := newMultiToolUpstream(t, "up", "echo", "other")
 	t.Setenv("UP_TOKEN", "up-tok")
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
 	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err != nil {
@@ -1158,7 +1158,7 @@ func TestProxyStartModeAllMirrorsEveryTool(t *testing.T) {
 	ts := newMultiToolUpstream(t, "up", "echo", "other")
 	t.Setenv("UP_TOKEN", "up-tok")
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}}}
 	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err != nil {
@@ -1185,7 +1185,7 @@ func TestProxyStartReadOnlySkipsAbsentAndWarns(t *testing.T) {
 	var buf bytes.Buffer
 	logger := obs.New(&buf, slog.LevelWarn, obs.FormatText)
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo", "gone"}}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, logger)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, logger, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
 	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err != nil {
@@ -1213,7 +1213,7 @@ func TestProxyStartReadOnlyEmptyIntersectionFails(t *testing.T) {
 	ts := newMultiToolUpstream(t, "up", "other")
 	t.Setenv("UP_TOKEN", "up-tok")
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
 	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	// Stop unconditionally: a regression that lets Start succeed here leaves
@@ -1231,7 +1231,7 @@ func TestProxyStartReadOnlyEmptyIntersectionFails(t *testing.T) {
 func TestProxyStartRejectsMutatingToolUnderReadOnly(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}},
-	}}, "", broker.StaticEnv{}, nil)
+	}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"other"}, Mode: "read-only"}}}
 	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), "not classified read-only") {
@@ -1246,7 +1246,7 @@ func TestProxyStartReadOnlyNarrowedMirrorsSubset(t *testing.T) {
 	ts := newMultiToolUpstream(t, "up", "echo", "other")
 	t.Setenv("UP_TOKEN", "up-tok")
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo", "other"}}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"echo"}, Mode: "read-only"}}}
 	proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err != nil {
@@ -1270,7 +1270,7 @@ func TestProxyStartReadOnlyNarrowedMirrorsSubset(t *testing.T) {
 func TestProxyStartRejectsNamedReadOnlyDuplicateGrant(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}},
-	}}, "", broker.StaticEnv{}, nil)
+	}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{
 		{Resource: "up", Tools: []string{"echo"}},
 		{Resource: "up", Mode: "read-only"},
@@ -1287,7 +1287,7 @@ func TestProxyStartRejectsNamedReadOnlyDuplicateGrant(t *testing.T) {
 func TestProxyStartRejectsModeAllWithTools(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
-	}}, "", broker.StaticEnv{}, nil)
+	}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "all", Tools: []string{"echo"}}}}
 	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), "mode all") {
@@ -1301,7 +1301,7 @@ func TestProxyStartRejectsModeAllWithTools(t *testing.T) {
 func TestProxyStartRejectsReadOnlyDuplicateGrant(t *testing.T) {
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
 		"up": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}},
-	}}, "", broker.StaticEnv{}, nil)
+	}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}, {Resource: "up", Mode: "read-only"}}}
 	_, _, err := p.Start(testBinding(), agent, func(engine.Event) {})
 	if err == nil || !strings.Contains(err.Error(), `resource "up" is granted more than once`) {
@@ -1329,7 +1329,7 @@ func TestProxyStartReadOnlyHintWarnsOnlyWhenAnnotated(t *testing.T) {
 			var buf bytes.Buffer
 			logger := obs.New(&buf, slog.LevelWarn, obs.FormatText)
 			res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN", ReadOnlyTools: []string{"echo"}}
-			p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, logger)
+			p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, logger, "")
 			agent := config.AgentDef{Name: "fe", Tools: []config.ToolGrant{{Resource: "up", Mode: "read-only"}}}
 			proxyURL, runToken, err := p.Start(testBinding(), agent, func(engine.Event) {})
 			if err != nil {
@@ -1359,7 +1359,7 @@ func TestProxyForwardDeniesToolOffAllowlist(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: "http://unused.invalid", CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 
 	var events []engine.Event
 	appendEvent := func(e engine.Event) { events = append(events, e) }
@@ -1404,7 +1404,7 @@ func startExecProxy(t *testing.T, allow []config.ExecEntry, record func(engine.E
 	t.Helper()
 	agent := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
 		Exec: config.ExecConfig{Mode: "attested", Allow: allow}}
-	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
 	url, token, err := p.Start(testBinding(), agent, record)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1502,7 +1502,7 @@ func TestExecAndToolCallRecordInCallOrder(t *testing.T) {
 	t.Setenv("UP_TOKEN", upstreamToken)
 
 	res := config.ToolResource{Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"}
-	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{
 		Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
 		Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}},
@@ -1559,7 +1559,7 @@ func TestExecStopWaitsForInFlightAttest(t *testing.T) {
 	}
 	agent := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
 		Exec: config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "go"}}}}
-	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
 	base, token, err := p.Start(testBinding(), agent, appendEvent)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1678,7 +1678,7 @@ func startModelGateway(t *testing.T, up *modelUpstream, agent config.AgentDef, k
 		},
 	}
 	gw.Defaults.Model = "planner-model"
-	p := New(gw, keyRoot, broker.StaticEnv{}, nil)
+	p := New(gw, keyRoot, broker.StaticEnv{}, nil, "")
 	var mu sync.Mutex
 	var events []engine.Event
 	base, token, err := p.Start(testBinding(), agent, func(e engine.Event) {
@@ -1910,7 +1910,7 @@ func TestModelProxyUpstreamUnreachableRecordsFailedEvent(t *testing.T) {
 		},
 	}
 	gw.Defaults.Model = "planner-model"
-	p := New(gw, t.TempDir(), broker.StaticEnv{}, nil)
+	p := New(gw, t.TempDir(), broker.StaticEnv{}, nil, "")
 
 	var mu sync.Mutex
 	var events []engine.Event
@@ -2012,7 +2012,7 @@ func TestModelProxyStopWaitsForInFlightAppend(t *testing.T) {
 		Models: map[string]config.ModelRoute{
 			"planner-model": {Endpoint: ts.URL, Model: "gpt-4o", APIKeyEnv: "MODEL_KEY"},
 		},
-	}, t.TempDir(), broker.StaticEnv{}, nil)
+	}, t.TempDir(), broker.StaticEnv{}, nil, "")
 	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
 
 	entered := make(chan struct{})
@@ -2110,7 +2110,7 @@ func TestProxyRoundTripOverUnixSocket(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"bridge": {Kind: "mcp", URL: config.UnixScheme + sock, CredentialSource: "static_env", TokenEnv: "BRIDGE_TOKEN"},
 	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 	var mu sync.Mutex
 	var events []engine.Event
 	appendEvent := func(e engine.Event) {
@@ -2193,7 +2193,7 @@ func TestUnixUpstreamReleasesConnectionsAcrossSteps(t *testing.T) {
 	tools := map[string]config.ToolResource{
 		"bridge": {Kind: "mcp", URL: config.UnixScheme + sock, CredentialSource: "static_env", TokenEnv: "BRIDGE_TOKEN"},
 	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil)
+	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 
 	const steps = 10
 	for i := 0; i < steps; i++ {
@@ -2215,4 +2215,247 @@ func TestUnixUpstreamReleasesConnectionsAcrossSteps(t *testing.T) {
 		t.Fatalf("upstream accepted %d connections over %d steps; each step must dial at least once", got, steps)
 	}
 	waitNoOpenConns(t, conns, "after the last Stop")
+}
+
+// lockedLogBuffer captures the operational log; the gateway logs from its
+// own goroutines, so reads are locked too.
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// refRecordingBroker records the ref each resource was resolved with and
+// answers a fixed token, so a test can see exactly what the gateway put on
+// the ref without any network.
+type refRecordingBroker struct {
+	mu    sync.Mutex
+	refs  map[string]broker.CredentialRef
+	token string
+}
+
+func (r *refRecordingBroker) Resolve(_ context.Context, ref broker.CredentialRef) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.refs == nil {
+		r.refs = map[string]broker.CredentialRef{}
+	}
+	r.refs[ref.ResourceID] = ref
+	return r.token, nil
+}
+
+// ref reports the ref this resource was resolved with, and whether the
+// broker was ever asked for it at all — so a check on an absent resource
+// cannot pass on a zero CredentialRef.
+func (r *refRecordingBroker) ref(id string) (broker.CredentialRef, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	got, ok := r.refs[id]
+	return got, ok
+}
+
+func TestAuthModeFor(t *testing.T) {
+	cases := map[string]string{
+		"":                   "static_env",
+		"client_credentials": "client_credentials",
+		"token_exchange":     "token_exchange",
+		"device_code":        "device_code", // never mislabeled static_env: recorded as configured
+	}
+	for grant, want := range cases {
+		if got := authModeFor(config.ToolResource{GrantType: grant}); got != want {
+			t.Errorf("authModeFor(%q) = %q, want %q", grant, got, want)
+		}
+	}
+}
+
+// TestProxySubjectTokenOnlyOnTokenExchangeRefs: the run's subject token is
+// put on the ref of a token_exchange resource and on NO other ref, so no
+// other broker can ever see it; audience travels with it.
+func TestProxySubjectTokenOnlyOnTokenExchangeRefs(t *testing.T) {
+	const subject = "zq9subjecttokenAAAA1111"
+	// Distinct tool names: two resources exposing the same name is a Start
+	// refusal (a cross-resource collision), which is not what this test is
+	// about. newMultiToolUpstream checks no bearer, so the recording
+	// broker's fixed answer is fine.
+	upStatic := newMultiToolUpstream(t, "plain", "ping")
+	upOBO := newMultiToolUpstream(t, "obo", "whoami")
+	tools := map[string]config.ToolResource{
+		"plain": {Kind: "mcp", URL: upStatic.URL, CredentialSource: "static_env", TokenEnv: "UP_TOKEN"},
+		"obo": {Kind: "mcp", URL: upOBO.URL, CredentialSource: "static_env", GrantType: "token_exchange",
+			ClientAuth: "client_secret_basic", TokenEndpoint: "http://127.0.0.1:9/token",
+			ClientIDEnv: "TE_ID", ClientSecretEnv: "TE_SECRET", Audience: "https://obo.example"},
+	}
+	rb := &refRecordingBroker{token: "any"}
+	p := New(config.GatewayConfig{Tools: tools}, "", rb, nil, subject)
+	_, _, err := p.Start(testBinding(), testAgentDef("plain", "obo"), func(engine.Event) {})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	plain, resolved := rb.ref("plain")
+	if !resolved {
+		t.Fatal("the broker was never asked for the static resource, so the check below would prove nothing")
+	}
+	if plain.SubjectToken != "" || plain.Audience != "" {
+		t.Fatalf("static resource's ref must carry neither subject token nor audience: subject token set=%v audience=%q",
+			plain.SubjectToken != "", plain.Audience)
+	}
+	got, resolved := rb.ref("obo")
+	if !resolved {
+		t.Fatal("the broker was never asked for the token_exchange resource")
+	}
+	if got.SubjectToken != subject {
+		t.Fatal("token_exchange resource's ref must carry the run's subject token")
+	}
+	if got.Audience != "https://obo.example" || got.Grant != "token_exchange" {
+		t.Fatalf("token_exchange ref lost its coordinates: audience=%q grant=%q", got.Audience, got.Grant)
+	}
+}
+
+// TestProxyTokenExchangeInjectsExchangedToken exercises the token_exchange
+// grant end-to-end: the proxy exchanges the run's subject token at a fake
+// RFC 8693 endpoint and injects the EXCHANGED token upstream — never the
+// subject token, never the run token — records AuthMode "token_exchange",
+// and at Debug leaks neither token into the operational log nor into any
+// event's reason or preview.
+func TestProxyTokenExchangeInjectsExchangedToken(t *testing.T) {
+	const subjectToken = "zq9subjecttokenAAAA1111"
+	const exchangedToken = "zq9exchangedtokenBBBB2222"
+	var mu sync.Mutex
+	var form map[string]string
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		form = map[string]string{
+			"grant_type": r.Form.Get("grant_type"), "subject_token": r.Form.Get("subject_token"),
+			"subject_token_type": r.Form.Get("subject_token_type"), "audience": r.Form.Get("audience"),
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"` + exchangedToken + `","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+	t.Setenv("TE_ID", "agenthof-broker")
+	t.Setenv("TE_SECRET", "client-secret")
+
+	ts, lastAuth := newStubUpstream(t, exchangedToken)
+	defer ts.Close()
+
+	res := config.ToolResource{
+		Kind: "mcp", URL: ts.URL, CredentialSource: "static_env",
+		GrantType: "token_exchange", ClientAuth: "client_secret_basic",
+		TokenEndpoint: tokenSrv.URL, ClientIDEnv: "TE_ID", ClientSecretEnv: "TE_SECRET",
+		Audience: "https://up.example",
+	}
+	b := broker.Dispatch{StaticEnv: broker.StaticEnv{}, TokenExchange: broker.NewTokenExchange(nil, "urn:ietf:params:oauth:token-type:id_token")}
+	logBuf := &lockedLogBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", b, logger, subjectToken)
+
+	var events []engine.Event
+	proxyURL, runToken, err := p.Start(testBinding(), testAgentDef("up"), func(e engine.Event) {
+		events = append(events, e)
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ctx := context.Background()
+	sess, err := stubAgentSession(ctx, proxyURL, runToken)
+	if err != nil {
+		t.Fatalf("agent session: %v", err)
+	}
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hi"}}); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	_ = sess.Close()
+	p.Stop()
+
+	if got := lastAuth(); got != "Bearer "+exchangedToken {
+		t.Fatalf("upstream Authorization = %q, want the exchanged token", got)
+	}
+	mu.Lock()
+	seen := form
+	mu.Unlock()
+	if seen["grant_type"] != "urn:ietf:params:oauth:grant-type:token-exchange" || seen["subject_token"] != subjectToken ||
+		seen["subject_token_type"] != "urn:ietf:params:oauth:token-type:id_token" || seen["audience"] != "https://up.example" {
+		t.Fatalf("exchange request shape: grant=%q type=%q audience=%q subject-matches=%v",
+			seen["grant_type"], seen["subject_token_type"], seen["audience"], seen["subject_token"] == subjectToken)
+	}
+	var found bool
+	for _, e := range events {
+		if e.Type == "tool_call" {
+			found = true
+			if e.AuthMode != "token_exchange" {
+				t.Fatalf("AuthMode = %q, want token_exchange", e.AuthMode)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no tool_call event recorded")
+	}
+	for _, secret := range []string{subjectToken, exchangedToken, runToken} {
+		if strings.Contains(logBuf.String(), secret) {
+			t.Fatalf("operational log carries a token (prefix %s)", secret[:8])
+		}
+		for _, e := range events {
+			if strings.Contains(e.Reason, secret) || strings.Contains(e.Artifact, secret) {
+				t.Fatalf("ledger event carries a token (prefix %s): %+v", secret[:8], e.Type)
+			}
+		}
+	}
+}
+
+// TestProxyTokenExchangeStartFailureNoLeak: an exchange the authorization
+// server rejects fails Start, and neither the AS's text nor the subject
+// token reaches Start's error or the operational log.
+func TestProxyTokenExchangeStartFailureNoLeak(t *testing.T) {
+	const subjectToken = "zq9subjecttokenAAAA1111"
+	const sentinel = "never-in-a-ledger"
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"` + sentinel + `"}`))
+	}))
+	defer tokenSrv.Close()
+	t.Setenv("TE_ID", "agenthof-broker")
+	t.Setenv("TE_SECRET", "client-secret")
+	ts, _ := newStubUpstream(t, "never-reached")
+	defer ts.Close()
+
+	res := config.ToolResource{
+		Kind: "mcp", URL: ts.URL, CredentialSource: "static_env",
+		GrantType: "token_exchange", ClientAuth: "client_secret_basic",
+		TokenEndpoint: tokenSrv.URL, ClientIDEnv: "TE_ID", ClientSecretEnv: "TE_SECRET",
+		Audience: "https://up.example",
+	}
+	b := broker.Dispatch{StaticEnv: broker.StaticEnv{}, TokenExchange: broker.NewTokenExchange(nil, "")}
+	logBuf := &lockedLogBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}, "", b, logger, subjectToken)
+
+	_, _, err := p.Start(testBinding(), testAgentDef("up"), func(engine.Event) {})
+	if err == nil {
+		p.Stop()
+		t.Fatal("Start must fail when the exchange is rejected")
+	}
+	for _, forbidden := range []string{sentinel, "invalid_grant", subjectToken} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("Start's error echoed %q: %v", forbidden, err)
+		}
+		if strings.Contains(logBuf.String(), forbidden) {
+			t.Fatalf("operational log echoed %q", forbidden)
+		}
+	}
 }

@@ -38,7 +38,7 @@ say so ([below](#where-agenthof-deliberately-diverges)).
 | --- | --- | --- |
 | [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html) · [OAuth 2.0 (RFC 6749)](https://www.rfc-editor.org/rfc/rfc6749) | The mature standards for human login (OIDC) and machine-to-machine grants (client-credentials, §4.4). | The load-bearing pair: OIDC establishes the invoker; client-credentials mints upstream tokens. Only mature, widely-supported standards are required. |
 | [RFC 9728, *Protected Resource Metadata*](https://www.rfc-editor.org/rfc/rfc9728) | How an OAuth resource server advertises how to authenticate to it. | The gateway acts as a resource server and validates audience; foreign tokens are rejected. |
-| [RFC 8693, *Token Exchange*](https://www.rfc-editor.org/rfc/rfc8693) · [SPIFFE](https://spiffe.io/) | Emerging standards for delegated and workload identity. | **Optional federation upgrades**, not prerequisites — reserved seams in the auth-federation broker, never load-bearing for a release (Article II). |
+| [RFC 8693, *Token Exchange*](https://www.rfc-editor.org/rfc/rfc8693) · [SPIFFE](https://spiffe.io/) | Emerging standards for delegated and workload identity. | **Optional federation upgrades**, not prerequisites, never load-bearing for a release (Article II). Token exchange ships as one such upgrade, chosen per tool resource: a resource declared `grant_type: token_exchange` is called on behalf of the invoking human, by impersonation (no actor token) — see [`lifecycle-tool.md`](lifecycle-tool.md#on-behalf-of-the-invoker). SPIFFE remains a reserved seam in the auth-federation broker. |
 
 ## Hash-chained ledger & tamper-evidence
 

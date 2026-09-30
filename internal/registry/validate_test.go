@@ -456,7 +456,7 @@ func TestValidateClientCredentialsToolResource(t *testing.T) {
 	}{
 		{"valid", func(*config.ToolResource) {}, false},
 		{"loopback http ok", func(r *config.ToolResource) { r.TokenEndpoint = "http://127.0.0.1:9/token" }, false},
-		{"reserved grant", func(r *config.ToolResource) { r.GrantType = "token_exchange" }, true},
+		{"unknown grant", func(r *config.ToolResource) { r.GrantType = "device_code" }, true},
 		{"reserved client_auth", func(r *config.ToolResource) { r.ClientAuth = "private_key_jwt" }, true},
 		{"missing issuer", func(r *config.ToolResource) { r.Issuer = "" }, true},
 		{"missing token_endpoint", func(r *config.ToolResource) { r.TokenEndpoint = "" }, true},
@@ -471,6 +471,79 @@ func TestValidateClientCredentialsToolResource(t *testing.T) {
 				t.Fatalf("bad-tool-resource finding = %v, want %v (errs: %v)", got, tc.want, errs)
 			}
 		})
+	}
+}
+
+func TestValidateTokenExchangeToolResource(t *testing.T) {
+	base := func(mut func(*config.ToolResource)) config.Config {
+		r := config.ToolResource{
+			Kind: "mcp", URL: "https://mcp.example.com/", CredentialSource: "static_env",
+			GrantType: "token_exchange", ClientAuth: "client_secret_basic",
+			TokenEndpoint: "https://idp.example.com/token", Audience: "https://mcp.example.com",
+			ClientIDEnv: "TE_ID", ClientSecretEnv: "TE_SECRET",
+		}
+		mut(&r)
+		return config.Config{Gateway: config.GatewayConfig{Tools: map[string]config.ToolResource{"t": r}}}
+	}
+	cases := []struct {
+		name string
+		mut  func(*config.ToolResource)
+		want string // "" = valid; otherwise a substring of the one expected message
+	}{
+		{"valid", func(*config.ToolResource) {}, ""},
+		{"loopback http token_endpoint ok", func(r *config.ToolResource) { r.TokenEndpoint = "http://127.0.0.1:9/token" }, ""},
+		{"scope is optional", func(r *config.ToolResource) { r.Scope = "mcp.read" }, ""},
+		{"missing audience", func(r *config.ToolResource) { r.Audience = "" }, "audience is required for token_exchange"},
+		{"missing client_id_env", func(r *config.ToolResource) { r.ClientIDEnv = "" }, "client_id_env is required for token_exchange"},
+		{"missing client_secret_env", func(r *config.ToolResource) { r.ClientSecretEnv = "" }, "client_secret_env is required for token_exchange"},
+		{"missing token_endpoint", func(r *config.ToolResource) { r.TokenEndpoint = "" }, "token_endpoint must be set and https"},
+		{"plaintext remote token_endpoint", func(r *config.ToolResource) { r.TokenEndpoint = "http://idp.example.com/token" }, "token_endpoint must be set and https"},
+		{"unimplemented client_auth", func(r *config.ToolResource) { r.ClientAuth = "private_key_jwt" }, "client_auth \"private_key_jwt\" is not implemented"},
+		{"token_env on an OBO resource", func(r *config.ToolResource) { r.TokenEnv = "DIRECT" }, "token_env must not be set with grant_type token_exchange"},
+		{"issuer on an OBO resource", func(r *config.ToolResource) { r.Issuer = "https://idp.example.com/" }, "issuer must not be set with grant_type token_exchange"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := Validate(base(tc.mut))
+			if tc.want == "" {
+				if len(errs) != 0 {
+					t.Fatalf("expected a valid resource, got %v", errs)
+				}
+				return
+			}
+			if codes(errs)["bad-tool-resource"] != 1 {
+				t.Fatalf("expected exactly one bad-tool-resource finding, got %v", errs)
+			}
+			if !strings.Contains(errs[0].Msg, tc.want) {
+				t.Fatalf("message %q does not mention %q", errs[0].Msg, tc.want)
+			}
+		})
+	}
+}
+
+// audience belongs to token_exchange alone: on the direct-bearer or
+// client_credentials grant it is a mismatch, not an ignored key.
+func TestAudienceRejectedOffTokenExchange(t *testing.T) {
+	direct := config.ToolResource{Kind: "mcp", URL: "https://mcp.example.com/", CredentialSource: "static_env", TokenEnv: "T", Audience: "https://mcp.example.com"}
+	cc := config.ToolResource{
+		Kind: "mcp", URL: "https://mcp.example.com/", CredentialSource: "static_env",
+		GrantType: "client_credentials", ClientAuth: "client_secret_basic",
+		Issuer: "https://id.example.com", TokenEndpoint: "https://id.example.com/token",
+		ClientIDEnv: "CC_ID", ClientSecretEnv: "CC_SECRET", Audience: "https://mcp.example.com",
+	}
+	for name, r := range map[string]config.ToolResource{"direct-bearer": direct, "client_credentials": cc} {
+		errs := Validate(config.Config{Gateway: config.GatewayConfig{Tools: map[string]config.ToolResource{"t": r}}})
+		if codes(errs)["bad-tool-resource"] != 1 || !strings.Contains(errs[0].Msg, "audience is only valid with grant_type token_exchange") {
+			t.Fatalf("%s: expected the audience mismatch finding, got %v", name, errs)
+		}
+	}
+}
+
+func TestUnknownGrantMessageNamesBothGrants(t *testing.T) {
+	r := config.ToolResource{Kind: "mcp", URL: "https://mcp.example.com/", CredentialSource: "static_env", GrantType: "device_code"}
+	errs := Validate(config.Config{Gateway: config.GatewayConfig{Tools: map[string]config.ToolResource{"t": r}}})
+	if len(errs) != 1 || !strings.Contains(errs[0].Msg, "is not implemented (client_credentials or token_exchange)") {
+		t.Fatalf("got %v", errs)
 	}
 }
 

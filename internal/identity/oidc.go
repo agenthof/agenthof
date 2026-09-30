@@ -2,8 +2,10 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
@@ -13,6 +15,11 @@ import (
 type OIDC struct {
 	IssuerURL string
 	ClientID  string
+	// Audience is the resource-server audience Agenthof also accepts, next
+	// to ClientID (an access token minted for the API rather than for the
+	// login client). Empty means only ClientID is accepted — exactly the
+	// behaviour before this field existed.
+	Audience string
 	// HTTP is the client used for discovery and verification requests. If
 	// nil, http.DefaultClient is used. Exposed so tests can inject an
 	// httptest server's client without touching the network.
@@ -26,8 +33,9 @@ func (o OIDC) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
-// Authenticate verifies rawToken as an OIDC ID token issued by o.IssuerURL
-// for o.ClientID, returning the resulting Invoker.
+// Authenticate verifies rawToken as an OIDC token issued by o.IssuerURL for
+// o.ClientID — or, when o.Audience is set, for either o.ClientID or
+// o.Audience — returning the resulting Invoker.
 func (o OIDC) Authenticate(ctx context.Context, rawToken string) (Invoker, error) {
 	clientCtx := oidc.ClientContext(ctx, o.httpClient())
 
@@ -36,9 +44,28 @@ func (o OIDC) Authenticate(ctx context.Context, rawToken string) (Invoker, error
 		return Invoker{}, fmt.Errorf("oidc discovery: %w", err)
 	}
 
-	idToken, err := provider.Verifier(&oidc.Config{ClientID: o.ClientID}).Verify(clientCtx, rawToken)
-	if err != nil {
-		return Invoker{}, fmt.Errorf("oidc verify: %w", err)
+	var idToken *oidc.IDToken
+	if o.Audience == "" {
+		idToken, err = provider.Verifier(&oidc.Config{ClientID: o.ClientID}).Verify(clientCtx, rawToken)
+		if err != nil {
+			return Invoker{}, fmt.Errorf("oidc verify: %w", err)
+		}
+	} else {
+		// go-oidc checks exactly one audience (ClientID). Accepting EITHER
+		// the client id OR the resource-server audience means skipping that
+		// check and replacing it here — before any claim is read, so a token
+		// audienced to neither can never yield an Invoker. The message is
+		// fixed: the token's own aud values are unverified input.
+		idToken, err = provider.Verifier(&oidc.Config{SkipClientIDCheck: true}).Verify(clientCtx, rawToken)
+		if err != nil {
+			return Invoker{}, fmt.Errorf("oidc verify: %w", err)
+		}
+		// An unset client id matches nothing: without the guard, a token
+		// whose aud is the empty string would satisfy the check.
+		clientIDMatch := o.ClientID != "" && slices.Contains(idToken.Audience, o.ClientID)
+		if !clientIDMatch && !slices.Contains(idToken.Audience, o.Audience) {
+			return Invoker{}, errors.New("oidc verify: token audience does not include the client id or the configured audience")
+		}
 	}
 
 	var claims struct {

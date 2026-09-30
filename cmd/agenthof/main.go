@@ -129,7 +129,7 @@ func cmdApply(args []string, out io.Writer) int {
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
-	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -315,7 +315,7 @@ func cmdRegistry(args []string, out io.Writer) int {
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path (enable/disable only)")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
-	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -525,19 +525,37 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 }
 
 // newBroker builds the process credential broker. Dispatch routes each
-// resource's grant to the right sub-broker: a direct-bearer (static_env) grant
-// to StaticEnv, a client_credentials grant to ClientCredentials. Extracted so
-// the routing is unit-testable without a live run (the tool-proxy path records
-// only a fixed failure reason, so a broker's error text is no longer observable
-// end-to-end).
-func newBroker() broker.Broker {
+// resource's grant to the right sub-broker: a direct-bearer (static_env)
+// grant to StaticEnv, a client_credentials grant to ClientCredentials, and a
+// token_exchange grant to TokenExchange, which exchanges the invoker's
+// verified token (subjectTokenType names its kind) for a per-user upstream
+// token. Extracted so the routing is unit-testable without a live run.
+//
+// A broker's error text can reach the ledger: a failure while the tool
+// proxy starts is recorded under the fixed reason "tool proxy start failed",
+// but a failure mid-step is recorded as the tool_call's reason verbatim
+// (capped at 200 runes) — which is why TokenExchange speaks only a fixed
+// vocabulary and never echoes the authorization server.
+func newBroker(subjectTokenType string) broker.Broker {
+	// A hung upstream token endpoint must not block the outbound call
+	// forever: an explicit client with a timeout is required here,
+	// mirroring the proxy's own connectTimeout, rather than nil (which
+	// falls back to http.DefaultClient, which has no timeout).
+	// token_exchange is the first grant to put a secret (the invoker's subject
+	// token) in the POST body. Go re-sends a body across a 307/308 redirect
+	// while stripping only the Authorization header, so a redirecting token
+	// endpoint could carry the human's token to another host. Refuse to follow
+	// redirects: a 3xx then lands in the broker's fixed-vocabulary failure path.
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	return broker.Dispatch{
-		StaticEnv: broker.StaticEnv{},
-		// A hung upstream token endpoint must not block the outbound call
-		// forever: an explicit client with a timeout is required here,
-		// mirroring the proxy's own connectTimeout, rather than nil (which
-		// falls back to http.DefaultClient, which has no timeout).
-		ClientCredentials: broker.NewClientCredentials(&http.Client{Timeout: 30 * time.Second}),
+		StaticEnv:         broker.StaticEnv{},
+		ClientCredentials: broker.NewClientCredentials(httpClient),
+		TokenExchange:     broker.NewTokenExchange(httpClient, subjectTokenType),
 	}
 }
 
@@ -554,7 +572,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	input := fs.String("input", "", "task input for the workflow")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
-	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	cfgDir := fs.String("config", "./config", "config directory")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
@@ -585,7 +603,8 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	logger := obs.New(stderr, level, format)
 	logger.Debug("run invoked", "role", role, "workflow", workflow)
 
-	inv, _, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
+	r := resolveInvokerForRun(*as, *groups, *token)
+	inv, refused, usageErr, verifyErr := r.inv, r.refused, r.usageErr, r.verifyErr
 	if usageErr {
 		_, _ = fmt.Fprintln(out, "run: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
 		return 2
@@ -628,6 +647,20 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(out, "run %s refused: configuration invalid\n", runID)
 		return 1
 	}
+	// An on-behalf-of resource needs the invoker's verified token to
+	// exchange; a dev --as identity (or no token at all) has none. Refuse
+	// here, before the engine starts — a proper refused run with a fixed
+	// reason, not a mid-run "tool proxy start failed" — and never contact
+	// the exchange endpoint.
+	if inv.Method != "oidc" && workflowRequiresOBO(cfg, reg, workflow) {
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, oboRefusalReason)
+		if refErr != nil {
+			_, _ = fmt.Fprintln(out, refErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "run %s refused: %s\n", runID, oboRefusalReason)
+		return 1
+	}
 	exec := agentrt.AdapterExecutor{}
 	// A hash failure here yields an empty join key, not a run failure: the
 	// run's config already validated above, so the run proceeds regardless.
@@ -636,9 +669,11 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	// holds per-run listener state, so a shared instance would let one run
 	// close another's. keyRoot is ".", the same working directory gateway
 	// provision writes role keys under (EnsureRoleKey(".", role)) — not
-	// --config, which would miss those keys.
-	b := newBroker()
-	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger) }
+	// --config, which would miss those keys. The verified subject token is
+	// per run too: it goes to the gateway here and nowhere else — never to
+	// the engine, Binding, or the ledger.
+	b := newBroker(subjectTokenTypeFromEnv(os.Getenv))
+	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger, r.subjectToken) }
 	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
 		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway, Logger: logger})
 	if err != nil && status == "refused" {
@@ -934,7 +969,7 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
-	token := fs.String("token", "", "raw OIDC ID token to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2

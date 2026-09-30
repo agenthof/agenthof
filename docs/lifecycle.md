@@ -294,16 +294,18 @@ environment variable named in `gateway.yaml` (never a value stored in
 config), and the human is attributed through the ledger rather than through
 the credential.
 
-> Shipped: a tool resource's credential is either a static bearer token read
-> from an environment variable (`credential_source: static_env`, the
-> default `grant_type: ""`), or a separate upstream OAuth token the broker
-> mints itself via the `client_credentials` grant
-> (`grant_type: client_credentials`) — see
-> [`reference/config.md`](reference/config.md) for the field-by-field
-> rules and a worked example. Reserved for later: token exchange and other
-> IdP-issued, per-call credential shapes beyond `client_credentials` — parsed
-> as reserved schema fields today, not yet implemented — so a resource can
-> move onto that footing later without a breaking schema change.
+> Shipped: a tool resource's credential is a static bearer token read from
+> an environment variable (`credential_source: static_env`, the default
+> `grant_type: ""`), a separate upstream OAuth token the broker mints itself
+> via the `client_credentials` grant, or — for a per-user upstream — a token
+> obtained *on behalf of the invoker* by exchanging the invoker's own
+> verified token (`grant_type: token_exchange`, RFC 8693), so the upstream
+> sees the human. See [`reference/config.md`](reference/config.md) for the
+> field-by-field rules and worked examples, and
+> [`lifecycle-tool.md`](lifecycle-tool.md#on-behalf-of-the-invoker) for
+> the life of an on-behalf-of call and its limits. Reserved for later:
+> delegation with an actor token, and re-authentication when the inbound
+> token expires mid-run.
 
 ### Success, artifacts, and handoff
 
@@ -394,7 +396,7 @@ flag and exit-code reference.
 | fronted agents: every step is an HTTP call to the agent's endpoint, with identity headers and `execution: fronted` stamped on the step events. Every fronted step also receives the per-run listener coordinates. The listener is TCP loopback unless `refbox_socket_dir` is set, in which case it is a Unix socket | streamed model-call usage (a streamed call is recorded without token counts) |
 | refbox reference compartment: a rootless-podman recipe (`deploy/refbox/`) with no network, no injected credentials, and an ephemeral workspace (or, with `REFBOX_WORKSPACE_VOLUME`, a named volume shared with `refexec`). The agent reaches Agenthof only over the socket directory; a Go echo agent and a Python LangChain agent both run there from their own images, the latter making its model call through the gateway socket in that directory. Exec inside it is the agent's report, or first-hand through `refexec` when the agent declares `exec.mode: runtime` | a network allowlist for first-hand commands |
 | model gateway: the agent calls `<proxy URL>v1/chat/completions` with the run token; Agenthof authorizes the logical model, injects the per-role provider key, and records `model_call`. Non-streaming calls record token counts. Budgets are the upstream gateway's, via the provisioned role key | Agenthof-side spend caps; a per-role list of models; OAuth-protected model providers |
-| inbound MCP proxy for an agent's declared tools — allowlisted, credential-injecting, ledgered, and able to mint its own upstream token via the `client_credentials` grant | on-behalf-of / token-exchange agent auth to IdP-protected resources (RFC 8693) |
+| inbound MCP proxy for an agent's declared tools — allowlisted, credential-injecting, ledgered, able to mint its own upstream token via the `client_credentials` grant, and able to call a per-user upstream on behalf of the invoking human via RFC 8693 token exchange (`grant_type: token_exchange`) | delegation with an actor token; re-authentication when the invoker's token expires mid-run |
 | exec, two ways: `mode: attested` — an allowlist check, then an agent-reported outcome recorded as `exec`; `mode: runtime` — the allowlist check, then `refexec` runs the command first-hand in a no-network compartment and Agenthof records its account as `exec` with `runtime_attestation`. Agenthof itself never runs the command | Agenthof running a command itself |
 | hash-chained ledger + `audit` / `audit verify` | enforced capabilities beyond the tool allowlist (the proxy allowlists which tools an agent may reach; it does not otherwise constrain what the agent's own code does) |
 | RBAC by group; linear workflow + fail-back | multi-resource / cross-repo scope |

@@ -152,9 +152,11 @@ operator's, outside Agenthof. Attribution rides the ledger rather than the
 credential: authenticate as the machine, attribute to the human, per action. It
 is also what keeps the integration surface small — only mature, universally
 supported standards are load-bearing, namely OIDC login and machine-to-machine
-client credentials. Emerging agent-identity standards (RFC 8693 token exchange,
-SPIFFE/WIMSE, identity-provider agent-SSO products) are optional federation
-upgrades, never prerequisites for a release.
+client credentials. Emerging agent-identity standards are optional federation
+upgrades, never prerequisites for a release: RFC 8693 token exchange ships as
+one such upgrade, chosen per tool resource, so an agent can reach a per-user
+service as the invoking human; SPIFFE/WIMSE and identity-provider agent-SSO
+products remain optional the same way.
 
 ## Containment
 

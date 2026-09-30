@@ -66,6 +66,11 @@ func TestResolveInvokerVerifiedToken(t *testing.T) {
 	if aa != "ignored-as" {
 		t.Fatalf("assertedAs = %q, want the --as value", aa)
 	}
+	// --groups is ignored just as --as is: the token carries no groups
+	// claim, so the verified invoker asserts none.
+	if len(inv.Groups) != 0 {
+		t.Fatalf("Groups = %v, want none (--groups must not be merged into a verified invoker)", inv.Groups)
+	}
 }
 
 // TestResolveInvokerFailedToken covers the verification-failed path:
@@ -102,5 +107,89 @@ func TestResolveInvokerFailedToken(t *testing.T) {
 	}
 	if inv.Subject != "(unverified)" || inv.Issuer != srv.URL || inv.Method != "oidc-rejected" {
 		t.Fatalf("got %+v", inv)
+	}
+}
+
+// TestResolveInvokerForRunSubjectToken pins the one thing cmdRun needs
+// beyond resolveInvoker: the verified raw token comes back as the subject
+// token — from --token or from the AGENTHOF_TOKEN fallback — and is EMPTY
+// on the asserted, refused, and usage-error branches.
+func TestResolveInvokerForRunSubjectToken(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := cmdTestOIDCServer(t, key)
+	token := cmdMintToken(t, key, map[string]any{
+		"iss": srv.URL, "aud": "agenthof", "exp": time.Now().Add(time.Hour).Unix(),
+		"sub": "u-123", "email": "dana@example.com",
+	})
+	t.Setenv("AGENTHOF_OIDC_ISSUER", srv.URL)
+	t.Setenv("AGENTHOF_OIDC_CLIENT_ID", "agenthof")
+	t.Setenv("AGENTHOF_TOKEN", "")
+
+	r := resolveInvokerForRun("ignored", "ignored", token)
+	if r.refused || r.usageErr || r.inv.Method != "oidc" {
+		t.Fatalf("expected a verified invoker, got method=%q refused=%v usageErr=%v", r.inv.Method, r.refused, r.usageErr)
+	}
+	if r.subjectToken != token {
+		t.Fatal("subjectToken must be the raw token that was verified")
+	}
+
+	t.Setenv("AGENTHOF_TOKEN", token)
+	r = resolveInvokerForRun("", "", "")
+	if r.inv.Method != "oidc" || r.subjectToken != token {
+		t.Fatal("the AGENTHOF_TOKEN fallback must also yield the verified token as subjectToken")
+	}
+	t.Setenv("AGENTHOF_TOKEN", "")
+
+	r = resolveInvokerForRun("dana@example.com", "eng", "")
+	if r.inv.Method != "asserted" || r.subjectToken != "" {
+		t.Fatalf("asserted invoker must carry no subject token: method=%q refused=%v usageErr=%v", r.inv.Method, r.refused, r.usageErr)
+	}
+
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate other key: %v", err)
+	}
+	bad := cmdMintToken(t, otherKey, map[string]any{
+		"iss": srv.URL, "aud": "agenthof", "exp": time.Now().Add(time.Hour).Unix(), "sub": "u-123",
+	})
+	r = resolveInvokerForRun("", "", bad)
+	if !r.refused || r.subjectToken != "" {
+		t.Fatalf("a refused token must never be returned as the subject token: refused=%v", r.refused)
+	}
+
+	t.Setenv("AGENTHOF_OIDC_ISSUER", "")
+	r = resolveInvokerForRun("", "", token)
+	if !r.usageErr || r.subjectToken != "" {
+		t.Fatalf("usage error must carry no subject token: method=%q refused=%v usageErr=%v", r.inv.Method, r.refused, r.usageErr)
+	}
+}
+
+// TestResolveInvokerForRunAudienceEnv: with AGENTHOF_OIDC_AUDIENCE set, a
+// token audienced only to that audience verifies; without it, it is refused.
+func TestResolveInvokerForRunAudienceEnv(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := cmdTestOIDCServer(t, key)
+	const aud = "https://agenthof.example/api"
+	token := cmdMintToken(t, key, map[string]any{
+		"iss": srv.URL, "aud": aud, "exp": time.Now().Add(time.Hour).Unix(), "sub": "u-123",
+	})
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("AGENTHOF_OIDC_ISSUER", srv.URL)
+	t.Setenv("AGENTHOF_OIDC_CLIENT_ID", "agenthof")
+
+	t.Setenv("AGENTHOF_OIDC_AUDIENCE", "")
+	if r := resolveInvokerForRun("", "", token); !r.refused {
+		t.Fatal("without AGENTHOF_OIDC_AUDIENCE, a resource-audienced token must be refused")
+	}
+	t.Setenv("AGENTHOF_OIDC_AUDIENCE", aud)
+	r := resolveInvokerForRun("", "", token)
+	if r.refused || r.inv.Method != "oidc" || r.subjectToken != token {
+		t.Fatalf("with AGENTHOF_OIDC_AUDIENCE set, the token must verify: method=%q refused=%v usageErr=%v", r.inv.Method, r.refused, r.usageErr)
 	}
 }
