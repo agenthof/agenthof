@@ -67,9 +67,11 @@ lives. Agenthof closing it is the teardown request; the body ending on
 refspawn's side means the set is gone.
 
 Any other status is a refusal Agenthof records as
-`spawn compartment unavailable`: a malformed request, an agent with no
-image, the cap, a child that already has a live set, a start that failed,
-or sockets that never answered within `ready_timeout`.
+`spawn compartment unavailable`: a malformed request, a run id ending in
+`-exec` (the suffix a child's exec directory reserves), an agent with no
+image, the cap, a child that already has a live set — or whose compartment
+names one holds — a start that failed, or sockets that never answered
+within `ready_timeout`.
 
 ## Teardown, in order
 
@@ -77,7 +79,9 @@ or sockets that never answered within `ready_timeout`.
    still holds and exits.
 2. `podman rm -f` each agent compartment.
 3. `podman volume rm` the child's volume — possible only once nothing
-   mounts it, which is why the order matters.
+   mounts it, which is why the order matters. A volume still held after a
+   few retries is left for the next start's reap, never forced away from
+   whatever is still writing to it.
 4. The child's two directories.
 
 At start-up, and again at shutdown, refspawn removes every container and

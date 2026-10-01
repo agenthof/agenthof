@@ -74,6 +74,22 @@ func volroot() string { return os.Getenv("REFSPAWN_TEST_VOLROOT") }
 
 func pidfile(name string) string { return filepath.Join(volroot(), ".pids", name+".pid") }
 
+// mountfile records which volume a running "container" has mounted, so the
+// fake can refuse `volume rm` the way podman does. Written beside the pid
+// file and removed with it.
+func mountfile(name string) string { return filepath.Join(volroot(), ".pids", name+".vol") }
+
+// mounted reports whether any running "container" still holds volume.
+func mounted(volume string) bool {
+	matches, _ := filepath.Glob(filepath.Join(volroot(), ".pids", "*.vol"))
+	for _, m := range matches {
+		if b, err := os.ReadFile(m); err == nil && strings.TrimSpace(string(b)) == volume {
+			return true
+		}
+	}
+	return false
+}
+
 // twoArgFlags are the `podman run` flags refspawn passes with a separate value.
 var twoArgFlags = map[string]bool{"--name": true, "--network": true, "--tmpfs": true, "--security-opt": true, "--user": true, "-v": true, "-e": true, "-w": true}
 
@@ -100,6 +116,7 @@ func fakePodman(args []string) int {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 			}
 			_ = os.Remove(pidfile(name))
+			_ = os.Remove(mountfile(name))
 		}
 		return 0
 	case "ps":
@@ -127,6 +144,11 @@ func fakePodman(args []string) int {
 		case "rm":
 			name := args[len(args)-1]
 			record(fakeRecord{Op: "volume-rm", PID: os.Getpid(), Name: name, Args: args})
+			// Like podman: a mounted volume goes only under -f.
+			if !hasFlag(args, "-f") && mounted(name) {
+				fmt.Fprintf(os.Stderr, "Error: volume %s is being used by a container\n", name)
+				return 125
+			}
 			_ = os.RemoveAll(filepath.Join(volroot(), name))
 			return 0
 		case "ls":
@@ -143,6 +165,15 @@ func fakePodman(args []string) int {
 	return 125
 }
 
+func hasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
 // filterPrefix reads `--filter name=^PREFIX` off a ps / volume ls argv.
 func filterPrefix(args []string) string {
 	for i, a := range args {
@@ -154,7 +185,7 @@ func filterPrefix(args []string) string {
 }
 
 func fakeRun(args []string) int {
-	var name, image, workspace string
+	var name, image, volume, workspace string
 	var argv []string
 	rest := args[1:]
 	for i := 0; i < len(rest); i++ {
@@ -172,7 +203,7 @@ func fakeRun(args []string) int {
 				name = rest[i+1]
 			case "-v":
 				if vol, ok := strings.CutSuffix(rest[i+1], ":/work"); ok {
-					workspace = filepath.Join(volroot(), vol)
+					volume, workspace = vol, filepath.Join(volroot(), vol)
 				}
 			}
 			i++
@@ -199,9 +230,13 @@ func fakeRun(args []string) int {
 	}
 	_ = os.MkdirAll(filepath.Join(volroot(), ".pids"), 0o755)
 	_ = os.WriteFile(pidfile(name), []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
+	if volume != "" {
+		_ = os.WriteFile(mountfile(name), []byte(volume), 0o600)
+	}
 	record(fakeRecord{Op: "run", PID: os.Getpid(), Child: cmd.Process.Pid, Name: name, Args: args})
 	err := cmd.Wait()
 	_ = os.Remove(pidfile(name))
+	_ = os.Remove(mountfile(name))
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		if code := ee.ExitCode(); code >= 0 {

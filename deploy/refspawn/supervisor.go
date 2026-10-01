@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -43,15 +44,18 @@ const (
 	readyInterval = 100 * time.Millisecond
 )
 
-// errCapReached and errChildLive are the two ways admit refuses: the set
-// will not fit under max_compartments, or that child already has one.
+// errCapReached, errChildLive and errNameTaken are the three ways admit
+// refuses: the set will not fit under max_compartments, that child already
+// has one, or one of its compartment names belongs to a live sibling.
 var (
 	errCapReached = errors.New("compartment cap reached")
 	errChildLive  = errors.New("a set for this child is already provisioned")
+	errNameTaken  = errors.New("a live child already holds a compartment name this set needs")
 )
 
 // supervisor holds nothing between provisions but the slot count, the live
-// children and the set of held requests it must wait for at shutdown.
+// children and their compartment names, and the set of held requests it
+// must wait for at shutdown.
 type supervisor struct {
 	cfg        spawnConfig
 	logger     *slog.Logger
@@ -60,6 +64,7 @@ type supervisor struct {
 	mu         sync.Mutex
 	used       int             // agent compartments reserved across every live child
 	live       map[string]bool // child run ids with a set: one per child, never two
+	names      map[string]bool // compartment names in use: one owner each, never two
 	wg         sync.WaitGroup
 }
 
@@ -67,7 +72,8 @@ func newSupervisor(cfg spawnConfig, logger *slog.Logger, podman []string) *super
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &supervisor{cfg: cfg, logger: logger, podmanArgv: podman, environ: os.Environ, live: map[string]bool{}}
+	return &supervisor{cfg: cfg, logger: logger, podmanArgv: podman, environ: os.Environ,
+		live: map[string]bool{}, names: map[string]bool{}}
 }
 
 func (s *supervisor) handler() http.Handler {
@@ -76,29 +82,45 @@ func (s *supervisor) handler() http.Handler {
 	return mux
 }
 
-// admit claims the child and takes n slots in one step, or neither: a set
-// that will not fit whole is refused before anything starts, and a child
-// that already has a set never gets a second one over the top of it.
-func (s *supervisor) admit(id string, n int) error {
+// admit claims the child, its compartment names and one slot per name in
+// one step, or none of them: a set that will not fit whole is refused
+// before anything starts, a child that already has a set never gets a
+// second one over the top of it, and no two live children ever share a
+// compartment name. Both an id and an agent name may contain "-", so
+// <id>-<agent> alone is not unique — "r-1" with agent "a-b" and "r-1-a"
+// with agent "b" name the same container — and tearing one set down would
+// otherwise rm -f a sibling's live compartment.
+func (s *supervisor) admit(id string, names []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.live[id] {
 		return errChildLive
 	}
-	if s.used+n > s.cfg.MaxCompartments {
+	for _, name := range names {
+		if s.names[name] {
+			return errNameTaken
+		}
+	}
+	if s.used+len(names) > s.cfg.MaxCompartments {
 		return errCapReached
 	}
 	s.live[id] = true
-	s.used += n
+	for _, name := range names {
+		s.names[name] = true
+	}
+	s.used += len(names)
 	return nil
 }
 
-// release drops the child and hands its slots back. It runs only once the
+// release drops the child, its names and its slots. It runs only once the
 // set is gone, so a slot is free exactly when its compartment is.
-func (s *supervisor) release(id string, n int) {
+func (s *supervisor) release(id string, names []string) {
 	s.mu.Lock()
 	delete(s.live, id)
-	s.used -= n
+	for _, name := range names {
+		delete(s.names, name)
+	}
+	s.used -= len(names)
 	s.mu.Unlock()
 }
 
@@ -128,12 +150,22 @@ func (s *supervisor) handleProvision(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "refspawn: child_run_id is not a valid name", http.StatusBadRequest)
 		return
 	}
+	// <spawn_root>/<id> and <spawn_root>/<id>-exec share one namespace: an
+	// id ending in the exec suffix would place this child's socket
+	// directory exactly where a live sibling's exec directory is — and
+	// start() opens with RemoveAll(childDir). Refusing the suffix is what
+	// makes the two directory names one-to-one with the id.
+	if strings.HasSuffix(body.ChildRunID, execDirSuffix) {
+		http.Error(w, "refspawn: child_run_id must not end in "+execDirSuffix, http.StatusBadRequest)
+		return
+	}
 	if len(body.Agents) == 0 {
 		http.Error(w, "refspawn: agents must name at least one agent", http.StatusBadRequest)
 		return
 	}
 	seen := map[string]bool{}
 	images := map[string]string{}
+	names := make([]string, 0, len(body.Agents))
 	for _, a := range body.Agents {
 		if !nameRE.MatchString(a) || len(a) > maxName || seen[a] {
 			http.Error(w, "refspawn: agents must be distinct valid names", http.StatusBadRequest)
@@ -148,26 +180,26 @@ func (s *supervisor) handleProvision(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		images[a] = img
+		names = append(names, compartmentName(body.ChildRunID, a))
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "refspawn: streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	n := len(body.Agents)
-	switch err := s.admit(body.ChildRunID, n); {
-	case errors.Is(err, errChildLive):
-		s.logger.Warn("provision refused", "child", body.ChildRunID, "reason", "child already provisioned")
-		http.Error(w, "refspawn: "+errChildLive.Error(), http.StatusConflict)
+	switch err := s.admit(body.ChildRunID, names); {
+	case errors.Is(err, errChildLive), errors.Is(err, errNameTaken):
+		s.logger.Warn("provision refused", "child", body.ChildRunID, "reason", err.Error())
+		http.Error(w, "refspawn: "+err.Error(), http.StatusConflict)
 		return
-	case err != nil:
-		s.logger.Warn("provision refused", "child", body.ChildRunID, "reason", "compartment cap reached", "wanted", n)
-		http.Error(w, "refspawn: "+errCapReached.Error(), http.StatusServiceUnavailable)
+	case err != nil: // errCapReached, and any later refusal fails closed the same way
+		s.logger.Warn("provision refused", "child", body.ChildRunID, "reason", err.Error(), "wanted", len(names))
+		http.Error(w, "refspawn: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	s.wg.Add(1)
 	defer s.wg.Done()
-	defer s.release(body.ChildRunID, n) // after the teardown below (defers run last-in first-out)
+	defer s.release(body.ChildRunID, names) // after the teardown below (defers run last-in first-out)
 	set := s.newSet(body.ChildRunID, body.Agents, images)
 	defer set.teardown()
 	if err := set.start(); err != nil {
@@ -221,7 +253,7 @@ func (s *supervisor) newSet(id string, agents []string, images map[string]string
 	set := &childSet{s: s, id: id, agents: agents, images: images,
 		volume:   containerPrefix + id + "-work",
 		childDir: filepath.Join(s.cfg.SpawnRoot, id),
-		execDir:  filepath.Join(s.cfg.SpawnRoot, id+"-exec"),
+		execDir:  filepath.Join(s.cfg.SpawnRoot, id+execDirSuffix),
 		sockets:  map[string]string{}, refexecExit: make(chan struct{}), agentExit: make(chan string, len(agents))}
 	for _, a := range agents {
 		set.sockets[a] = filepath.Join(set.childDir, a+".sock")
@@ -271,7 +303,7 @@ func (set *childSet) start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	set.cancelAgents = cancel
 	for _, a := range set.agents {
-		name := containerPrefix + set.id + "-" + a
+		name := compartmentName(set.id, a)
 		args := append(append([]string{}, set.s.podmanArgv[1:]...), refboxRunArgs(set.s.cfg, name, set.images[a], set.volume, set.childDir, set.sockets[a])...)
 		c := exec.CommandContext(ctx, set.s.podmanArgv[0], args...)
 		// Cancelling removes the CONTAINER; killing the podman client would
@@ -353,9 +385,16 @@ func (set *childSet) teardown() {
 		set.agentWait.Wait()
 	}
 	if set.volumeMade {
+		// No -f: podman refuses a mounted volume, so this removal succeeding
+		// IS the proof that the order above did its work and nothing holds
+		// the child's workspace any more. The retries cover the moment
+		// between a compartment's removal and podman releasing the mount; a
+		// volume still held after them — an exec compartment that outlived a
+		// killed refexec — is left for the next start's reap rather than
+		// pulled out from under whatever is still writing to it.
 		var err error
 		for range 5 {
-			if _, err = set.s.podman(context.Background(), 30*time.Second, "volume", "rm", "-f", set.volume); err == nil {
+			if _, err = set.s.podman(context.Background(), 30*time.Second, "volume", "rm", set.volume); err == nil {
 				break
 			}
 			time.Sleep(time.Second)

@@ -18,6 +18,17 @@ import (
 // child's refexec shares that prefix, and each refexec removes its own.
 const containerPrefix = "agenthof-spawn-"
 
+// execDirSuffix distinguishes a child's exec directory from its socket
+// directory under the one spawn_root. A child run id ending in it is
+// refused, so the two names stay one-to-one with the id.
+const execDirSuffix = "-exec"
+
+// compartmentName is the container name for one agent of one child. The
+// supervisor claims every name a set needs before it starts anything: an
+// id and an agent name may both contain "-", so this is not unique on its
+// own.
+func compartmentName(id, agent string) string { return containerPrefix + id + "-" + agent }
+
 // refboxRunArgs is the one `podman run` for an agent compartment: the
 // refbox recipe's arg set (deploy/refbox/refbox-run.sh) with the child's
 // workspace volume at /work, the child's socket directory bind-mounted at
@@ -105,6 +116,10 @@ func (s *supervisor) reap() {
 	if out, err := s.podman(ctx, 30*time.Second, "volume", "ls", "-q", "--filter", "name=^"+containerPrefix); err == nil {
 		for _, v := range strings.Fields(string(out)) {
 			s.logger.Info("reaping leftover volume", "volume", v)
+			// -f here, unlike an ordered teardown: a leftover may still be
+			// mounted by a container refspawn does not name — an exec
+			// compartment of a refexec that died with its supervisor — and
+			// there is nothing left running to release it.
 			if _, err := s.podman(ctx, 30*time.Second, "volume", "rm", "-f", v); err != nil {
 				s.logger.Warn("leftover volume not removed", "volume", v, "error", err)
 			}

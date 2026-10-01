@@ -428,6 +428,56 @@ func TestProvisionRefusesASecondSetForTheSameChild(t *testing.T) {
 	}
 }
 
+// A run id ending in "-exec" would name its socket directory exactly where
+// a live sibling's exec directory is, and start() opens with a RemoveAll
+// of that directory. The suffix is refused outright.
+func TestProvisionRejectsAnExecSuffixRunID(t *testing.T) {
+	cfg := testConfig(t, selfImages(t, "a"))
+	s, srv, log := fakeSupervisor(t, cfg)
+	_, sibling := provision(t, s, srv, "r-aaaaaaaa", []string{"a"})
+	defer sibling.release(t)
+	before := len(records(t, log))
+	if code, h := provision(t, s, srv, "r-aaaaaaaa-exec", []string{"a"}); code != http.StatusBadRequest || h != nil {
+		t.Fatalf("a run id ending in -exec: code=%d, want 400", code)
+	}
+	if len(records(t, log)) != before {
+		t.Fatalf("a refused run id must start nothing: %v", ops(records(t, log)))
+	}
+	if !dialable(sibling.line.ExecSocket) {
+		t.Fatal("the sibling's exec socket is gone: its directory was removed by the refused provision")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.used != 1 || s.live["r-aaaaaaaa-exec"] {
+		t.Fatalf("used = %d, live = %v: a refused run id reserves nothing", s.used, s.live)
+	}
+}
+
+// <id>-<agent> is not unique on its own: "r-1" with agent "a-b" and "r-1-a"
+// with agent "b" name the same container, and tearing one set down would
+// rm -f the other's live compartment. The second set is refused whole.
+func TestProvisionRefusesACompartmentNameALiveChildHolds(t *testing.T) {
+	cfg := testConfig(t, selfImages(t, "a-b", "b"))
+	s, srv, log := fakeSupervisor(t, cfg)
+	_, first := provision(t, s, srv, "r-1", []string{"a-b"})
+	defer first.release(t)
+	before := len(records(t, log))
+	if code, h := provision(t, s, srv, "r-1-a", []string{"b"}); code != http.StatusConflict || h != nil {
+		t.Fatalf("a set whose compartment name is already live: code=%d, want 409", code)
+	}
+	if len(records(t, log)) != before {
+		t.Fatalf("a refused name must start nothing: %v", ops(records(t, log)))
+	}
+	if !dialable(first.line.AgentSockets["a-b"]) {
+		t.Fatal("the live set must be untouched by the refusal")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.used != 1 {
+		t.Fatalf("used = %d, want only the live child's one slot", s.used)
+	}
+}
+
 func TestProvisionFailsClosedWhenACompartmentExits(t *testing.T) {
 	cfg := testConfig(t, map[string]string{"a": "false"}) // the "image" exits 1 at once
 	s, srv, log := fakeSupervisor(t, cfg)
