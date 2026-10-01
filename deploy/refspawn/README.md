@@ -115,11 +115,22 @@ are host processes.
   invoking podman. Its socket directory's permissions and the mount
   namespace are the gate on who may ask.
 - If `agenthof` is killed outright, its held requests close and refspawn
-  tears the children down. If refspawn itself is killed outright, the
-  children live until podman's `--timeout` trips, or until the next
-  refspawn starts and reaps them by name.
+  tears the children down. If refspawn itself is killed outright, the child
+  *compartments* live until podman's `--timeout` trips, and both they and the
+  child *volumes* are reaped by name the next time refspawn starts. A child's
+  *refexec* is a host process, not a compartment: on an ungraceful kill of
+  refspawn it may be left running (idle, its socket directory removed on the
+  next start) until the host or session ends.
 - `max_compartments` counts agent compartments; each child's refexec is a
   host process whose transient exec compartments are bounded by its own
   `max_compartments`, not by this one.
+- `max_compartments` must absorb teardown latency. A finished child's slots
+  free only after its ordered teardown completes (refexec stop grace, then
+  `volume rm` with retries), so a parent that spawns the next set immediately
+  can see a transient `spawn compartment unavailable` refusal if the cap is
+  sized exactly to one generation. Size it above the peak concurrent set.
+- Run **one refspawn per podman user.** Reaping matches leftovers by the
+  `agenthof-spawn-` name prefix across the whole podman user, so two refspawn
+  instances sharing a user would reap each other's live children.
 - A child always gets a fresh, empty volume. Handing a child a shared or
   persistent workspace is not supported.

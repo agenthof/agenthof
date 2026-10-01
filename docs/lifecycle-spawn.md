@@ -233,16 +233,21 @@ is complete, and there is no runtime check.
   is whatever the operator mounted. What Agenthof guarantees is that a
   child runs only where the supervisor put it, or not at all.
 - **A child's own agents are not isolated from each other.** They share one
-  workspace by design, so nothing in `/work` is protected between them: one
-  agent can read, overwrite, or follow a symlink another left behind. The
-  boundary spawn draws is between runs, not within one.
+  workspace and one socket directory by design, so nothing in `/work` — nor in
+  the child's socket directory — is protected between them: one agent can read,
+  overwrite, or follow a symlink another left behind, or reach a sibling
+  agent's socket. The boundary spawn draws is between runs, not within one.
 - A child always starts on a fresh, empty workspace and hands back only a
   hash and a preview. Handing a child a shared or persistent workspace is
   not supported.
 - If `agenthof` is killed outright, its held requests close and the
   supervisor tears the children down. If the supervisor is killed outright,
-  the children live until podman's timeout trips, or until the next
-  supervisor starts and reaps them by name.
+  the child *compartments* live until podman's timeout trips, and both they
+  and the child *volumes* are reaped by name the next time the supervisor
+  starts. A child's *refexec* process is a host process, not a compartment:
+  on an ungraceful kill of the supervisor it may be left running (idle, with
+  its socket directory removed on the next start) until the host or session
+  ends — it holds no network and governs nothing once its socket is gone.
 - A `/spawn` is synchronous and holds the parent step's connection for the
   child's duration, bounded by the step timeout.
 - The invoker propagates unchanged; there is no separate acting-agent
