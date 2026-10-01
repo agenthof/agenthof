@@ -148,7 +148,12 @@ linkage lives on the ledger, not in a header. The binding is forwarded, not
 signed. It passes the same registry gate a root run passes — the role
 must exist, own the workflow, and admit the invoker's groups. A child
 refused at that gate still gets a ledger with one `run_refused` event; its
-compartments were already provisioned and are torn down like any other.
+compartments were already provisioned and are torn down like any other. The
+parent's `spawn` event and the `403` carry only a fixed, classifying reason —
+`child refused by its access policy` — never the role's required groups; that
+full reason lives in the child's own `run_refused`, reached by `child_run_id`.
+A spawning agent is untrusted and cannot act on the detail, so it is not told
+which groups it lacks — one more thing it cannot enumerate.
 
 A child may spawn in turn, within the caps: `max_depth` bounds how deep,
 `max_parallel` how wide at each node, `max_total_spawns` how many over each

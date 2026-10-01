@@ -26,6 +26,16 @@ import (
 // agent reach the runtime directly. Fail-closed: such a child never runs.
 const reasonCompartmentUnavailable = "spawn compartment unavailable"
 
+// reasonChildRefusedByPolicy is the fixed reason the parent's spawn event and
+// the door's answer carry when the engine refuses the child at its registry
+// gate (RBAC, role/workflow ownership, an unknown role). It classifies the
+// refusal — policy, so retrying with the same binding will not help — without
+// disclosing the role's required groups to the spawning agent, which is
+// untrusted and cannot act on that detail anyway. The FULL engine reason is
+// still written to the child's own ledger (its run_refused event), where an
+// operator reaches it by the spawn event's child_run_id.
+const reasonChildRefusedByPolicy = "child refused by its access policy"
+
 // runDeps is everything one `agenthof run` needs to start a governed run —
 // root or spawned child: the validated config and registry, the process
 // broker, the ledger and artifact locations, the one step-timeout knob,
@@ -269,13 +279,15 @@ func (d *runDeps) runChild(ctx context.Context, role, workflow, input string, pa
 	if err != nil {
 		if res.Status == "refused" && !errors.Is(err, engine.ErrLedgerWrite) {
 			// A recorded refusal — the child's own ledger holds run_refused
-			// — not a transport failure. The error here is the engine's own
-			// refusal text, the same string it wrote to that event, so it is
-			// safe as a reason. A refusal whose record failed is joined with
-			// ErrLedgerWrite and carries a filesystem path: that is not a
-			// reason, so it takes the error path below and the door records
-			// its own fixed "spawn did not complete".
-			return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "refused", Reason: err.Error(), Provisioned: provisioned}, nil
+			// with the engine's FULL reason — not a transport failure. The
+			// wire and the parent's spawn event carry only the fixed,
+			// classifying reason: the full text (which names the role's
+			// required groups) stays in the child ledger, reached by this
+			// event's child_run_id, and is never echoed to the spawning agent.
+			// A refusal whose record failed is joined with ErrLedgerWrite and
+			// carries a filesystem path: it takes the error path below, where
+			// the door records its own fixed "spawn did not complete".
+			return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "refused", Reason: reasonChildRefusedByPolicy, Provisioned: provisioned}, nil
 		}
 		return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "failed", Provisioned: provisioned}, err
 	}

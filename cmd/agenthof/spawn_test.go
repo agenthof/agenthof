@@ -766,12 +766,16 @@ func TestRunSpawnRefusals(t *testing.T) {
 	if sp.Status != "refused" || sp.ChildRunID != "" || sp.Reason != "spawn target is not on the agent's may_spawn list" {
 		t.Fatalf("spawn event = %+v", sp)
 	}
-	// RBAC denies the child role: refused, and the child has its own
-	// run_refused ledger linked to the parent.
+	// RBAC denies the child role: the WIRE reason is the fixed classifying
+	// string — it must NOT disclose the role's groups — while the child's own
+	// run_refused ledger keeps the FULL engine reason, linked to the parent.
 	parentID, _, events := runLead(t, root, "spawn:locked/locked-wf:x")
 	sp = onlySpawn(t, events)
-	if sp.Status != "refused" || sp.ChildRunID == "" || !strings.Contains(sp.Reason, "allowed groups") {
+	if sp.Status != "refused" || sp.ChildRunID == "" || sp.Reason != reasonChildRefusedByPolicy {
 		t.Fatalf("spawn event = %+v", sp)
+	}
+	if strings.Contains(sp.Reason, "allowed groups") {
+		t.Fatalf("the wire reason must not disclose the role's groups: %q", sp.Reason)
 	}
 	child, _, err := engine.ReadLog(logDir, sp.ChildRunID)
 	if err != nil {
@@ -779,6 +783,9 @@ func TestRunSpawnRefusals(t *testing.T) {
 	}
 	if len(child) != 1 || child[0].Type != "run_refused" || child[0].Binding.ParentRunID != parentID {
 		t.Fatalf("child events = %+v", child)
+	}
+	if !strings.Contains(child[0].Reason, "allowed groups") {
+		t.Fatalf("the child ledger must keep the full reason: %+v", child[0])
 	}
 }
 

@@ -219,11 +219,15 @@ R_DEPTH="spawn would exceed max_depth"
 R_PARALLEL="spawn would exceed max_parallel"
 R_TOTAL="spawn would exceed max_total_spawns"
 R_OBO="obo requires a verified invoker token"
+# R_RBAC is the FULL engine reason the child's own run_refused ledger keeps;
+# R_POLICY is the fixed, non-disclosing reason the parent's spawn event and the
+# door's answer carry instead, so the spawning agent never sees the groups.
 R_RBAC="role \"locked\" requires membership in one of its allowed groups (nobody); the invoker's groups don't qualify"
+R_POLICY="child refused by its access policy"
 R_UNAVAILABLE="spawn compartment unavailable"
-REASONS=("$R_NOT_ALLOWED" "$R_DEPTH" "$R_PARALLEL" "$R_TOTAL" "$R_OBO" "$R_RBAC" "$R_UNAVAILABLE")
-for i in $(seq 0 6); do
-	for j in $(seq 0 6); do
+REASONS=("$R_NOT_ALLOWED" "$R_DEPTH" "$R_PARALLEL" "$R_TOTAL" "$R_OBO" "$R_RBAC" "$R_POLICY" "$R_UNAVAILABLE")
+for i in $(seq 0 7); do
+	for j in $(seq 0 7); do
 		if [ "$i" -lt "$j" ] && [ "${REASONS[$i]}" = "${REASONS[$j]}" ]; then
 			fail "two refusal modes share one reason (${REASONS[$i]}), so no assertion below could tell them apart"
 		fi
@@ -610,12 +614,15 @@ LOCKED="$(field "$(ledger "$RBACRUN")" spawn child_run_id refused)"
 [ -n "$LOCKED" ] || fail "an RBAC-refused child must have its own run id"
 [ "$(count "$(ledger "$LOCKED")" run_refused)" = 1 ] || fail "the refused child has no run_refused event"
 grep -q "\"parent_run_id\":\"$RBACRUN\"" "$(ledger "$LOCKED")" || fail "the refused child does not name its parent"
+# The child's own ledger keeps the FULL engine reason (R_RBAC); the parent's
+# spawn event and the door answer carry only the fixed, non-disclosing one.
 [ "$(field "$(ledger "$LOCKED")" run_refused reason)" = "$R_RBAC" ] || fail "the child's refusal is not the engine's RBAC one"
 sole_reason "$(ledger "$LOCKED")" "$R_RBAC"
-sole_reason "$(ledger "$RBACRUN")" "$R_RBAC"
+sole_reason "$(ledger "$RBACRUN")" "$R_POLICY"
+case "$(cat "$(ledger "$RBACRUN")")" in *"allowed groups"*) fail "the parent's spawn event discloses the role's groups" ;; esac
 [ "$(provisioned_count)" = $((BEFORE + 1)) ] || fail "an RBAC-refused child is refused AFTER provisioning; its set must have been provisioned once"
 nothing_left "after the RBAC refusal"
-echo "$AUDIT" | grep -q "spawn locked/locked-wf → run $LOCKED refused (depth 1) — role \"locked\" requires membership" || fail "audit did not render the RBAC refusal"
+echo "$AUDIT" | grep -q "spawn locked/locked-wf → run $LOCKED refused (depth 1) — child refused by its access policy" || fail "audit did not render the policy refusal"
 
 # 7. A child fronting an on-behalf-of resource under a --as invoker is
 #    refused BEFORE its engine starts, with the fixed reason; the exchange

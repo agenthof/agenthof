@@ -149,7 +149,10 @@ over:
   on your agent's `may_spawn` list, a cap would be exceeded, the child could
   not be given compartments (`spawn compartment unavailable`), or the child
   was refused at its own registry gate or pre-run gate (then it has a
-  `child_run_id` and a ledger).
+  `child_run_id` and a ledger). The `reason` is always a fixed, classifying
+  string — a registry-gate refusal answers `child refused by its access policy`,
+  never the role's required groups; the full reason is in the child's own
+  ledger, reached by `child_run_id`.
 - `502` — the child could not be carried through (Agenthof could not write
   its ledger, say); recorded on your run's ledger as a failed spawn.
 - `503` — the step was already over when the request arrived.
