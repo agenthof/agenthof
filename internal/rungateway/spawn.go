@@ -28,13 +28,18 @@ const (
 // still has one). OutputSHA and OutputPreview are the child's final
 // artifact as the ledger carries it: a hash and a capped preview, never the
 // body. Reason is Agenthof's own text for a refused child; the door caps it
-// before recording.
+// before recording. Provisioned reports whether a compartment set was
+// consumed for this child: it is what max_total_spawns counts. A child
+// refused before provisioning (the pre-run gate), a provision that failed,
+// or an internal failure before provisioning gives its slot back; a
+// provisioned child counts whatever happened next, even a registry refusal.
 type SpawnResult struct {
 	ChildRunID    string
 	Status        string
 	Reason        string
 	OutputSHA     string
 	OutputPreview string
+	Provisioned   bool
 }
 
 // Spawner runs one governed child run on the door's behalf and returns when
@@ -138,8 +143,9 @@ func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, age
 		}
 		// Check-and-reserve is one step under mu, so N concurrent requests
 		// cannot each see room for one more. A refused attempt reserves
-		// nothing and so never counts; a child that starts counts toward
-		// max_total_spawns whatever its outcome — it has a ledger of its own.
+		// nothing and so never counts; the reservation taken here is given
+		// back below unless the Spawner reports that a compartment set was
+		// consumed (SpawnResult.Provisioned).
 		p.mu.Lock()
 		switch {
 		case depth > p.gwcfg.Spawn.MaxDepth:
@@ -174,6 +180,14 @@ func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, age
 
 		logger.Info("spawn started", "child_role", childRole, "child_workflow", childWorkflow, "depth", depth)
 		res, err := p.spawner.Spawn(ctx, req.Role, req.Workflow, req.Input, bind)
+		if !res.Provisioned {
+			// No compartment set was consumed: give the max_total_spawns
+			// reservation back, on this path and on the error path alike. The
+			// attempt is still recorded below.
+			p.mu.Lock()
+			p.spawnTotal--
+			p.mu.Unlock()
+		}
 		if err != nil {
 			// The error can carry a path or whatever an adapter said; the
 			// ledger gets a fixed reason and the log an error class.

@@ -100,13 +100,13 @@ func (d *runDeps) Spawn(ctx context.Context, childRole, childWorkflow, input str
 			// ErrLedgerWrite and carries a filesystem path: that is not a
 			// reason, so it takes the error path below and the door records
 			// its own fixed "spawn did not complete".
-			return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "refused", Reason: err.Error()}, nil
+			return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "refused", Reason: err.Error(), Provisioned: true}, nil
 		}
-		return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "failed"}, err
+		return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "failed", Provisioned: true}, err
 	}
 	status := res.Status
 	if status == "cancelled" {
 		status = "failed" // the door's vocabulary: a child torn down with its parent did not succeed
 	}
-	return rungateway.SpawnResult{ChildRunID: res.RunID, Status: status, OutputSHA: res.OutputSHA, OutputPreview: res.OutputPreview}, nil
+	return rungateway.SpawnResult{ChildRunID: res.RunID, Status: status, OutputSHA: res.OutputSHA, OutputPreview: res.OutputPreview, Provisioned: true}, nil
 }

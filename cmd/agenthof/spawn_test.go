@@ -98,8 +98,8 @@ func TestSpawnRefusedChildHasOwnLedgerLinkedToParent(t *testing.T) {
 	deps := buildDeps(t, spawnTestConfig(), dir)
 	parent := engine.Binding{Invoker: identity.Static("dev@x"), Role: "lead-role", Workflow: "lead-wf", RunID: "r-parent"}
 	res, err := deps.Spawn(context.Background(), "locked", "locked-wf", "x", parent)
-	if err != nil || res.Status != "refused" || res.ChildRunID == "" {
-		t.Fatalf("res=%+v err=%v, want a refused child with its own run id and no error", res, err)
+	if err != nil || res.Status != "refused" || res.ChildRunID == "" || !res.Provisioned {
+		t.Fatalf("res=%+v err=%v, want a refused, provisioned child with its own run id and no error", res, err)
 	}
 	events, _, err := engine.ReadLog(dir+"/runs", res.ChildRunID)
 	if err != nil {
@@ -127,8 +127,8 @@ func TestSpawnOBOChildIsRefusedBeforeTheEngine(t *testing.T) {
 	deps := buildDeps(t, cfg, dir)
 	parent := engine.Binding{Invoker: identity.Static("dev@x"), Role: "se", Workflow: "coder-only", RunID: "r-parent"}
 	res, err := deps.Spawn(context.Background(), "se", "with-planner", "x", parent)
-	if err != nil || res.Status != "refused" || res.Reason != oboRefusalReason || res.ChildRunID == "" {
-		t.Fatalf("res=%+v err=%v, want the fixed OBO refusal with a child run id", res, err)
+	if err != nil || res.Status != "refused" || res.Reason != oboRefusalReason || res.ChildRunID == "" || res.Provisioned {
+		t.Fatalf("res=%+v err=%v, want the fixed OBO refusal with a child run id and nothing provisioned", res, err)
 	}
 	events, _, err := engine.ReadLog(dir+"/runs", res.ChildRunID)
 	if err != nil {

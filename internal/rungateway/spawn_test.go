@@ -38,16 +38,16 @@ type stubSpawner struct {
 func (s *stubSpawner) Spawn(ctx context.Context, role, workflow, input string, parent engine.Binding) (SpawnResult, error) {
 	s.mu.Lock()
 	s.calls = append(s.calls, stubSpawnCall{role, workflow, input, parent})
-	block := s.block
+	block, result, err := s.block, s.result, s.err
 	s.mu.Unlock()
 	if block != nil {
 		select {
 		case <-block:
 		case <-ctx.Done():
-			return SpawnResult{ChildRunID: "r-child", Status: "failed", Reason: "cancelled"}, nil
+			return SpawnResult{ChildRunID: "r-child", Status: "failed", Reason: "cancelled", Provisioned: true}, nil
 		}
 	}
-	return s.result, s.err
+	return result, err
 }
 
 func (s *stubSpawner) callCount() int {
@@ -234,7 +234,7 @@ func TestSpawnDepthBoundary(t *testing.T) {
 }
 
 func TestSpawnParallelCapIsAtomic(t *testing.T) {
-	sp := &stubSpawner{block: make(chan struct{}), result: SpawnResult{ChildRunID: "r-child", Status: "succeeded"}}
+	sp := &stubSpawner{block: make(chan struct{}), result: SpawnResult{ChildRunID: "r-child", Status: "succeeded", Provisioned: true}}
 	rec := &eventRecorder{}
 	base, token, p := startSpawnGateway(t, context.Background(), spawnPolicy(3, 2, 10), testBinding(), spawnAgent(workerChild), sp, rec)
 	const n = 5
@@ -282,7 +282,7 @@ func TestSpawnParallelCapIsAtomic(t *testing.T) {
 }
 
 func TestSpawnTotalCapSurvivesStartStop(t *testing.T) {
-	sp := &stubSpawner{result: SpawnResult{ChildRunID: "r-child", Status: "succeeded"}}
+	sp := &stubSpawner{result: SpawnResult{ChildRunID: "r-child", Status: "succeeded", Provisioned: true}}
 	rec := &eventRecorder{}
 	p := New(spawnPolicy(3, 5, 2), "", broker.StaticEnv{}, nil, "").WithSpawner(sp)
 	agent := spawnAgent(workerChild)
@@ -320,7 +320,7 @@ func TestSpawnTotalCapSurvivesStartStop(t *testing.T) {
 }
 
 func TestSpawnRefusedChildRecordsChildRunIDAndCounts(t *testing.T) {
-	sp := &stubSpawner{result: SpawnResult{ChildRunID: "r-refused", Status: "refused", Reason: `role "worker" requires membership in one of its allowed groups (finance); the invoker's groups don't qualify`}}
+	sp := &stubSpawner{result: SpawnResult{ChildRunID: "r-refused", Status: "refused", Reason: `role "worker" requires membership in one of its allowed groups (finance); the invoker's groups don't qualify`, Provisioned: true}}
 	rec := &eventRecorder{}
 	base, token, p := startSpawnGateway(t, context.Background(), spawnPolicy(3, 2, 4), testBinding(), spawnAgent(workerChild), sp, rec)
 	code, out := postSpawn(t, context.Background(), base, token, spawnBody("worker", "child-wf", "x"))
@@ -531,5 +531,69 @@ func TestSpawnUnknownSpawnerStatusIsRecordedFailed(t *testing.T) {
 	}
 	if ev := spawnEvents(rec); len(ev) != 1 || ev[0].Status != "failed" {
 		t.Fatalf("events = %+v", ev)
+	}
+}
+
+func TestSpawnUnprovisionedChildDoesNotCount(t *testing.T) {
+	// Key on "a compartment set was consumed", not "a ledger was written":
+	// a refusal before provisioning, a failed provision, and an internal
+	// failure before provisioning all give the slot back.
+	cases := []struct {
+		name   string
+		result SpawnResult
+		err    error
+		code   int
+	}{
+		{"provision refused", SpawnResult{Status: "refused", Reason: "spawn compartment unavailable"}, nil, http.StatusForbidden},
+		{"pre-run refusal with a child ledger", SpawnResult{ChildRunID: "r-obo", Status: "refused", Reason: "obo requires a verified invoker token"}, nil, http.StatusForbidden},
+		{"internal failure before provisioning", SpawnResult{}, errors.New("ledger: open /secret: boom"), http.StatusBadGateway},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sp := &stubSpawner{result: c.result, err: c.err}
+			rec := &eventRecorder{}
+			base, token, p := startSpawnGateway(t, context.Background(), spawnPolicy(3, 2, 1), testBinding(), spawnAgent(workerChild), sp, rec)
+			if code, _ := postSpawn(t, context.Background(), base, token, spawnBody("worker", "child-wf", "x")); code != c.code {
+				t.Fatalf("code = %d, want %d", code, c.code)
+			}
+			p.mu.Lock()
+			total, inflight := p.spawnTotal, p.spawnInflight
+			p.mu.Unlock()
+			if total != 0 || inflight != 0 {
+				t.Fatalf("spawnTotal=%d spawnInflight=%d, want 0 and 0: an unprovisioned child must give its slot back", total, inflight)
+			}
+			// The slot really is free: with max_total_spawns 1, a provisioned
+			// child now fits.
+			sp.mu.Lock()
+			sp.result, sp.err = SpawnResult{ChildRunID: "r-child", Status: "succeeded", Provisioned: true}, nil
+			sp.mu.Unlock()
+			if code, out := postSpawn(t, context.Background(), base, token, spawnBody("worker", "child-wf", "x")); code != http.StatusOK || out.Status != "succeeded" {
+				t.Fatalf("after an unprovisioned child, a provisioned one must fit under max_total_spawns 1: code=%d out=%+v", code, out)
+			}
+			ev := spawnEvents(rec)
+			if len(ev) != 2 || ev[0].ChildRunID != c.result.ChildRunID {
+				t.Fatalf("events = %+v: the unprovisioned attempt is still recorded (with its child id when a ledger exists)", ev)
+			}
+		})
+	}
+}
+
+func TestSpawnProvisionedRefusedChildCounts(t *testing.T) {
+	// RBAC refused the child AFTER its compartments were provisioned: a set
+	// was consumed, so it counts, exactly like a child that ran.
+	sp := &stubSpawner{result: SpawnResult{ChildRunID: "r-refused", Status: "refused", Reason: "role \"worker\" requires membership", Provisioned: true}}
+	rec := &eventRecorder{}
+	base, token, p := startSpawnGateway(t, context.Background(), spawnPolicy(3, 2, 1), testBinding(), spawnAgent(workerChild), sp, rec)
+	if code, _ := postSpawn(t, context.Background(), base, token, spawnBody("worker", "child-wf", "x")); code != http.StatusForbidden {
+		t.Fatalf("code = %d, want 403", code)
+	}
+	code, out := postSpawn(t, context.Background(), base, token, spawnBody("worker", "child-wf", "x"))
+	if code != http.StatusForbidden || out.Reason != reasonSpawnTotal {
+		t.Fatalf("a provisioned child consumed the only slot: code=%d out=%+v", code, out)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.spawnTotal != 1 {
+		t.Fatalf("spawnTotal = %d, want 1", p.spawnTotal)
 	}
 }
