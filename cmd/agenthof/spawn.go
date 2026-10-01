@@ -86,8 +86,9 @@ func (d *runDeps) newGateway() engine.ToolProxy {
 // childGateway is a spawned child's gateway factory: the same config with
 // the child's own socket directory (so the child's per-step gateway socket
 // lands where only the child's compartments can see it), the child's own
-// refexec in place of every agent's exec.url, and the same Spawner, so a
-// child can spawn in turn.
+// refexec in place of every agent's exec.url, and a Spawner of its own, so
+// a child can spawn in turn — measured against the child's directory, not
+// the root's.
 type childGateway struct {
 	deps      *runDeps
 	socketDir string
@@ -97,7 +98,18 @@ type childGateway struct {
 func (g childGateway) newGateway() engine.ToolProxy {
 	gw := g.deps.cfg.Gateway
 	gw.RefboxSocketDir = g.socketDir
-	return rungateway.New(gw, ".", g.deps.broker, g.deps.logger, g.deps.subjectToken).WithSpawner(g.deps).WithExecURL(g.execURL)
+	return rungateway.New(gw, ".", g.deps.broker, g.deps.logger, g.deps.subjectToken).WithSpawner(g).WithExecURL(g.execURL)
+}
+
+// Spawn implements rungateway.Spawner for a spawned child's own gateway. It
+// is runDeps.Spawn with one difference, and it is the whole reason this type
+// carries the Spawner rather than runDeps doing it for the whole tree: the
+// directory a grandchild's compartments are measured against is THIS child's
+// socket directory — the one actually mounted into the compartments that are
+// asking — not the root deployment's refbox_socket_dir. runDeps is shared by
+// every run in the tree and cannot know which of them asked.
+func (g childGateway) Spawn(ctx context.Context, childRole, childWorkflow, input string, parent engine.Binding) (rungateway.SpawnResult, error) {
+	return g.deps.spawn(ctx, childRole, childWorkflow, input, parent, g.socketDir)
 }
 
 // childExecutor serves a spawned child's steps over the sockets the
@@ -141,19 +153,21 @@ func distinctStepAgents(wf config.WorkflowDef) []string {
 // answers: the child's refexec socket must sit outside the child's socket
 // directory (which is mounted into the child's compartments — inside it, an
 // agent could dial the runtime directly and bypass the governed exec door),
-// and neither may sit under the root's refbox_socket_dir (mounted whole into
-// the root compartment).
-func checkPlacement(rootSocketDir string, lease *refspawn.Lease) error {
+// and neither of the child's directories may sit under mountedDir, the
+// socket directory mounted into the compartments of the run that asked for
+// this child — refbox_socket_dir for a root run, the spawning child's own
+// ChildDir for a nested one. Empty means that run has no mounted directory.
+func checkPlacement(mountedDir string, lease *refspawn.Lease) error {
 	execDir := filepath.Dir(lease.ExecSocket)
 	if registry.InsideDir(execDir, lease.ChildDir) {
 		return errors.New("the child's exec socket is inside its mounted socket directory")
 	}
-	if rootSocketDir != "" {
-		if registry.InsideDir(lease.ChildDir, rootSocketDir) {
-			return errors.New("the child's socket directory is inside refbox_socket_dir")
+	if mountedDir != "" {
+		if registry.InsideDir(lease.ChildDir, mountedDir) {
+			return errors.New("the child's socket directory is inside the spawning run's mounted socket directory")
 		}
-		if registry.InsideDir(execDir, rootSocketDir) {
-			return errors.New("the child's exec socket is inside refbox_socket_dir")
+		if registry.InsideDir(execDir, mountedDir) {
+			return errors.New("the child's exec socket is inside the spawning run's mounted socket directory")
 		}
 	}
 	return nil
@@ -183,7 +197,19 @@ func preRunRefusal(cfg config.Config, reg *registry.Registry, workflow string, i
 // lease is the teardown: the supervisor removes the set when the child is
 // over. The child's outcome comes back as a result; only an internal
 // failure (a ledger that could not be opened or written) is an error.
+//
+// This is the ROOT run's Spawner, so the directory the child's own
+// directories are measured against is the configured refbox_socket_dir. A
+// spawned child's gateway carries childGateway instead, which measures
+// against that child's socket directory.
 func (d *runDeps) Spawn(ctx context.Context, childRole, childWorkflow, input string, parent engine.Binding) (rungateway.SpawnResult, error) {
+	return d.spawn(ctx, childRole, childWorkflow, input, parent, d.cfg.Gateway.RefboxSocketDir)
+}
+
+// spawn is Spawn with the one thing that differs by depth made explicit:
+// mountedDir is the socket directory mounted into the compartments of the
+// run that asked, which checkPlacement measures the answer against.
+func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input string, parent engine.Binding, mountedDir string) (rungateway.SpawnResult, error) {
 	logger := d.logger.With("parent_run", parent.RunID, "child_role", childRole, "child_workflow", childWorkflow)
 	if reason, refused := preRunRefusal(d.cfg, d.reg, childWorkflow, parent.Invoker); refused {
 		id, err := engine.Refuse(d.logDir, childRole, childWorkflow, parent.Invoker, reason, &parent)
@@ -208,7 +234,7 @@ func (d *runDeps) Spawn(ctx context.Context, childRole, childWorkflow, input str
 		return rungateway.SpawnResult{Status: "refused", Reason: reasonCompartmentUnavailable}, nil
 	}
 	defer lease.Release()
-	if err := checkPlacement(d.cfg.Gateway.RefboxSocketDir, lease); err != nil {
+	if err := checkPlacement(mountedDir, lease); err != nil {
 		logger.Error("spawn refused", "reason", err.Error(), "child_run", childID) // our own fixed text, no path
 		return rungateway.SpawnResult{Status: "refused", Reason: reasonCompartmentUnavailable}, nil
 	}

@@ -54,11 +54,19 @@ type fakeSupervisor struct {
 	sock        string
 	handler     http.HandlerFunc
 	execHandler http.HandlerFunc
+	// nestExecInFirstChild makes every provision after the first put its
+	// exec directory INSIDE the first child's socket directory: the
+	// misplacement only a nested spawn can catch, since that directory is
+	// mounted into the compartments doing the asking but is nothing special
+	// to the root.
+	nestExecInFirstChild bool
 
-	mu         sync.Mutex
-	provisions [][]string // the agents asked for, per provision
-	ids        []string
-	released   int
+	mu            sync.Mutex
+	provisions    [][]string // the agents asked for, per provision
+	ids           []string
+	released      int
+	firstChildDir string
+	nestedExecDir string
 }
 
 func newFakeSupervisor(t *testing.T, handler, execHandler http.HandlerFunc) *fakeSupervisor {
@@ -87,12 +95,18 @@ func (f *fakeSupervisor) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = io.Copy(io.Discard, r.Body)
+	childDir := filepath.Join(f.root, req.ChildRunID)
+	execDir := filepath.Join(f.root, req.ChildRunID+"-exec")
 	f.mu.Lock()
 	f.provisions = append(f.provisions, append([]string{}, req.Agents...))
 	f.ids = append(f.ids, req.ChildRunID)
+	if f.firstChildDir == "" {
+		f.firstChildDir = childDir
+	} else if f.nestExecInFirstChild {
+		execDir = filepath.Join(f.firstChildDir, req.ChildRunID+"-exec")
+		f.nestedExecDir = execDir
+	}
 	f.mu.Unlock()
-	childDir := filepath.Join(f.root, req.ChildRunID)
-	execDir := filepath.Join(f.root, req.ChildRunID+"-exec")
 	for _, d := range []string{childDir, execDir} {
 		if err := os.Mkdir(d, 0o700); err != nil {
 			http.Error(w, "mkdir", http.StatusBadGateway)
@@ -143,6 +157,14 @@ func (f *fakeSupervisor) seen() (provisions [][]string, ids []string, released i
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.provisions, f.ids, f.released
+}
+
+// nested reports the exec directory the nesting layout handed back, and the
+// first child's socket directory it was placed inside.
+func (f *fakeSupervisor) nested() (execDir, firstChildDir string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.nestedExecDir, f.firstChildDir
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -556,8 +578,11 @@ func TestSpawnProvisionsDistinctStepAgentsAndReleases(t *testing.T) {
 }
 
 // writeSpawnSample writes a config whose root agent is a TCP stub and whose
-// children are served by a fake supervisor; it returns the config dir.
-func writeSpawnSample(t *testing.T) string {
+// children are served by a fake supervisor; it returns the config dir and
+// that supervisor. refbox_socket_dir is set to a private directory of its
+// own, as a deployment that spawns has it: the root run's gateway listens
+// there, and it is the directory a root run's children are placed against.
+func writeSpawnSample(t *testing.T) (string, *fakeSupervisor) {
 	t.Helper()
 	stub := httptest.NewServer(http.HandlerFunc(echoCompatHandler))
 	t.Cleanup(stub.Close)
@@ -575,7 +600,7 @@ func writeSpawnSample(t *testing.T) string {
 		"roles/lead.yaml":         "name: lead-role\nworkflows: [lead-wf]\nallowed_groups: [\"*\"]\n",
 		"roles/worker.yaml":       "name: worker\nworkflows: [child-wf, exec-wf]\nallowed_groups: [\"*\"]\n",
 		"roles/locked.yaml":       "name: locked\nworkflows: [locked-wf]\nallowed_groups: [nobody]\n",
-		"gateway.yaml":            "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\nspawn:\n  max_depth: 2\n  max_parallel: 2\n  max_total_spawns: 4\nspawn_supervisor: " + fake.url() + "\n",
+		"gateway.yaml":            "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\nrefbox_socket_dir: " + shortDir(t) + "\nspawn:\n  max_depth: 2\n  max_parallel: 2\n  max_total_spawns: 4\nspawn_supervisor: " + fake.url() + "\n",
 	}
 	for rel, content := range files {
 		p := filepath.Join(root, rel)
@@ -586,7 +611,21 @@ func writeSpawnSample(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	return root
+	return root, fake
+}
+
+// rootSocketDir reads refbox_socket_dir back out of a written sample.
+func rootSocketDir(t *testing.T, root string) string {
+	t.Helper()
+	gw, err := os.ReadFile(filepath.Join(root, "gateway.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^refbox_socket_dir: (.*)$`).FindSubmatch(gw)
+	if m == nil {
+		t.Fatalf("no refbox_socket_dir in:\n%s", gw)
+	}
+	return string(m[1])
 }
 
 func runLead(t *testing.T, root, input string) (string, string, []engine.Event) {
@@ -624,7 +663,7 @@ func onlySpawn(t *testing.T, events []engine.Event) engine.Event {
 }
 
 func TestRunSpawnsGovernedChild(t *testing.T) {
-	root := writeSpawnSample(t)
+	root, _ := writeSpawnSample(t)
 	parentID, logDir, events := runLead(t, root, "spawn:worker/child-wf:hello")
 	sp := onlySpawn(t, events)
 	if sp.Status != "succeeded" || sp.ChildRunID == "" || sp.ChildRole != "worker" || sp.ChildWorkflow != "child-wf" || sp.Depth != 1 || sp.OutputSHA == "" {
@@ -654,7 +693,7 @@ func TestRunSpawnsGovernedChild(t *testing.T) {
 }
 
 func TestRunNestedSpawnStopsAtMaxDepth(t *testing.T) {
-	root := writeSpawnSample(t)
+	root, _ := writeSpawnSample(t)
 	_, logDir, events := runLead(t, root, "spawn:worker/child-wf:spawn:worker/child-wf:spawn:worker/child-wf:deep")
 	sp := onlySpawn(t, events) // depth 1, succeeded
 	child, _, err := engine.ReadLog(logDir, sp.ChildRunID)
@@ -678,8 +717,49 @@ func TestRunNestedSpawnStopsAtMaxDepth(t *testing.T) {
 	}
 }
 
+func TestRunNestedSpawnPlacementChecksTheSpawningChildsSocketDir(t *testing.T) {
+	// The directory mounted into a CHILD's compartments is that child's own
+	// socket directory, not the root deployment's refbox_socket_dir. So a
+	// grandchild whose exec socket lands inside it is reachable from the
+	// compartments that asked for it — the governed exec door bypassed — and
+	// must be refused, even though the same answer is nowhere near the root's
+	// directory, which is all the root run can check.
+	root, fake := writeSpawnSample(t)
+	fake.nestExecInFirstChild = true
+	_, logDir, events := runLead(t, root, "spawn:worker/child-wf:spawn:worker/child-wf:x")
+	sp := onlySpawn(t, events)
+	if sp.Status != "succeeded" {
+		t.Fatalf("the child itself is placed correctly and must run: %+v", sp)
+	}
+	child, _, err := engine.ReadLog(logDir, sp.ChildRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gsp := onlySpawn(t, child)
+	if gsp.Status != "refused" || gsp.Reason != reasonCompartmentUnavailable || gsp.ChildRunID != "" || gsp.Depth != 2 {
+		t.Fatalf("grandchild spawn = %+v, want refused with the fixed compartment reason and no child", gsp)
+	}
+	// And the contrast, on the very paths the supervisor handed back: that
+	// answer passes against the root's configured directory — which is what
+	// every run in the tree would be measured against if the spawning run's
+	// own directory were not threaded through.
+	nestedExecDir, childSocketDir := fake.nested()
+	if nestedExecDir == "" {
+		t.Fatal("the supervisor never handed back a nested exec directory")
+	}
+	answer := refspawn.NewLease(filepath.Join(filepath.Dir(childSocketDir), "r-grandchild"),
+		map[string]string{"child": filepath.Join(childSocketDir, "child.sock")},
+		filepath.Join(nestedExecDir, "refexec.sock"), io.NopCloser(strings.NewReader("")))
+	if err := checkPlacement(rootSocketDir(t, root), answer); err != nil {
+		t.Fatalf("against the root's dir this answer passes (%v); the refusal above can only come from the child's own dir", err)
+	}
+	if err := checkPlacement(childSocketDir, answer); err == nil {
+		t.Fatal("against the spawning child's own socket dir the same answer must fail")
+	}
+}
+
 func TestRunSpawnRefusals(t *testing.T) {
-	root := writeSpawnSample(t)
+	root, _ := writeSpawnSample(t)
 	// Not on may_spawn: refused, nothing started.
 	_, logDir, events := runLead(t, root, "spawn:lead-role/lead-wf:x")
 	sp := onlySpawn(t, events)
@@ -705,7 +785,7 @@ func TestRunSpawnRefusals(t *testing.T) {
 func TestRunSpawnedChildExecGoesToTheChildsRuntime(t *testing.T) {
 	// The runner agent's configured exec.url names nothing that listens; the
 	// child's gateway dials the supervisor's exec socket instead.
-	root := writeSpawnSample(t)
+	root, _ := writeSpawnSample(t)
 	_, logDir, events := runLead(t, root, "spawn:worker/exec-wf:exec-run:cat /work/x")
 	sp := onlySpawn(t, events)
 	if sp.Status != "succeeded" {
@@ -727,7 +807,7 @@ func TestRunSpawnedChildExecGoesToTheChildsRuntime(t *testing.T) {
 }
 
 func TestRunSpawnWithDeadSupervisorIsRefusedAndNotCounted(t *testing.T) {
-	root := writeSpawnSample(t)
+	root, _ := writeSpawnSample(t)
 	dead := shortDir(t)
 	gw, err := os.ReadFile(filepath.Join(root, "gateway.yaml"))
 	if err != nil {

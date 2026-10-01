@@ -207,6 +207,26 @@ func TestValidateSpawnSupervisorShape(t *testing.T) {
 	}
 }
 
+func TestValidateRefboxSocketDirMustBeAbsolute(t *testing.T) {
+	// A relative refbox_socket_dir cannot be compared with the absolute
+	// socket paths it guards, and would resolve against Agenthof's working
+	// directory at listen time. Rejected at apply, so no containment check
+	// downstream is ever asked a question it cannot answer.
+	cfg := spawnCfg()
+	cfg.Gateway.RefboxSocketDir = "run/agenthof"
+	if errs := Validate(cfg); !hasCodeMsg(errs, "bad-refbox-socket-dir", "must be an absolute path") {
+		t.Fatalf("want bad-refbox-socket-dir, got %v", errList(errs))
+	}
+	// Absolute passes, and so does unset (the TCP-loopback default).
+	for _, dir := range []string{"/run/agenthof", ""} {
+		cfg := spawnCfg()
+		cfg.Gateway.RefboxSocketDir = dir
+		if errs := Validate(cfg); len(errs) != 0 {
+			t.Errorf("refbox_socket_dir %q must pass, got %v", dir, errList(errs))
+		}
+	}
+}
+
 func TestInsideDir(t *testing.T) {
 	for _, c := range []struct {
 		dir, parent string

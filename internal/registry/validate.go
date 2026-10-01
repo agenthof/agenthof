@@ -430,6 +430,17 @@ func Validate(cfg config.Config) []ValidationError {
 				fmt.Sprintf("an agent declares may_spawn, so gateway.yaml must set spawn.%s to at least 1: a missing cap is never unbounded", c.key))
 		}
 	}
+	// refbox_socket_dir is mounted into agent compartments at the same path
+	// inside and out, and it is the directory every containment check
+	// measures a socket against. A relative value breaks both: it would
+	// resolve against whatever directory Agenthof happens to run in, and it
+	// cannot be compared with the absolute paths it guards — InsideDir fails
+	// closed on such a pair, so every absolute socket path would be reported
+	// as inside it. Config is law: reject the shape here instead.
+	if dir := cfg.Gateway.RefboxSocketDir; dir != "" && !filepath.IsAbs(dir) {
+		add("gateway.yaml", "refbox_socket_dir", "bad-refbox-socket-dir",
+			"refbox_socket_dir must be an absolute path: it is mounted into agent compartments at the same path inside and out, and it is what every socket's placement is checked against")
+	}
 	// The supervisor is where a child's compartments come from. Without one
 	// there is nowhere to run a child, so may_spawn is refused at apply
 	// rather than at the door; with one, it is a local socket in a directory

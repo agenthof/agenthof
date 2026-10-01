@@ -445,7 +445,7 @@ budget_usd_month: 20
 | Models | `models` | map of string → `ModelRoute` | no | — |
 | Tools | `tools` | map of string → `ToolResource` | no | — |
 | Defaults.Model | `defaults.model` | string | no | — |
-| RefboxSocketDir | `refbox_socket_dir` | string | no | empty (TCP loopback) |
+| RefboxSocketDir | `refbox_socket_dir` | string (absolute path) | no | empty (TCP loopback) |
 | SpawnSupervisor | `spawn_supervisor` | string (`unix://<absolute socket path>`) | yes when any agent declares `may_spawn`; otherwise ignored | — |
 | Spawn | `spawn` | object (`max_depth`, `max_parallel`, `max_total_spawns`, `reject_cycles`) | yes when any agent declares `may_spawn`; otherwise ignored | — |
 | StepTimeout | `step_timeout` | duration string | no | `5m` |
@@ -579,7 +579,10 @@ each fronted step's gateway listens on a Unix domain socket in this directory
 instead, and the proxy URL is `unix://` plus that socket's path. The value
 after `unix://` is the socket path only; the HTTP routes stay fixed (`/`,
 `/exec/authorize`, `/exec/attest`, `/exec/run`, `/v1/chat/completions`, `/spawn`). The run token
-still travels in the `Authorization` header. `apply` does not check that the
+still travels in the `Authorization` header. The value must be an absolute
+path (`bad-refbox-socket-dir` otherwise): it is mounted into agent
+compartments at the same path inside and out, and it is what every socket's
+placement is checked against. `apply` does not check that the
 directory exists. Keep the directory's path short: a Unix socket path has a
 small operating-system length limit, and a path that exceeds it fails the
 step at listen time.
