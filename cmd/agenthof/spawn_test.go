@@ -40,8 +40,9 @@ func spawnTestConfig() config.Config {
 			{Name: "locked", Workflows: []string{"locked-wf"}, AllowedGroups: []string{"nobody"}, SourceFile: "r"},
 		},
 		Gateway: config.GatewayConfig{
-			Models: map[string]config.ModelRoute{"fast": {Endpoint: "https://x/v1", Model: "m", APIKeyEnv: "K"}},
-			Spawn:  config.SpawnPolicy{MaxDepth: 2, MaxParallel: 2, MaxTotalSpawns: 4},
+			Models:          map[string]config.ModelRoute{"fast": {Endpoint: "https://x/v1", Model: "m", APIKeyEnv: "K"}},
+			Spawn:           config.SpawnPolicy{MaxDepth: 2, MaxParallel: 2, MaxTotalSpawns: 4},
+			SpawnSupervisor: "unix:///run/agenthof-spawn/refspawn.sock",
 		},
 	}
 }
@@ -124,6 +125,7 @@ func TestSpawnOBOChildIsRefusedBeforeTheEngine(t *testing.T) {
 	// resource and steps in "with-planner"; role "se" owns every workflow.
 	cfg.Agents[0].MaySpawn = []config.SpawnTarget{{Role: "se", Workflow: "with-planner"}}
 	cfg.Gateway.Spawn = config.SpawnPolicy{MaxDepth: 2, MaxParallel: 2, MaxTotalSpawns: 4}
+	cfg.Gateway.SpawnSupervisor = "unix:///run/agenthof-spawn/refspawn.sock"
 	deps := buildDeps(t, cfg, dir)
 	parent := engine.Binding{Invoker: identity.Static("dev@x"), Role: "se", Workflow: "coder-only", RunID: "r-parent"}
 	res, err := deps.Spawn(context.Background(), "se", "with-planner", "x", parent)
@@ -164,7 +166,7 @@ func writeSpawnSample(t *testing.T) string {
 		"roles/lead.yaml":         "name: lead-role\nworkflows: [lead-wf]\nallowed_groups: [\"*\"]\n",
 		"roles/worker.yaml":       "name: worker\nworkflows: [child-wf]\nallowed_groups: [\"*\"]\n",
 		"roles/locked.yaml":       "name: locked\nworkflows: [locked-wf]\nallowed_groups: [nobody]\n",
-		"gateway.yaml":            "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\nspawn:\n  max_depth: 2\n  max_parallel: 2\n  max_total_spawns: 4\n",
+		"gateway.yaml":            "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\nspawn:\n  max_depth: 2\n  max_parallel: 2\n  max_total_spawns: 4\nspawn_supervisor: unix:///run/agenthof-spawn/refspawn.sock\n",
 	}
 	for rel, content := range files {
 		p := filepath.Join(root, rel)

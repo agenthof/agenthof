@@ -25,7 +25,7 @@ func spawnCfg() config.Config {
 			{Name: "lead-role", Workflows: []string{"lead-wf"}, AllowedGroups: []string{"*"}, SourceFile: "r/lead.yaml"},
 			{Name: "worker", Workflows: []string{"child-wf"}, AllowedGroups: []string{"*"}, SourceFile: "r/worker.yaml"},
 		},
-		Gateway: config.GatewayConfig{Spawn: config.SpawnPolicy{MaxDepth: 2, MaxParallel: 2, MaxTotalSpawns: 4}},
+		Gateway: config.GatewayConfig{Spawn: config.SpawnPolicy{MaxDepth: 2, MaxParallel: 2, MaxTotalSpawns: 4}, SpawnSupervisor: "unix:///run/agenthof-spawn/refspawn.sock"},
 	}
 }
 
@@ -158,9 +158,69 @@ func TestValidateSpawnCycles(t *testing.T) {
 			{Name: "c-wf", SourceFile: "w", Steps: []config.Step{{Name: "s", Agent: "c"}}},
 		},
 		Roles:   []config.RoleDef{{Name: "r", Workflows: []string{"lead-wf", "a-wf", "b-wf", "c-wf"}, AllowedGroups: []string{"*"}, SourceFile: "r"}},
-		Gateway: config.GatewayConfig{Spawn: config.SpawnPolicy{MaxDepth: 3, MaxParallel: 2, MaxTotalSpawns: 4, RejectCycles: true}},
+		Gateway: config.GatewayConfig{Spawn: config.SpawnPolicy{MaxDepth: 3, MaxParallel: 2, MaxTotalSpawns: 4, RejectCycles: true}, SpawnSupervisor: "unix:///run/agenthof-spawn/refspawn.sock"},
 	}
 	if errs := Validate(diamond); len(errs) != 0 {
 		t.Fatalf("a diamond is acyclic, got %v", errList(errs))
+	}
+}
+
+func TestValidateSpawnSupervisorRequiredWithMaySpawn(t *testing.T) {
+	cfg := spawnCfg()
+	cfg.Gateway.SpawnSupervisor = ""
+	if errs := Validate(cfg); !hasCodeMsg(errs, "spawn-supervisor-required", "spawn_supervisor") {
+		t.Fatalf("may_spawn without a supervisor must be rejected (a child is never run in a shared process), got %v", errList(errs))
+	}
+	// No may_spawn anywhere: not required.
+	cfg.Agents[0].MaySpawn = nil
+	cfg.Gateway = config.GatewayConfig{}
+	if errs := Validate(cfg); len(errs) != 0 {
+		t.Fatalf("a config without may_spawn needs no supervisor, got %v", errList(errs))
+	}
+}
+
+func TestValidateSpawnSupervisorShape(t *testing.T) {
+	cases := []struct {
+		name, sup, refboxDir, fragment string
+	}{
+		{"https is not a local socket", "https://sup.example/", "", "must be a unix:// socket path"},
+		{"relative socket path", "unix://run/refspawn.sock", "", "must be a unix:// socket path"},
+		{"inside refbox_socket_dir", "unix:///run/agenthof/refspawn.sock", "/run/agenthof", "must not be inside gateway.refbox_socket_dir"},
+		{"inside a child of refbox_socket_dir", "unix:///run/agenthof/sup/refspawn.sock", "/run/agenthof", "must not be inside gateway.refbox_socket_dir"},
+	}
+	for _, c := range cases {
+		cfg := spawnCfg()
+		cfg.Gateway.SpawnSupervisor = c.sup
+		cfg.Gateway.RefboxSocketDir = c.refboxDir
+		if errs := Validate(cfg); !hasCodeMsg(errs, "bad-spawn-supervisor", c.fragment) {
+			t.Errorf("%s: want bad-spawn-supervisor containing %q, got %v", c.name, c.fragment, errList(errs))
+		}
+	}
+	// A sibling directory is fine, and so is a prefix that is not a parent.
+	for _, sup := range []string{"unix:///run/agenthof-spawn/refspawn.sock", "unix:///run/agenthof2/refspawn.sock"} {
+		cfg := spawnCfg()
+		cfg.Gateway.SpawnSupervisor = sup
+		cfg.Gateway.RefboxSocketDir = "/run/agenthof"
+		if errs := Validate(cfg); len(errs) != 0 {
+			t.Errorf("%s beside /run/agenthof must pass, got %v", sup, errList(errs))
+		}
+	}
+}
+
+func TestInsideDir(t *testing.T) {
+	for _, c := range []struct {
+		dir, parent string
+		want        bool
+	}{
+		{"/run/agenthof", "/run/agenthof", true},
+		{"/run/agenthof/x", "/run/agenthof", true},
+		{"/run/agenthof/x/../x", "/run/agenthof", true},
+		{"/run/agenthof2", "/run/agenthof", false},
+		{"/run", "/run/agenthof", false},
+		{"/tmp/x", "/run/agenthof", false},
+	} {
+		if got := InsideDir(c.dir, c.parent); got != c.want {
+			t.Errorf("InsideDir(%q, %q) = %v, want %v", c.dir, c.parent, got, c.want)
+		}
 	}
 }

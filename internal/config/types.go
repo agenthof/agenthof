@@ -301,6 +301,15 @@ type GatewayConfig struct {
 	// refbox compartment can reach it with no network. Empty means TCP loopback
 	// (the default, unchanged).
 	RefboxSocketDir string `yaml:"refbox_socket_dir"`
+	// SpawnSupervisor is the compartment supervisor (refspawn) that
+	// provisions every spawned child's compartments, as unix://<absolute
+	// socket path>. Required as soon as any agent declares may_spawn: config
+	// is law, and a child with nowhere to run is refused at apply, never run
+	// in a shared process. The socket's directory must be private (0700,
+	// this user) — checked when the door dials it — and must not be under
+	// RefboxSocketDir, which is mounted into agent compartments. apply does
+	// not check that the socket exists.
+	SpawnSupervisor string `yaml:"spawn_supervisor"`
 	// Spawn bounds the spawn door; required (all three caps) once any agent
 	// declares may_spawn. See SpawnPolicy.
 	Spawn SpawnPolicy `yaml:"spawn"`

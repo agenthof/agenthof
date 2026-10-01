@@ -167,14 +167,10 @@ func Validate(cfg config.Config) []ValidationError {
 				// socket inside it would let the agent dial the runtime directly —
 				// un-allowlisted and un-recorded. Make it impossible, not merely
 				// forbidden in prose.
-				if cfg.Gateway.RefboxSocketDir != "" && strings.HasPrefix(a.Exec.URL, config.UnixScheme) {
-					sockDir := filepath.Clean(filepath.Dir(strings.TrimPrefix(a.Exec.URL, config.UnixScheme)))
-					refboxDir := filepath.Clean(cfg.Gateway.RefboxSocketDir)
-					if rel, err := filepath.Rel(refboxDir, sockDir); err == nil &&
-						rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-						add(a.SourceFile, a.Name, "bad-exec-config",
-							"exec.url must not be inside gateway.refbox_socket_dir: that directory is mounted into the agent's compartment, so the agent could reach the runtime directly")
-					}
+				if cfg.Gateway.RefboxSocketDir != "" && strings.HasPrefix(a.Exec.URL, config.UnixScheme) &&
+					InsideDir(filepath.Dir(strings.TrimPrefix(a.Exec.URL, config.UnixScheme)), cfg.Gateway.RefboxSocketDir) {
+					add(a.SourceFile, a.Name, "bad-exec-config",
+						"exec.url must not be inside gateway.refbox_socket_dir: that directory is mounted into the agent's compartment, so the agent could reach the runtime directly")
 				}
 			default:
 				add(a.SourceFile, a.Name, "bad-exec-config",
@@ -434,6 +430,22 @@ func Validate(cfg config.Config) []ValidationError {
 				fmt.Sprintf("an agent declares may_spawn, so gateway.yaml must set spawn.%s to at least 1: a missing cap is never unbounded", c.key))
 		}
 	}
+	// The supervisor is where a child's compartments come from. Without one
+	// there is nowhere to run a child, so may_spawn is refused at apply
+	// rather than at the door; with one, it is a local socket in a directory
+	// no agent compartment can see.
+	switch sup := cfg.Gateway.SpawnSupervisor; {
+	case sup == "" && spawnDeclared:
+		add("gateway.yaml", "spawn_supervisor", "spawn-supervisor-required",
+			"an agent declares may_spawn, so gateway.yaml must set spawn_supervisor to the compartment supervisor's unix:// socket: a child run is never started without one")
+	case sup != "" && (!strings.HasPrefix(sup, config.UnixScheme) || !validSecureOrUnixEndpoint(sup)):
+		add("gateway.yaml", "spawn_supervisor", "bad-spawn-supervisor",
+			"spawn_supervisor must be a unix:// socket path (absolute)")
+	case sup != "" && cfg.Gateway.RefboxSocketDir != "" &&
+		InsideDir(filepath.Dir(strings.TrimPrefix(sup, config.UnixScheme)), cfg.Gateway.RefboxSocketDir):
+		add("gateway.yaml", "spawn_supervisor", "bad-spawn-supervisor",
+			"spawn_supervisor must not be inside gateway.refbox_socket_dir: that directory is mounted into agent compartments, so an agent could reach the supervisor directly")
+	}
 	if cfg.Gateway.StepTimeout != 0 && cfg.Gateway.StepTimeout < time.Second {
 		add("gateway.yaml", "step_timeout", "bad-step-timeout", "step_timeout must be a duration of at least 1s, such as 5m")
 	}
@@ -557,4 +569,16 @@ func validSecureOrUnixEndpoint(raw string) bool {
 		return filepath.IsAbs(path)
 	}
 	return validSecureEndpoint(raw)
+}
+
+// InsideDir reports whether dir is parent itself or anywhere below it, after
+// cleaning both. It is the one rule for "this path would be visible inside a
+// mounted directory"; a sibling whose name merely shares a prefix is outside.
+// Exported for the spawn door's runtime check on what a supervisor hands back.
+func InsideDir(dir, parent string) bool {
+	rel, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(dir))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

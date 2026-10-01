@@ -142,6 +142,11 @@ see [`tools`](#tools-1) below). `token_endpoint` stays on the stricter
 https-or-loopback rule, because that call carries a client secret to a
 remote host.
 
+`endpoint` stays required for every agent, but under spawn it is not
+consulted: a spawned child's agents are dialed at the compartments the
+supervisor provisioned for that child, whatever this field names. See
+[`spawn_supervisor`](#spawn_supervisor).
+
 Every fronted step receives `X-Agenthof-Proxy-URL` and
 `X-Agenthof-Run-Token`, whether or not the agent declares `tools` or `exec`.
 The model door is `POST <proxy URL>v1/chat/completions` with that run token.
@@ -182,6 +187,8 @@ and `timeout` is the per-command deadline Agenthof enforces on its call to
 the runtime: a duration string of at least `1s`, such as `5m`. Keep it below
 the step timeout, which otherwise fails the step first. All three are
 rejected with `mode: attested`.
+Under spawn `url` is likewise not consulted: a spawned child's exec door
+reaches the child's own runtime, bound to the child's workspace.
 
 Each `allow` entry:
 
@@ -439,6 +446,7 @@ budget_usd_month: 20
 | Tools | `tools` | map of string → `ToolResource` | no | — |
 | Defaults.Model | `defaults.model` | string | no | — |
 | RefboxSocketDir | `refbox_socket_dir` | string | no | empty (TCP loopback) |
+| SpawnSupervisor | `spawn_supervisor` | string (`unix://<absolute socket path>`) | yes when any agent declares `may_spawn`; otherwise ignored | — |
 | Spawn | `spawn` | object (`max_depth`, `max_parallel`, `max_total_spawns`, `reject_cycles`) | yes when any agent declares `may_spawn`; otherwise ignored | — |
 | StepTimeout | `step_timeout` | duration string | no | `5m` |
 
@@ -588,6 +596,29 @@ compartment listens. The checked-in demo config
 uses `/run/agenthof` as a placeholder, because YAML cannot expand
 `$XDG_RUNTIME_DIR`. The two paths must match. See
 [the life of a run](../lifecycle.md#a-reference-compartment-refbox).
+
+### `spawn_supervisor`
+
+The compartment supervisor every spawned child is provisioned through, as
+`unix://` plus the absolute path of its socket. **Required as soon as any
+agent declares [`may_spawn`](#may_spawn)**: a child run is a full governed
+run in compartments of its own, and with no supervisor there is nowhere to
+start one, so `apply` rejects the config with `spawn-supervisor-required`
+rather than letting a child run beside its parent. With no `may_spawn`
+anywhere the field is not needed.
+
+The value must be a `unix://` socket with an absolute path
+(`bad-spawn-supervisor` otherwise), and its directory must not be inside
+[`refbox_socket_dir`](#refbox_socket_dir), which is mounted into agent
+compartments — an agent could otherwise reach the supervisor directly
+(`bad-spawn-supervisor`). `apply` does not check that the socket exists.
+When the spawn door dials it, the socket's directory must be mode `0700`
+and owned by the user Agenthof runs as, the same gate every operator-side
+runtime insists on; otherwise the spawn is refused and recorded as
+`spawn compartment unavailable`.
+
+The reference supervisor is `deploy/refspawn/`; see
+[the life of a spawn](../lifecycle-spawn.md).
 
 ### `spawn`
 

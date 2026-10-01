@@ -29,7 +29,7 @@ func TestAgentDefMaySpawnParsesAndMatchesExactly(t *testing.T) {
 
 func TestGatewaySpawnPolicyAndStepTimeoutParse(t *testing.T) {
 	var g GatewayConfig
-	src := "spawn:\n  max_depth: 3\n  max_parallel: 4\n  max_total_spawns: 8\n  reject_cycles: true\nstep_timeout: 7m\n"
+	src := "spawn:\n  max_depth: 3\n  max_parallel: 4\n  max_total_spawns: 8\n  reject_cycles: true\nstep_timeout: 7m\nspawn_supervisor: unix:///run/agenthof-spawn/refspawn.sock\n"
 	if err := yaml.Unmarshal([]byte(src), &g); err != nil {
 		t.Fatal(err)
 	}
@@ -39,6 +39,9 @@ func TestGatewaySpawnPolicyAndStepTimeoutParse(t *testing.T) {
 	}
 	if g.StepTimeout != 7*time.Minute || g.EffectiveStepTimeout() != 7*time.Minute {
 		t.Fatalf("step_timeout = %v (effective %v), want 7m", g.StepTimeout, g.EffectiveStepTimeout())
+	}
+	if g.SpawnSupervisor != "unix:///run/agenthof-spawn/refspawn.sock" {
+		t.Fatalf("spawn_supervisor = %q", g.SpawnSupervisor)
 	}
 	if (GatewayConfig{}).EffectiveStepTimeout() != DefaultStepTimeout || DefaultStepTimeout != 5*time.Minute {
 		t.Fatalf("an unset step_timeout must mean %v", 5*time.Minute)
