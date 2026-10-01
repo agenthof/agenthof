@@ -168,7 +168,7 @@ Step by step:
    on-behalf-of adds nothing to it and never derives it from any upstream
    token. The verified token is kept for the run, in memory, and
    handed to the per-run gateway. It goes nowhere else: not to the engine,
-   not into the signed binding, not into any event.
+   not into the forwarded binding, not into any event.
 2. **Before the engine starts,** Agenthof checks whether any agent stepping
    in the workflow grants a `token_exchange` resource. If so and the invoker
    is not a verified token — a dev `--as` identity, or no token at all — the

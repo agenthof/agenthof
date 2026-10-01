@@ -7,8 +7,9 @@
 # socket path and the workspace volume; this script prepares the 0700 socket
 # directory and creates the volume, then hands over to refexec. Start the
 # agent's refbox compartment with REFBOX_WORKSPACE_VOLUME set to the same
-# volume so the command sees the agent's files. One refexec per refbox: the
-# socket is never shared across compartments. Requires podman and a Linux
+# volume so the command sees the agent's files. One refexec per refbox (or
+# per spawned child, started by refspawn and shared by that child's agents):
+# the socket is never shared across runs. Requires podman and a Linux
 # host. No credential is passed in: refexec is credential-less.
 set -euo pipefail
 

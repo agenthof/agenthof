@@ -57,6 +57,18 @@ type StepExecutor interface {
 	Execute(ctx context.Context, binding Binding, agent config.AgentDef, input string, artifacts map[string]string) (StepResult, error)
 }
 
+// Result is what Run reports back: the run's id and final status, plus — on
+// a succeeded run — the sha256 and capped preview of the last step's
+// artifact, exactly what that step's step_succeeded event carries. The
+// artifact body itself never travels here (Article III); it lives in the
+// artifact store under OutputSHA.
+type Result struct {
+	RunID         string
+	Status        string // succeeded | failed | refused | cancelled
+	OutputSHA     string
+	OutputPreview string
+}
+
 type Options struct {
 	LogDir      string
 	StepTimeout time.Duration
@@ -70,12 +82,22 @@ type Options struct {
 	// Logger receives operational diagnostics for this run — never audit
 	// events, which go to the run ledger under LogDir. Nil means discard.
 	Logger *slog.Logger
+	// Parent, when set, links this run under a spawning parent: the run's
+	// binding carries Parent.RunID as ParentRunID and Parent.Depth+1 as
+	// Depth, and the invoker is expected to be the parent's, unchanged. Nil
+	// means a root run.
+	Parent *Binding
+	// RunID, when set, is the id this run records under instead of a fresh
+	// one. A caller that must name resources for the run before it starts
+	// — a Spawner provisioning a child's compartments — mints it with
+	// NewRunID and passes it here. Empty means mint one.
+	RunID string
 }
 
 const defaultMaxBounces = 2
 
 func Run(ctx context.Context, reg *registry.Registry, role, workflow, input string,
-	inv identity.Invoker, exec StepExecutor, opts Options) (string, string, error) {
+	inv identity.Invoker, exec StepExecutor, opts Options) (Result, error) {
 
 	if opts.LogDir == "" {
 		opts.LogDir = ".agenthof/runs"
@@ -86,19 +108,23 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	if opts.ArtifactDir == "" {
 		opts.ArtifactDir = ".agenthof/artifacts"
 	}
-	runID := NewRunID()
-	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}
+	runID := opts.RunID
+	if runID == "" {
+		runID = NewRunID()
+	}
+	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}.linkedTo(opts.Parent)
 	logger := obs.OrDiscard(opts.Logger).With("run", runID, "role", role, "workflow", workflow)
+	failed := func(err error) (Result, error) { return Result{RunID: runID, Status: "failed"}, err }
 	log, err := OpenLog(opts.LogDir, runID)
 	if err != nil {
 		logger.Error("run ledger open failed", "err", err)
-		return runID, "failed", err
+		return failed(err)
 	}
 	defer func() { _ = log.Close() }()
 	store, err := artifact.NewStore(opts.ArtifactDir)
 	if err != nil {
 		logger.Error("artifact store open failed", "err", err)
-		return runID, "failed", err
+		return failed(err)
 	}
 	now := func() time.Time { return time.Now().UTC() }
 	var logErr error
@@ -112,20 +138,20 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	}
 	// ledgerFailed is the one exit for a failed ledger append: a local
 	// filesystem error, so its text (a path, never a secret) may be logged.
-	ledgerFailed := func() (string, string, error) {
+	ledgerFailed := func() (Result, error) {
 		logger.Error("ledger write failed", "err", logErr)
-		return runID, "failed", fmt.Errorf("ledger write failed: %w", logErr)
+		return failed(fmt.Errorf("%w: %w", ErrLedgerWrite, logErr))
 	}
 
-	refuse := func(reason string) (string, string, error) {
+	refuse := func(reason string) (Result, error) {
 		refusalErr := fmt.Errorf("%s", reason)
 		logger.Warn("run refused", "reason", reason)
 		emit(Event{Type: "run_refused", Reason: reason})
 		if logErr != nil {
 			logger.Error("ledger write failed", "err", logErr)
-			return runID, "refused", errors.Join(refusalErr, fmt.Errorf("ledger write failed: %w", logErr))
+			return Result{RunID: runID, Status: "refused"}, errors.Join(refusalErr, fmt.Errorf("%w: %w", ErrLedgerWrite, logErr))
 		}
-		return runID, "refused", refusalErr
+		return Result{RunID: runID, Status: "refused"}, refusalErr
 	}
 	ro, ok := reg.Role(role)
 	if !ok {
@@ -152,10 +178,27 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	}
 	artifacts := map[string]string{}
 	bounces := map[string]int{}
+	// lastSHA/lastPreview track the most recent succeeded step's artifact;
+	// on a succeeded run that is the final artifact Result reports.
+	var lastSHA, lastPreview string
 	i := 0
 	for i < len(wf.Steps) {
 		if logErr != nil {
 			return ledgerFailed()
+		}
+		// A run whose context is already over — a spawned child whose parent
+		// step was cancelled or timed out, or any caller that gave up — stops
+		// here rather than starting the next step: without this, a cancelled
+		// child would still walk its fail-back graph, each step paying the
+		// gateway's connect timeouts before failing. The exit is bounded to
+		// roughly one Start, not instant: the loop only checks between steps.
+		if err := ctx.Err(); err != nil {
+			logger.Warn("run cancelled", "class", "context")
+			emit(Event{Type: "workflow_finished", Status: "cancelled", Reason: "run cancelled"})
+			if logErr != nil {
+				return ledgerFailed()
+			}
+			return Result{RunID: runID, Status: "cancelled"}, nil
 		}
 		step := wf.Steps[i]
 		agent, _ := reg.Agent(step.Agent)
@@ -165,19 +208,19 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 
 		stepCtx, cancel := context.WithTimeout(ctx, opts.StepTimeout)
 		// Every fronted step gets the per-run listener. It serves whichever
-		// doors this agent uses — tools, exec, or the model proxy — and a
-		// listener with no traffic is cheap. The agent receives the proxy
+		// doors this agent uses — tools, exec, the model proxy, or spawn — and
+		// a listener with no traffic is cheap. The agent receives the proxy
 		// URL and run token and ignores the doors it does not call.
 		fronted := gw != nil && agent.EffectiveExecution() == "fronted"
 		if fronted {
-			// appendEvent writes tool_call events on the same serialized
-			// ledger writer but must NOT touch the engine-goroutine logErr var.
+			// appendEvent writes door events on the same serialized ledger
+			// writer but must NOT touch the engine-goroutine logErr var.
 			appendEvent := func(e Event) {
 				e.Time = now()
 				e.Binding = bind
 				_ = log.Append(e)
 			}
-			url, token, perr := gw.Start(bind, agent, appendEvent)
+			url, token, perr := gw.Start(stepCtx, bind, agent, appendEvent)
 			if perr != nil {
 				cancel()
 				// perr is transport-derived (upstream connect / listen) and can
@@ -192,7 +235,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 				if logErr != nil {
 					return ledgerFailed()
 				}
-				return runID, "failed", nil
+				return failed(nil)
 			}
 			stepCtx = WithProxyCoordinates(stepCtx, url, token)
 		}
@@ -211,7 +254,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 				if logErr != nil {
 					return ledgerFailed()
 				}
-				return runID, "failed", nil
+				return failed(nil)
 			}
 			res = StepResult{Success: false, Reason: execErr.Error()}
 		}
@@ -227,14 +270,15 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 					emit(Event{Type: "workflow_finished", Status: "failed", Reason: "artifact store: " + perr.Error()})
 					if logErr != nil {
 						logger.Error("ledger write failed", "err", logErr)
-						return runID, "failed", errors.Join(storeErr, fmt.Errorf("ledger write failed: %w", logErr))
+						return failed(errors.Join(storeErr, fmt.Errorf("%w: %w", ErrLedgerWrite, logErr)))
 					}
-					return runID, "failed", storeErr
+					return failed(storeErr)
 				}
 			}
 			if agent.Output != "" {
 				artifacts[agent.Output] = res.Artifact
 			}
+			lastSHA, lastPreview = sha, preview
 			emit(Event{Type: "step_succeeded", Step: step.Name, Agent: agent.Name, Artifact: preview, ArtifactSHA: sha, Execution: execTier})
 			logger.Debug("step succeeded", "step", step.Name, "agent", agent.Name)
 			i++
@@ -265,7 +309,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 			if logErr != nil {
 				return ledgerFailed()
 			}
-			return runID, "failed", nil
+			return failed(nil)
 		}
 		logger.Warn("step bounced back", "step", step.Name, "target", target, "bounce", bounces[step.Name], "cap", cap)
 		emit(Event{Type: "bounced_back", Step: step.Name, Status: target, Reason: res.Reason})
@@ -282,5 +326,5 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		return ledgerFailed()
 	}
 	logger.Debug("run finished", "status", "succeeded")
-	return runID, "succeeded", nil
+	return Result{RunID: runID, Status: "succeeded", OutputSHA: lastSHA, OutputPreview: lastPreview}, nil
 }

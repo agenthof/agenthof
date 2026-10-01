@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -165,14 +167,10 @@ func Validate(cfg config.Config) []ValidationError {
 				// socket inside it would let the agent dial the runtime directly —
 				// un-allowlisted and un-recorded. Make it impossible, not merely
 				// forbidden in prose.
-				if cfg.Gateway.RefboxSocketDir != "" && strings.HasPrefix(a.Exec.URL, config.UnixScheme) {
-					sockDir := filepath.Clean(filepath.Dir(strings.TrimPrefix(a.Exec.URL, config.UnixScheme)))
-					refboxDir := filepath.Clean(cfg.Gateway.RefboxSocketDir)
-					if rel, err := filepath.Rel(refboxDir, sockDir); err == nil &&
-						rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-						add(a.SourceFile, a.Name, "bad-exec-config",
-							"exec.url must not be inside gateway.refbox_socket_dir: that directory is mounted into the agent's compartment, so the agent could reach the runtime directly")
-					}
+				if cfg.Gateway.RefboxSocketDir != "" && strings.HasPrefix(a.Exec.URL, config.UnixScheme) &&
+					InsideDir(filepath.Dir(strings.TrimPrefix(a.Exec.URL, config.UnixScheme)), cfg.Gateway.RefboxSocketDir) {
+					add(a.SourceFile, a.Name, "bad-exec-config",
+						"exec.url must not be inside gateway.refbox_socket_dir: that directory is mounted into the agent's compartment, so the agent could reach the runtime directly")
 				}
 			default:
 				add(a.SourceFile, a.Name, "bad-exec-config",
@@ -353,17 +351,17 @@ func Validate(cfg config.Config) []ValidationError {
 		}
 	}
 
-	roleNames := map[string]bool{}
+	roles := map[string]config.RoleDef{}
 	for _, r := range cfg.Roles {
 		if r.Name == "" {
 			add(r.SourceFile, "(role)", "missing-name", "role has no name")
 			continue
 		}
-		if roleNames[r.Name] {
+		if _, dup := roles[r.Name]; dup {
 			add(r.SourceFile, r.Name, "duplicate-name", "role name already defined")
 			continue
 		}
-		roleNames[r.Name] = true
+		roles[r.Name] = r
 		if len(r.Workflows) == 0 {
 			add(r.SourceFile, r.Name, "no-workflows", "role owns no workflows")
 		}
@@ -378,7 +376,165 @@ func Validate(cfg config.Config) []ValidationError {
 			}
 		}
 	}
+
+	// Spawn: each may_spawn target must resolve to a role that exists and
+	// owns a workflow that exists; the policy caps are required as soon as
+	// any agent declares may_spawn (config is law — a gateway.yaml that is
+	// missing altogether arrives here as a zero policy and is rejected the
+	// same way); the optional static type-cycle check runs last.
+	spawnDeclared := false
+	for _, a := range cfg.Agents {
+		if a.Name == "" {
+			continue
+		}
+		seen := map[config.SpawnTarget]bool{}
+		for _, t := range a.MaySpawn {
+			spawnDeclared = true
+			if t.Role == "" || t.Workflow == "" {
+				add(a.SourceFile, a.Name, "bad-spawn-target", "may_spawn entries must name both a role and a workflow")
+				continue
+			}
+			if seen[t] {
+				add(a.SourceFile, a.Name, "bad-spawn-target",
+					fmt.Sprintf("may_spawn lists %s/%s more than once", t.Role, t.Workflow))
+				continue
+			}
+			seen[t] = true
+			ro, ok := roles[t.Role]
+			if !ok {
+				add(a.SourceFile, a.Name, "bad-spawn-target",
+					fmt.Sprintf("may_spawn names role %q, which does not exist", t.Role))
+				continue
+			}
+			if _, ok := workflows[t.Workflow]; !ok {
+				add(a.SourceFile, a.Name, "bad-spawn-target",
+					fmt.Sprintf("may_spawn names workflow %q, which does not exist", t.Workflow))
+				continue
+			}
+			if !slices.Contains(ro.Workflows, t.Workflow) {
+				add(a.SourceFile, a.Name, "bad-spawn-target",
+					fmt.Sprintf("may_spawn names %s/%s, but role %q does not own workflow %q", t.Role, t.Workflow, t.Role, t.Workflow))
+			}
+		}
+	}
+	policy := cfg.Gateway.Spawn
+	for _, c := range []struct {
+		key string
+		val int
+	}{{"max_depth", policy.MaxDepth}, {"max_parallel", policy.MaxParallel}, {"max_total_spawns", policy.MaxTotalSpawns}} {
+		switch {
+		case c.val < 0:
+			add("gateway.yaml", "spawn", "bad-spawn-policy", fmt.Sprintf("spawn.%s must not be negative", c.key))
+		case c.val == 0 && spawnDeclared:
+			add("gateway.yaml", "spawn", "spawn-policy-required",
+				fmt.Sprintf("an agent declares may_spawn, so gateway.yaml must set spawn.%s to at least 1: a missing cap is never unbounded", c.key))
+		}
+	}
+	// refbox_socket_dir is mounted into agent compartments at the same path
+	// inside and out, and it is the directory every containment check
+	// measures a socket against. A relative value breaks both: it would
+	// resolve against whatever directory Agenthof happens to run in, and it
+	// cannot be compared with the absolute paths it guards — InsideDir fails
+	// closed on such a pair, so every absolute socket path would be reported
+	// as inside it. Config is law: reject the shape here instead.
+	if dir := cfg.Gateway.RefboxSocketDir; dir != "" && !filepath.IsAbs(dir) {
+		add("gateway.yaml", "refbox_socket_dir", "bad-refbox-socket-dir",
+			"refbox_socket_dir must be an absolute path: it is mounted into agent compartments at the same path inside and out, and it is what every socket's placement is checked against")
+	}
+	// The supervisor is where a child's compartments come from. Without one
+	// there is nowhere to run a child, so may_spawn is refused at apply
+	// rather than at the door; with one, it is a local socket in a directory
+	// no agent compartment can see.
+	switch sup := cfg.Gateway.SpawnSupervisor; {
+	case sup == "" && spawnDeclared:
+		add("gateway.yaml", "spawn_supervisor", "spawn-supervisor-required",
+			"an agent declares may_spawn, so gateway.yaml must set spawn_supervisor to the compartment supervisor's unix:// socket: a child run is never started without one")
+	case sup != "" && (!strings.HasPrefix(sup, config.UnixScheme) || !validSecureOrUnixEndpoint(sup)):
+		add("gateway.yaml", "spawn_supervisor", "bad-spawn-supervisor",
+			"spawn_supervisor must be a unix:// socket path (absolute)")
+	case sup != "" && cfg.Gateway.RefboxSocketDir != "" &&
+		InsideDir(filepath.Dir(strings.TrimPrefix(sup, config.UnixScheme)), cfg.Gateway.RefboxSocketDir):
+		add("gateway.yaml", "spawn_supervisor", "bad-spawn-supervisor",
+			"spawn_supervisor must not be inside gateway.refbox_socket_dir: that directory is mounted into agent compartments, so an agent could reach the supervisor directly")
+	}
+	if cfg.Gateway.StepTimeout != 0 && cfg.Gateway.StepTimeout < time.Second {
+		add("gateway.yaml", "step_timeout", "bad-step-timeout", "step_timeout must be a duration of at least 1s, such as 5m")
+	}
+	if policy.RejectCycles {
+		if cycle := spawnCycle(agents, workflows); cycle != nil {
+			add("gateway.yaml", "spawn", "spawn-cycle",
+				fmt.Sprintf("spawn.reject_cycles is set and the may_spawn graph has a cycle: %s", strings.Join(cycle, " -> ")))
+		}
+	}
 	return errs
+}
+
+// spawnCycle finds a directed cycle in the agent-type spawn graph: an edge
+// A -> B exists when A's may_spawn names a workflow that has a step run by
+// B. It returns one cycle as a path with its first node repeated at the end,
+// or nil. Because may_spawn fully determines what a run can reach, this
+// static check is complete. Nodes and edges are visited in sorted order so
+// the reported cycle is deterministic.
+func spawnCycle(agents map[string]config.AgentDef, workflows map[string]config.WorkflowDef) []string {
+	edges := map[string][]string{}
+	for name, a := range agents {
+		seen := map[string]bool{}
+		for _, t := range a.MaySpawn {
+			wf, ok := workflows[t.Workflow]
+			if !ok {
+				continue // already reported as bad-spawn-target
+			}
+			for _, s := range wf.Steps {
+				if !seen[s.Agent] {
+					seen[s.Agent] = true
+					edges[name] = append(edges[name], s.Agent)
+				}
+			}
+		}
+		sort.Strings(edges[name])
+	}
+	const (
+		white = iota
+		grey
+		black
+	)
+	color := map[string]int{}
+	var stack []string
+	var walk func(n string) []string
+	walk = func(n string) []string {
+		color[n] = grey
+		stack = append(stack, n)
+		for _, m := range edges[n] {
+			switch color[m] {
+			case grey:
+				for i, s := range stack {
+					if s == m {
+						return append(append([]string{}, stack[i:]...), m)
+					}
+				}
+			case white:
+				if c := walk(m); c != nil {
+					return c
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		color[n] = black
+		return nil
+	}
+	names := make([]string, 0, len(agents))
+	for name := range agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if color[name] == white {
+			if c := walk(name); c != nil {
+				return c
+			}
+		}
+	}
+	return nil
 }
 
 // validSecureEndpoint requires an https URL, or http only to a loopback host
@@ -424,4 +580,21 @@ func validSecureOrUnixEndpoint(raw string) bool {
 		return filepath.IsAbs(path)
 	}
 	return validSecureEndpoint(raw)
+}
+
+// InsideDir reports whether dir is parent itself or anywhere below it, after
+// cleaning both. It is the one rule for "this path would be visible inside a
+// mounted directory"; a sibling whose name merely shares a prefix is outside.
+// Exported for the spawn door's runtime check on what a supervisor hands back.
+//
+// Every caller reads it as "reject this path", so a pair it cannot relate at
+// all — one absolute, the other relative, which filepath.Rel refuses — is
+// reported as inside: an unanswerable containment question fails closed, not
+// open.
+func InsideDir(dir, parent string) bool {
+	rel, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(dir))
+	if err != nil {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

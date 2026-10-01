@@ -207,7 +207,7 @@ func runOneCall(t *testing.T, res config.ToolResource) (*mcp.CallToolResult, []e
 	var mu sync.Mutex
 	var events []engine.Event
 	appendEvent := func(e engine.Event) { mu.Lock(); defer mu.Unlock(); events = append(events, e) }
-	url, runToken, err := p.Start(testBinding(), testAgentDef("bridge"), appendEvent)
+	url, runToken, err := p.Start(context.Background(), testBinding(), testAgentDef("bridge"), appendEvent)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

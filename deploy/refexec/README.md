@@ -71,7 +71,9 @@ The workspace is a named podman volume, mounted read-write at the same path
 into the agent's refbox compartment (`REFBOX_WORKSPACE_VOLUME` on
 `deploy/refbox/refbox-run.sh`) and into every refexec compartment. Its life
 is the recipe's: `refexec-run.sh` creates it, runs share it, and tearing the
-recipe down (`podman volume rm`) drops it. One refexec per refbox.
+recipe down (`podman volume rm`) drops it. One refexec per refbox — or one
+per spawned child, shared by that child's agents, when `refspawn` starts it
+(see [`deploy/refspawn/README.md`](../refspawn/README.md)).
 
 ## Run it locally (Linux host with rootless podman)
 

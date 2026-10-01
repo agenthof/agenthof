@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/registry"
@@ -15,7 +16,7 @@ type spyGateway struct {
 	lastRun string
 }
 
-func (s *spyGateway) Start(bind Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
+func (s *spyGateway) Start(_ context.Context, bind Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
 	s.mu.Lock()
 	s.lastRun = bind.RunID
 	s.mu.Unlock()
@@ -69,12 +70,12 @@ func TestRunUsesAFreshGatewayPerRun(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			id, status, err := Run(context.Background(), reg, "se", "wf", "x", staticInvoker(), &coordExec{}, opts)
-			if err != nil || status != "succeeded" {
-				t.Errorf("run %d: status=%q err=%v", i, status, err)
+			res, err := Run(context.Background(), reg, "se", "wf", "x", staticInvoker(), &coordExec{}, opts)
+			if err != nil || res.Status != "succeeded" {
+				t.Errorf("run %d: status=%q err=%v", i, res.Status, err)
 				return
 			}
-			ids[i] = id
+			ids[i] = res.RunID
 		}(i)
 	}
 	wg.Wait()
@@ -97,12 +98,49 @@ func TestRunUsesAFreshGatewayPerRun(t *testing.T) {
 func TestRunNilFactoryRunsWithoutGateway(t *testing.T) {
 	dir := t.TempDir()
 	ce := &coordExec{}
-	_, status, err := Run(context.Background(), frontedReg(), "se", "wf", "x",
+	res, err := Run(context.Background(), frontedReg(), "se", "wf", "x",
 		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a"})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("run: status=%q err=%v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("run: status=%q err=%v", res.Status, err)
 	}
 	if ce.ok {
 		t.Fatal("nil factory must not hand the step proxy coordinates")
+	}
+}
+
+// ctxSpyGateway keeps the context Start received.
+type ctxSpyGateway struct {
+	mu  sync.Mutex
+	ctx context.Context
+}
+
+func (s *ctxSpyGateway) Start(ctx context.Context, _ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
+	s.mu.Lock()
+	s.ctx = ctx
+	s.mu.Unlock()
+	return "http://127.0.0.1:9/", "tok", nil
+}
+
+func (s *ctxSpyGateway) Stop() {}
+
+func TestRunHandsTheStepContextToStart(t *testing.T) {
+	dir := t.TempDir()
+	spy := &ctxSpyGateway{}
+	res, err := Run(context.Background(), frontedReg(), "se", "wf", "x", staticInvoker(), &coordExec{},
+		Options{LogDir: dir, ArtifactDir: dir + "/a", StepTimeout: time.Minute, NewGateway: func() ToolProxy { return spy }})
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("run: status=%q err=%v", res.Status, err)
+	}
+	spy.mu.Lock()
+	ctx := spy.ctx
+	spy.mu.Unlock()
+	if ctx == nil {
+		t.Fatal("Start received no context")
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("the context handed to Start must carry the step deadline")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the step context must be cancelled once the step is over, so a door's child work is torn down with it")
 	}
 }

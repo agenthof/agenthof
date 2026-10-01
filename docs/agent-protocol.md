@@ -68,10 +68,10 @@ Your agent replies `200 OK` with a JSON body:
 
 See [`docs/lifecycle.md`](lifecycle.md) for the full step lifecycle.
 
-## Reaching a door (model, tool, exec)
+## Reaching a door (model, tool, exec, spawn)
 
-To use a model, a tool, or a command, your agent calls the **gateway** for the current
-step. Agenthof passes two request headers on the step `POST`:
+To use a model, a tool, a command, or a governed child run, your agent calls the
+**gateway** for the current step. Agenthof passes two request headers on the step `POST`:
 
 - `X-Agenthof-Proxy-URL` — the base URL of the per-run gateway.
 - `X-Agenthof-Run-Token` — a token scoped to this run; use it as a bearer to the
@@ -134,6 +134,40 @@ compartment on the shared workspace — or `403` (off the allowlist, recorded) o
 answer `403` and are recorded as refusals. See
 [`docs/lifecycle-exec.md`](lifecycle-exec.md#the-first-hand-door).
 
+### Spawn door — a governed child run
+
+`POST <proxy-url>/spawn` with `Authorization: Bearer <run-token>` and
+`{"role": "...", "workflow": "...", "input": "..."}`. Agenthof runs that
+workflow as a full governed run under the same human — in compartments of
+its own, provisioned by the operator's supervisor — and answers when it is
+over:
+
+- `200 {"status": "succeeded" | "failed", "child_run_id", "output_sha",
+  "output_preview"}` — the child's final artifact comes back as a hash and a
+  short preview, never the body.
+- `403 {"status": "refused", "reason", "child_run_id"?}` — the target is not
+  on your agent's `may_spawn` list, a cap would be exceeded, the child could
+  not be given compartments (`spawn compartment unavailable`), or the child
+  was refused at its own registry gate or pre-run gate (then it has a
+  `child_run_id` and a ledger). The `reason` is always a fixed, classifying
+  string — a registry-gate refusal answers `child refused by its access policy`,
+  never the role's required groups; the full reason is in the child's own
+  ledger, reached by `child_run_id`.
+- `502` — the child could not be carried through (Agenthof could not write
+  its ledger, say); recorded on your run's ledger as a failed spawn.
+- `503` — the step was already over when the request arrived.
+
+The call blocks for the child's duration, so your HTTP client must not time
+it out sooner than the step's own deadline. Several concurrent calls run
+children in parallel, up to `max_parallel`. A child may call `/spawn` too,
+up to `max_depth`. Inside a child, your agent is dialed at the compartment
+the supervisor gave it and its exec door reaches the child's own runtime,
+whatever its YAML names. Which targets you may spawn, and every bound, is
+config — see [`may_spawn`](reference/config.md#may_spawn) and
+[the life of a spawn](lifecycle-spawn.md). The identity headers a child
+receives carry `X-Agenthof-Run-Id` for the child's own run; the binding is
+forwarded, not signed.
+
 ## Configuring your agent
 
 Point an agent's `endpoint` at where your service listens (see
@@ -153,11 +187,14 @@ output: my-result                    # names this agent's artifact for later ste
 Beyond the two gateway headers, every step `POST` also carries context headers your
 agent may read but does not need to function: `X-Agenthof-Agent`, `X-Agenthof-Invoker`,
 `X-Agenthof-Invoker-Issuer`, `X-Agenthof-Invoker-Method`, `X-Agenthof-Role`,
-`X-Agenthof-Workflow`, `X-Agenthof-Run-Id`, plus a signed `X-Agenthof-Binding-Signature`.
-See [`docs/lifecycle.md`](lifecycle.md).
+`X-Agenthof-Workflow`, `X-Agenthof-Run-Id`. The delegation binding is
+**forwarded** on every step this way — attested, not enforced: nothing
+cryptographically binds these headers today, so treat them as context, not
+as proof. Cryptographically signing the binding is reserved for later, not
+a current guarantee. See [`docs/lifecycle.md`](lifecycle.md).
 
 ## What is stable
 
 The step request/response shape, the two gateway headers, and the model
-(`/v1/chat/completions`) and tool (MCP) paths are the wire contract — write to them, not
-to any internal detail.
+(`/v1/chat/completions`), tool (MCP), exec (`/exec/*`) and spawn (`/spawn`) paths are
+the wire contract — write to them, not to any internal detail.

@@ -92,7 +92,9 @@ func RenderText(r Result) string {
 	}
 
 	for _, e := range r.Events {
-		fmt.Fprintf(&b, "%s %s %s — %s (%s)",
+		// A spawned child is indented under its parent: two spaces per level
+		// of depth, so the tree reads off the left margin.
+		fmt.Fprintf(&b, "%s%s %s %s — %s (%s)", strings.Repeat("  ", e.Depth),
 			e.Time.UTC().Format(time.RFC3339), e.Source, e.Kind, e.Invoker.Subject, e.Invoker.Method)
 
 		var tags []string
@@ -104,6 +106,9 @@ func RenderText(r Result) string {
 		}
 		if e.Reason != "" {
 			tags = append(tags, "reason="+e.Reason)
+		}
+		if e.ParentRunID != "" {
+			tags = append(tags, "parent="+e.ParentRunID)
 		}
 		if len(tags) > 0 {
 			fmt.Fprintf(&b, " [%s]", strings.Join(tags, " "))

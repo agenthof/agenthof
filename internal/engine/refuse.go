@@ -18,20 +18,26 @@ import (
 // a misconfigured step cannot succeed.
 var ErrStepConfig = errors.New("step configuration error")
 
+// ErrLedgerWrite marks an error Run returns because the run's ledger could
+// not be appended. A caller that must tell "refused, and recorded" from
+// "refused, and the record itself failed" checks errors.Is(err, ErrLedgerWrite).
+var ErrLedgerWrite = errors.New("ledger write failed")
+
 // Refuse records a run refusal that happens before (or independent of) a
 // call to Run — for example a caller that pre-checks authorization and never
 // starts a workflow at all. It opens a fresh log under logDir, writes exactly
-// one run_refused event carrying the binding, and closes the log. It returns
-// the new run's ID so the refusal can be looked up and audited like any
-// other run.
-func Refuse(logDir, role, workflow string, inv identity.Invoker, reason string) (string, error) {
+// one run_refused event carrying the binding, and closes the log. parent,
+// when non-nil, links the refused run under a spawning parent exactly as Run
+// would (nil for a root). It returns the new run's ID so the refusal can be
+// looked up and audited like any other run.
+func Refuse(logDir, role, workflow string, inv identity.Invoker, reason string, parent *Binding) (string, error) {
 	runID := NewRunID()
 	log, err := OpenLog(logDir, runID)
 	if err != nil {
 		return runID, err
 	}
 	defer func() { _ = log.Close() }()
-	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}
+	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}.linkedTo(parent)
 	e := Event{
 		Time:    time.Now().UTC(),
 		Type:    "run_refused",

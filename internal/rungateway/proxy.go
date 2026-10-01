@@ -1,10 +1,12 @@
-// Package rungateway is Agenthof's enforced inbound MCP proxy: a
-// credential-starved agent reaches a declared tool/MCP resource only through
-// here, which authenticates the step (a per-step run token), authorizes
-// against the agent's allowlist, injects a resource credential the agent
-// never sees (no-passthrough), forwards the call to the upstream MCP server,
-// and appends a tool_call event per call (carrying a trusted runtime's
-// attestation when the resource declares one).
+// Package rungateway is Agenthof's per-run listener: the doors a fronted,
+// credential-starved agent reaches during one step. The tool door is an
+// enforced inbound MCP proxy (authenticate the step by its run token,
+// authorize against the agent's allowlist, inject a resource credential the
+// agent never sees, forward upstream, append a tool_call per call — carrying
+// a trusted runtime's attestation when the resource declares one); the exec
+// and model doors ride the same listener; and the spawn door starts a
+// governed child run through a Spawner. Every door records what it did on
+// the run's ledger.
 package rungateway
 
 import (
@@ -56,7 +58,7 @@ type Gateway struct {
 	keyRoot string
 	// subjectToken is the invoker's verified inbound token for this run —
 	// the RFC 8693 subject token. Per run, never per step: it is handed to
-	// New once, never placed on engine.Binding (signed, rides every step
+	// New once, never placed on engine.Binding (forwarded, rides every step
 	// header) or Start, and reaches a broker only on the ref of a
 	// token_exchange resource. Empty when the invoker was not OIDC-verified.
 	subjectToken string
@@ -82,6 +84,19 @@ type Gateway struct {
 	// them to finish independent of how the underlying HTTP server treats
 	// in-flight connections when closed.
 	inflight sync.WaitGroup
+	// spawner runs a child run for the spawn door; nil means the door
+	// refuses (fail-closed). Set once by WithSpawner, before the first Start.
+	spawner Spawner
+	// spawnInflight and spawnTotal are the spawn door's cap accounting, under
+	// mu. They live for the whole run: Start does NOT reset them, because
+	// max_total_spawns bounds a run's whole life, not one step.
+	spawnInflight int
+	spawnTotal    int
+	// execURL, when set, is the first-hand exec runtime the exec door dials
+	// in place of every agent's exec.url: a spawned child's agents are
+	// served by the child's own refexec, so the per-child gateway carries
+	// it. Set once by WithExecURL, before the first Start.
+	execURL string
 }
 
 // New builds a Gateway over the gateway config. Tool resources come from
@@ -133,10 +148,12 @@ func readOnlySet(res config.ToolResource) map[string]struct{} {
 // Start serves one fronted step. It mints a run token, connects to each
 // resource the agent's tool grants name as an upstream MCP client, mirrors
 // their tools onto an inbound MCP server gated by that token, and binds an
-// ephemeral localhost listener. It returns the URL the agent must call and
-// the token it must present — the token travels only in the HTTP
+// ephemeral localhost listener. ctx is the step's context; the spawn door
+// derives each child run's context from it, so the step's deadline or
+// cancel tears the children down. It returns the URL the agent must call
+// and the token it must present — the token travels only in the HTTP
 // Authorization header, never on Binding or the ledger.
-func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) (string, string, error) {
+func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) (string, string, error) {
 	token, err := mintToken()
 	if err != nil {
 		return "", "", fmt.Errorf("mint run token: %w", err)
@@ -147,7 +164,7 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 	// Registry validation already rejects a first-hand exec without a
 	// unix:// url or a timeout, but Start is reachable without the registry,
 	// so it fails closed on both rather than dialing nowhere or forever.
-	if agent.Exec.FirstHand() && (!strings.HasPrefix(agent.Exec.URL, config.UnixScheme) || agent.Exec.Timeout <= 0) {
+	if agent.Exec.FirstHand() && (!strings.HasPrefix(p.execURLFor(agent), config.UnixScheme) || agent.Exec.Timeout <= 0) {
 		logger.Error("gateway start refused", "reason", "first-hand exec needs a unix:// url and a positive timeout")
 		return "", "", fmt.Errorf("exec runtime %q requires a unix:// url and a positive timeout", agent.Exec.Runtime)
 	}
@@ -327,6 +344,7 @@ func (p *Gateway) Start(bind engine.Binding, agent config.AgentDef, appendEvent 
 	mux.HandleFunc("/exec/attest", p.execAttestHandler(bind, agent, appendEvent))
 	mux.HandleFunc("/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
 	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
+	mux.HandleFunc("/spawn", p.spawnHandler(ctx, bind, agent, appendEvent, logger))
 	handler := authMiddleware(mux, token)
 
 	var ln net.Listener

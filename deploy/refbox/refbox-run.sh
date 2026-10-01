@@ -17,6 +17,7 @@ NAME="${REFBOX_NAME:-refbox-echo}"
 # The agent's socket file name inside SOCK_DIR. The echo image is the default;
 # another runtime's image (deploy/refbox/Containerfile.python) names its own.
 SOCKET="${REFBOX_SOCKET:-refbox-echo.sock}"
+# REFBOX_TIMEOUT: podman --timeout in seconds for the compartment (default 300).
 
 mkdir -p "$SOCK_DIR"
 # The socket directory must be exclusive to this one compartment. The default
@@ -51,7 +52,7 @@ common=(
 	--memory=256m
 	--cpus=1
 	--pids-limit=64
-	--timeout=300
+	--timeout="${REFBOX_TIMEOUT:-300}"
 	-v "$SOCK_DIR:$SOCK_DIR"
 )
 

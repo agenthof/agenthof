@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func unixClient(sock string) *http.Client {
@@ -200,6 +201,11 @@ type fakeGateway struct {
 	lastArgv   []string
 	lastRoute  string
 	authorized int
+
+	spawnStatus int           // 0 means 200
+	spawnDelay  time.Duration // how long each /spawn takes to answer
+	lastSpawn   []string      // role, workflow, input of the last /spawn
+	spawns      int
 }
 
 func newFakeGateway(t *testing.T, g *fakeGateway) *fakeGateway {
@@ -230,7 +236,10 @@ func newFakeGateway(t *testing.T, g *fakeGateway) *fakeGateway {
 			return
 		}
 		var req struct {
-			Command []string `json:"command"`
+			Command  []string `json:"command"`
+			Role     string   `json:"role"`
+			Workflow string   `json:"workflow"`
+			Input    string   `json:"input"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		g.mu.Lock()
@@ -255,6 +264,20 @@ func newFakeGateway(t *testing.T, g *fakeGateway) *fakeGateway {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]bool{"allowed": true})
+		case "/spawn":
+			g.mu.Lock()
+			g.lastSpawn = []string{req.Role, req.Workflow, req.Input}
+			g.spawns++
+			g.mu.Unlock()
+			time.Sleep(g.spawnDelay)
+			w.Header().Set("Content-Type", "application/json")
+			if g.spawnStatus != 0 && g.spawnStatus != http.StatusOK {
+				w.WriteHeader(g.spawnStatus)
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "refused", "reason": "spawn would exceed max_parallel"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "succeeded", "child_run_id": "r-child",
+				"output_sha": "abc", "output_preview": "[" + req.Role + "/" + req.Workflow + "] " + req.Input})
 		default:
 			http.Error(w, "no", http.StatusNotFound)
 		}
@@ -377,5 +400,179 @@ func TestScriptStepSkipsTheProbe(t *testing.T) {
 	plain := step(t, newMux(true, t.TempDir()), gw.sock, "hello")
 	if plain.Success {
 		t.Fatal("a plain step still probes, and this gateway refuses the probe")
+	}
+}
+
+func TestSpawnDirectiveReportsChildOutcome(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{})
+	out := step(t, newMux(false, t.TempDir()), gw.sock, "spawn:worker/child-wf:hello: with colons")
+	if !out.Success || out.Artifact != "spawn succeeded r-child [worker/child-wf] hello: with colons" {
+		t.Fatalf("got %+v", out)
+	}
+	gw.mu.Lock()
+	defer gw.mu.Unlock()
+	if gw.lastRoute != "/spawn" || len(gw.lastSpawn) != 3 || gw.lastSpawn[0] != "worker" || gw.lastSpawn[1] != "child-wf" || gw.lastSpawn[2] != "hello: with colons" {
+		t.Fatalf("gateway saw %s %v", gw.lastRoute, gw.lastSpawn)
+	}
+}
+
+func TestSpawnRefusalIsAnAnswerNotAFailedStep(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{spawnStatus: http.StatusForbidden})
+	out := step(t, newMux(false, t.TempDir()), gw.sock, "spawn:worker/child-wf:x")
+	if !out.Success || out.Artifact != "spawn refused - spawn would exceed max_parallel" {
+		t.Fatalf("got %+v, want the refusal reported in the artifact", out)
+	}
+}
+
+func TestSpawnDirectiveRejectsBadSpec(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{})
+	for _, input := range []string{"spawn:worker:x", "spawn:/child-wf:x", "spawn:worker/child-wf"} {
+		out := step(t, newMux(false, t.TempDir()), gw.sock, input)
+		if out.Success || !strings.Contains(out.Reason, "spawn: want <role>/<workflow>:<input>") {
+			t.Fatalf("%q: got %+v", input, out)
+		}
+	}
+	gw.mu.Lock()
+	defer gw.mu.Unlock()
+	if gw.spawns != 0 {
+		t.Fatal("a bad spec must not reach the gateway")
+	}
+}
+
+func TestSpawnParallelRunsConcurrently(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{spawnDelay: 300 * time.Millisecond})
+	start := time.Now()
+	out := step(t, newMux(false, t.TempDir()), gw.sock, "spawn-parallel:3:worker/child-wf:x")
+	elapsed := time.Since(start)
+	if !out.Success {
+		t.Fatalf("got %+v", out)
+	}
+	lines := strings.Split(out.Artifact, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("artifact = %q, want three lines", out.Artifact)
+	}
+	for _, l := range lines {
+		if l != "spawn succeeded r-child [worker/child-wf] x" {
+			t.Fatalf("line %q", l)
+		}
+	}
+	if elapsed > 800*time.Millisecond {
+		t.Fatalf("three 300ms spawns took %v: they ran one after another, not in parallel", elapsed)
+	}
+	gw.mu.Lock()
+	defer gw.mu.Unlock()
+	if gw.spawns != 3 {
+		t.Fatalf("gateway saw %d spawns, want 3", gw.spawns)
+	}
+}
+
+func TestSpawnParallelRejectsBadCount(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{})
+	for _, input := range []string{"spawn-parallel:0:worker/child-wf:x", "spawn-parallel:33:worker/child-wf:x", "spawn-parallel:two:worker/child-wf:x"} {
+		out := step(t, newMux(false, t.TempDir()), gw.sock, input)
+		if out.Success || !strings.Contains(out.Reason, "spawn-parallel: want <n>:<role>/<workflow>:<input>") {
+			t.Fatalf("%q: got %+v", input, out)
+		}
+	}
+}
+
+func TestSleepDirective(t *testing.T) {
+	gw := newFakeGateway(t, &fakeGateway{})
+	out := step(t, newMux(false, t.TempDir()), gw.sock, "sleep:0")
+	if !out.Success || out.Artifact != "slept 0s" {
+		t.Fatalf("got %+v", out)
+	}
+	out = step(t, newMux(false, t.TempDir()), gw.sock, "sleep:-1")
+	if out.Success || !strings.Contains(out.Reason, "sleep: want a whole number of seconds") {
+		t.Fatalf("got %+v", out)
+	}
+	// A cancelled request ends the sleep early with the context's error.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := runScript(ctx, stepEnv{proxyURL: "unix://" + gw.sock, token: "tok123", workspace: t.TempDir()}, "sleep:30")
+	if err == nil || !strings.Contains(err.Error(), "sleep: context deadline exceeded") {
+		t.Fatalf("err = %v, want the context's error", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("the sleep outlived its context")
+	}
+}
+
+func TestFileDirectives(t *testing.T) {
+	ws := t.TempDir()
+	ctx := context.Background()
+	env := stepEnv{workspace: ws, agent: "writer", runID: "r-0a0b0c0d"}
+	if got, err := runScript(ctx, env, "read:"); err != nil || got != "absent" {
+		t.Fatalf("read on an empty workspace = %q, %v; want absent", got, err)
+	}
+	if got, err := runScript(ctx, env, "write:hello; read:"); err != nil || got != "hello" {
+		t.Fatalf("write then read = %q, %v; want hello", got, err)
+	}
+	if got, err := runScript(ctx, env, "touch-run:; ls:"); err != nil || got != "agent-note.txt,r-0a0b0c0d.txt" {
+		t.Fatalf("touch-run then ls = %q, %v", got, err)
+	}
+	if got, err := runScript(ctx, stepEnv{workspace: t.TempDir()}, "ls:"); err != nil || got != "empty" {
+		t.Fatalf("ls on an empty workspace = %q, %v; want empty", got, err)
+	}
+	if _, err := runScript(ctx, stepEnv{workspace: ws}, "touch-run:"); err == nil {
+		t.Fatal("touch-run without a run id must fail, not write an unnamed file")
+	}
+	for _, bad := range []string{"../escape", "a/b", "..", "."} {
+		if _, err := runScript(ctx, stepEnv{workspace: ws, runID: bad}, "touch-run:"); err == nil {
+			t.Errorf("touch-run with run id %q must fail, not write outside the workspace", bad)
+		}
+	}
+}
+
+func TestOnlyDirectiveRunsForTheNamedAgent(t *testing.T) {
+	ws := t.TempDir()
+	ctx := context.Background()
+	writer, reader := stepEnv{workspace: ws, agent: "writer"}, stepEnv{workspace: ws, agent: "reader"}
+	script := "only:writer:write:shared; only:reader:read:"
+	if got, err := runScript(ctx, writer, script); err != nil || got != "skipped" {
+		t.Fatalf("writer's artifact = %q, %v; want skipped (its last directive is the reader's)", got, err)
+	}
+	if got, err := runScript(ctx, reader, script); err != nil || got != "shared" {
+		t.Fatalf("reader's artifact = %q, %v; want the writer's note", got, err)
+	}
+	for _, bad := range []string{"only:writer", "only::read:", "only:writer:"} {
+		if _, err := runScript(ctx, writer, bad); err == nil {
+			t.Errorf("%q must be rejected", bad)
+		}
+	}
+}
+
+func TestSpawnTranslatesTheChildSeparator(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ea")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "gw.sock")
+	ln, err := listenUnix(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var seen map[string]string
+	gw := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		seen = body
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "succeeded", "child_run_id": "r-1", "output_preview": "ok"})
+	})}
+	go func() { _ = gw.Serve(ln) }()
+	t.Cleanup(func() { _ = gw.Close() })
+	line, err := spawnOne(context.Background(), "unix://"+sock, "tok", "worker/pair-wf:only:writer:write:x | only:reader:read:")
+	if err != nil || line != "spawn succeeded r-1 ok" {
+		t.Fatalf("line = %q, %v", line, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seen["role"] != "worker" || seen["workflow"] != "pair-wf" || seen["input"] != "only:writer:write:x ; only:reader:read:" {
+		t.Fatalf("the door saw %v: the child's | separator must arrive as ;", seen)
 	}
 }

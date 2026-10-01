@@ -189,7 +189,7 @@ func TestRenderLedgerIntegrityVerified(t *testing.T) {
 func TestRenderRefuseHelper(t *testing.T) {
 	dir := t.TempDir()
 	inv := identity.Invoker{Subject: "dev@x", Groups: []string{"engineering"}}
-	id, err := engine.Refuse(dir, "fin", "simple", inv, `role "fin" does not allow the invoker: allowed groups [finance]`)
+	id, err := engine.Refuse(dir, "fin", "simple", inv, `role "fin" does not allow the invoker: allowed groups [finance]`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,5 +353,34 @@ func TestRenderToolCallTokenExchangeMode(t *testing.T) {
 	out := Render(events, ledger.Head{Count: len(events)}, nil)
 	if !strings.Contains(out, "tool whoami — args abcdef12 (token_exchange)") {
 		t.Fatalf("token_exchange mode not rendered:\n%s", out)
+	}
+}
+
+func TestRenderSpawn(t *testing.T) {
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "lead-role", Workflow: "lead-wf", RunID: "r-parent"}
+	cases := []struct {
+		e    engine.Event
+		want string
+	}{
+		{engine.Event{Type: "spawn", Status: "succeeded", ChildRole: "worker", ChildWorkflow: "child-wf", ChildRunID: "r-child", Depth: 1, OutputSHA: "0123456789abcdef"},
+			"spawn worker/child-wf → run r-child succeeded (depth 1) — artifact 01234567"},
+		{engine.Event{Type: "spawn", Status: "failed", ChildRole: "worker", ChildWorkflow: "child-wf", ChildRunID: "r-child", Depth: 1},
+			"spawn worker/child-wf → run r-child failed (depth 1) — see the child run's ledger"},
+		{engine.Event{Type: "spawn", Status: "failed", ChildRole: "worker", ChildWorkflow: "child-wf", Depth: 1, Reason: "spawn did not complete"},
+			"spawn worker/child-wf → no child run failed (depth 1) — spawn did not complete"},
+		{engine.Event{Type: "spawn", Status: "refused", ChildRole: "locked", ChildWorkflow: "locked-wf", ChildRunID: "r-child", Depth: 1, Reason: "role \"locked\" requires membership"},
+			"spawn locked/locked-wf → run r-child refused (depth 1) — role \"locked\" requires membership"},
+		{engine.Event{Type: "spawn", Status: "refused", ChildRole: "worker", ChildWorkflow: "child-wf", Depth: 3, Reason: "spawn would exceed max_depth"},
+			"spawn worker/child-wf → no child run refused (depth 3) — spawn would exceed max_depth"},
+		{engine.Event{Type: "spawn", Status: "sideways", ChildRole: "worker", ChildWorkflow: "child-wf", ChildRunID: "r-child"},
+			"spawn worker/child-wf → run r-child sideways"},
+	}
+	for _, c := range cases {
+		c.e.Time = time.Unix(0, 0).UTC()
+		c.e.Binding = bind
+		out := Render([]engine.Event{c.e}, ledger.Head{Count: 1}, nil)
+		if !strings.Contains(out, c.want) {
+			t.Errorf("status %q: missing %q in:\n%s", c.e.Status, c.want, out)
+		}
 	}
 }

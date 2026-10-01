@@ -21,7 +21,7 @@ type spyProxy struct {
 	gotAgent string
 }
 
-func (s *spyProxy) Start(_ Binding, agent config.AgentDef, _ func(Event)) (string, string, error) {
+func (s *spyProxy) Start(_ context.Context, _ Binding, agent config.AgentDef, _ func(Event)) (string, string, error) {
 	s.started++
 	s.gotAgent = agent.Name
 	return "http://127.0.0.1:12345/mcp", "tok-abc", nil
@@ -31,7 +31,7 @@ func (s *spyProxy) Stop() { s.stopped++ }
 // failProxy fails Start, so Run must fail the step without ever calling Stop.
 type failProxy struct{ stopped int }
 
-func (f *failProxy) Start(_ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
+func (f *failProxy) Start(_ context.Context, _ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
 	return "", "", errors.New("upstream unreachable")
 }
 func (f *failProxy) Stop() { f.stopped++ }
@@ -42,7 +42,7 @@ func (f *failProxy) Stop() { f.stopped++ }
 // echoes it.
 type urlLeakProxy struct{}
 
-func (urlLeakProxy) Start(_ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
+func (urlLeakProxy) Start(_ context.Context, _ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
 	return "", "", fmt.Errorf("connect upstream %q: %w", "github",
 		&url.Error{Op: "Get", URL: "https://mcp/x?key=SUPERSECRET", Err: errors.New("connection refused")})
 }
@@ -118,10 +118,10 @@ func TestRunStartsListenerForFrontedAgentWithoutTools(t *testing.T) {
 	}
 	sp := &spyProxy{}
 	ce := &coordExec{}
-	_, status, err := Run(context.Background(), reg, "se", "wf", "x",
+	res, err := Run(context.Background(), reg, "se", "wf", "x",
 		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return sp }})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("run: status=%q err=%v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("run: status=%q err=%v", res.Status, err)
 	}
 	if sp.started != 1 || sp.stopped != 1 {
 		t.Fatalf("proxy bracket: started=%d stopped=%d, want 1/1", sp.started, sp.stopped)
@@ -136,10 +136,10 @@ func TestRunBracketsFrontedToolStepWithProxy(t *testing.T) {
 	sp := &spyProxy{}
 	ce := &coordExec{}
 	// ftCfg: a role/workflow whose single step is a FRONTED agent with tools.
-	_, status, err := Run(context.Background(), ftCfg(), "se", "wf", "x",
+	res, err := Run(context.Background(), ftCfg(), "se", "wf", "x",
 		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return sp }})
-	if err != nil || status != "succeeded" {
-		t.Fatalf("run: status=%q err=%v", status, err)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("run: status=%q err=%v", res.Status, err)
 	}
 	if sp.started != 1 || sp.stopped != 1 {
 		t.Fatalf("proxy bracket: started=%d stopped=%d, want 1/1", sp.started, sp.stopped)
@@ -154,12 +154,12 @@ func TestRunBracketsFrontedToolStepWithProxy(t *testing.T) {
 
 func TestToolProxyStartFailureKeepsURLOutOfLedger(t *testing.T) {
 	dir := t.TempDir()
-	id, status, err := Run(context.Background(), ftCfg(), "se", "wf", "x",
+	res, err := Run(context.Background(), ftCfg(), "se", "wf", "x",
 		staticInvoker(), &coordExec{}, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return urlLeakProxy{} }})
-	if err != nil || status != "failed" {
-		t.Fatalf("run: status=%q err=%v", status, err)
+	if err != nil || res.Status != "failed" {
+		t.Fatalf("run: status=%q err=%v", res.Status, err)
 	}
-	events, _, rerr := ReadLog(dir, id)
+	events, _, rerr := ReadLog(dir, res.RunID)
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
@@ -193,10 +193,10 @@ func TestRunFailsStepWhenToolProxyStartErrors(t *testing.T) {
 	dir := t.TempDir()
 	fp := &failProxy{}
 	ce := &coordExec{}
-	id, status, err := Run(context.Background(), ftCfg(), "se", "wf", "x",
+	res, err := Run(context.Background(), ftCfg(), "se", "wf", "x",
 		staticInvoker(), ce, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return fp }})
-	if err != nil || status != "failed" {
-		t.Fatalf("run: status=%q err=%v", status, err)
+	if err != nil || res.Status != "failed" {
+		t.Fatalf("run: status=%q err=%v", res.Status, err)
 	}
 	if fp.stopped != 0 {
 		t.Fatalf("Stop must not be called when Start fails, got %d", fp.stopped)
@@ -204,7 +204,7 @@ func TestRunFailsStepWhenToolProxyStartErrors(t *testing.T) {
 	if ce.ok {
 		t.Fatal("executor must never run when the tool proxy fails to start")
 	}
-	events, _, rerr := ReadLog(dir, id)
+	events, _, rerr := ReadLog(dir, res.RunID)
 	if rerr != nil {
 		t.Fatal(rerr)
 	}

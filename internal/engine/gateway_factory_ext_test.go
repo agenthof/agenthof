@@ -104,14 +104,14 @@ func TestConcurrentRunsIsolateRealGateways(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			id, status, err := engine.Run(ctx, reg, "se", "wf", "x", identity.Static("dev@x"), exec, opts)
+			res, err := engine.Run(ctx, reg, "se", "wf", "x", identity.Static("dev@x"), exec, opts)
 			idMu.Lock()
 			lid := leaderID
 			idMu.Unlock()
-			if id == lid {
+			if res.RunID == lid {
 				closeLeader.Do(func() { close(leaderDone) })
 			}
-			out[i] = outcome{id, status, err}
+			out[i] = outcome{res.RunID, res.Status, err}
 		}(i)
 	}
 	wg.Wait()

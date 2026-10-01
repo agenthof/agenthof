@@ -36,6 +36,12 @@ type Record struct {
 	ArtifactSHA string    `json:"artifact_sha,omitempty"`
 	Seq         int       `json:"seq,omitempty"`
 
+	// ParentRunID and Depth place a spawned child run in its delegation
+	// tree: the run that asked for it and how deep it sits (a root is 0).
+	// Absent on a root run's records.
+	ParentRunID string `json:"parent_run_id,omitempty"`
+	Depth       int    `json:"depth,omitempty"`
+
 	// pos is the intra-source position (line index for run events, Seq
 	// for control events) used only for merge ordering; it is never
 	// serialized.
@@ -77,6 +83,8 @@ func normalizeRun(e engine.Event, lineIdx int) Record {
 		Reason:      e.Reason,
 		ConfigHash:  e.ConfigHash,
 		ArtifactSHA: e.ArtifactSHA,
+		ParentRunID: e.Binding.ParentRunID,
+		Depth:       e.Binding.Depth,
 		pos:         lineIdx,
 	}
 }

@@ -36,6 +36,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Execution | `execution` | string | no | `fronted` |
 | Endpoint | `endpoint` | string | yes | — |
 | Exec | `exec` | object | no | none |
+| MaySpawn | `may_spawn` | list of `{role, workflow}` objects | no | none (the agent spawns nothing) |
 
 ### `name`
 
@@ -141,6 +142,11 @@ see [`tools`](#tools-1) below). `token_endpoint` stays on the stricter
 https-or-loopback rule, because that call carries a client secret to a
 remote host.
 
+`endpoint` stays required for every agent, but under spawn it is not
+consulted: a spawned child's agents are dialed at the compartments the
+supervisor provisioned for that child, whatever this field names. See
+[`spawn_supervisor`](#spawn_supervisor).
+
 Every fronted step receives `X-Agenthof-Proxy-URL` and
 `X-Agenthof-Run-Token`, whether or not the agent declares `tools` or `exec`.
 The model door is `POST <proxy URL>v1/chat/completions` with that run token.
@@ -181,6 +187,8 @@ and `timeout` is the per-command deadline Agenthof enforces on its call to
 the runtime: a duration string of at least `1s`, such as `5m`. Keep it below
 the step timeout, which otherwise fails the step first. All three are
 rejected with `mode: attested`.
+Under spawn `url` is likewise not consulted: a spawned child's exec door
+reaches the child's own runtime, bound to the child's workspace.
 
 Each `allow` entry:
 
@@ -268,6 +276,26 @@ tools:
 # A second grant of billing-mcp in this list would be bad-tool-grant: a
 # resource may repeat only when every grant of it is mode: all.
 ```
+
+### `may_spawn`
+
+Optional list of `{role, workflow}` objects. Each names one child run the
+agent may ask the **spawn door** (`POST <proxy-url>/spawn`) to start: the
+`role` the child runs as and the `workflow` it runs. An agent with no
+`may_spawn` spawns nothing — the door refuses and records the attempt. Both
+values are matched exactly. A child run is a full governed run: it passes the
+same registry gate as a root run (the role must own the workflow and admit the
+invoker), under the **same invoker** as the parent — a child never gains
+authority the invoking human does not have. Each child gets its own run id,
+its own hash-chained ledger in the same run-log directory, and a binding that
+names its parent (`parent_run_id`) and its depth (`depth`; a root run is 0).
+The binding is forwarded to the agent as request headers; it is not signed.
+
+`apply` rejects, with `bad-spawn-target`: an entry missing `role` or
+`workflow`; a `role` that does not exist; a `workflow` that does not exist; a
+pair the role does not own; the same pair listed twice. Declaring
+`may_spawn` anywhere makes the gateway's [`spawn`](#spawn) block required.
+See [the life of a spawn](../lifecycle-spawn.md).
 
 ## Workflows (`config/workflows/*.yaml` → `WorkflowDef` / `Step`)
 
@@ -417,7 +445,10 @@ budget_usd_month: 20
 | Models | `models` | map of string → `ModelRoute` | no | — |
 | Tools | `tools` | map of string → `ToolResource` | no | — |
 | Defaults.Model | `defaults.model` | string | no | — |
-| RefboxSocketDir | `refbox_socket_dir` | string | no | empty (TCP loopback) |
+| RefboxSocketDir | `refbox_socket_dir` | string (absolute path) | no | empty (TCP loopback) |
+| SpawnSupervisor | `spawn_supervisor` | string (`unix://<absolute socket path>`) | yes when any agent declares `may_spawn`; otherwise optional (a malformed value is still rejected) | — |
+| Spawn | `spawn` | object (`max_depth`, `max_parallel`, `max_total_spawns`, `reject_cycles`) | yes when any agent declares `may_spawn`; otherwise optional (a malformed value is still rejected) | — |
+| StepTimeout | `step_timeout` | duration string | no | `5m` |
 
 `ModelRoute` fields:
 
@@ -547,8 +578,11 @@ loopback port, and the proxy URL stays `http://127.0.0.1:<port>/`. When set,
 each fronted step's gateway listens on a Unix domain socket in this directory
 instead, and the proxy URL is `unix://` plus that socket's path. The value
 after `unix://` is the socket path only; the HTTP routes stay fixed (`/`,
-`/exec/authorize`, `/exec/attest`, `/exec/run`, `/v1/chat/completions`). The run token
-still travels in the `Authorization` header. `apply` does not check that the
+`/exec/authorize`, `/exec/attest`, `/exec/run`, `/v1/chat/completions`, `/spawn`). The run token
+still travels in the `Authorization` header. The value must be an absolute
+path (`bad-refbox-socket-dir` otherwise): it is mounted into agent
+compartments at the same path inside and out, and it is what every socket's
+placement is checked against. `apply` does not check that the
 directory exists. Keep the directory's path short: a Unix socket path has a
 small operating-system length limit, and a path that exceeds it fails the
 step at listen time.
@@ -565,6 +599,75 @@ compartment listens. The checked-in demo config
 uses `/run/agenthof` as a placeholder, because YAML cannot expand
 `$XDG_RUNTIME_DIR`. The two paths must match. See
 [the life of a run](../lifecycle.md#a-reference-compartment-refbox).
+
+### `spawn_supervisor`
+
+The compartment supervisor every spawned child is provisioned through, as
+`unix://` plus the absolute path of its socket. **Required as soon as any
+agent declares [`may_spawn`](#may_spawn)**: a child run is a full governed
+run in compartments of its own, and with no supervisor there is nowhere to
+start one, so `apply` rejects the config with `spawn-supervisor-required`
+rather than letting a child run beside its parent. With no `may_spawn`
+anywhere the field is not needed.
+
+The value must be a `unix://` socket with an absolute path
+(`bad-spawn-supervisor` otherwise), and its directory must not be inside
+[`refbox_socket_dir`](#refbox_socket_dir), which is mounted into agent
+compartments — an agent could otherwise reach the supervisor directly
+(`bad-spawn-supervisor`). `apply` does not check that the socket exists.
+When the spawn door dials it, the socket's directory must be mode `0700`
+and owned by the user Agenthof runs as, the same gate every operator-side
+runtime insists on; otherwise the spawn is refused and recorded as
+`spawn compartment unavailable`.
+
+The reference supervisor is `deploy/refspawn/`; see
+[the life of a spawn](../lifecycle-spawn.md).
+
+### `spawn`
+
+The bounds of the delegation tree the spawn door may build. **Required as
+soon as any agent declares [`may_spawn`](#may_spawn)** — including when there
+is no `gateway.yaml` at all: config is law, and a missing cap is rejected at
+`apply` with `spawn-policy-required`, never read as unbounded. With no
+`may_spawn` anywhere the block is not needed.
+
+| Field | YAML key | Type | Required | Default |
+|---|---|---|---|---|
+| MaxDepth | `max_depth` | integer ≥ 1 | yes when spawn is in use | — |
+| MaxParallel | `max_parallel` | integer ≥ 1 | yes when spawn is in use | — |
+| MaxTotalSpawns | `max_total_spawns` | integer ≥ 1 | yes when spawn is in use | — |
+| RejectCycles | `reject_cycles` | bool | no | `false` |
+
+- `max_depth` — how deep the tree may go. A root run is depth 0 and its
+  children are 1; a spawn whose child would sit deeper than `max_depth` is
+  refused. `max_depth: 1` lets a root run spawn and its children not.
+- `max_parallel` — how many children one run may have in flight at once.
+  Checked and reserved atomically, so N simultaneous requests cannot each
+  see room for one more.
+- `max_total_spawns` — how many children one run may start over its whole
+  life, across all of its steps. A refused attempt starts nothing and does
+  not count; a child that started counts whatever its outcome (it has a
+  ledger of its own). The whole tree under one root is bounded by the sum
+  over k = 1..`max_depth` of `max_total_spawns`^k.
+- `reject_cycles` — when `true`, `apply` rejects (`spawn-cycle`) any cycle in
+  the agent-type spawn graph: an edge A → B exists when A's `may_spawn` names
+  a workflow with a step run by B; a self-loop counts. When `false` (the
+  default) such reuse of a type deeper in the tree is allowed and `max_depth`
+  bounds it. Because `may_spawn` fully determines what can be reached, this
+  static check is complete; there is no runtime check.
+
+A negative cap is rejected with `bad-spawn-policy` whether or not spawn is in
+use. Every refusal at the door is recorded on the parent's ledger as a
+`spawn` event with a fixed reason.
+
+### `step_timeout`
+
+Optional duration string, default `5m`; at least `1s` or `apply` rejects it
+with `bad-step-timeout`. The deadline every step runs under — it is at once
+the engine's per-step deadline and the timeout on the request Agenthof makes
+to the agent's endpoint, one knob. A spawned child runs under the step that
+asked for it, so a whole subtree shares the invoking step's deadline: size
+`step_timeout` for the subtree, not for one step.
 
 ### `defaults` / `defaults.model`
 
@@ -743,13 +846,20 @@ normalization, no substring matching:
 
 - `--invoker <subject>` matches the invoker's subject exactly as recorded.
 - `--agent <name>` matches the agent name exactly.
-- `--run <run-id>` narrows the timeline to a single run's log.
+- `--run <run-id>` narrows the timeline to that run **and every run spawned
+  under it** (a delegation tree: each child ledger names its parent, so the
+  tree is walked down from the id you give; a child whose parent's log was
+  pruned still appears under the parent's id). Control events are left out.
+  In the text timeline, a spawned child's lines are indented two spaces per
+  level of depth and carry a `parent=<run-id>` tag.
 - `--config-hash <sha256:…>` matches the full `config_hash` string exactly.
 - `--outcome <value>` matches an event's outcome exactly — and **the literal
   you need depends on which kind of event you're after**, because run
   events and control events were never recorded with the same outcome
   vocabulary: a **run** event's outcome is one of
-  `succeeded | failed | refused`; a **control** event's (`apply`,
+  `succeeded | failed | refused | cancelled` (`cancelled` is a run whose
+  context ended between steps — a spawned child torn down with its parent,
+  for instance); a **control** event's (`apply`,
   `enable`/`disable`, `repair`) outcome is one of
   `success | refused | rejected | error`. `--outcome succeeded` selects only
   successfully finished runs, `--outcome failed` selects only failed runs,
@@ -872,7 +982,9 @@ Field notes:
   log, or `seq` within the control log — so 8 steps recorded in the same
   second still come out in a stable order). Each event carries whichever of
   `run_id`, `role`, `workflow`, `agent`, `outcome`, `reason`, `config_hash`,
-  `artifact_sha`, or `seq` applies to it (all `omitempty`); `invoker` is
+  `artifact_sha`, `seq`, `parent_run_id`, or `depth` applies to it (all
+  `omitempty`; `parent_run_id` and `depth` place a spawned child run in its
+  delegation tree, and a root run has neither); `invoker` is
   always present, with `subject`, `issuer`, `method`, and — for a control
   event recorded with `--as` — `asserted_as`. All timestamps are RFC3339
   UTC. There is **no `witness` field** — it is deliberately left out of this

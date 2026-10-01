@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agenthof/agenthof/internal/agentrt"
 	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/audit"
 	"github.com/agenthof/agenthof/internal/broker"
@@ -26,8 +25,8 @@ import (
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/obs"
+	"github.com/agenthof/agenthof/internal/refspawn"
 	"github.com/agenthof/agenthof/internal/registry"
-	"github.com/agenthof/agenthof/internal/rungateway"
 )
 
 const usage = `agenthof — the agents' court
@@ -614,7 +613,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		// echo the go-oidc error text into the ledger below — it can
 		// echo claim values from the (unverified) token.
 		_, _ = fmt.Fprintf(out, "run: token authentication failed: %v\n", verifyErr)
-		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, "token verification failed")
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, "token verification failed", nil)
 		if refErr != nil {
 			_, _ = fmt.Fprintln(out, refErr)
 			return 1
@@ -639,7 +638,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 			firstErr = valErrs[0].Error()
 		}
 		reason := "configuration invalid: " + firstErr
-		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, reason)
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, reason, nil)
 		if refErr != nil {
 			_, _ = fmt.Fprintln(out, refErr)
 			return 1
@@ -647,45 +646,47 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(out, "run %s refused: configuration invalid\n", runID)
 		return 1
 	}
-	// An on-behalf-of resource needs the invoker's verified token to
-	// exchange; a dev --as identity (or no token at all) has none. Refuse
-	// here, before the engine starts — a proper refused run with a fixed
-	// reason, not a mid-run "tool proxy start failed" — and never contact
-	// the exchange endpoint.
-	if inv.Method != "oidc" && workflowRequiresOBO(cfg, reg, workflow) {
-		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, oboRefusalReason)
+	// The pre-run gate — shared with spawned children, so a child fronting an
+	// on-behalf-of resource under a dev identity is refused the same way.
+	if reason, refused := preRunRefusal(cfg, reg, workflow, inv); refused {
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, reason, nil)
 		if refErr != nil {
 			_, _ = fmt.Fprintln(out, refErr)
 			return 1
 		}
-		_, _ = fmt.Fprintf(out, "run %s refused: %s\n", runID, oboRefusalReason)
+		_, _ = fmt.Fprintf(out, "run %s refused: %s\n", runID, reason)
 		return 1
 	}
-	exec := agentrt.AdapterExecutor{}
 	// A hash failure here yields an empty join key, not a run failure: the
 	// run's config already validated above, so the run proceeds regardless.
 	h, _ := config.HashDir(*cfgDir)
-	// One broker for the process. Each run gets its own gateway: the Gateway
-	// holds per-run listener state, so a shared instance would let one run
-	// close another's. keyRoot is ".", the same working directory gateway
-	// provision writes role keys under (EnsureRoleKey(".", role)) — not
-	// --config, which would miss those keys. The verified subject token is
-	// per run too: it goes to the gateway here and nowhere else — never to
-	// the engine, Binding, or the ledger.
+	// One broker for the process; one runDeps for this run and every child
+	// it spawns. The verified subject token goes to the gateways and nowhere
+	// else — never to the engine, Binding, or the ledger. The compartment
+	// supervisor is the spawn door's only way to run a child: unset (valid
+	// only when no agent may spawn), every spawn is refused.
 	b := newBroker(subjectTokenTypeFromEnv(os.Getenv))
-	newGateway := func() engine.ToolProxy { return rungateway.New(cfg.Gateway, ".", b, logger, r.subjectToken) }
-	runID, status, err := engine.Run(context.Background(), reg, role, workflow, *input,
-		inv, exec, engine.Options{LogDir: *logDir, ArtifactDir: *artifactDir, ConfigHash: h, NewGateway: newGateway, Logger: logger})
-	if err != nil && status == "refused" {
-		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", runID, err)
+	var sup refspawn.Provisioner
+	if ep := cfg.Gateway.SpawnSupervisor; ep != "" {
+		client, err := refspawn.New(ep, logger)
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "run: %v\n", err)
+			return 2
+		}
+		sup = client
+	}
+	deps := newRunDeps(cfg, reg, b, logger, *logDir, *artifactDir, h, r.subjectToken, sup)
+	res, err := engine.Run(context.Background(), reg, role, workflow, *input, inv, deps.executor(), deps.options(nil))
+	if err != nil && res.Status == "refused" {
+		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", res.RunID, err)
 		return 1
 	}
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "run %s error: %v\n", runID, err)
+		_, _ = fmt.Fprintf(out, "run %s error: %v\n", res.RunID, err)
 		return 1
 	}
-	_, _ = fmt.Fprintf(out, "run %s finished: %s\n", runID, status)
-	if status != "succeeded" {
+	_, _ = fmt.Fprintf(out, "run %s finished: %s\n", res.RunID, res.Status)
+	if res.Status != "succeeded" {
 		return 1
 	}
 	return 0

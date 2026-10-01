@@ -19,6 +19,27 @@ type Binding struct {
 	Role     string           `json:"role"`
 	Workflow string           `json:"workflow"`
 	RunID    string           `json:"run_id"`
+	// ParentRunID and Depth link a spawned child run to the run that asked
+	// for it: the parent's run id, and how deep in the delegation tree this
+	// run sits (a root run is 0; its children are 1). Both are absent on a
+	// root run's events. Additive (Article VI). The binding is forwarded to
+	// the agent as request headers and recorded on every event; it is not
+	// signed.
+	ParentRunID string `json:"parent_run_id,omitempty"`
+	Depth       int    `json:"depth,omitempty"`
+}
+
+// linkedTo returns b linked under parent: parent's run id as ParentRunID and
+// parent's depth + 1 as Depth. A nil parent leaves b a root. Run and Refuse
+// both apply it, so a refused child records its linkage exactly like a run
+// one.
+func (b Binding) linkedTo(parent *Binding) Binding {
+	if parent == nil {
+		return b
+	}
+	b.ParentRunID = parent.RunID
+	b.Depth = parent.Depth + 1
+	return b
 }
 
 // RuntimeAttestation is a trusted operator runtime's first-hand account of
@@ -53,11 +74,15 @@ type Event struct {
 	ArgsSHA          string    `json:"args_sha,omitempty"`          // set by tool_call: sha256 of the raw call arguments (never the args themselves)
 	Command          []string  `json:"command,omitempty"`           // set by exec: the reported argv
 	ExitCode         *int      `json:"exit_code,omitempty"`         // set by exec attest: pointer so 0 (success) is distinct from absent
-	OutputSHA        string    `json:"output_sha,omitempty"`        // set by exec: sha256 of the command output as reported — by the agent (attested) or by the runtime over the output it returned (runtime); never the output
+	OutputSHA        string    `json:"output_sha,omitempty"`        // set by exec: sha256 of the command output as reported — by the agent (attested) or by the runtime over the output it returned (runtime); set by spawn: sha256 of the child's final artifact; never the output or the artifact
 	Mode             string    `json:"mode,omitempty"`              // set by exec: "attested" (the agent's report) or "runtime" (a declared runtime ran it first-hand; see RuntimeAttestation)
 	Model            string    `json:"model,omitempty"`             // set by model_call: the logical model requested
 	PromptTokens     *int      `json:"prompt_tokens,omitempty"`     // set by model_call (non-streaming): usage
 	CompletionTokens *int      `json:"completion_tokens,omitempty"` // set by model_call (non-streaming): usage
+	ChildRunID       string    `json:"child_run_id,omitempty"`      // set by spawn: the child run this event links to, whenever one was started (absent when the door refused before starting one)
+	ChildRole        string    `json:"child_role,omitempty"`        // set by spawn: the role the child ran, or was asked to run, as
+	ChildWorkflow    string    `json:"child_workflow,omitempty"`    // set by spawn: the child's workflow
+	Depth            int       `json:"depth,omitempty"`             // set by spawn: the child's depth in the delegation tree (this run's depth + 1)
 	// RuntimeAttestation is set by tool_call when the resource declares a
 	// trusted runtime (runtime: refbridge) and by exec when the agent's exec
 	// door is first-hand (exec.mode: runtime, served by refexec): that

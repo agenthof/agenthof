@@ -11,11 +11,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -89,6 +91,36 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "tool door: " + pendingErr.Error()})
 			return
 		}
+	}
+	if spec, ok := strings.CutPrefix(req.Input, "spawn:"); ok {
+		line, err := stubCallSpawn(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), spec)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "spawn door: " + err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "artifact": line})
+		return
+	}
+	if spec, ok := strings.CutPrefix(req.Input, "spawn-many:"); ok {
+		// spawn-many:<n>:<role>/<workflow>:<input> — n sequential spawns of
+		// the same child; the artifact is the lines joined.
+		count, rest, _ := strings.Cut(spec, ":")
+		n, err := strconv.Atoi(count)
+		if err != nil || n < 1 {
+			http.Error(w, "bad spawn-many", http.StatusBadRequest)
+			return
+		}
+		var lines []string
+		for range n {
+			line, err := stubCallSpawn(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), rest)
+			if err != nil {
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "spawn door: " + err.Error()})
+				return
+			}
+			lines = append(lines, line)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "artifact": strings.Join(lines, "\n")})
+		return
 	}
 	line := req.Input
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
@@ -169,6 +201,22 @@ func stubCallExec(proxyURL, token, cmd string) error {
 	return nil
 }
 
+// doorClient returns the client and base URL for a per-run gateway's proxy
+// URL: a unix:// one — a spawned child's gateway under its socket dir — is
+// dialed over that socket at the placeholder http://agenthof, as the
+// reference agent does; anything else is the default client.
+func doorClient(proxyURL string) (*http.Client, string) {
+	if p, ok := strings.CutPrefix(proxyURL, "unix://"); ok {
+		return &http.Client{Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", p)
+			},
+			DisableKeepAlives: true,
+		}}, "http://agenthof"
+	}
+	return http.DefaultClient, strings.TrimRight(proxyURL, "/")
+}
+
 // stubCallExecRun drives the first-hand exec door: one POST /exec/run. A 200
 // with exit 0 means the declared runtime ran the command and Agenthof
 // recorded its account; anything else fails the step.
@@ -180,13 +228,14 @@ func stubCallExecRun(proxyURL, token, cmd string) error {
 	if err != nil {
 		return err
 	}
-	rq, err := http.NewRequest(http.MethodPost, strings.TrimRight(proxyURL, "/")+"/exec/run", bytes.NewReader(b))
+	client, base := doorClient(proxyURL)
+	rq, err := http.NewRequest(http.MethodPost, base+"/exec/run", bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
 	rq.Header.Set("Content-Type", "application/json")
 	rq.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(rq)
+	resp, err := client.Do(rq)
 	if err != nil {
 		return err
 	}
@@ -1729,4 +1778,57 @@ func TestRunOBOEndToEndInProcess(t *testing.T) {
 			t.Fatalf("a token reached the ledger or the CLI output (prefix %s)", secret[:8])
 		}
 	}
+}
+
+// stubCallSpawn drives the spawn door from the demo stub: spec is
+// <role>/<workflow>:<input>. The artifact line is the door's answer —
+// status, child run id, and the child's preview (or the refusal reason) —
+// so a test can read the outcome off the parent's step artifact. A refusal
+// (403) is an answer the line carries, not an error: the ledger proves it.
+func stubCallSpawn(proxyURL, token, spec string) (string, error) {
+	target, input, ok := strings.Cut(spec, ":")
+	if !ok {
+		return "", fmt.Errorf("spawn spec %q needs <role>/<workflow>:<input>", spec)
+	}
+	role, workflow, ok := strings.Cut(target, "/")
+	if !ok {
+		return "", fmt.Errorf("spawn spec %q needs <role>/<workflow>:<input>", spec)
+	}
+	body, err := json.Marshal(map[string]string{"role": role, "workflow": workflow, "input": input})
+	if err != nil {
+		return "", err
+	}
+	client, base := doorClient(proxyURL)
+	req, err := http.NewRequest(http.MethodPost, base+"/spawn", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusForbidden {
+		return "", fmt.Errorf("gateway returned %d", resp.StatusCode)
+	}
+	var out struct {
+		Status        string `json:"status"`
+		ChildRunID    string `json:"child_run_id"`
+		OutputPreview string `json:"output_preview"`
+		Reason        string `json:"reason"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	id := out.ChildRunID
+	if id == "" {
+		id = "-"
+	}
+	detail := out.OutputPreview
+	if out.Status != "succeeded" {
+		detail = out.Reason
+	}
+	return strings.TrimSpace(fmt.Sprintf("spawn %s %s %s", out.Status, id, detail)), nil
 }

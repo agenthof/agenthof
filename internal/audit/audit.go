@@ -136,6 +136,30 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 			default:
 				fmt.Fprintf(&sb, "  %s  tool %s %s\n", t, e.Tool, e.Status)
 			}
+		case "spawn":
+			target := e.ChildRole + "/" + e.ChildWorkflow
+			run := "no child run"
+			if e.ChildRunID != "" {
+				run = "run " + e.ChildRunID
+			}
+			switch e.Status {
+			case "succeeded":
+				sha := e.OutputSHA
+				if sha == "" {
+					sha = "-"
+				} else if len(sha) > 8 {
+					sha = sha[:8]
+				}
+				fmt.Fprintf(&sb, "  %s  spawn %s → %s succeeded (depth %d) — artifact %s\n", t, target, run, e.Depth, sha)
+			case "failed", "refused":
+				reason := e.Reason
+				if reason == "" {
+					reason = "see the child run's ledger"
+				}
+				fmt.Fprintf(&sb, "  %s  spawn %s → %s %s (depth %d) — %s\n", t, target, run, e.Status, e.Depth, reason)
+			default:
+				fmt.Fprintf(&sb, "  %s  spawn %s → %s %s\n", t, target, run, e.Status)
+			}
 		default:
 			fmt.Fprintf(&sb, "  %s  %s\n", t, e.Type)
 		}
