@@ -212,7 +212,7 @@ func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, app
 			return
 		}
 		sockPath := strings.TrimPrefix(agent.Exec.URL, config.UnixScheme)
-		if err := checkPrivateDir(filepath.Dir(sockPath)); err != nil {
+		if err := CheckPrivateDir(filepath.Dir(sockPath)); err != nil {
 			logger.Error("exec runtime socket dir rejected", "class", errClass(err))
 			fail(reasonExecSocketDir)
 			return
@@ -310,11 +310,11 @@ func ctxReason(ctx context.Context, fallback string) string {
 	return fallback
 }
 
-// checkPrivateDir is the gateway's side of the socket-directory gate the
+// CheckPrivateDir is the gateway's side of the socket-directory gate the
 // runtime applies at listen (deploy/internal/refrunner.Listen): a directory,
 // mode 0700, owned by the user Agenthof runs as. Failing it means whatever
 // answers on that socket is not a runtime only this user could have started.
-func checkPrivateDir(dir string) error {
+func CheckPrivateDir(dir string) error {
 	fi, err := os.Stat(dir)
 	if err != nil {
 		return err
