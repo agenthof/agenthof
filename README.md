@@ -26,9 +26,9 @@ the door rather than trusting the agent.
 **Agenthof is** a governance layer for AI agents:
 
 - a **scoped identity and kill switch** for every agent;
-- **credential-injecting gateways** for the three doors an agent uses — model,
-  tool/MCP, and exec — so the agent reaches each one through Agenthof and never
-  holds the credential itself;
+- **credential-injecting gateways** for the four doors an agent uses — model,
+  tool/MCP, exec, and spawn — so the agent reaches each one through Agenthof
+  and never holds the credential itself;
 - **least privilege by default** — an agent reaches a tool only because you
   named it; naming none is rejected, never silently widened to every tool;
 - a **hash-chained audit ledger** that attributes every action and refusal to
@@ -159,7 +159,7 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   retention.
 - [`docs/agent-protocol.md`](docs/agent-protocol.md) — the agent wire contract:
   how to build an agent in any language (the step JSON, the gateway headers, and
-  the model/tool/exec call patterns).
+  the model/tool/exec/spawn call patterns).
 - [`docs/concepts.md`](docs/concepts.md) — the ideas behind Agenthof:
   planes, gateways, identity, the ledger.
 - [`docs/lifecycle.md`](docs/lifecycle.md) — the life of a run: how one
@@ -171,6 +171,9 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   allowlist, the operator's sandbox, and the attested record.
 - [`docs/lifecycle-tool.md`](docs/lifecycle-tool.md) — the life of a tool call:
   the two MCP legs, the injected resource credential, and `tool_call`.
+- [`docs/lifecycle-spawn.md`](docs/lifecycle-spawn.md) — the life of a spawn:
+  a governed child run under the same human, in compartments of its own,
+  bounded and linked to its parent.
 - [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md) — the
   life of a control action: apply, the kill switch, and the control ledger.
 - [`docs/reference/config.md`](docs/reference/config.md) — every YAML field,

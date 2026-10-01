@@ -87,6 +87,20 @@ The governed core is real and runnable today:
   on a workspace shared with the agent's compartment, and attests what ran;
   Agenthof records that account on the `exec` event. Agenthof itself runs
   no command either way.
+- **Sub-agent spawn, isolated per child** — a fronted agent asks its per-run
+  gateway for a governed child run of a `{role, workflow}` its `may_spawn`
+  lists, and gets the child's result back as a hash and a preview. Each
+  child is a full run under the same human — its own ledger, linked to the
+  parent by run id and depth — nested and parallel within three required
+  caps (`max_depth`, `max_parallel`, `max_total_spawns`) plus an optional
+  static cycle check at `apply`, and torn down with its parent's step;
+  `investigate --run` shows the tree. A child runs in compartments of its
+  own: `deploy/refspawn`, a reference operator-side supervisor on the host,
+  gives it one workspace volume, one rootless-podman refbox compartment per
+  agent in its workflow, and one `refexec` bound to that volume, and
+  removes them in order when the child is over. With no supervisor a child
+  is refused, never run beside its parent. Agenthof itself still runs
+  nothing.
 
 ## Next
 
