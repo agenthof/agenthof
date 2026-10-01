@@ -1,4 +1,4 @@
-name: spawn
+name: refspawn
 on:
   schedule:
     - cron: "0 21 * * *"
@@ -10,8 +10,8 @@ on:
       - 'deploy/refbox/**'
       - 'deploy/internal/refrunner/**'
       - 'examples/echo-agent/**'
-      - 'scripts/e2e-spawn.sh'
-      - '.github/workflows/spawn.yml'
+      - 'scripts/e2e-refspawn.sh'
+      - '.github/workflows/refspawn.yml'
       - 'internal/**'
       - 'cmd/agenthof/**'
       - 'go.mod'
@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 jobs:
-  spawn:
+  refspawn:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -36,4 +36,4 @@ jobs:
             sudo apt-get install -y podman
           fi
           podman --version
-      - run: ./scripts/e2e-spawn.sh
+      - run: ./scripts/e2e-refspawn.sh

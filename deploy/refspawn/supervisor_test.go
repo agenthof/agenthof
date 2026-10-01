@@ -594,7 +594,7 @@ func TestRefboxRunArgsShape(t *testing.T) {
 
 // TestPodmanRealSet drives real rootless podman: skipped unless the
 // operator names a built agent image and a refexec binary. The podman e2e
-// (scripts/e2e-spawn.sh) is the full proof; this is the unit-level smoke.
+// (scripts/e2e-refspawn.sh) is the full proof; this is the unit-level smoke.
 func TestPodmanRealSet(t *testing.T) {
 	image, refexecBin := os.Getenv("REFSPAWN_PODMAN_IMAGE"), os.Getenv("REFSPAWN_PODMAN_REFEXEC")
 	if image == "" || refexecBin == "" {

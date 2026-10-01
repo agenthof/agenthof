@@ -61,7 +61,7 @@ jobs:
           go-version-file: go.mod
       - run: ./scripts/e2e-refexec-local.sh
 
-  spawn-local:
+  refspawn-local:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -69,7 +69,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: ./scripts/e2e-spawn-local.sh
+      - run: ./scripts/e2e-refspawn-local.sh
 
   obo-local:
     runs-on: ubuntu-latest

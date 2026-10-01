@@ -61,7 +61,7 @@ the agent process, then `apply` and `run`. Run one end to end:
 bash scripts/e2e-refbridge.sh   # a stdio tool, run in refbridge, over unix://
 bash scripts/e2e-refbox.sh      # the agent itself, run inside refbox
 bash scripts/e2e-refexec.sh     # a command run first-hand by refexec, on a workspace shared with refbox
-bash scripts/e2e-spawn.sh       # a spawned child run, in the compartments refspawn provisions for it
+bash scripts/e2e-refspawn.sh       # a spawned child run, in the compartments refspawn provisions for it
 ```
 
 To drive Agenthof by hand, follow the same steps that script does. The detail a

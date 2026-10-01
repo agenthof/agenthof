@@ -5,7 +5,7 @@
 #   lima.sh up                 create (first run) or start the VM
 #   lima.sh shell              open a shell in the VM at the repo (/agenthof)
 #   lima.sh build              compile agenthof and build the compartment images
-#   lima.sh e2e [name] [--keep] run e2e(s): refbox | refbridge | refexec | spawn | all (default all)
+#   lima.sh e2e [name] [--keep] run e2e(s): refbox | refbridge | refexec | refspawn | all (default all)
 #   lima.sh clean [--all]      prune compartment leftovers; --all drops cached images
 #   lima.sh down               stop the VM (keeps it for next time)
 #   lima.sh destroy            delete the VM entirely
@@ -59,9 +59,9 @@ cmd_e2e() {
 	local name="all" keep=0
 	for a in "$@"; do
 		case "$a" in
-			refbox|refbridge|refexec|spawn|all) name="$a" ;;
+			refbox|refbridge|refexec|refspawn|all) name="$a" ;;
 			--keep) keep=1 ;;
-			*) die "unknown e2e argument: $a (want refbox | refbridge | refexec | spawn | all [--keep])" ;;
+			*) die "unknown e2e argument: $a (want refbox | refbridge | refexec | refspawn | all [--keep])" ;;
 		esac
 	done
 	local scripts=()
@@ -69,8 +69,8 @@ cmd_e2e() {
 		refbox) scripts=("scripts/e2e-refbox.sh") ;;
 		refbridge) scripts=("scripts/e2e-refbridge.sh") ;;
 		refexec) scripts=("scripts/e2e-refexec.sh") ;;
-		spawn) scripts=("scripts/e2e-spawn.sh") ;;
-		all) scripts=("scripts/e2e-refbox.sh" "scripts/e2e-refbridge.sh" "scripts/e2e-refexec.sh" "scripts/e2e-spawn.sh") ;;
+		refspawn) scripts=("scripts/e2e-refspawn.sh") ;;
+		all) scripts=("scripts/e2e-refbox.sh" "scripts/e2e-refbridge.sh" "scripts/e2e-refexec.sh" "scripts/e2e-refspawn.sh") ;;
 	esac
 	local rc=0
 	for s in "${scripts[@]}"; do

@@ -6,9 +6,9 @@ inside, see [`lifecycle.md`](lifecycle.md). For the YAML, see
 [`may_spawn`](reference/config.md#may_spawn),
 [`spawn`](reference/config.md#spawn) and
 [`spawn_supervisor`](reference/config.md#spawn_supervisor). For the
-executable proofs, see [`scripts/e2e-spawn-local.sh`](../scripts/e2e-spawn-local.sh)
+executable proofs, see [`scripts/e2e-refspawn-local.sh`](../scripts/e2e-refspawn-local.sh)
 (the door, the ledger and the supervisor protocol, with no container
-runtime) and [`scripts/e2e-spawn.sh`](../scripts/e2e-spawn.sh) (real
+runtime) and [`scripts/e2e-refspawn.sh`](../scripts/e2e-refspawn.sh) (real
 compartments and real isolation, with rootless podman). For the supervisor
 itself, [`deploy/refspawn/README.md`](../deploy/refspawn/README.md).
 

@@ -103,8 +103,8 @@ sed "s|/run/agenthof-spawn|$XDG_RUNTIME_DIR/agenthof-spawn|; s|command: \[refexe
 
 Then set `spawn_supervisor: unix://$XDG_RUNTIME_DIR/agenthof-spawn/refspawn.sock`
 (written out as the absolute path) in Agenthof's `gateway.yaml`, and
-`may_spawn` on the agent that may spawn. `scripts/e2e-spawn.sh` runs this
-whole path with real podman; `scripts/e2e-spawn-local.sh` runs the same
+`may_spawn` on the agent that may spawn. `scripts/e2e-refspawn.sh` runs this
+whole path with real podman; `scripts/e2e-refspawn-local.sh` runs the same
 door and ledger proof on any machine, against a stand-in whose compartments
 are host processes.
 

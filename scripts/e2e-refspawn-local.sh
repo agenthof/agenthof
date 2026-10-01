@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# e2e-spawn-local: prove the REAL agenthof binary runs governed sub-agent
+# e2e-refspawn-local: prove the REAL agenthof binary runs governed sub-agent
 # runs through the spawn door, hermetically, with no container runtime. The
 # compartment supervisor is a stand-in built from refspawn's own test tree:
 # the real refspawn program with a fake podman in place of podman, so each
@@ -67,7 +67,7 @@ trap cleanup EXIT
 unset AGENTHOF_TOKEN || true
 
 fail() {
-	echo "e2e-spawn-local: FAIL — $*"
+	echo "e2e-refspawn-local: FAIL — $*"
 	exit 1
 }
 free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'; }
@@ -772,4 +772,4 @@ printf '%s\n' "${OUTS[@]}" >"$WORK/outs.txt"
 [ -s "$WORK/outs.txt" ] || fail "nothing agenthof printed was captured, so the search below would prove nothing"
 grep -qF "spawn worker/child-wf" "$WORK/outs.txt" || fail "no captured output names a spawn, so the search below would prove nothing"
 if grep -qF "never-used-$NONCE" "$WORK/outs.txt"; then fail "the client secret reached agenthof's output"; fi
-echo "e2e-spawn-local: PASS"
+echo "e2e-refspawn-local: PASS"

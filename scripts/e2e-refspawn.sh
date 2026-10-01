@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# e2e-spawn: prove per-child isolation end to end with real rootless podman.
+# e2e-refspawn: prove per-child isolation end to end with real rootless podman.
 # The root run's agent runs in a refbox compartment; refspawn runs on the
 # host and, per spawned child, creates one workspace volume, one refbox
 # compartment per agent in the child's workflow (both mounting that volume
@@ -18,19 +18,19 @@
 # set is refused share one ledger reason on purpose, so they are told apart
 # by the distinct record the supervisor writes for each, over only the lines
 # that run produced. Requires rootless podman, go and python3. Run from the
-# repo root (or through deploy/lima/lima.sh e2e spawn).
+# repo root (or through deploy/lima/lima.sh e2e refspawn).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 fail() {
-	echo "e2e-spawn: FAIL — $*"
+	echo "e2e-refspawn: FAIL — $*"
 	exit 1
 }
 # Checked before anything is created, so there is nothing to clean up: this
 # e2e is about the real runtime's isolation and has no meaning without it.
-command -v podman >/dev/null || fail "podman is not installed; this e2e proves isolation with the real runtime. Run it on a Linux host with rootless podman (CI does), or through 'deploy/lima/lima.sh e2e spawn' on macOS. The hermetic governance e2e is scripts/e2e-spawn-local.sh."
+command -v podman >/dev/null || fail "podman is not installed; this e2e proves isolation with the real runtime. Run it on a Linux host with rootless podman (CI does), or through 'deploy/lima/lima.sh e2e refspawn' on macOS. The hermetic governance e2e is scripts/e2e-refspawn-local.sh."
 
 IMAGE="${REFBOX_IMAGE:-refbox-echo:test}"
 IMAGE_B="refbox-echo-b:test"
@@ -432,4 +432,4 @@ if echo "$ROOT_MOUNTS" | grep -q "$SPAWN_ROOT\|$SUP_DIR"; then fail "a spawn dir
 podman exec "$LEAD" /probe -touch /work/probe-ok || fail "/probe cannot write the root compartment's own workspace, so the negative below would prove nothing"
 if podman exec "$LEAD" /probe -touch "$SUP_DIR/probe-was-here"; then fail "the root compartment can reach refspawn's directory"; fi
 
-echo "e2e-spawn: PASS"
+echo "e2e-refspawn: PASS"
