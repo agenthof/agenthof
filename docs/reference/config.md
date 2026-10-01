@@ -446,8 +446,8 @@ budget_usd_month: 20
 | Tools | `tools` | map of string → `ToolResource` | no | — |
 | Defaults.Model | `defaults.model` | string | no | — |
 | RefboxSocketDir | `refbox_socket_dir` | string (absolute path) | no | empty (TCP loopback) |
-| SpawnSupervisor | `spawn_supervisor` | string (`unix://<absolute socket path>`) | yes when any agent declares `may_spawn`; otherwise ignored | — |
-| Spawn | `spawn` | object (`max_depth`, `max_parallel`, `max_total_spawns`, `reject_cycles`) | yes when any agent declares `may_spawn`; otherwise ignored | — |
+| SpawnSupervisor | `spawn_supervisor` | string (`unix://<absolute socket path>`) | yes when any agent declares `may_spawn`; otherwise optional (a malformed value is still rejected) | — |
+| Spawn | `spawn` | object (`max_depth`, `max_parallel`, `max_total_spawns`, `reject_cycles`) | yes when any agent declares `may_spawn`; otherwise optional (a malformed value is still rejected) | — |
 | StepTimeout | `step_timeout` | duration string | no | `5m` |
 
 `ModelRoute` fields:

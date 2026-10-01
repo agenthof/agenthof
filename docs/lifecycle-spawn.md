@@ -21,8 +21,8 @@ itself, [`deploy/refspawn/README.md`](../deploy/refspawn/README.md).
     |                              |      | yes                     |                           |
     |                              |-- provision {child id,         |                           |
     |                              |     the workflow's agents} --->| volume + 1 compartment    |
-    |                              |                                |   per agent + 1 refexec   |
-    |                              | <-- {child dir, agent sockets, |   all mounting /work      |
+    |                              |                                |   per agent, all on /work,|
+    |                              | <-- {child dir, agent sockets, |   + 1 refexec on it       |
     |                              |      exec socket}  (held open) |                           |
     |                              |   none? ----------------------------------------------------> parent: spawn refused
     |                              |-- run the child workflow against those sockets:            |
