@@ -490,11 +490,89 @@ func TestSleepDirective(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := runScript(ctx, "unix://"+gw.sock, "tok123", t.TempDir(), "sleep:30")
+	_, err := runScript(ctx, stepEnv{proxyURL: "unix://" + gw.sock, token: "tok123", workspace: t.TempDir()}, "sleep:30")
 	if err == nil || !strings.Contains(err.Error(), "sleep: context deadline exceeded") {
 		t.Fatalf("err = %v, want the context's error", err)
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("the sleep outlived its context")
+	}
+}
+
+func TestFileDirectives(t *testing.T) {
+	ws := t.TempDir()
+	ctx := context.Background()
+	env := stepEnv{workspace: ws, agent: "writer", runID: "r-0a0b0c0d"}
+	if got, err := runScript(ctx, env, "read:"); err != nil || got != "absent" {
+		t.Fatalf("read on an empty workspace = %q, %v; want absent", got, err)
+	}
+	if got, err := runScript(ctx, env, "write:hello; read:"); err != nil || got != "hello" {
+		t.Fatalf("write then read = %q, %v; want hello", got, err)
+	}
+	if got, err := runScript(ctx, env, "touch-run:; ls:"); err != nil || got != "agent-note.txt,r-0a0b0c0d.txt" {
+		t.Fatalf("touch-run then ls = %q, %v", got, err)
+	}
+	if got, err := runScript(ctx, stepEnv{workspace: t.TempDir()}, "ls:"); err != nil || got != "empty" {
+		t.Fatalf("ls on an empty workspace = %q, %v; want empty", got, err)
+	}
+	if _, err := runScript(ctx, stepEnv{workspace: ws}, "touch-run:"); err == nil {
+		t.Fatal("touch-run without a run id must fail, not write an unnamed file")
+	}
+	for _, bad := range []string{"../escape", "a/b", "..", "."} {
+		if _, err := runScript(ctx, stepEnv{workspace: ws, runID: bad}, "touch-run:"); err == nil {
+			t.Errorf("touch-run with run id %q must fail, not write outside the workspace", bad)
+		}
+	}
+}
+
+func TestOnlyDirectiveRunsForTheNamedAgent(t *testing.T) {
+	ws := t.TempDir()
+	ctx := context.Background()
+	writer, reader := stepEnv{workspace: ws, agent: "writer"}, stepEnv{workspace: ws, agent: "reader"}
+	script := "only:writer:write:shared; only:reader:read:"
+	if got, err := runScript(ctx, writer, script); err != nil || got != "skipped" {
+		t.Fatalf("writer's artifact = %q, %v; want skipped (its last directive is the reader's)", got, err)
+	}
+	if got, err := runScript(ctx, reader, script); err != nil || got != "shared" {
+		t.Fatalf("reader's artifact = %q, %v; want the writer's note", got, err)
+	}
+	for _, bad := range []string{"only:writer", "only::read:", "only:writer:"} {
+		if _, err := runScript(ctx, writer, bad); err == nil {
+			t.Errorf("%q must be rejected", bad)
+		}
+	}
+}
+
+func TestSpawnTranslatesTheChildSeparator(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ea")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "gw.sock")
+	ln, err := listenUnix(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var seen map[string]string
+	gw := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		seen = body
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "succeeded", "child_run_id": "r-1", "output_preview": "ok"})
+	})}
+	go func() { _ = gw.Serve(ln) }()
+	t.Cleanup(func() { _ = gw.Close() })
+	line, err := spawnOne(context.Background(), "unix://"+sock, "tok", "worker/pair-wf:only:writer:write:x | only:reader:read:")
+	if err != nil || line != "spawn succeeded r-1 ok" {
+		t.Fatalf("line = %q, %v", line, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seen["role"] != "worker" || seen["workflow"] != "pair-wf" || seen["input"] != "only:writer:write:x ; only:reader:read:" {
+		t.Fatalf("the door saw %v: the child's | separator must arrive as ;", seen)
 	}
 }

@@ -6,6 +6,13 @@
 // A step whose input starts with a directive is a script instead of an echo:
 //
 //	write:<text>                         write <text> to <workspace>/agent-note.txt
+//	read:                                the body of <workspace>/agent-note.txt, or "absent"
+//	ls:                                  the names in <workspace>, sorted and comma-joined, or "empty"
+//	touch-run:                           create <workspace>/<run id>.txt (the run id from X-Agenthof-Run-Id);
+//	                                     the artifact is "touched <run id>.txt"
+//	only:<agent>:<directive>             run <directive> only when this step's agent is <agent>; otherwise
+//	                                     the artifact is "skipped" — how one script drives the different
+//	                                     agents of a multi-step workflow
 //	exec-run:<argv>                      ask Agenthof's exec door to run argv (first-hand, when
 //	                                     the agent's exec is mode runtime); the output is the artifact
 //	exec-attest:<argv>                   report argv through /exec/attest; the artifact is attest:<status>
@@ -16,10 +23,13 @@
 //	                                     n such spawns at once; one line each, sorted
 //	sleep:<seconds>                      wait (cancelled with the step); the artifact is "slept <n>s"
 //
-// Directives are separated by ";" and the last one's result is the artifact,
-// so a child's input cannot itself contain ";". Every door call is made
-// under the step request's context: when Agenthof gives up on the step, the
-// agent's calls — and the children behind them — are cancelled too.
+// Directives are separated by ";" and the last one's result is the artifact.
+// A child's own script, written inside a spawn directive, separates ITS
+// directives with "|": the spawn directives turn each "|" into ";" before
+// posting, since the parent's script was already split on ";". Every door
+// call is made under the step request's context: when Agenthof gives up on
+// the step, the agent's calls — and the children behind them — are
+// cancelled too.
 package main
 
 import (
@@ -76,7 +86,8 @@ func handleStep(w http.ResponseWriter, r *http.Request, callGateway bool, worksp
 	proxyURL, token := r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token")
 	if isScript(req.Input) {
 		// The script reaches the gateway itself; no separate probe.
-		artifact, err := runScript(r.Context(), proxyURL, token, workspace, req.Input)
+		env := stepEnv{proxyURL: proxyURL, token: token, workspace: workspace, agent: req.Agent, runID: r.Header.Get("X-Agenthof-Run-Id")}
+		artifact, err := runScript(r.Context(), env, req.Input)
 		if err != nil {
 			_ = json.NewEncoder(w).Encode(response{Success: false, Reason: err.Error()})
 			return
@@ -93,7 +104,7 @@ func handleStep(w http.ResponseWriter, r *http.Request, callGateway bool, worksp
 	_ = json.NewEncoder(w).Encode(response{Artifact: req.Input, Success: true})
 }
 
-var directives = []string{"write:", "exec-run:", "exec-attest:", "spawn:", "spawn-parallel:", "sleep:"}
+var directives = []string{"write:", "read:", "ls:", "touch-run:", "only:", "exec-run:", "exec-attest:", "spawn:", "spawn-parallel:", "sleep:"}
 
 func isScript(input string) bool {
 	input = strings.TrimSpace(input)
@@ -105,62 +116,115 @@ func isScript(input string) bool {
 	return false
 }
 
+// stepEnv is what one step's directives run with: the gateway coordinates,
+// the workspace, and which agent and run this step is.
+type stepEnv struct {
+	proxyURL, token, workspace, agent, runID string
+}
+
 // runScript runs the ";"-separated directives in order and returns the last
 // one's result. The first failure ends the script.
-func runScript(ctx context.Context, proxyURL, token, workspace, input string) (string, error) {
+func runScript(ctx context.Context, env stepEnv, input string) (string, error) {
 	artifact := ""
 	for _, part := range strings.Split(input, ";") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		switch {
-		case strings.HasPrefix(part, "write:"):
-			path := filepath.Join(workspace, "agent-note.txt")
-			if err := os.WriteFile(path, []byte(strings.TrimPrefix(part, "write:")+"\n"), 0o644); err != nil {
-				return "", fmt.Errorf("write: %w", err)
-			}
-			artifact = "wrote " + path
-		case strings.HasPrefix(part, "exec-run:"):
-			out, err := execRun(ctx, proxyURL, token, strings.Fields(strings.TrimPrefix(part, "exec-run:")))
-			if err != nil {
-				return "", err
-			}
-			artifact = out
-		case strings.HasPrefix(part, "exec-attest:"):
-			status, err := execAttest(ctx, proxyURL, token, strings.Fields(strings.TrimPrefix(part, "exec-attest:")))
-			if err != nil {
-				return "", err
-			}
-			artifact = "attest:" + strconv.Itoa(status)
-		case strings.HasPrefix(part, "spawn:"):
-			line, err := spawnOne(ctx, proxyURL, token, strings.TrimPrefix(part, "spawn:"))
-			if err != nil {
-				return "", err
-			}
-			artifact = line
-		case strings.HasPrefix(part, "spawn-parallel:"):
-			lines, err := spawnParallel(ctx, proxyURL, token, strings.TrimPrefix(part, "spawn-parallel:"))
-			if err != nil {
-				return "", err
-			}
-			artifact = strings.Join(lines, "\n")
-		case strings.HasPrefix(part, "sleep:"):
-			secs, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(part, "sleep:")))
-			if err != nil || secs < 0 || secs > 600 {
-				return "", errors.New("sleep: want a whole number of seconds from 0 to 600")
-			}
-			select {
-			case <-time.After(time.Duration(secs) * time.Second):
-			case <-ctx.Done():
-				return "", fmt.Errorf("sleep: %w", ctx.Err())
-			}
-			artifact = "slept " + strconv.Itoa(secs) + "s"
-		default:
-			return "", fmt.Errorf("unknown directive %q", part)
+		out, err := runOne(ctx, env, part)
+		if err != nil {
+			return "", err
 		}
+		artifact = out
 	}
 	return artifact, nil
+}
+
+// runOne runs a single directive.
+func runOne(ctx context.Context, env stepEnv, part string) (string, error) {
+	switch {
+	case strings.HasPrefix(part, "write:"):
+		path := filepath.Join(env.workspace, "agent-note.txt")
+		if err := os.WriteFile(path, []byte(strings.TrimPrefix(part, "write:")+"\n"), 0o644); err != nil {
+			return "", fmt.Errorf("write: %w", err)
+		}
+		return "wrote " + path, nil
+	case strings.HasPrefix(part, "read:"):
+		b, err := os.ReadFile(filepath.Join(env.workspace, "agent-note.txt"))
+		if errors.Is(err, os.ErrNotExist) {
+			return "absent", nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("read: %w", err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	case strings.HasPrefix(part, "ls:"):
+		entries, err := os.ReadDir(env.workspace)
+		if err != nil {
+			return "", fmt.Errorf("ls: %w", err)
+		}
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		if len(names) == 0 {
+			return "empty", nil
+		}
+		sort.Strings(names)
+		return strings.Join(names, ","), nil
+	case strings.HasPrefix(part, "touch-run:"):
+		if env.runID == "" {
+			return "", errors.New("touch-run: the request carries no X-Agenthof-Run-Id")
+		}
+		// The run id names a file, so it must stay one plain name inside the workspace.
+		if strings.ContainsFunc(env.runID, func(r rune) bool {
+			return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_'
+		}) {
+			return "", fmt.Errorf("touch-run: run id %q is not a plain name", env.runID)
+		}
+		name := env.runID + ".txt"
+		if err := os.WriteFile(filepath.Join(env.workspace, name), nil, 0o644); err != nil {
+			return "", fmt.Errorf("touch-run: %w", err)
+		}
+		return "touched " + name, nil
+	case strings.HasPrefix(part, "only:"):
+		target, rest, ok := strings.Cut(strings.TrimPrefix(part, "only:"), ":")
+		if !ok || target == "" || strings.TrimSpace(rest) == "" {
+			return "", fmt.Errorf("only: want <agent>:<directive>, got %q", part)
+		}
+		if target != env.agent {
+			return "skipped", nil
+		}
+		return runOne(ctx, env, strings.TrimSpace(rest))
+	case strings.HasPrefix(part, "exec-run:"):
+		return execRun(ctx, env.proxyURL, env.token, strings.Fields(strings.TrimPrefix(part, "exec-run:")))
+	case strings.HasPrefix(part, "exec-attest:"):
+		status, err := execAttest(ctx, env.proxyURL, env.token, strings.Fields(strings.TrimPrefix(part, "exec-attest:")))
+		if err != nil {
+			return "", err
+		}
+		return "attest:" + strconv.Itoa(status), nil
+	case strings.HasPrefix(part, "spawn:"):
+		return spawnOne(ctx, env.proxyURL, env.token, strings.TrimPrefix(part, "spawn:"))
+	case strings.HasPrefix(part, "spawn-parallel:"):
+		lines, err := spawnParallel(ctx, env.proxyURL, env.token, strings.TrimPrefix(part, "spawn-parallel:"))
+		if err != nil {
+			return "", err
+		}
+		return strings.Join(lines, "\n"), nil
+	case strings.HasPrefix(part, "sleep:"):
+		secs, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(part, "sleep:")))
+		if err != nil || secs < 0 || secs > 600 {
+			return "", errors.New("sleep: want a whole number of seconds from 0 to 600")
+		}
+		select {
+		case <-time.After(time.Duration(secs) * time.Second):
+		case <-ctx.Done():
+			return "", fmt.Errorf("sleep: %w", ctx.Err())
+		}
+		return "slept " + strconv.Itoa(secs) + "s", nil
+	}
+	return "", fmt.Errorf("unknown directive %q", part)
 }
 
 // execRun asks the exec door to run argv and returns the command's output.
@@ -206,13 +270,17 @@ func execAttest(ctx context.Context, proxyURL, token string, argv []string) (int
 // the door's answer as one line: "spawn <status> <child run id or -> <preview
 // or reason>". A refusal (403) is an answer the line carries, not a failed
 // step — the parent's ledger already records it; any other non-200 fails
-// the step. The input runs to the end of the spec, colons included.
+// the step. The input runs to the end of the spec, colons included; its "|"
+// become ";" so the child can run a script of its own.
 func spawnOne(ctx context.Context, proxyURL, token, spec string) (string, error) {
 	target, input, ok := strings.Cut(spec, ":")
 	role, workflow, ok2 := strings.Cut(target, "/")
 	if !ok || !ok2 || role == "" || workflow == "" {
 		return "", fmt.Errorf("spawn: want <role>/<workflow>:<input>, got %q", spec)
 	}
+	// The child's script separates its directives with "|": this script was
+	// already split on ";".
+	input = strings.ReplaceAll(input, "|", ";")
 	resp, err := postDoor(ctx, proxyURL, token, "/spawn", map[string]string{"role": role, "workflow": workflow, "input": input})
 	if err != nil {
 		return "", fmt.Errorf("spawn: %w", err)
