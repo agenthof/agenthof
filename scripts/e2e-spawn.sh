@@ -113,7 +113,7 @@ done
 [ "$(stat -c %a "$SUP_DIR")" = 700 ] || fail "refspawn socket dir is not 0700"
 
 # The root run's agent, in its own refbox (an ephemeral tmpfs workspace).
-REFBOX_DETACH=1 REFBOX_IMAGE="$IMAGE" REFBOX_NAME="$LEAD" deploy/refbox/refbox-run.sh >/dev/null
+REFBOX_DETACH=1 REFBOX_IMAGE="$IMAGE" REFBOX_NAME="$LEAD" REFBOX_TIMEOUT=1500 deploy/refbox/refbox-run.sh >/dev/null
 for i in $(seq 1 30); do
 	[ -S "$SOCK_DIR/refbox-echo.sock" ] && break
 	[ "$i" = 30 ] && { podman logs "$LEAD" || true; fail "lead agent socket never appeared"; }
@@ -276,7 +276,22 @@ sole_refusal() {
 		fail "the supervisor recorded the other refusal ($2) beside its own ($1)"
 	fi
 }
+# Teardown is asynchronous from the parent's side by design: the held request
+# closes and the parent's run ends, while the supervisor removes the set it
+# made in order afterwards. So the check waits for the whole set to be gone,
+# bounded at 30 s, and only then says what is left.
 nothing_left() {
+	local i
+	for i in $(seq 1 60); do
+		if [ -z "$(podman ps -aq --filter 'name=^agenthof-spawn-')" ] &&
+			[ -z "$(podman ps -aq --filter 'name=^refexec-')" ] &&
+			[ -z "$(podman volume ls -q --filter 'name=^agenthof-spawn-')" ] &&
+			[ -z "$(ls -A "$SPAWN_ROOT")" ] &&
+			! pgrep -f "refexec -config $SPAWN_ROOT" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 0.5
+	done
 	[ -z "$(podman ps -aq --filter 'name=^agenthof-spawn-')" ] || { podman ps -a --filter 'name=^agenthof-spawn-'; fail "$1: a child compartment outlived the run"; }
 	[ -z "$(podman ps -aq --filter 'name=^refexec-')" ] || { podman ps -a --filter 'name=^refexec-'; fail "$1: an exec compartment outlived the run"; }
 	[ -z "$(podman volume ls -q --filter 'name=^agenthof-spawn-')" ] || { podman volume ls --filter 'name=^agenthof-spawn-'; fail "$1: a child volume outlived the run"; }
@@ -312,6 +327,10 @@ ART="$(parent_artifact "$RUNID")"
 for c in $(field "$(ledger "$RUNID")" spawn child_run_id succeeded); do
 	echo "$ART" | grep -qx "spawn succeeded $c $c.txt" || { echo "$ART"; fail "sibling $c saw more than its own file in /work (file path)"; }
 done
+# The supervisor's slots are freed only when that run's set is gone, and the
+# cap is 3: without this the next pair of siblings could be refused for want
+# of a compartment the run above has not finished releasing.
+nothing_left "after the sibling file-path run"
 run "spawn-parallel:2:worker/one-wf:touch-run: | sleep:3 | exec-run:ls /work"
 echo "$OUT" | grep -q "finished: succeeded" || fail "the parallel exec run did not succeed"
 ART="$(parent_artifact "$RUNID")"
