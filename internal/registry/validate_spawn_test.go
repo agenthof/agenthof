@@ -218,6 +218,11 @@ func TestInsideDir(t *testing.T) {
 		{"/run/agenthof2", "/run/agenthof", false},
 		{"/run", "/run/agenthof", false},
 		{"/tmp/x", "/run/agenthof", false},
+		// Neither path can be related to the other, so containment cannot be
+		// decided. Every caller reads InsideDir as "reject this path", so the
+		// undecidable case must be reported as inside — fail closed.
+		{"relative/dir", "/run/agenthof", true},
+		{"/run/agenthof/x", "relative/dir", true},
 	} {
 		if got := InsideDir(c.dir, c.parent); got != c.want {
 			t.Errorf("InsideDir(%q, %q) = %v, want %v", c.dir, c.parent, got, c.want)

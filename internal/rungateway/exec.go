@@ -211,7 +211,7 @@ func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, app
 			refuse(reasonExecCommandUnrecordable)
 			return
 		}
-		sockPath := strings.TrimPrefix(agent.Exec.URL, config.UnixScheme)
+		sockPath := strings.TrimPrefix(p.execURLFor(agent), config.UnixScheme)
 		if err := CheckPrivateDir(filepath.Dir(sockPath)); err != nil {
 			logger.Error("exec runtime socket dir rejected", "class", errClass(err))
 			fail(reasonExecSocketDir)
@@ -329,4 +329,26 @@ func CheckPrivateDir(dir string) error {
 		return errors.New("not owned by this user")
 	}
 	return nil
+}
+
+// WithExecURL makes the first-hand exec door dial url — unix://<socket> —
+// instead of each agent's configured exec.url, and returns the gateway.
+// Call it before the first Start. A spawned child's agents run in the
+// child's compartments and their exec goes to the child's own refexec,
+// bound to the child's workspace; the configured url belongs to the root
+// deployment and would reach the wrong workspace.
+func (p *Gateway) WithExecURL(url string) *Gateway {
+	p.execURL = url
+	return p
+}
+
+// execURLFor is the runtime socket the exec door dials for agent: the
+// gateway's override when one is set, else the agent's configured exec.url.
+// It is the one reader of either, so the Start-time check and the dial
+// cannot disagree.
+func (p *Gateway) execURLFor(agent config.AgentDef) string {
+	if p.execURL != "" {
+		return p.execURL
+	}
+	return agent.Exec.URL
 }

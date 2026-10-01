@@ -11,11 +11,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -99,6 +101,27 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "artifact": line})
 		return
 	}
+	if spec, ok := strings.CutPrefix(req.Input, "spawn-many:"); ok {
+		// spawn-many:<n>:<role>/<workflow>:<input> — n sequential spawns of
+		// the same child; the artifact is the lines joined.
+		count, rest, _ := strings.Cut(spec, ":")
+		n, err := strconv.Atoi(count)
+		if err != nil || n < 1 {
+			http.Error(w, "bad spawn-many", http.StatusBadRequest)
+			return
+		}
+		var lines []string
+		for range n {
+			line, err := stubCallSpawn(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), rest)
+			if err != nil {
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "spawn door: " + err.Error()})
+				return
+			}
+			lines = append(lines, line)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "artifact": strings.Join(lines, "\n")})
+		return
+	}
 	line := req.Input
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
 		line = line[:i]
@@ -178,6 +201,22 @@ func stubCallExec(proxyURL, token, cmd string) error {
 	return nil
 }
 
+// doorClient returns the client and base URL for a per-run gateway's proxy
+// URL: a unix:// one — a spawned child's gateway under its socket dir — is
+// dialed over that socket at the placeholder http://agenthof, as the
+// reference agent does; anything else is the default client.
+func doorClient(proxyURL string) (*http.Client, string) {
+	if p, ok := strings.CutPrefix(proxyURL, "unix://"); ok {
+		return &http.Client{Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", p)
+			},
+			DisableKeepAlives: true,
+		}}, "http://agenthof"
+	}
+	return http.DefaultClient, strings.TrimRight(proxyURL, "/")
+}
+
 // stubCallExecRun drives the first-hand exec door: one POST /exec/run. A 200
 // with exit 0 means the declared runtime ran the command and Agenthof
 // recorded its account; anything else fails the step.
@@ -189,13 +228,14 @@ func stubCallExecRun(proxyURL, token, cmd string) error {
 	if err != nil {
 		return err
 	}
-	rq, err := http.NewRequest(http.MethodPost, strings.TrimRight(proxyURL, "/")+"/exec/run", bytes.NewReader(b))
+	client, base := doorClient(proxyURL)
+	rq, err := http.NewRequest(http.MethodPost, base+"/exec/run", bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
 	rq.Header.Set("Content-Type", "application/json")
 	rq.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(rq)
+	resp, err := client.Do(rq)
 	if err != nil {
 		return err
 	}
@@ -1758,13 +1798,14 @@ func stubCallSpawn(proxyURL, token, spec string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(proxyURL, "/")+"/spawn", bytes.NewReader(body))
+	client, base := doorClient(proxyURL)
+	req, err := http.NewRequest(http.MethodPost, base+"/spawn", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

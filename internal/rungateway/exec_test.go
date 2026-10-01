@@ -404,3 +404,42 @@ func TestStartRefusesFirstHandAgentWithoutTimeoutOrUnixURL(t *testing.T) {
 		})
 	}
 }
+
+func TestExecRunDialsTheOverrideRuntime(t *testing.T) {
+	// A spawned child's agents are served by the CHILD's refexec: the
+	// per-child gateway overrides every agent's configured exec.url.
+	stub := newRefexecStub(t, echoRefexec)
+	rec := &eventRecorder{}
+	agent := firstHandAgent(config.UnixScheme+"/nonexistent/dir/refexec.sock", 5*time.Second, config.ExecEntry{Exe: "cat"})
+	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "").WithExecURL(stub.url)
+	base, token, err := p.Start(context.Background(), testBinding(), agent, rec.record)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(p.Stop)
+	code, body := execPost(t, base, "exec/run", token, `{"command":["cat","/work/x"]}`)
+	if code != 200 || !strings.Contains(body, `"exit":0`) {
+		t.Fatalf("code=%d body=%s: the override runtime was not dialed", code, body)
+	}
+	if stub.calls.Load() != 1 {
+		t.Fatalf("override runtime calls = %d, want 1", stub.calls.Load())
+	}
+	if e := onlyExec(t, rec); e.Status != "succeeded" || e.Mode != "runtime" {
+		t.Fatalf("event = %+v", e)
+	}
+}
+
+func TestStartChecksTheOverrideNotTheConfiguredExecURL(t *testing.T) {
+	// With an override, the configured exec.url is not consulted at all — not
+	// even for the Start-time unix:// check.
+	agent := firstHandAgent("https://not-a-socket", 5*time.Second, config.ExecEntry{Exe: "cat"})
+	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "").WithExecURL(config.UnixScheme + "/tmp/x/refexec.sock")
+	if _, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {}); err != nil {
+		t.Fatalf("Start with a unix:// override must pass: %v", err)
+	}
+	p.Stop()
+	bare := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "").WithExecURL("https://not-a-socket")
+	if _, _, err := bare.Start(context.Background(), testBinding(), firstHandAgent(config.UnixScheme+"/tmp/x/refexec.sock", 5*time.Second), func(engine.Event) {}); err == nil {
+		t.Fatal("a non-unix override must fail Start exactly as a non-unix exec.url does")
+	}
+}

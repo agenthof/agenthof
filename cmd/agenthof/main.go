@@ -25,6 +25,7 @@ import (
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/obs"
+	"github.com/agenthof/agenthof/internal/refspawn"
 	"github.com/agenthof/agenthof/internal/registry"
 )
 
@@ -661,9 +662,20 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	h, _ := config.HashDir(*cfgDir)
 	// One broker for the process; one runDeps for this run and every child
 	// it spawns. The verified subject token goes to the gateways and nowhere
-	// else — never to the engine, Binding, or the ledger.
+	// else — never to the engine, Binding, or the ledger. The compartment
+	// supervisor is the spawn door's only way to run a child: unset (valid
+	// only when no agent may spawn), every spawn is refused.
 	b := newBroker(subjectTokenTypeFromEnv(os.Getenv))
-	deps := newRunDeps(cfg, reg, b, logger, *logDir, *artifactDir, h, r.subjectToken)
+	var sup refspawn.Provisioner
+	if ep := cfg.Gateway.SpawnSupervisor; ep != "" {
+		client, err := refspawn.New(ep, logger)
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "run: %v\n", err)
+			return 2
+		}
+		sup = client
+	}
+	deps := newRunDeps(cfg, reg, b, logger, *logDir, *artifactDir, h, r.subjectToken, sup)
 	res, err := engine.Run(context.Background(), reg, role, workflow, *input, inv, deps.executor(), deps.options(nil))
 	if err != nil && res.Status == "refused" {
 		_, _ = fmt.Fprintf(out, "run %s refused: %v\n", res.RunID, err)

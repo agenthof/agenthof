@@ -87,6 +87,11 @@ type Options struct {
 	// Depth, and the invoker is expected to be the parent's, unchanged. Nil
 	// means a root run.
 	Parent *Binding
+	// RunID, when set, is the id this run records under instead of a fresh
+	// one. A caller that must name resources for the run before it starts
+	// — a Spawner provisioning a child's compartments — mints it with
+	// NewRunID and passes it here. Empty means mint one.
+	RunID string
 }
 
 const defaultMaxBounces = 2
@@ -103,7 +108,10 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	if opts.ArtifactDir == "" {
 		opts.ArtifactDir = ".agenthof/artifacts"
 	}
-	runID := NewRunID()
+	runID := opts.RunID
+	if runID == "" {
+		runID = NewRunID()
+	}
 	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}.linkedTo(opts.Parent)
 	logger := obs.OrDiscard(opts.Logger).With("run", runID, "role", role, "workflow", workflow)
 	failed := func(err error) (Result, error) { return Result{RunID: runID, Status: "failed"}, err }

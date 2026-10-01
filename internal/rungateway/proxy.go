@@ -92,6 +92,11 @@ type Gateway struct {
 	// max_total_spawns bounds a run's whole life, not one step.
 	spawnInflight int
 	spawnTotal    int
+	// execURL, when set, is the first-hand exec runtime the exec door dials
+	// in place of every agent's exec.url: a spawned child's agents are
+	// served by the child's own refexec, so the per-child gateway carries
+	// it. Set once by WithExecURL, before the first Start.
+	execURL string
 }
 
 // New builds a Gateway over the gateway config. Tool resources come from
@@ -159,7 +164,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	// Registry validation already rejects a first-hand exec without a
 	// unix:// url or a timeout, but Start is reachable without the registry,
 	// so it fails closed on both rather than dialing nowhere or forever.
-	if agent.Exec.FirstHand() && (!strings.HasPrefix(agent.Exec.URL, config.UnixScheme) || agent.Exec.Timeout <= 0) {
+	if agent.Exec.FirstHand() && (!strings.HasPrefix(p.execURLFor(agent), config.UnixScheme) || agent.Exec.Timeout <= 0) {
 		logger.Error("gateway start refused", "reason", "first-hand exec needs a unix:// url and a positive timeout")
 		return "", "", fmt.Errorf("exec runtime %q requires a unix:// url and a positive timeout", agent.Exec.Runtime)
 	}

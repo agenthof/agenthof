@@ -575,10 +575,15 @@ func validSecureOrUnixEndpoint(raw string) bool {
 // cleaning both. It is the one rule for "this path would be visible inside a
 // mounted directory"; a sibling whose name merely shares a prefix is outside.
 // Exported for the spawn door's runtime check on what a supervisor hands back.
+//
+// Every caller reads it as "reject this path", so a pair it cannot relate at
+// all — one absolute, the other relative, which filepath.Rel refuses — is
+// reported as inside: an unanswerable containment question fails closed, not
+// open.
 func InsideDir(dir, parent string) bool {
 	rel, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(dir))
 	if err != nil {
-		return false
+		return true
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
