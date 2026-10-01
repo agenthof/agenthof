@@ -138,6 +138,12 @@ func (s *supervisor) close() {
 // refusal reaches the client only once the set is gone and the slots are
 // back. Never Flush before the teardown on a failure path.
 func (s *supervisor) handleProvision(w http.ResponseWriter, req *http.Request) {
+	// Count the handler in BEFORE admit: close() waits on s.wg, so a handler
+	// that has claimed slots/names but not yet reached the set-up below must
+	// already be visible, or shutdown could reap concurrently with start().
+	// Harmless for requests that refuse early — they Done and return.
+	s.wg.Add(1)
+	defer s.wg.Done()
 	var body provisionRequest
 	if err := json.NewDecoder(io.LimitReader(req.Body, maxRequest)).Decode(&body); err != nil {
 		http.Error(w, "refspawn: bad request", http.StatusBadRequest)
@@ -197,8 +203,6 @@ func (s *supervisor) handleProvision(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "refspawn: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	s.wg.Add(1)
-	defer s.wg.Done()
 	defer s.release(body.ChildRunID, names) // after the teardown below (defers run last-in first-out)
 	set := s.newSet(body.ChildRunID, body.Agents, images)
 	defer set.teardown()
