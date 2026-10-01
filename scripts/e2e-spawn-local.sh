@@ -747,6 +747,13 @@ run "$WORK/config" lead lead-wf "spawn:worker/child-wf:read:"
 FRESH_ART="$(parent_artifact "$RUNID")"
 echo "$FRESH_ART" | grep -q "spawn succeeded r-[0-9a-f]* absent" || fail "a new child must start on a fresh workspace"
 [ ! -e "$WORK/ws/agent-note.txt" ] || fail "a child's note reached the parent's workspace"
+# The same workspace, written and listed through the same host agent: a note
+# of the parent's own lands at exactly the path checked above, which is what
+# makes that absence an empty workspace and not an unreachable directory.
+run "$WORK/config" lead lead-wf "write:probe-$NONCE; ls:"
+PROBE_ART="$(parent_artifact "$RUNID")"
+echo "$PROBE_ART" | grep -qx "agent-note.txt" || { echo "$PROBE_ART"; fail "the parent's own write does not show in its own listing"; }
+[ -e "$WORK/ws/agent-note.txt" ] || fail "the parent's note is not at the path the absence above searched, so that absence proved nothing"
 nothing_left "after the isolation runs"
 echo "isolation: one workspace per child, shared by that child's agents, fresh per child, invisible to the parent — ok"
 
@@ -758,6 +765,11 @@ echo "isolation: one workspace per child, shared by that child's agents, fresh p
 grep -q "level=DEBUG" "$WORK/agenthof.err" || fail "the operational log carries no debug records"
 grep -rqF "hello-$NONCE" "$WORK/logs" "$WORK/artifacts" "$WORK/agenthof.err" || fail "the positive control is missing, so the identical search for the secret would prove nothing"
 if grep -rqF "never-used-$NONCE" "$WORK/logs" "$WORK/artifacts" "$WORK/agenthof.err" "$WORK/refspawn.err"; then fail "the client secret reached a ledger, artifact or log"; fi
-printf '%s\n' "${OUTS[@]}" | grep -qF "spawn worker/child-wf" || fail "no captured output names a spawn, so the search below would prove nothing"
-if printf '%s\n' "${OUTS[@]}" | grep -qF "never-used-$NONCE"; then fail "the client secret reached agenthof's output"; fi
+# Written to a file, not piped: once the captured output outgrows the pipe
+# buffer, a grep -q that matches early would SIGPIPE the writer and fail the
+# pipeline under pipefail — reporting "no match" exactly when there is one.
+printf '%s\n' "${OUTS[@]}" >"$WORK/outs.txt"
+[ -s "$WORK/outs.txt" ] || fail "nothing agenthof printed was captured, so the search below would prove nothing"
+grep -qF "spawn worker/child-wf" "$WORK/outs.txt" || fail "no captured output names a spawn, so the search below would prove nothing"
+if grep -qF "never-used-$NONCE" "$WORK/outs.txt"; then fail "the client secret reached agenthof's output"; fi
 echo "e2e-spawn-local: PASS"

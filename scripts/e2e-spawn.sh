@@ -360,11 +360,20 @@ WRITER="agenthof-spawn-$CHILD_ID-writer"
 [ "$(podman inspect "$READER" --format '{{.ImageName}}')" = "localhost/$IMAGE_B" ] || fail "the reader runs $(podman inspect "$READER" --format '{{.ImageName}}'), not the image its agent maps to"
 [ "$(podman inspect "$WRITER" --format '{{.ImageName}}')" = "localhost/$IMAGE" ] || fail "the writer runs $(podman inspect "$WRITER" --format '{{.ImageName}}'), not the image its agent maps to"
 MOUNTS="$(podman inspect "$READER" --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}')"
-echo "$MOUNTS" | grep -q "^volume .*agenthof-spawn-$CHILD_ID-work /work$" || fail "the child's volume is not at /work: $MOUNTS"
+# A named volume's Source is the backing host path, so its identity is in
+# .Name: the volume at /work is THIS child's, not a sibling's, and it is the
+# only one. The bind assertions below stay on paths, which is what they claim.
+VOLUMES="$(podman inspect "$READER" --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{.Destination}}{{"\n"}}{{end}}{{end}}')"
+echo "$VOLUMES" | grep -qx "agenthof-spawn-$CHILD_ID-work /work" || fail "the child's own volume is not the one at /work: $VOLUMES"
+[ "$(echo "$VOLUMES" | grep -c . || true)" = 1 ] || fail "unexpected volumes: $VOLUMES"
 echo "$MOUNTS" | grep -q "^bind $SPAWN_ROOT/$CHILD_ID $SPAWN_ROOT/$CHILD_ID$" || fail "the child's socket dir is not mounted at its own path: $MOUNTS"
 [ "$(echo "$MOUNTS" | grep -c '^bind ' || true)" = 1 ] || fail "unexpected binds: $MOUNTS"
 if echo "$MOUNTS" | grep -q -- "-exec"; then fail "the child's exec dir is mounted into its compartment: $MOUNTS"; fi
 if echo "$MOUNTS" | grep -q "$SOCK_DIR"; then fail "the ROOT's socket dir is mounted into a child compartment: $MOUNTS"; fi
+# /probe must run and succeed once before anything is asked of it that must
+# fail: a missing or renamed probe would answer every negative below with the
+# same non-zero exit, for the wrong reason.
+podman exec "$READER" /probe -touch /work/probe-ok || fail "/probe cannot write the child's own workspace, so the negatives below would prove nothing"
 if podman exec "$READER" /probe -touch "$SPAWN_ROOT/$CHILD_ID-exec/probe-was-here"; then fail "a child compartment can reach its refexec's directory"; fi
 if podman exec "$READER" /probe -dial 1.1.1.1:443; then fail "a child compartment reached the internet"; fi
 if podman inspect "$READER" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Ei 'TOKEN|SECRET|PASSWORD|API_KEY|AGENTHOF_' >/dev/null; then fail "a child compartment has credential-like environment"; fi
@@ -401,6 +410,7 @@ echo "fail-closed: no image and the compartment cap both refuse before anything 
 ROOT_MOUNTS="$(podman inspect "$LEAD" --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}')"
 echo "$ROOT_MOUNTS" | grep -q "bind $SOCK_DIR $SOCK_DIR" || fail "root socket dir not mounted"
 if echo "$ROOT_MOUNTS" | grep -q "$SPAWN_ROOT\|$SUP_DIR"; then fail "a spawn directory is mounted into the root compartment: $ROOT_MOUNTS"; fi
+podman exec "$LEAD" /probe -touch /work/probe-ok || fail "/probe cannot write the root compartment's own workspace, so the negative below would prove nothing"
 if podman exec "$LEAD" /probe -touch "$SUP_DIR/probe-was-here"; then fail "the root compartment can reach refspawn's directory"; fi
 
 echo "e2e-spawn: PASS"
