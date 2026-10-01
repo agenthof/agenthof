@@ -218,8 +218,12 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 	wf, ok := d.reg.Workflow(childWorkflow)
 	if !ok {
 		// Nothing to provision: the engine refuses an unknown workflow with
-		// its own recorded reason.
-		return d.runChild(ctx, childRole, childWorkflow, input, parent, d.executor(), d.options(&parent), false)
+		// its own recorded reason — before it ever builds a gateway. Null the
+		// factory anyway so this path cannot run a child on the ROOT gateway
+		// (unreachable today; impossible rather than merely unreachable).
+		opts := d.options(&parent)
+		opts.NewGateway = nil
+		return d.runChild(ctx, childRole, childWorkflow, input, parent, d.executor(), opts, false)
 	}
 	if d.sup == nil {
 		logger.Warn("spawn refused", "reason", "no compartment supervisor configured")
