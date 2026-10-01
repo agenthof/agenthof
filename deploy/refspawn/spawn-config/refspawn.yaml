@@ -1,0 +1,41 @@
+# The reference refspawn config. Every key is required; nothing is defaulted.
+# refspawn is a HOST process: `socket` must live in a directory that is mode
+# 0700 and owned by the user refspawn (and Agenthof) runs as — never under
+# Agenthof's refbox socket dir, which is mounted into agent compartments, and
+# never under spawn_root. The demo paths are placeholders; the e2e rewrites
+# them to a temp dir.
+socket: /run/agenthof-spawn/refspawn.sock
+# Per-child directories live here: <spawn_root>/<run id> (the child's agent
+# and gateway sockets; mounted into that child's compartments only) and
+# <spawn_root>/<run id>-exec (its refexec socket; never mounted anywhere).
+spawn_root: /run/agenthof-spawn/children
+# Agent name -> the image its compartment runs. An agent not listed cannot be
+# spawned: the provision is refused and Agenthof records it. Pull the images
+# yourself (refspawn runs podman with --pull=never).
+images:
+  refbox-echo: localhost/refbox-echo:test
+# podman --timeout for every agent compartment: a backstop. Set it at or
+# above Agenthof's step_timeout, else a child under a long step is cut short.
+timeout: 10m
+# How long a child's sockets may take to accept a connection before the set
+# is torn down and the spawn refused.
+ready_timeout: 60s
+limits:
+  memory: 256m
+  cpus: "1"
+  pids: 64
+# Agent compartments across every live child (a child with N agents takes N).
+# A set that will not fit whole is refused, never queued or partly started.
+max_compartments: 4
+# One refexec per child, bound to the child's volume: its program and the
+# template rendered into each child's refexec config (deploy/refexec).
+refexec:
+  command: [refexec]
+  image: docker.io/library/busybox:1.36.1
+  timeout: 2m
+  limits:
+    memory: 256m
+    cpus: "1"
+    pids: 64
+  max_compartments: 2
+  env_allow: []
