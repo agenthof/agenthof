@@ -73,9 +73,9 @@ type Event struct {
 	Tool             string    `json:"tool,omitempty"`              // set by tool_call: the tool name invoked (or attempted)
 	ArgsSHA          string    `json:"args_sha,omitempty"`          // set by tool_call: sha256 of the raw call arguments (never the args themselves)
 	Command          []string  `json:"command,omitempty"`           // set by exec: the reported argv
-	ExitCode         *int      `json:"exit_code,omitempty"`         // set by exec attest: pointer so 0 (success) is distinct from absent
-	OutputSHA        string    `json:"output_sha,omitempty"`        // set by exec: sha256 of the command output as reported — by the agent (attested) or by the runtime over the output it returned (runtime); set by spawn: sha256 of the child's final artifact; never the output or the artifact
-	Mode             string    `json:"mode,omitempty"`              // set by exec: "attested" (the agent's report) or "runtime" (a declared runtime ran it first-hand; see RuntimeAttestation)
+	ExitCode         *int      `json:"exit_code,omitempty"`         // set by exec: pointer so 0 (success) is distinct from absent
+	OutputSHA        string    `json:"output_sha,omitempty"`        // set by exec: the runtime's sha256 of the output it returned (on a historical attested event, the hash the agent reported); set by spawn: sha256 of the child's final artifact; never the output or the artifact
+	Mode             string    `json:"mode,omitempty"`              // set by exec: "runtime" (a declared runtime ran it first-hand; see RuntimeAttestation). Ledgers written before exec became first-hand only carry "attested" (the agent's own report); the field is read and rendered verbatim
 	Model            string    `json:"model,omitempty"`             // set by model_call: the logical model requested
 	PromptTokens     *int      `json:"prompt_tokens,omitempty"`     // set by model_call (non-streaming): usage
 	CompletionTokens *int      `json:"completion_tokens,omitempty"` // set by model_call (non-streaming): usage
@@ -84,12 +84,12 @@ type Event struct {
 	ChildWorkflow    string    `json:"child_workflow,omitempty"`    // set by spawn: the child's workflow
 	Depth            int       `json:"depth,omitempty"`             // set by spawn: the child's depth in the delegation tree (this run's depth + 1)
 	// RuntimeAttestation is set by tool_call when the resource declares a
-	// trusted runtime (runtime: refbridge) and by exec when the agent's exec
-	// door is first-hand (exec.mode: runtime, served by refexec): that
-	// runtime's FIRST-HAND account of the call — which command it ran, which
-	// process it held, with which environment variable NAMES. It is the
-	// runtime's word, not the agent's (an exec with Mode "attested" is the
-	// agent's), and never a value.
+	// trusted runtime (runtime: refbridge) and by exec, whose door is
+	// first-hand (served by refexec): that runtime's FIRST-HAND account of
+	// the call — which command it ran, which process it held, with which
+	// environment variable NAMES. It is the runtime's word, not the agent's
+	// (a historical exec event with Mode "attested" is the agent's, and
+	// carries none), and never a value.
 	RuntimeAttestation *RuntimeAttestation `json:"runtime_attestation,omitempty"`
 	Actor              string              `json:"actor,omitempty"`     // reserved: delegation — the acting agent
 	Principal          string              `json:"principal,omitempty"` // reserved: delegation — the initiating human/system
