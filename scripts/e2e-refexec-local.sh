@@ -276,12 +276,10 @@ echo "$AUDIT" | grep -qF "exec touch $WORK/canary refused — command is not on 
 [ ! -e "$WORK/canary" ] || fail "an off-allowlist command ran"
 [ "$(grep -c 'compartment started' "$WORK/refexec.err")" = 2 ] || fail "the runtime was asked to run something it should not have been (want 2 starts: env, false)"
 
-# 4. Path gating: attest is refused on the first-hand agent; run is refused
-#    on the agent that declares none. Both are recorded.
-run exec-runner "exec-attest:env"
-echo "$OUT" | grep -q "finished: succeeded" || fail "exec-attest step (which reports the status) did not finish"
-[ -f "$WORK/artifacts/$(printf 'attest:403' | sha_stdin)" ] || fail "attest on a first-hand agent must be answered 403"
-echo "$AUDIT" | grep -q "exec env refused — exec on this agent is first-hand" || fail "attest refusal not recorded"
+# 4. Path gating: /exec/run is refused — and recorded — on an agent that
+#    declares no exec. (The retired agent-asserted routes' recorded refusal
+#    is proved in-process: internal/rungateway/exec_test.go and
+#    cmd/agenthof/testdata/script/door_exec_runtime.txtar.)
 run exec-none "exec-run:env"
 echo "$OUT" | grep -q "finished: failed" || fail "run on an agent that declares no exec must fail the step"
 echo "$AUDIT" | grep -q "exec env refused — first-hand exec is not declared for this agent" || fail "run refusal not recorded"
