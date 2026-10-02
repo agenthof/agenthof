@@ -416,13 +416,19 @@ func TestExecRunStopWaitsAndRecordsCancelledCall(t *testing.T) {
 }
 
 func TestStartRefusesFirstHandAgentWithoutTimeoutOrUnixURL(t *testing.T) {
+	notRefexec := firstHandAgent("unix:///tmp/x.sock", time.Minute, config.ExecEntry{Exe: "cat"})
+	notRefexec.Exec.Runtime = "podman" // valid url + timeout, but not the first-hand runtime
+	emptyRuntime := firstHandAgent("unix:///tmp/x.sock", time.Minute, config.ExecEntry{Exe: "cat"})
+	emptyRuntime.Exec.Runtime = ""
 	for name, agent := range map[string]config.AgentDef{
-		"no timeout": firstHandAgent("unix:///tmp/x.sock", 0, config.ExecEntry{Exe: "cat"}),
-		"https url":  firstHandAgent("https://exec.example/run", time.Minute, config.ExecEntry{Exe: "cat"}),
+		"no timeout":    firstHandAgent("unix:///tmp/x.sock", 0, config.ExecEntry{Exe: "cat"}),
+		"https url":     firstHandAgent("https://exec.example/run", time.Minute, config.ExecEntry{Exe: "cat"}),
+		"wrong runtime": notRefexec,
+		"empty runtime": emptyRuntime,
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
-			if _, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {}); err == nil || !strings.Contains(err.Error(), "requires a unix:// url and a positive timeout") {
+			if _, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {}); err == nil || !strings.Contains(err.Error(), "must be refexec with a unix:// url and a positive timeout") {
 				t.Fatalf("Start err = %v, want the fail-closed refusal", err)
 			}
 		})

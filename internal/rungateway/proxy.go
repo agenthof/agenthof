@@ -161,12 +161,14 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 
 	logger := p.logger.With("run", bind.RunID, "agent", agent.Name)
 
-	// Registry validation already rejects an exec block without a unix://
-	// url or a timeout, but Start is reachable without the registry, so it
-	// fails closed on both rather than dialing nowhere or forever.
-	if agent.Exec.Declared() && (!strings.HasPrefix(p.execURLFor(agent), config.UnixScheme) || agent.Exec.Timeout <= 0) {
-		logger.Error("gateway start refused", "reason", "exec needs a unix:// runtime url and a positive timeout")
-		return "", "", fmt.Errorf("exec runtime %q requires a unix:// url and a positive timeout", agent.Exec.Runtime)
+	// Registry validation already rejects an exec block that is not first-hand
+	// (runtime: refexec) or lacks a unix:// url or a timeout, but Start is
+	// reachable without the registry, so it fails closed on all three rather
+	// than dialing nowhere, forever, or running a command the runtime then
+	// disowns at attestation.
+	if agent.Exec.Declared() && (agent.Exec.Runtime != "refexec" || !strings.HasPrefix(p.execURLFor(agent), config.UnixScheme) || agent.Exec.Timeout <= 0) {
+		logger.Error("gateway start refused", "reason", "exec must be first-hand (runtime: refexec) with a unix:// url and a positive timeout")
+		return "", "", fmt.Errorf("exec runtime %q must be refexec with a unix:// url and a positive timeout", agent.Exec.Runtime)
 	}
 
 	// Build the per-resource allowlist. Registry validation already rejects
