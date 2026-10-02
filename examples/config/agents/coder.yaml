@@ -6,10 +6,14 @@ instruction: |
 output: patch
 execution: fronted
 endpoint: http://127.0.0.1:8080/
-# Attested exec door: the agent reports the command it ran, Agenthof records
-# that report, and Agenthof does not run the command itself.
+# First-hand exec door: the agent asks Agenthof to run an allowlisted command,
+# refexec (deploy/refexec) runs it in a no-network compartment and attests
+# what ran, and Agenthof records that account. Agenthof never runs the
+# command itself. The socket is dialed only when a step calls /exec/run.
 exec:
-  mode: attested
+  runtime: refexec
+  url: unix:///run/agenthof-exec/refexec.sock
+  timeout: 2m
   allow:
     - exe: "go"
       args_prefix: ["test"]

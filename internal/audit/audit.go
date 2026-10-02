@@ -171,8 +171,9 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 // an exec line, if any: the party that ran it, its argv, the process it
 // held, and that process's generation. Rendered on succeeded and failed
 // lines alike — a non-zero exit is still a command the runtime ran. It is
-// the runtime's first-hand word, distinct from an exec event's "attested",
-// which is the agent's.
+// the runtime's first-hand word; a historical exec event tagged "attested"
+// (an agent's own report, from before exec became first-hand only) carries
+// none and renders its mode verbatim.
 func runtimeAttested(e engine.Event) string {
 	a := e.RuntimeAttestation
 	if a == nil {

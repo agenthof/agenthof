@@ -23,8 +23,8 @@ relicense your contribution out from under you.
 - Format with `gofmt`; CI enforces it, plus `go vet`, golangci-lint,
   govulncheck, gitleaks, and a FIPS build gate (`GOFIPS140=latest`).
 - The constitution (`docs/constitution.md`) is binding: additive-only ledger
-  schema, commands only on the config allowlist (attested; Agenthof does not
-  run them), no secrets in config or logs.
+  schema, commands only on the config allowlist (run first-hand by an operator-side
+  runtime; Agenthof does not run them), no secrets in config or logs.
 - Every feature, and every new event type, must trace to a specific
   constitution article or to a concept documented in `docs/concepts.md`. If
   it can't be traced, it doesn't ship.

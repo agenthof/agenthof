@@ -111,7 +111,7 @@ func (r *eventRecorder) execs() []engine.Event {
 
 func firstHandAgent(url string, timeout time.Duration, allow ...config.ExecEntry) config.AgentDef {
 	return config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
-		Exec: config.ExecConfig{Mode: "runtime", Runtime: "refexec", URL: url, Timeout: timeout, Allow: allow}}
+		Exec: config.ExecConfig{Runtime: "refexec", URL: url, Timeout: timeout, Allow: allow}}
 }
 
 func startAgentProxy(t *testing.T, agent config.AgentDef, rec *eventRecorder) (base, token string, p *Gateway) {
@@ -214,15 +214,39 @@ func TestExecRunUnrecordableCommandIsRefusedNotDialed(t *testing.T) {
 
 func TestExecRunRefusedWhenNotDeclared(t *testing.T) {
 	rec := &eventRecorder{}
-	attested := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
-		Exec: config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "cat"}}}}
-	base, token, _ := startAgentProxy(t, attested, rec)
+	noExec := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run"}
+	base, token, _ := startAgentProxy(t, noExec, rec)
 	code, _ := execPost(t, base, "exec/run", token, `{"command":["cat","x"]}`)
 	if code != 403 {
 		t.Fatalf("code=%d, want 403", code)
 	}
 	if e := onlyExec(t, rec); e.Status != "refused" || e.Reason != reasonExecRunNotDeclared {
 		t.Fatalf("event = %+v", e)
+	}
+}
+
+// TestAssertedRoutesRefusedWithoutExec: exec is first-hand only, so the
+// retired agent-asserted routes answer a RECORDED 403 on every agent, one
+// that declares no exec included — never a fall-through to the MCP handler
+// at / with no ledger line.
+func TestAssertedRoutesRefusedWithoutExec(t *testing.T) {
+	rec := &eventRecorder{}
+	noExec := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run"}
+	base, token, _ := startAgentProxy(t, noExec, rec)
+	if code, body := execPost(t, base, "exec/authorize", token, `{"command":["true"]}`); code != 403 || !strings.Contains(body, reasonExecFirstHandOnly) {
+		t.Fatalf("authorize code=%d body=%q, want 403 with the fixed reason", code, body)
+	}
+	if code, _ := execPost(t, base, "exec/attest", token, `{"command":["true"],"exit":0,"output_sha":"aa"}`); code != 403 {
+		t.Fatalf("attest code=%d, want 403", code)
+	}
+	ev := rec.execs()
+	if len(ev) != 2 {
+		t.Fatalf("want two refused events, got %+v", ev)
+	}
+	for _, e := range ev {
+		if e.Status != "refused" || e.Reason != reasonExecFirstHandOnly || e.Mode != "runtime" || e.ExitCode != nil || len(e.Command) != 1 || e.Command[0] != "true" {
+			t.Fatalf("event = %+v", e)
+		}
 	}
 }
 
@@ -392,13 +416,19 @@ func TestExecRunStopWaitsAndRecordsCancelledCall(t *testing.T) {
 }
 
 func TestStartRefusesFirstHandAgentWithoutTimeoutOrUnixURL(t *testing.T) {
+	notRefexec := firstHandAgent("unix:///tmp/x.sock", time.Minute, config.ExecEntry{Exe: "cat"})
+	notRefexec.Exec.Runtime = "podman" // valid url + timeout, but not the first-hand runtime
+	emptyRuntime := firstHandAgent("unix:///tmp/x.sock", time.Minute, config.ExecEntry{Exe: "cat"})
+	emptyRuntime.Exec.Runtime = ""
 	for name, agent := range map[string]config.AgentDef{
-		"no timeout": firstHandAgent("unix:///tmp/x.sock", 0, config.ExecEntry{Exe: "cat"}),
-		"https url":  firstHandAgent("https://exec.example/run", time.Minute, config.ExecEntry{Exe: "cat"}),
+		"no timeout":    firstHandAgent("unix:///tmp/x.sock", 0, config.ExecEntry{Exe: "cat"}),
+		"https url":     firstHandAgent("https://exec.example/run", time.Minute, config.ExecEntry{Exe: "cat"}),
+		"wrong runtime": notRefexec,
+		"empty runtime": emptyRuntime,
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
-			if _, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {}); err == nil || !strings.Contains(err.Error(), "requires a unix:// url and a positive timeout") {
+			if _, _, err := p.Start(context.Background(), testBinding(), agent, func(engine.Event) {}); err == nil || !strings.Contains(err.Error(), "must be refexec with a unix:// url and a positive timeout") {
 				t.Fatalf("Start err = %v, want the fail-closed refusal", err)
 			}
 		})

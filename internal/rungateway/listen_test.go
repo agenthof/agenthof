@@ -84,7 +84,7 @@ func TestStartUnixSocketServesAuthedRequests(t *testing.T) {
 		},
 	}}
 
-	req, err := http.NewRequest(http.MethodPost, "http://agenthof/exec/authorize", strings.NewReader(`{"command":["x"]}`))
+	req, err := http.NewRequest(http.MethodPost, "http://agenthof/exec/run", strings.NewReader(`{"command":["x"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,11 +95,11 @@ func TestStartUnixSocketServesAuthedRequests(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("authed status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("authed status = %d, want 403 (the exec door answered — this agent declares no exec — rather than the auth middleware)", resp.StatusCode)
 	}
 
-	req2, err := http.NewRequest(http.MethodPost, "http://agenthof/exec/authorize", strings.NewReader(`{"command":["x"]}`))
+	req2, err := http.NewRequest(http.MethodPost, "http://agenthof/exec/run", strings.NewReader(`{"command":["x"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}

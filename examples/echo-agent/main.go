@@ -13,9 +13,8 @@
 //	only:<agent>:<directive>             run <directive> only when this step's agent is <agent>; otherwise
 //	                                     the artifact is "skipped" — how one script drives the different
 //	                                     agents of a multi-step workflow
-//	exec-run:<argv>                      ask Agenthof's exec door to run argv (first-hand, when
-//	                                     the agent's exec is mode runtime); the output is the artifact
-//	exec-attest:<argv>                   report argv through /exec/attest; the artifact is attest:<status>
+//	exec-run:<argv>                      ask Agenthof's exec door to run argv through the agent's
+//	                                     declared runtime; the output is the artifact
 //	spawn:<role>/<workflow>:<input>      ask Agenthof's spawn door to run a governed child run; the
 //	                                     artifact is "spawn <status> <child run id> <preview>" (a refusal
 //	                                     is an answer, reported the same way, not a failed step)
@@ -64,15 +63,15 @@ type response struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-func newMux(callGateway bool, workspace string) *http.ServeMux {
+func newMux(workspace string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleStep(w, r, callGateway, workspace)
+		handleStep(w, r, workspace)
 	})
 	return mux
 }
 
-func handleStep(w http.ResponseWriter, r *http.Request, callGateway bool, workspace string) {
+func handleStep(w http.ResponseWriter, r *http.Request, workspace string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -85,7 +84,6 @@ func handleStep(w http.ResponseWriter, r *http.Request, callGateway bool, worksp
 	w.Header().Set("Content-Type", "application/json")
 	proxyURL, token := r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token")
 	if isScript(req.Input) {
-		// The script reaches the gateway itself; no separate probe.
 		env := stepEnv{proxyURL: proxyURL, token: token, workspace: workspace, agent: req.Agent, runID: r.Header.Get("X-Agenthof-Run-Id")}
 		artifact, err := runScript(r.Context(), env, req.Input)
 		if err != nil {
@@ -95,16 +93,10 @@ func handleStep(w http.ResponseWriter, r *http.Request, callGateway bool, worksp
 		_ = json.NewEncoder(w).Encode(response{Artifact: artifact, Success: true})
 		return
 	}
-	if callGateway {
-		if err := probeGateway(r.Context(), proxyURL, token); err != nil {
-			_ = json.NewEncoder(w).Encode(response{Success: false, Reason: "gateway unreachable: " + err.Error()})
-			return
-		}
-	}
 	_ = json.NewEncoder(w).Encode(response{Artifact: req.Input, Success: true})
 }
 
-var directives = []string{"write:", "read:", "ls:", "touch-run:", "only:", "exec-run:", "exec-attest:", "spawn:", "spawn-parallel:", "sleep:"}
+var directives = []string{"write:", "read:", "ls:", "touch-run:", "only:", "exec-run:", "spawn:", "spawn-parallel:", "sleep:"}
 
 func isScript(input string) bool {
 	input = strings.TrimSpace(input)
@@ -198,12 +190,6 @@ func runOne(ctx context.Context, env stepEnv, part string) (string, error) {
 		return runOne(ctx, env, strings.TrimSpace(rest))
 	case strings.HasPrefix(part, "exec-run:"):
 		return execRun(ctx, env.proxyURL, env.token, strings.Fields(strings.TrimPrefix(part, "exec-run:")))
-	case strings.HasPrefix(part, "exec-attest:"):
-		status, err := execAttest(ctx, env.proxyURL, env.token, strings.Fields(strings.TrimPrefix(part, "exec-attest:")))
-		if err != nil {
-			return "", err
-		}
-		return "attest:" + strconv.Itoa(status), nil
 	case strings.HasPrefix(part, "spawn:"):
 		return spawnOne(ctx, env.proxyURL, env.token, strings.TrimPrefix(part, "spawn:"))
 	case strings.HasPrefix(part, "spawn-parallel:"):
@@ -253,17 +239,6 @@ func execRun(ctx context.Context, proxyURL, token string, argv []string) (string
 		return "", fmt.Errorf("exec-run: %s exited %d", argv[0], out.Exit)
 	}
 	return out.Output, nil
-}
-
-// execAttest reports argv as run with exit 0 and returns the door's status:
-// a first-hand agent is refused here, which the artifact then shows.
-func execAttest(ctx context.Context, proxyURL, token string, argv []string) (int, error) {
-	resp, err := postDoor(ctx, proxyURL, token, "/exec/attest", map[string]any{"command": argv, "exit": 0, "output_sha": ""})
-	if err != nil {
-		return 0, fmt.Errorf("exec-attest: %w", err)
-	}
-	_ = resp.Body.Close()
-	return resp.StatusCode, nil
 }
 
 // spawnOne asks the spawn door to run <role>/<workflow>:<input> and reports
@@ -339,21 +314,6 @@ func spawnParallel(ctx context.Context, proxyURL, token, spec string) ([]string,
 	return lines, nil
 }
 
-// probeGateway confirms the Agenthof gateway is reachable over the socket named
-// by proxyURL, by POSTing to /exec/authorize with the run token. A 200 (any
-// allowed value) means the socket path works end to end.
-func probeGateway(ctx context.Context, proxyURL, token string) error {
-	resp, err := postDoor(ctx, proxyURL, token, "/exec/authorize", map[string]any{"command": []string{"true"}})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("gateway returned %d", resp.StatusCode)
-	}
-	return nil
-}
-
 // postDoor POSTs a JSON body to one route of the per-run gateway, over the
 // gateway's Unix socket when proxyURL is unix://, with the run token.
 func postDoor(ctx context.Context, proxyURL, token, route string, body any) (*http.Response, error) {
@@ -394,11 +354,10 @@ func listenUnix(path string) (net.Listener, error) {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "TCP listen address (ignored when -socket is set)")
 	socket := flag.String("socket", "", "Unix socket path to listen on; overrides -addr")
-	callGateway := flag.Bool("call-gateway", false, "probe the Agenthof gateway (X-Agenthof-Proxy-URL) on each plain step")
 	workspace := flag.String("workspace", "/work", "directory the write: directive writes agent-note.txt into (the refbox workspace)")
 	flag.Parse()
 
-	srv := &http.Server{Handler: newMux(*callGateway, *workspace)}
+	srv := &http.Server{Handler: newMux(*workspace)}
 	var ln net.Listener
 	var err error
 	if *socket != "" {

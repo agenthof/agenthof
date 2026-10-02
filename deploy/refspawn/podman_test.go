@@ -256,7 +256,6 @@ func fakeAgent(args []string) int {
 	fs := flag.NewFlagSet("fake-agent", flag.ContinueOnError)
 	socket := fs.String("socket", "", "")
 	fs.String("workspace", "", "")
-	fs.Bool("call-gateway", false, "")
 	if err := fs.Parse(args); err != nil || *socket == "" {
 		return 2
 	}

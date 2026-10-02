@@ -63,10 +63,15 @@ type execRunResponse struct {
 	RuntimeAttestation any    `json:"runtime_attestation"`
 }
 
-// execAuthorizeHandler is the attested door's permission check. On an agent
-// whose exec is first-hand it refuses and records: the agent must not be
-// able to land an agent-asserted line on a door a runtime serves.
-func (p *Gateway) execAuthorizeHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
+// execAssertedHandler answers the two retired agent-asserted routes,
+// /exec/authorize and /exec/attest. Exec is first-hand only: there is no
+// agent-asserted exec to authorize or attest, so every call is refused and
+// recorded (every refusal is a ledger event). The routes stay registered so
+// a call to them is that recorded refusal, not a fall-through to the MCP
+// handler at / with no ledger line. The body is decoded only for the argv
+// the refusal records; attest's other fields are ignored. A body that is not
+// JSON is answered 400 and records nothing, as on /exec/run.
+func (p *Gateway) execAssertedHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Command []string `json:"command"`
@@ -75,63 +80,13 @@ func (p *Gateway) execAuthorizeHandler(bind engine.Binding, agent config.AgentDe
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		if agent.Exec.FirstHand() {
-			p.refuseAssertedExec(w, bind, agent, appendEvent, req.Command)
-			return
-		}
-		allowed := agent.Exec.Allows(req.Command)
-		if !allowed {
-			p.guardedAppend(appendEvent, engine.Event{
-				Type: "exec", Agent: agent.Name, Status: "refused",
-				Reason:  reasonExecNotAllowlisted,
-				Command: req.Command,
-				Mode:    "attested", Binding: bind,
-			})
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]bool{"allowed": allowed})
-	}
-}
-
-// execAttestHandler records the agent's own report of a command it ran. On
-// a first-hand agent it is refused and recorded, like authorize.
-func (p *Gateway) execAttestHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Command   []string `json:"command"`
-			Exit      *int     `json:"exit"`
-			OutputSHA string   `json:"output_sha"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		if agent.Exec.FirstHand() {
-			p.refuseAssertedExec(w, bind, agent, appendEvent, req.Command)
-			return
-		}
-		if req.Exit == nil {
-			http.Error(w, "exit is required", http.StatusBadRequest)
-			return
-		}
-		status := "succeeded"
-		if *req.Exit != 0 {
-			status = "failed"
-		}
-		exit := *req.Exit
-		p.guardedAppend(appendEvent, engine.Event{
-			Type: "exec", Agent: agent.Name, Status: status,
-			Command: req.Command, ExitCode: &exit, OutputSHA: req.OutputSHA,
-			Mode: "attested", Binding: bind,
-		})
-		w.WriteHeader(http.StatusNoContent)
+		p.refuseAssertedExec(w, bind, agent, appendEvent, req.Command)
 	}
 }
 
 // refuseAssertedExec records and answers the refusal of /exec/authorize or
-// /exec/attest on an agent whose exec door is first-hand. The event's mode
-// is the door the agent was refused at — the runtime's — so the line cannot
-// be read as an agent's report.
+// /exec/attest. The event's mode is the door's — the runtime's — so the line
+// cannot be read as an agent's report.
 func (p *Gateway) refuseAssertedExec(w http.ResponseWriter, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), argv []string) {
 	p.guardedAppend(appendEvent, engine.Event{
 		Type: "exec", Agent: agent.Name, Status: "refused",
@@ -194,7 +149,7 @@ func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, app
 			http.Error(w, reason, http.StatusBadGateway)
 		}
 
-		if !agent.Exec.FirstHand() {
+		if !agent.Exec.Declared() {
 			refuse(reasonExecRunNotDeclared)
 			return
 		}

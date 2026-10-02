@@ -168,28 +168,26 @@ provider key, and the tool gateway injects the resource credential. A
 non-conforming agent that already holds a key can still call a provider
 directly; the operator's sandbox is what prevents that, and Agenthof does
 not verify it.
-Allowlisted commands run in the operator's runtime and each is recorded, in
-one of two ways. Under `exec.mode: attested` the agent runs the command in
-its sandbox and reports it; Agenthof records the report and does not run or
-contain the command. Under `exec.mode: runtime` a trusted operator-side
-runtime — the reference one is `refexec`, a rootless-podman supervisor on
-the operator's host — runs the command on the agent's behalf and attests
-first-hand what ran; Agenthof records that account. Both are core. Agenthof
-itself never runs the command: exec has no credential to starve, so
-containment is the operator's runtime's job, and the first-hand record
-trusts that runtime, as the tool door trusts a declared bridge. The agent runs in an operator-provided sandbox.
+Allowlisted commands run in a trusted operator-side runtime — the reference
+one is `refexec`, a rootless-podman supervisor on the operator's host — that
+runs each command on the agent's behalf and attests first-hand what ran;
+Agenthof authorizes the command against the allowlist and records that
+account. There is no agent-asserted exec: an agent's own report of a command
+is refused at the door, and the refusal is recorded. Agenthof itself never
+runs the command: exec has no credential to starve, so containment is the
+operator's runtime's job, and the first-hand record trusts that runtime, as
+the tool door trusts a declared bridge. The agent runs in an operator-provided sandbox.
 That sandbox's network and exec confinement is required, and Agenthof does
 not verify it. A call that reaches the proxy for a tool the run cannot reach
 is recorded as a refusal too — the tool name and a fingerprint of the
 arguments, never the arguments themselves. A command the exec allowlist does
 not match is recorded as a refused `exec` event carrying the argv. An
-allowlisted command the agent then reports is recorded as an `exec` event
-tagged `attested`: the argv, the exit code, and a hash of the output the
-agent supplies, never the output body. An allowlisted command a declared
-runtime ran is recorded as an `exec` event tagged `runtime`: the argv, the
-exit code, the runtime's hash of the output it returned, and that runtime's
-first-hand account as `runtime_attestation` — the event never carries the
-output body. Every one of those doors writes to
+allowlisted command the declared runtime ran is recorded as an `exec` event
+tagged `runtime`: the argv, the exit code, the runtime's hash of the output
+it returned, and that runtime's first-hand account as `runtime_attestation`
+— the event never carries the output body. Ledgers written before exec
+became first-hand only may hold `exec` events tagged `attested` — an agent's
+own report; they still verify and render as written. Every one of those doors writes to
 the ledger. No change may add an unmediated network call, or a credential
 stored where an agent's config or runtime can read its value.
 

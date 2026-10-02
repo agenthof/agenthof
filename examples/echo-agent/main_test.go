@@ -35,7 +35,7 @@ func TestServesEchoOverUnixSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listenUnix: %v", err)
 	}
-	srv := &http.Server{Handler: newMux(false, "")}
+	srv := &http.Server{Handler: newMux("")}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
@@ -57,74 +57,13 @@ func TestServesEchoOverUnixSocket(t *testing.T) {
 	}
 }
 
-func TestProbesGatewayWhenEnabled(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "gw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	gwSock := filepath.Join(dir, "gw.sock")
-
-	gwLn, err := listenUnix(gwSock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var mu sync.Mutex
-	var gotAuth string
-	gw := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		gotAuth = r.Header.Get("Authorization")
-		mu.Unlock()
-		if r.URL.Path != "/exec/authorize" {
-			http.Error(w, "no", http.StatusNotFound)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]bool{"allowed": true})
-	})}
-	go func() { _ = gw.Serve(gwLn) }()
-	t.Cleanup(func() { _ = gw.Close() })
-
-	agentSock := filepath.Join(dir, "agent.sock")
-	aLn, err := listenUnix(agentSock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	asrv := &http.Server{Handler: newMux(true, "")}
-	go func() { _ = asrv.Serve(aLn) }()
-	t.Cleanup(func() { _ = asrv.Close() })
-
-	body, err := json.Marshal(request{Input: "hi", Agent: "a"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := http.NewRequest(http.MethodPost, "http://agenthof/", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("X-Agenthof-Proxy-URL", "unix://"+gwSock)
-	req.Header.Set("X-Agenthof-Run-Token", "tok123")
-	resp, err := unixClient(agentSock).Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	var out response
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	if !out.Success {
-		t.Fatalf("step failed: %q", out.Reason)
-	}
-	mu.Lock()
-	auth := gotAuth
-	mu.Unlock()
-	if auth != "Bearer tok123" {
-		t.Fatalf("gateway saw auth %q, want Bearer tok123", auth)
-	}
-}
-
-func TestProbeFailsStepWhenGatewayUnreachable(t *testing.T) {
-	asrv := httptestUnix(t, newMux(true, ""))
+// TestPlainStepNeedsNoGateway: a plain step echoes with no gateway probe. The
+// retired probe POSTed /exec/authorize, which now answers a recorded 403 on
+// every agent; probing /exec/run instead would record a refused exec per
+// plain step of an exec-less agent. The model call is the gateway-reach
+// evidence; the echo agent makes none.
+func TestPlainStepNeedsNoGateway(t *testing.T) {
+	asrv := httptestUnix(t, newMux(""))
 	body, err := json.Marshal(request{Input: "hi", Agent: "a"})
 	if err != nil {
 		t.Fatal(err)
@@ -144,8 +83,8 @@ func TestProbeFailsStepWhenGatewayUnreachable(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Success {
-		t.Fatal("step should fail when the gateway socket is unreachable")
+	if !out.Success || out.Artifact != "hi" {
+		t.Fatalf("got %+v, want the echo with no gateway reached", out)
 	}
 }
 
@@ -172,7 +111,7 @@ func httptestUnix(t *testing.T, h http.Handler) unixSrv {
 func TestHandleStepRejectsGET(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://agenthof/", nil)
 	rec := httptest.NewRecorder()
-	newMux(false, "").ServeHTTP(rec, req)
+	newMux("").ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET status = %d, want 405", rec.Code)
 	}
@@ -181,26 +120,23 @@ func TestHandleStepRejectsGET(t *testing.T) {
 func TestHandleStepRejectsBadJSON(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "http://agenthof/", strings.NewReader("{not json"))
 	rec := httptest.NewRecorder()
-	newMux(false, "").ServeHTTP(rec, req)
+	newMux("").ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad-JSON status = %d, want 400", rec.Code)
 	}
 }
 
-// fakeGateway serves the exec door's routes on a Unix socket: /exec/run
-// answers a fixed exit and output (or a status) after checking the run
-// token and the argv; /exec/attest and /exec/authorize answer a status.
+// fakeGateway serves the gateway's routes on a Unix socket: /exec/run answers
+// a fixed exit and output (or a status) after checking the run token and the
+// argv; /spawn answers a child's outcome.
 type fakeGateway struct {
-	sock       string
-	runStatus  int
-	runExit    int
-	runOutput  string
-	attest     int
-	authorize  int
-	mu         sync.Mutex
-	lastArgv   []string
-	lastRoute  string
-	authorized int
+	sock      string
+	runStatus int
+	runExit   int
+	runOutput string
+	mu        sync.Mutex
+	lastArgv  []string
+	lastRoute string
 
 	spawnStatus int           // 0 means 200
 	spawnDelay  time.Duration // how long each /spawn takes to answer
@@ -213,12 +149,6 @@ func newFakeGateway(t *testing.T, g *fakeGateway) *fakeGateway {
 	// Zero statuses mean "the door's normal answer".
 	if g.runStatus == 0 {
 		g.runStatus = http.StatusOK
-	}
-	if g.attest == 0 {
-		g.attest = http.StatusNoContent
-	}
-	if g.authorize == 0 {
-		g.authorize = http.StatusOK
 	}
 	dir, err := os.MkdirTemp("/tmp", "eg")
 	if err != nil {
@@ -253,17 +183,6 @@ func newFakeGateway(t *testing.T, g *fakeGateway) *fakeGateway {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"exit": g.runExit, "output": g.runOutput, "truncated": false})
-		case "/exec/attest":
-			w.WriteHeader(g.attest)
-		case "/exec/authorize":
-			g.mu.Lock()
-			g.authorized++
-			g.mu.Unlock()
-			if g.authorize != http.StatusOK {
-				http.Error(w, "refused", g.authorize)
-				return
-			}
-			_ = json.NewEncoder(w).Encode(map[string]bool{"allowed": true})
 		case "/spawn":
 			g.mu.Lock()
 			g.lastSpawn = []string{req.Role, req.Workflow, req.Input}
@@ -317,7 +236,7 @@ func step(t *testing.T, mux *http.ServeMux, gwSock, input string) response {
 func TestScriptWritesNoteAndRunsExec(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusOK, runExit: 0, runOutput: "hello-1\n"})
 	ws := t.TempDir()
-	out := step(t, newMux(false, ws), gw.sock, "write:hello-1; exec-run:cat /work/agent-note.txt")
+	out := step(t, newMux(ws), gw.sock, "write:hello-1; exec-run:cat /work/agent-note.txt")
 	if !out.Success || out.Artifact != "hello-1\n" {
 		t.Fatalf("got %+v, want the command's output as the artifact", out)
 	}
@@ -334,7 +253,7 @@ func TestScriptWritesNoteAndRunsExec(t *testing.T) {
 
 func TestExecRunNonZeroExitFailsStep(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusOK, runExit: 1, runOutput: "no\n"})
-	out := step(t, newMux(false, t.TempDir()), gw.sock, "exec-run:false")
+	out := step(t, newMux(t.TempDir()), gw.sock, "exec-run:false")
 	if out.Success || !strings.Contains(out.Reason, "exec-run: false exited 1") {
 		t.Fatalf("got %+v, want a failed step naming the exit", out)
 	}
@@ -342,7 +261,7 @@ func TestExecRunNonZeroExitFailsStep(t *testing.T) {
 
 func TestExecRunRefusalFailsStepWithStatus(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusForbidden})
-	out := step(t, newMux(false, t.TempDir()), gw.sock, "exec-run:rm -rf /")
+	out := step(t, newMux(t.TempDir()), gw.sock, "exec-run:rm -rf /")
 	if out.Success || !strings.Contains(out.Reason, "exec-run: gateway returned 403") {
 		t.Fatalf("got %+v", out)
 	}
@@ -350,7 +269,7 @@ func TestExecRunRefusalFailsStepWithStatus(t *testing.T) {
 
 func TestExecRunEmptyCommandFailsStep(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusOK})
-	out := step(t, newMux(false, t.TempDir()), gw.sock, "exec-run:  ")
+	out := step(t, newMux(t.TempDir()), gw.sock, "exec-run:  ")
 	if out.Success || !strings.Contains(out.Reason, "exec-run: no command") {
 		t.Fatalf("got %+v", out)
 	}
@@ -361,51 +280,17 @@ func TestExecRunEmptyCommandFailsStep(t *testing.T) {
 	}
 }
 
-func TestExecAttestReportsStatus(t *testing.T) {
-	gw := newFakeGateway(t, &fakeGateway{attest: http.StatusForbidden})
-	out := step(t, newMux(false, t.TempDir()), gw.sock, "exec-attest:cat x")
-	if !out.Success || out.Artifact != "attest:403" {
-		t.Fatalf("got %+v, want attest:403 as the artifact", out)
-	}
-	gw.mu.Lock()
-	defer gw.mu.Unlock()
-	if gw.lastRoute != "/exec/attest" {
-		t.Fatalf("gateway saw %s", gw.lastRoute)
-	}
-}
-
 func TestUnknownDirectiveFailsStep(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusOK})
-	out := step(t, newMux(false, t.TempDir()), gw.sock, "exec-run:true; explode:now")
+	out := step(t, newMux(t.TempDir()), gw.sock, "exec-run:true; explode:now")
 	if out.Success || !strings.Contains(out.Reason, `unknown directive "explode:now"`) {
 		t.Fatalf("got %+v", out)
 	}
 }
 
-func TestScriptStepSkipsTheProbe(t *testing.T) {
-	// A first-hand agent's gateway refuses /exec/authorize; a script step must
-	// not probe it (the script reaches the gateway itself), or every step of
-	// such an agent would land a refused line and fail.
-	gw := newFakeGateway(t, &fakeGateway{runStatus: http.StatusOK, runOutput: "ok\n", authorize: http.StatusForbidden})
-	out := step(t, newMux(true, t.TempDir()), gw.sock, "exec-run:true")
-	if !out.Success || out.Artifact != "ok\n" {
-		t.Fatalf("got %+v", out)
-	}
-	gw.mu.Lock()
-	authorized := gw.authorized
-	gw.mu.Unlock()
-	if authorized != 0 {
-		t.Fatal("a script step must not probe /exec/authorize")
-	}
-	plain := step(t, newMux(true, t.TempDir()), gw.sock, "hello")
-	if plain.Success {
-		t.Fatal("a plain step still probes, and this gateway refuses the probe")
-	}
-}
-
 func TestSpawnDirectiveReportsChildOutcome(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{})
-	out := step(t, newMux(false, t.TempDir()), gw.sock, "spawn:worker/child-wf:hello: with colons")
+	out := step(t, newMux(t.TempDir()), gw.sock, "spawn:worker/child-wf:hello: with colons")
 	if !out.Success || out.Artifact != "spawn succeeded r-child [worker/child-wf] hello: with colons" {
 		t.Fatalf("got %+v", out)
 	}
@@ -418,7 +303,7 @@ func TestSpawnDirectiveReportsChildOutcome(t *testing.T) {
 
 func TestSpawnRefusalIsAnAnswerNotAFailedStep(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{spawnStatus: http.StatusForbidden})
-	out := step(t, newMux(false, t.TempDir()), gw.sock, "spawn:worker/child-wf:x")
+	out := step(t, newMux(t.TempDir()), gw.sock, "spawn:worker/child-wf:x")
 	if !out.Success || out.Artifact != "spawn refused - spawn would exceed max_parallel" {
 		t.Fatalf("got %+v, want the refusal reported in the artifact", out)
 	}
@@ -427,7 +312,7 @@ func TestSpawnRefusalIsAnAnswerNotAFailedStep(t *testing.T) {
 func TestSpawnDirectiveRejectsBadSpec(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{})
 	for _, input := range []string{"spawn:worker:x", "spawn:/child-wf:x", "spawn:worker/child-wf"} {
-		out := step(t, newMux(false, t.TempDir()), gw.sock, input)
+		out := step(t, newMux(t.TempDir()), gw.sock, input)
 		if out.Success || !strings.Contains(out.Reason, "spawn: want <role>/<workflow>:<input>") {
 			t.Fatalf("%q: got %+v", input, out)
 		}
@@ -442,7 +327,7 @@ func TestSpawnDirectiveRejectsBadSpec(t *testing.T) {
 func TestSpawnParallelRunsConcurrently(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{spawnDelay: 300 * time.Millisecond})
 	start := time.Now()
-	out := step(t, newMux(false, t.TempDir()), gw.sock, "spawn-parallel:3:worker/child-wf:x")
+	out := step(t, newMux(t.TempDir()), gw.sock, "spawn-parallel:3:worker/child-wf:x")
 	elapsed := time.Since(start)
 	if !out.Success {
 		t.Fatalf("got %+v", out)
@@ -469,7 +354,7 @@ func TestSpawnParallelRunsConcurrently(t *testing.T) {
 func TestSpawnParallelRejectsBadCount(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{})
 	for _, input := range []string{"spawn-parallel:0:worker/child-wf:x", "spawn-parallel:33:worker/child-wf:x", "spawn-parallel:two:worker/child-wf:x"} {
-		out := step(t, newMux(false, t.TempDir()), gw.sock, input)
+		out := step(t, newMux(t.TempDir()), gw.sock, input)
 		if out.Success || !strings.Contains(out.Reason, "spawn-parallel: want <n>:<role>/<workflow>:<input>") {
 			t.Fatalf("%q: got %+v", input, out)
 		}
@@ -478,11 +363,11 @@ func TestSpawnParallelRejectsBadCount(t *testing.T) {
 
 func TestSleepDirective(t *testing.T) {
 	gw := newFakeGateway(t, &fakeGateway{})
-	out := step(t, newMux(false, t.TempDir()), gw.sock, "sleep:0")
+	out := step(t, newMux(t.TempDir()), gw.sock, "sleep:0")
 	if !out.Success || out.Artifact != "slept 0s" {
 		t.Fatalf("got %+v", out)
 	}
-	out = step(t, newMux(false, t.TempDir()), gw.sock, "sleep:-1")
+	out = step(t, newMux(t.TempDir()), gw.sock, "sleep:-1")
 	if out.Success || !strings.Contains(out.Reason, "sleep: want a whole number of seconds") {
 		t.Fatalf("got %+v", out)
 	}

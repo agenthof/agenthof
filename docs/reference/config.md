@@ -156,39 +156,40 @@ An agent uses the doors it needs and ignores the rest. See
 ### `exec`
 
 Optional, and only on a `fronted` agent. Declares the commands the agent may
-run in the operator's sandbox. Agenthof authorizes every command against
-`allow` and records the result; it never runs the command itself. With
-`mode: attested` the agent runs the command and reports it, and the operator's
-sandbox is what confines execution. With `mode: runtime` a trusted
-operator-side runtime (`refexec`) runs the command first-hand over a `unix://`
-socket and Agenthof records that first-hand account (`runtime_attestation`).
+have run on its behalf. The exec door is first-hand: Agenthof authorizes
+every command against `allow`, asks the declared operator-side runtime
+(`refexec`) to run it over a `unix://` socket, and records that runtime's
+first-hand account (`runtime_attestation`). Agenthof never runs the command
+itself, and the agent never runs it either. The door requires an
+operator-run runtime — a Linux host with rootless podman — and there is no
+exec without one.
 
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
-| Mode | `mode` | string | yes when `exec` is set | — |
-| Allow | `allow` | list of objects | yes, non-empty, when `mode` is set | — |
-| Runtime | `runtime` | string | yes when `mode` is `runtime`; must be absent otherwise | — |
-| URL | `url` | string | yes when `mode` is `runtime`; must be absent otherwise | — |
-| Timeout | `timeout` | duration string | yes when `mode` is `runtime`; must be absent otherwise | — |
+| Runtime | `runtime` | string | yes; `refexec` is the only value implemented | — |
+| URL | `url` | string | yes; `unix://<absolute path>` of the runtime's socket | — |
+| Timeout | `timeout` | duration string | yes; at least `1s`, such as `5m` | — |
+| Allow | `allow` | list of objects | yes, non-empty | — |
 
-`mode` accepts `attested` (the agent runs the command in its sandbox and
-reports it — this section) and `runtime` (a trusted operator-side runtime
-runs it on the agent's behalf and attests it first-hand; its fields are
-described with it below). Both are core. Agenthof itself running the command
-is not a mode: any other value, including an empty `mode` on a block that
-still lists `allow`, is rejected at `apply` with `bad-exec-config`.
+`runtime` names the trusted operator-side runtime that runs the command —
+only `refexec` is implemented — `url` is that runtime's Unix socket as
+`unix://<absolute path>` (a trusted runtime is reached only over a local
+socket, as `runtime: refbridge` on a tool resource; never a path under
+`refbox_socket_dir`, which is mounted into agent compartments), and
+`timeout` is the per-command deadline Agenthof enforces on its call to the
+runtime: a duration string of at least `1s`, such as `5m`. Keep it below
+the step timeout, which otherwise fails the step first. Under spawn `url`
+is not consulted: a spawned child's exec door reaches the child's own
+runtime, bound to the child's workspace.
 
-With `mode: runtime`, `runtime` names the trusted operator-side runtime that
-runs the command — only `refexec` is implemented — `url` is that runtime's
-Unix socket as `unix://<absolute path>` (a trusted runtime is reached only
-over a local socket, as `runtime: refbridge` on a tool resource; never a
-path under `refbox_socket_dir`, which is mounted into agent compartments),
-and `timeout` is the per-command deadline Agenthof enforces on its call to
-the runtime: a duration string of at least `1s`, such as `5m`. Keep it below
-the step timeout, which otherwise fails the step first. All three are
-rejected with `mode: attested`.
-Under spawn `url` is likewise not consulted: a spawned child's exec door
-reaches the child's own runtime, bound to the child's workspace.
+The key `mode` is retired. An `exec` block that still carries it — `mode:
+attested` or `mode: runtime` — is rejected at `apply` with
+`bad-exec-config: line N: exec.mode is no longer supported; exec is always
+first-hand via a runtime (set runtime/url/timeout)`. The key is never
+silently dropped: exec is first-hand only, and a config that says otherwise
+is refused, not reinterpreted. Ledgers written before this change may hold
+`exec` events with `mode: attested`; they still verify and render — see
+[`lifecycle-exec.md`](../lifecycle-exec.md#the-retired-agent-asserted-routes).
 
 Each `allow` entry:
 
@@ -197,20 +198,21 @@ Each `allow` entry:
 | Exe | `exe` | string | yes | — |
 | ArgsPrefix | `args_prefix` | list of strings | no | empty (any arguments) |
 
-A reported argv matches an entry when `argv[0]` equals `exe` exactly (no
-glob) and `args_prefix` is a prefix of the arguments that follow. The rest of
-the argv is unconstrained. An empty `args_prefix` matches any invocation of
-that `exe`. An argv shorter than the prefix does not match.
+An argv matches an entry when `argv[0]` equals `exe` exactly (no glob) and
+`args_prefix` is a prefix of the arguments that follow. The rest of the argv
+is unconstrained. An empty `args_prefix` matches any invocation of that
+`exe`. An argv shorter than the prefix does not match.
 
 `apply` rejects, all with `bad-exec-config`:
 
 - `exec` on an agent whose effective execution is not `fronted`;
-- `mode` set to anything other than `attested` or `runtime`;
-- `mode` set with an empty `allow`;
-- an `allow` entry whose `exe` is empty;
-- `runtime`, `url` or `timeout` set with `mode: attested`;
-- with `mode: runtime`: `runtime` other than `refexec`, a `url` that is not an
-  absolute `unix://` path, or a `timeout` below `1s` (or absent).
+- a `mode` key (retired; see above);
+- `runtime` absent, or anything other than `refexec`;
+- a `url` that is not an absolute `unix://` path, or one inside
+  `refbox_socket_dir`;
+- a `timeout` absent or below `1s`;
+- an empty `allow`;
+- an `allow` entry whose `exe` is empty.
 
 Allowlisting an executable trusts that program's whole capability surface.
 `exe: go` with `args_prefix: [test]` still permits `go test` with whatever
@@ -218,7 +220,8 @@ flags that program accepts. An entry whose `exe` is a shell or interpreter
 and whose prefix is an eval flag (`sh -c`, `python -c`, and the like) makes
 the allowlist match arbitrary commands while the ledger still records them as
 allowlisted. Agenthof does not detect or reject those entries. Writing a
-safe allowlist is the operator's obligation, the same way the sandbox is.
+safe allowlist is the operator's obligation; the runtime's compartment is
+what bounds the damage a bad entry can do.
 
 **Example:**
 
@@ -227,7 +230,9 @@ name: builder
 execution: fronted
 endpoint: https://builder.internal/run
 exec:
-  mode: attested
+  runtime: refexec
+  url: unix:///run/agenthof-exec/refexec.sock
+  timeout: 5m
   allow:
     - exe: go
       args_prefix: [test]
@@ -578,7 +583,8 @@ loopback port, and the proxy URL stays `http://127.0.0.1:<port>/`. When set,
 each fronted step's gateway listens on a Unix domain socket in this directory
 instead, and the proxy URL is `unix://` plus that socket's path. The value
 after `unix://` is the socket path only; the HTTP routes stay fixed (`/`,
-`/exec/authorize`, `/exec/attest`, `/exec/run`, `/v1/chat/completions`, `/spawn`). The run token
+`/exec/run`, `/v1/chat/completions`, `/spawn`; the retired `/exec/authorize` and
+`/exec/attest` answer only a recorded refusal). The run token
 still travels in the `Authorization` header. The value must be an absolute
 path (`bad-refbox-socket-dir` otherwise): it is mounted into agent
 compartments at the same path inside and out, and it is what every socket's

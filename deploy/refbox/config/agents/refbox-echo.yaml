@@ -5,7 +5,3 @@ instruction: Echo the input back.
 output: echo
 execution: fronted
 endpoint: unix:///run/agenthof/refbox-echo.sock
-exec:
-  mode: attested
-  allow:
-    - exe: "true"

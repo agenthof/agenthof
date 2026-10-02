@@ -319,7 +319,7 @@ the `tool_call` event. What the bridge adds:
   the subprocess's environment variable names. Names and ids only, never a
   value, and the agent never sees it — Agenthof takes it out of the result
   before the agent does. This is the runtime's own word, not the agent's:
-  an exec event's `mode: attested` is what the agent reported, while a
+  a historical exec event's `mode: attested` is what the agent reported (exec is first-hand only now), while a
   `runtime_attestation` is what the operator's runtime reports about
   itself. A resource declared `runtime: refbridge` whose result carries no
   such account fails the call (reason `runtime attestation missing` or
