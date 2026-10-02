@@ -234,11 +234,6 @@ func (e ExecConfig) Declared() bool {
 	return len(e.Allow) > 0 || e.Runtime != "" || e.URL != "" || e.Timeout != 0
 }
 
-// FirstHand reports whether the agent's exec door is served by a declared
-// trusted runtime (the ledger gets that runtime's account) rather than by
-// the agent's own report.
-func (e ExecConfig) FirstHand() bool { return e.Runtime == "refexec" }
-
 // Allows reports whether an argv matches any allowlist entry: argv[0]
 // equals the entry's Exe and the entry's ArgsPrefix is a prefix of argv[1:].
 // It is the authorization check before the runtime is asked; the runtime's

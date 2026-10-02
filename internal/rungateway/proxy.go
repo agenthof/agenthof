@@ -161,11 +161,11 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 
 	logger := p.logger.With("run", bind.RunID, "agent", agent.Name)
 
-	// Registry validation already rejects a first-hand exec without a
-	// unix:// url or a timeout, but Start is reachable without the registry,
-	// so it fails closed on both rather than dialing nowhere or forever.
-	if agent.Exec.FirstHand() && (!strings.HasPrefix(p.execURLFor(agent), config.UnixScheme) || agent.Exec.Timeout <= 0) {
-		logger.Error("gateway start refused", "reason", "first-hand exec needs a unix:// url and a positive timeout")
+	// Registry validation already rejects an exec block without a unix://
+	// url or a timeout, but Start is reachable without the registry, so it
+	// fails closed on both rather than dialing nowhere or forever.
+	if agent.Exec.Declared() && (!strings.HasPrefix(p.execURLFor(agent), config.UnixScheme) || agent.Exec.Timeout <= 0) {
+		logger.Error("gateway start refused", "reason", "exec needs a unix:// runtime url and a positive timeout")
 		return "", "", fmt.Errorf("exec runtime %q requires a unix:// url and a positive timeout", agent.Exec.Runtime)
 	}
 
@@ -340,8 +340,8 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 
 	mux := http.NewServeMux()
 	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil))
-	mux.HandleFunc("/exec/authorize", p.execAuthorizeHandler(bind, agent, appendEvent))
-	mux.HandleFunc("/exec/attest", p.execAttestHandler(bind, agent, appendEvent))
+	mux.HandleFunc("/exec/authorize", p.execAssertedHandler(bind, agent, appendEvent))
+	mux.HandleFunc("/exec/attest", p.execAssertedHandler(bind, agent, appendEvent))
 	mux.HandleFunc("/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
 	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
 	mux.HandleFunc("/spawn", p.spawnHandler(ctx, bind, agent, appendEvent, logger))
