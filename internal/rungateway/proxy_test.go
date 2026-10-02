@@ -1403,7 +1403,7 @@ func execPost(t *testing.T, base, path, runToken, body string) (int, string) {
 func startExecProxy(t *testing.T, allow []config.ExecEntry, record func(engine.Event)) (string, string, func()) {
 	t.Helper()
 	agent := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
-		Exec: config.ExecConfig{Mode: "attested", Allow: allow}}
+		Exec: config.ExecConfig{Allow: allow}}
 	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
 	url, token, err := p.Start(context.Background(), testBinding(), agent, record)
 	if err != nil {
@@ -1506,7 +1506,7 @@ func TestExecAndToolCallRecordInCallOrder(t *testing.T) {
 	agent := config.AgentDef{
 		Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
 		Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}},
-		Exec:  config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "go"}}},
+		Exec:  config.ExecConfig{Allow: []config.ExecEntry{{Exe: "go"}}},
 	}
 	var mu sync.Mutex
 	var ev []engine.Event
@@ -1558,7 +1558,7 @@ func TestExecStopWaitsForInFlightAttest(t *testing.T) {
 		<-release
 	}
 	agent := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
-		Exec: config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "go"}}}}
+		Exec: config.ExecConfig{Allow: []config.ExecEntry{{Exe: "go"}}}}
 	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
 	base, token, err := p.Start(context.Background(), testBinding(), agent, appendEvent)
 	if err != nil {

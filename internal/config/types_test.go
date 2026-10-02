@@ -138,7 +138,7 @@ defaults:
 }
 
 func TestExecConfigAllows(t *testing.T) {
-	ec := ExecConfig{Mode: "attested", Allow: []ExecEntry{
+	ec := ExecConfig{Allow: []ExecEntry{
 		{Exe: "go", ArgsPrefix: []string{"test"}},
 		{Exe: "rg"},
 	}}
@@ -166,8 +166,16 @@ func TestExecConfigDeclared(t *testing.T) {
 	if (ExecConfig{}).Declared() {
 		t.Error("zero ExecConfig should not be declared")
 	}
-	if !(ExecConfig{Mode: "attested", Allow: []ExecEntry{{Exe: "go"}}}).Declared() {
-		t.Error("populated ExecConfig should be declared")
+	cases := map[string]ExecConfig{
+		"allow only":   {Allow: []ExecEntry{{Exe: "go"}}},
+		"runtime only": {Runtime: "refexec"},
+		"url only":     {URL: "unix:///run/agenthof-exec/refexec.sock"},
+		"timeout only": {Timeout: time.Minute},
+	}
+	for name, ec := range cases {
+		if !ec.Declared() {
+			t.Errorf("%s: a {%+v}-only exec must count as declared, or apply never sees it", name, ec)
+		}
 	}
 }
 
@@ -365,32 +373,12 @@ func TestToolGrantErrorNamesTheLine(t *testing.T) {
 	}
 }
 
-func TestExecConfigDeclaredCountsRuntimeFields(t *testing.T) {
-	cases := map[string]ExecConfig{
-		"runtime only": {Runtime: "refexec"},
-		"url only":     {URL: "unix:///run/agenthof-exec/refexec.sock"},
-		"timeout only": {Timeout: time.Minute},
-	}
-	for name, ec := range cases {
-		if !ec.Declared() {
-			t.Errorf("%s: a {%+v}-only exec must count as declared, or apply never sees it", name, ec)
-		}
-	}
-	if (ExecConfig{Mode: "runtime", Runtime: "refexec"}).FirstHand() != true {
-		t.Error("runtime refexec must be first-hand")
-	}
-	if (ExecConfig{Mode: "attested"}).FirstHand() {
-		t.Error("an attested exec is not first-hand")
-	}
-}
-
 func TestExecConfigRuntimeYAML(t *testing.T) {
 	var a AgentDef
 	err := yaml.Unmarshal([]byte(`name: builder
 execution: fronted
 endpoint: unix:///run/agenthof/agent.sock
 exec:
-  mode: runtime
   runtime: refexec
   url: unix:///run/agenthof-exec/refexec.sock
   timeout: 5m
@@ -401,7 +389,44 @@ exec:
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if a.Exec.Mode != "runtime" || a.Exec.Runtime != "refexec" || a.Exec.URL != "unix:///run/agenthof-exec/refexec.sock" || a.Exec.Timeout != 5*time.Minute {
+	if a.Exec.Runtime != "refexec" || a.Exec.URL != "unix:///run/agenthof-exec/refexec.sock" || a.Exec.Timeout != 5*time.Minute ||
+		len(a.Exec.Allow) != 1 || a.Exec.Allow[0].Exe != "go" || !reflect.DeepEqual(a.Exec.Allow[0].ArgsPrefix, []string{"test"}) {
 		t.Fatalf("exec = %+v", a.Exec)
+	}
+}
+
+// TestExecConfigRejectsStaleModeKey: exec.mode is retired. A block that still
+// carries it — on an otherwise valid first-hand shape, or the old
+// agent-reported shape — is rejected at load, naming the key's line and the
+// replacement, never read with the key silently dropped.
+func TestExecConfigRejectsStaleModeKey(t *testing.T) {
+	const want = "exec.mode is no longer supported; exec is always first-hand via a runtime (set runtime/url/timeout)"
+	cases := map[string]string{
+		"runtime shape with mode": "name: builder\nexecution: fronted\nendpoint: unix:///run/agenthof/agent.sock\nexec:\n  mode: runtime\n  runtime: refexec\n  url: unix:///run/agenthof-exec/refexec.sock\n  timeout: 5m\n  allow:\n    - exe: go\n",
+		"old attested shape":      "name: builder\nexecution: fronted\nendpoint: unix:///run/agenthof/agent.sock\nexec:\n  mode: attested\n  allow:\n    - exe: go\n",
+	}
+	for name, src := range cases {
+		t.Run(name, func(t *testing.T) {
+			var a AgentDef
+			err := yaml.Unmarshal([]byte(src), &a)
+			if err == nil {
+				t.Fatalf("a stale exec.mode must be rejected, parsed %+v", a.Exec)
+			}
+			if !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "bad-exec-config: line 5:") {
+				t.Fatalf("error must name the key's line and the replacement: %v", err)
+			}
+		})
+	}
+}
+
+// TestExecConfigNullBlockStaysUndeclared: a bare `exec:` with no value never
+// reaches UnmarshalYAML (yaml.v3 skips it for a null node) and declares nothing.
+func TestExecConfigNullBlockStaysUndeclared(t *testing.T) {
+	var a AgentDef
+	if err := yaml.Unmarshal([]byte("name: builder\nexec:\n"), &a); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if a.Exec.Declared() {
+		t.Fatalf("a bare exec: with no value must stay undeclared, got %+v", a.Exec)
 	}
 }

@@ -229,7 +229,7 @@ func spawnTestConfig() config.Config {
 		Agents: []config.AgentDef{
 			{Name: "lead", Endpoint: ep, SourceFile: "a", MaySpawn: []config.SpawnTarget{{Role: "worker", Workflow: "child-wf"}, {Role: "worker", Workflow: "pair-wf"}, {Role: "locked", Workflow: "locked-wf"}}},
 			{Name: "child", Endpoint: ep, SourceFile: "a"},
-			{Name: "runner", Endpoint: ep, SourceFile: "a", Exec: config.ExecConfig{Mode: "runtime", Runtime: "refexec", URL: "unix:///run/agenthof-exec/ignored.sock", Timeout: 30 * time.Second, Allow: []config.ExecEntry{{Exe: "cat"}}}},
+			{Name: "runner", Endpoint: ep, SourceFile: "a", Exec: config.ExecConfig{Runtime: "refexec", URL: "unix:///run/agenthof-exec/ignored.sock", Timeout: 30 * time.Second, Allow: []config.ExecEntry{{Exe: "cat"}}}},
 		},
 		Workflows: []config.WorkflowDef{
 			{Name: "lead-wf", SourceFile: "w", Steps: []config.Step{{Name: "s", Agent: "lead"}}},
@@ -592,7 +592,7 @@ func writeSpawnSample(t *testing.T) (string, *fakeSupervisor) {
 	files := map[string]string{
 		"agents/lead.yaml":        "name: lead\nmodel: fast\ninstruction: lead\noutput: out\n" + ep + "may_spawn:\n  - role: worker\n    workflow: child-wf\n  - role: worker\n    workflow: exec-wf\n  - role: locked\n    workflow: locked-wf\n",
 		"agents/child.yaml":       "name: child\nmodel: fast\ninstruction: child\noutput: out\n" + ep + "may_spawn:\n  - role: worker\n    workflow: child-wf\n",
-		"agents/runner.yaml":      "name: runner\nmodel: fast\ninstruction: runner\noutput: out\n" + ep + "exec:\n  mode: runtime\n  runtime: refexec\n  url: unix:///run/agenthof-exec/ignored.sock\n  timeout: 30s\n  allow:\n    - exe: cat\n",
+		"agents/runner.yaml":      "name: runner\nmodel: fast\ninstruction: runner\noutput: out\n" + ep + "exec:\n  runtime: refexec\n  url: unix:///run/agenthof-exec/ignored.sock\n  timeout: 30s\n  allow:\n    - exe: cat\n",
 		"workflows/lead-wf.yaml":  "name: lead-wf\nsteps:\n  - name: s\n    agent: lead\n",
 		"workflows/child-wf.yaml": "name: child-wf\nsteps:\n  - name: s\n    agent: child\n",
 		"workflows/exec-wf.yaml":  "name: exec-wf\nsteps:\n  - name: s\n    agent: runner\n",

@@ -11,7 +11,10 @@ package engine_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +23,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -143,8 +148,49 @@ func callEcho(ctx context.Context, proxyURL, token string) error {
 	return nil
 }
 
-// callExec drives the exec door: an allowed authorize, a refused authorize,
-// and an attest.
+// refexecStubURL serves refexec's /run contract on a Unix socket in a
+// private (0700) directory, answering exit 0 and "ok\n" with an attestation
+// naming the command, so the exec row drives the real first-hand door with
+// no container runtime. It returns the unix:// url for exec.url.
+func refexecStubURL(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "rxl") // 0700, and short: the socket-dir gate and the socket path length limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "exec.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Command []string `json:"command"`
+		}
+		if r.URL.Path != "/run" || json.NewDecoder(r.Body).Decode(&req) != nil || len(req.Command) == 0 {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		output := "ok\n"
+		sum := sha256.Sum256([]byte(output))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"exit_code": 0, "output": output, "output_sha": hex.EncodeToString(sum[:]),
+			"truncated": false, "output_bytes": len(output),
+			"runtime_attestation": map[string]any{
+				"runtime": "refexec", "session": "refexec-stub", "command": req.Command,
+				"pid": 4242, "spawn": 1, "credential_env": "", "env_names": []string{}, "materialization": "",
+			},
+		})
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return config.UnixScheme + sock
+}
+
+// callExec drives the first-hand exec door: an allowlisted run, then an
+// off-allowlist one the door refuses before the runtime is asked.
 func callExec(ctx context.Context, proxyURL, token string) error {
 	post := func(path, body string) (int, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyURL+path, strings.NewReader(body))
@@ -160,14 +206,11 @@ func callExec(ctx context.Context, proxyURL, token string) error {
 		_ = resp.Body.Close()
 		return resp.StatusCode, nil
 	}
-	if code, err := post("exec/authorize", `{"command":["ls"]}`); err != nil || code != http.StatusOK {
-		return fmt.Errorf("authorize allowed: code=%d err=%v", code, err)
+	if code, err := post("exec/run", `{"command":["ls"]}`); err != nil || code != http.StatusOK {
+		return fmt.Errorf("run allowed: code=%d err=%v", code, err)
 	}
-	if code, err := post("exec/authorize", `{"command":["rm","-rf","/"]}`); err != nil || code != http.StatusOK {
-		return fmt.Errorf("authorize refused: code=%d err=%v", code, err) // refusal is a 200 with allowed:false
-	}
-	if code, err := post("exec/attest", `{"command":["ls"],"exit":0,"output_sha":"abc"}`); err != nil || code != http.StatusNoContent {
-		return fmt.Errorf("attest: code=%d err=%v", code, err)
+	if code, err := post("exec/run", `{"command":["rm","-rf","/"]}`); err != nil || code != http.StatusForbidden {
+		return fmt.Errorf("run refused: code=%d err=%v", code, err)
 	}
 	return nil
 }
@@ -309,7 +352,7 @@ func TestOperationalLogCarriesNoSecret(t *testing.T) {
 		{name: "tool upstream connection refused with query secret", gateway: toolCfg(staticTool("http://" + refusedAddr + "/?key=" + querySecret)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineConnect},
 		{name: "tool client_credentials success", gateway: toolCfg(ccTool(stubMCP(t, mintedToken).URL, tokenEndpoint(t, http.StatusOK, `{"access_token":"`+mintedToken+`","token_type":"Bearer","expires_in":3600}`).URL)), agent: toolGrant, call: callEcho, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "tool call routed"},
 		{name: "tool client_credentials token endpoint rejects and echoes the secret", gateway: toolCfg(ccTool(stubMCP(t, mintedToken).URL, tokenEndpoint(t, http.StatusUnauthorized, `{"error":"invalid_client","error_description":"secret `+ccSecret+` rejected for `+ccClientID+`"}`).URL)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineConnect},
-		{name: "exec allowed, refused, attested", gateway: config.GatewayConfig{}, agent: config.AgentDef{Exec: config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "ls"}}}}, call: callExec, wantStatus: "succeeded", wantLine: lineListener},
+		{name: "exec first-hand: run allowed, run refused", gateway: config.GatewayConfig{}, agent: config.AgentDef{Exec: config.ExecConfig{Runtime: "refexec", URL: refexecStubURL(t), Timeout: 10 * time.Second, Allow: []config.ExecEntry{{Exe: "ls"}}}}, call: callExec, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "exec run recorded"},
 	}
 
 	formats := []struct {

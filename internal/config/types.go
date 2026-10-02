@@ -22,7 +22,7 @@ type AgentDef struct {
 	Output      string        `yaml:"output"`
 	Execution   string        `yaml:"execution"` // "", or "fronted"; "" means fronted
 	Endpoint    string        `yaml:"endpoint"`  // required: the agent's HTTP endpoint
-	Exec        ExecConfig    `yaml:"exec"`      // fronted only: allowlisted exec (attested, or first-hand via a runtime)
+	Exec        ExecConfig    `yaml:"exec"`      // fronted only: allowlisted exec, first-hand via a trusted runtime (refexec)
 	MaySpawn    []SpawnTarget `yaml:"may_spawn"` // spawn door: the {role, workflow} child runs this agent may start; empty means none (default-deny)
 	SourceFile  string        `yaml:"-"`
 }
@@ -177,21 +177,48 @@ func (a AgentDef) EffectiveExecution() string {
 	return a.Execution
 }
 
-// ExecConfig declares the commands a fronted agent may run and whose account
-// of each the ledger gets. Mode "attested": the agent runs the command in its
-// sandbox and reports it; Agenthof authorizes against Allow and records the
-// report, but does not run or contain it. Mode "runtime": a trusted
-// operator-side runtime, named by Runtime and reached over URL, runs the
-// command on the agent's behalf and attests it first-hand; Agenthof
-// authorizes, forwards, enforces Timeout and records that account. Agenthof
-// itself never runs a command. Runtime, URL and Timeout are required with
-// mode runtime and rejected with mode attested (config is law).
+// ExecConfig declares the commands a fronted agent may have run on its
+// behalf. Exec is first-hand only: a trusted operator-side runtime, named by
+// Runtime and reached over URL, runs each allowlisted command and attests it
+// first-hand; Agenthof authorizes against Allow, forwards, enforces Timeout
+// and records that account. Agenthof itself never runs a command, and the
+// agent never reports one — the retired mode key is rejected at load
+// (UnmarshalYAML) and Runtime, URL and Timeout are all required (config is
+// law). Ledgers written before exec became first-hand only may carry exec
+// events the agent reported itself (mode "attested"); that is the read
+// path's concern (engine.Event), not this struct's.
 type ExecConfig struct {
-	Mode    string        `yaml:"mode"`    // "attested" | "runtime"
-	Allow   []ExecEntry   `yaml:"allow"`   // non-empty when Mode is set
-	Runtime string        `yaml:"runtime"` // mode runtime: "refexec" (the only runtime implemented)
-	URL     string        `yaml:"url"`     // mode runtime: unix://<absolute socket path> of that runtime
-	Timeout time.Duration `yaml:"timeout"` // mode runtime: the per-command deadline Agenthof enforces, e.g. 5m
+	Allow   []ExecEntry   `yaml:"allow"`   // non-empty: the allowlist
+	Runtime string        `yaml:"runtime"` // "refexec" (the only runtime implemented)
+	URL     string        `yaml:"url"`     // unix://<absolute socket path> of that runtime
+	Timeout time.Duration `yaml:"timeout"` // the per-command deadline Agenthof enforces, e.g. 5m
+}
+
+// rawExec is ExecConfig without its methods, so the mapping can be decoded
+// with value.Decode without recursing back into UnmarshalYAML.
+type rawExec ExecConfig
+
+// UnmarshalYAML decodes an exec block and rejects the retired mode key by
+// name. Exec is first-hand only; a config that still says mode: attested or
+// mode: runtime is rejected at apply with the replacement stated, never read
+// with the key silently dropped (yaml.v3 would otherwise ignore it). A null
+// exec: never reaches this method — yaml.v3 skips the Unmarshaler for a null
+// node — and leaves the block undeclared.
+func (e *ExecConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("bad-exec-config: line %d: exec must be a mapping (runtime, url, timeout, allow)", value.Line)
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		if key := value.Content[i]; key.Value == "mode" {
+			return fmt.Errorf("bad-exec-config: line %d: exec.mode is no longer supported; exec is always first-hand via a runtime (set runtime/url/timeout)", key.Line)
+		}
+	}
+	var raw rawExec
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*e = ExecConfig(raw)
+	return nil
 }
 
 // ExecEntry allowlists an executable and a required leading-argument prefix.
@@ -201,10 +228,10 @@ type ExecEntry struct {
 }
 
 // Declared reports whether an agent declares exec at all: any field set. A
-// block that sets only the runtime fields is declared (and then rejected for
-// its empty mode), never silently ignored.
+// block that sets only some of the fields is declared (and then rejected at
+// apply for what it is missing), never silently ignored.
 func (e ExecConfig) Declared() bool {
-	return e.Mode != "" || len(e.Allow) > 0 || e.Runtime != "" || e.URL != "" || e.Timeout != 0
+	return len(e.Allow) > 0 || e.Runtime != "" || e.URL != "" || e.Timeout != 0
 }
 
 // FirstHand reports whether the agent's exec door is served by a declared
@@ -212,10 +239,10 @@ func (e ExecConfig) Declared() bool {
 // the agent's own report.
 func (e ExecConfig) FirstHand() bool { return e.Runtime == "refexec" }
 
-// Allows reports whether a reported argv matches any allowlist entry: argv[0]
+// Allows reports whether an argv matches any allowlist entry: argv[0]
 // equals the entry's Exe and the entry's ArgsPrefix is a prefix of argv[1:].
-// It matches the argv the agent reports; the operator's sandbox is what
-// actually confines execution.
+// It is the authorization check before the runtime is asked; the runtime's
+// compartment is what confines execution.
 func (e ExecConfig) Allows(argv []string) bool {
 	if len(argv) == 0 {
 		return false

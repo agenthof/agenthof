@@ -167,7 +167,6 @@ output: output
 execution: fronted
 endpoint: unix:///run/agenthof/placeholder.sock
 exec:
-  mode: runtime
   runtime: refexec
   url: unix:///run/agenthof-exec/placeholder.sock
   timeout: 60s

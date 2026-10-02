@@ -1298,44 +1298,22 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 
 // TestRunStartsListenerForFrontedExecWithoutTools proves a fronted agent
 // that declares exec and no tools still gets the per-run listener: the
-// stub sees the proxy coordinates, authorizes and attests a command, and
-// the ledger records that exec. Without the widened gate the stub is
+// stub sees the proxy coordinates, asks the exec door to run a command
+// through the declared runtime (an in-process refexec stand-in), and the
+// ledger records that exec first-hand. Without the widened gate the stub is
 // dispatched with no coordinates and no exec event is written.
 func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("AGENTHOF_TOKEN", "")
+	execSock := refexecStub(t)
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxyURL := r.Header.Get("X-Agenthof-Proxy-URL")
 		token := r.Header.Get("X-Agenthof-Run-Token")
 		if proxyURL != "" && token != "" {
-			body := `{"command":["go","test"]}`
-			req, err := http.NewRequest(http.MethodPost, proxyURL+"exec/authorize", strings.NewReader(body))
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			req.Header.Set("Authorization", "Bearer "+token)
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
+			if err := stubCallExecRun(proxyURL, token, "go test"); err != nil {
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}
-			_ = resp.Body.Close()
-			attest, err := http.NewRequest(http.MethodPost, proxyURL+"exec/attest",
-				strings.NewReader(`{"command":["go","test"],"exit":0,"output_sha":"abc"}`))
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			attest.Header.Set("Authorization", "Bearer "+token)
-			attest.Header.Set("Content-Type", "application/json")
-			aresp, err := http.DefaultClient.Do(attest)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
-				return
-			}
-			_ = aresp.Body.Close()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"success":true,"artifact":"front result"}`))
@@ -1345,7 +1323,8 @@ func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
 		"agents/helper.yaml": "name: helper\nexecution: fronted\nendpoint: " + stub.URL +
-			"\ninstruction: help\noutput: result\nexec:\n  mode: attested\n  allow:\n    - exe: go\n      args_prefix: [test]\n",
+			"\ninstruction: help\noutput: result\nexec:\n  runtime: refexec\n  url: unix://" + execSock +
+			"\n  timeout: 30s\n  allow:\n    - exe: go\n      args_prefix: [test]\n",
 		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
 		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
 	}
@@ -1379,8 +1358,8 @@ func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 			execEvent = &events[i]
 		}
 	}
-	if execEvent == nil || execEvent.Status != "succeeded" || execEvent.Mode != "attested" {
-		t.Fatalf("expected an attested exec event, got %+v", events)
+	if execEvent == nil || execEvent.Status != "succeeded" || execEvent.Mode != "runtime" || execEvent.RuntimeAttestation == nil {
+		t.Fatalf("expected a first-hand exec event, got %+v", events)
 	}
 }
 

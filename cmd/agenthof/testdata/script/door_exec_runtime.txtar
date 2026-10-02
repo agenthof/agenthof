@@ -33,7 +33,6 @@ instruction: run a command
 output: out
 execution: fronted
 exec:
-  mode: runtime
   runtime: refexec
   url: unix:///refexec-stub.sock
   timeout: 30s

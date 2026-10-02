@@ -111,7 +111,7 @@ func (r *eventRecorder) execs() []engine.Event {
 
 func firstHandAgent(url string, timeout time.Duration, allow ...config.ExecEntry) config.AgentDef {
 	return config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
-		Exec: config.ExecConfig{Mode: "runtime", Runtime: "refexec", URL: url, Timeout: timeout, Allow: allow}}
+		Exec: config.ExecConfig{Runtime: "refexec", URL: url, Timeout: timeout, Allow: allow}}
 }
 
 func startAgentProxy(t *testing.T, agent config.AgentDef, rec *eventRecorder) (base, token string, p *Gateway) {
@@ -215,7 +215,7 @@ func TestExecRunUnrecordableCommandIsRefusedNotDialed(t *testing.T) {
 func TestExecRunRefusedWhenNotDeclared(t *testing.T) {
 	rec := &eventRecorder{}
 	attested := config.AgentDef{Name: "builder", Execution: "fronted", Endpoint: "https://x/run",
-		Exec: config.ExecConfig{Mode: "attested", Allow: []config.ExecEntry{{Exe: "cat"}}}}
+		Exec: config.ExecConfig{Allow: []config.ExecEntry{{Exe: "cat"}}}}
 	base, token, _ := startAgentProxy(t, attested, rec)
 	code, _ := execPost(t, base, "exec/run", token, `{"command":["cat","x"]}`)
 	if code != 403 {

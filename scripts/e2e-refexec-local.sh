@@ -10,7 +10,7 @@
 # never injected nor named), audit renders it on succeeded and failed lines,
 # the exec event never carries the output body; an off-allowlist command is
 # refused before the runtime is asked; the agent-asserted routes are refused
-# on a first-hand agent and /exec/run is refused on an attested one; a
+# on a first-hand agent and /exec/run is refused on an agent that declares none; a
 # runtime that attests a different command, a missing runtime, a runtime in
 # a non-private socket directory and a runtime that outlives the deadline
 # each record a failed exec and fail the step; the deadline removes the
@@ -122,8 +122,9 @@ models:
 defaults:
   model: fast
 EOF
-agent() { # $1 = name, $2 = exec block (indented two spaces)
-	cat >"$WORK/config/agents/$1.yaml" <<EOF
+agent() { # $1 = name, $2 = exec block (indented two spaces), or "" for no exec
+	{
+		cat <<EOF
 name: $1
 description: e2e agent $1
 model: fast
@@ -131,9 +132,9 @@ instruction: Run the script.
 output: output
 execution: fronted
 endpoint: unix://$SOCK_DIR/agent.sock
-exec:
-$2
 EOF
+		[ -z "$2" ] || printf 'exec:\n%s\n' "$2"
+	} >"$WORK/config/agents/$1.yaml"
 	cat >"$WORK/config/workflows/$1.yaml" <<EOF
 name: $1
 description: one step through $1
@@ -142,53 +143,47 @@ steps:
     agent: $1
 EOF
 }
-agent exec-runner "  mode: runtime
-  runtime: refexec
+agent exec-runner "  runtime: refexec
   url: unix://$EXEC_DIR/exec.sock
   timeout: 30s
   allow:
     - exe: env
     - exe: false
     - exe: sleep"
-agent exec-slow "  mode: runtime
-  runtime: refexec
+agent exec-slow "  runtime: refexec
   url: unix://$EXEC_DIR/exec.sock
   timeout: 1s
   allow:
     - exe: sleep"
-agent exec-forged "  mode: runtime
-  runtime: refexec
+agent exec-forged "  runtime: refexec
   url: unix://$EXEC_DIR/forged.sock
   timeout: 30s
   allow:
     - exe: env"
-agent exec-missing "  mode: runtime
-  runtime: refexec
+agent exec-missing "  runtime: refexec
   url: unix://$EXEC_DIR/missing.sock
   timeout: 30s
   allow:
     - exe: env"
-agent exec-open "  mode: runtime
-  runtime: refexec
+agent exec-open "  runtime: refexec
   url: unix://$OPEN_DIR/exec.sock
   timeout: 30s
   allow:
     - exe: env"
-agent exec-attested "  mode: attested
-  allow:
-    - exe: env"
+agent exec-none ""
 cat >"$WORK/config/roles/exec-operator.yaml" <<EOF
 name: exec-operator
 description: Runs the refexec e2e workflows
-workflows: [exec-runner, exec-slow, exec-forged, exec-missing, exec-open, exec-attested]
+workflows: [exec-runner, exec-slow, exec-forged, exec-missing, exec-open, exec-none]
 allowed_groups: ["exec-users"]
 EOF
 export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE"   # the model route is never called; the key only lets it resolve
 
 "$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups exec-users
 
-# Config is law at apply too: mode runtime without a url, and mode attested
-# with a runtime, are both rejected.
+# Config is law at apply too: an exec block without a url is rejected for
+# the missing field; the retired mode key is rejected by name — on a
+# first-hand shape and on the old agent-reported shape alike.
 reject_apply() { # $1 = agent yaml body, $2 = expected message fragment
 	rm -rf "$WORK/badcfg" && mkdir -p "$WORK/badcfg" && cp -R "$WORK/config/." "$WORK/badcfg/"
 	printf '%s\n' "$1" >"$WORK/badcfg/agents/exec-runner.yaml"
@@ -204,7 +199,6 @@ model: fast
 instruction: x
 output: output
 exec:
-  mode: runtime
   runtime: refexec
   timeout: 30s
   allow:
@@ -216,10 +210,22 @@ model: fast
 instruction: x
 output: output
 exec:
-  mode: attested
+  mode: runtime
   runtime: refexec
+  url: unix://$EXEC_DIR/exec.sock
+  timeout: 30s
   allow:
-    - exe: env" "exec.mode attested takes no runtime, url or timeout"
+    - exe: env" "exec.mode is no longer supported; exec is always first-hand via a runtime"
+reject_apply "name: exec-runner
+execution: fronted
+endpoint: unix://$SOCK_DIR/agent.sock
+model: fast
+instruction: x
+output: output
+exec:
+  mode: attested
+  allow:
+    - exe: env" "exec.mode is no longer supported; exec is always first-hand via a runtime"
 
 run() { # $1 = workflow, $2 = input; sets OUT, RUNID, AUDIT
 	OUT="$("$WORK/agenthof" run exec-operator "$1" --input "$2" \
@@ -271,13 +277,13 @@ echo "$AUDIT" | grep -qF "exec touch $WORK/canary refused — command is not on 
 [ "$(grep -c 'compartment started' "$WORK/refexec.err")" = 2 ] || fail "the runtime was asked to run something it should not have been (want 2 starts: env, false)"
 
 # 4. Path gating: attest is refused on the first-hand agent; run is refused
-#    on the attested one. Both are recorded.
+#    on the agent that declares none. Both are recorded.
 run exec-runner "exec-attest:env"
 echo "$OUT" | grep -q "finished: succeeded" || fail "exec-attest step (which reports the status) did not finish"
 [ -f "$WORK/artifacts/$(printf 'attest:403' | sha_stdin)" ] || fail "attest on a first-hand agent must be answered 403"
 echo "$AUDIT" | grep -q "exec env refused — exec on this agent is first-hand" || fail "attest refusal not recorded"
-run exec-attested "exec-run:env"
-echo "$OUT" | grep -q "finished: failed" || fail "run on an attested agent must fail the step"
+run exec-none "exec-run:env"
+echo "$OUT" | grep -q "finished: failed" || fail "run on an agent that declares no exec must fail the step"
 echo "$AUDIT" | grep -q "exec env refused — first-hand exec is not declared for this agent" || fail "run refusal not recorded"
 
 # 5. A runtime that attests a different command fails the call.
