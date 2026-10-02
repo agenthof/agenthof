@@ -82,8 +82,9 @@ matching token is rejected before the door runs. The token is never written
 to the ledger. When the step finishes, the listener shuts down and the token
 stops working.
 
-An agent that declares `exec` and no tools still gets this listener. An agent
-that declares neither never sees the two headers.
+Every fronted step gets this listener and both headers, whether or not the
+agent declares `exec` or `tools`. The agent uses the doors it needs and
+ignores the rest.
 
 If the listener fails to start, the step fails immediately, with no bounce,
 the same way a tools step fails when its proxy cannot start.
