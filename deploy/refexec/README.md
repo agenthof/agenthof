@@ -1,7 +1,7 @@
 # refexec — first-hand exec, governed
 
-`refexec` serves Agenthof's exec door first-hand. An agent whose config
-declares `exec.mode: runtime` never runs the command itself: it asks
+`refexec` serves Agenthof's exec door — the only exec path. An agent whose
+config declares an `exec:` block never runs the command itself: it asks
 Agenthof, Agenthof checks the allowlist and asks refexec over a Unix socket
 only Agenthof dials, refexec runs the command in its own rootless-podman
 compartment on the operator's host and attests what ran, and Agenthof
@@ -98,7 +98,6 @@ declare the door on the agent:
 
 ```yaml
 exec:
-  mode: runtime
   runtime: refexec
   url: unix:///run/agenthof-exec/refexec.sock
   timeout: 2m

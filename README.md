@@ -58,10 +58,10 @@ Pre-release, and the governed core is real and runnable today:
   stdio-only MCP server is reached the same way through the reference bridge in
   `deploy/refbridge`, which attests first-hand what it ran on every call, recorded
   when the resource declares `runtime: refbridge`; the
-  **exec** door is *attested* (the agent reports the allowlisted command it ran)
-  or *first-hand* through the reference runtime in `deploy/refexec`, which runs
-  the allowlisted command in a no-network rootless-podman compartment and attests
-  what ran — Agenthof records either account and never runs the command itself;
+  **exec** door is *first-hand* through the reference runtime in `deploy/refexec`,
+  which runs the allowlisted command in a no-network rootless-podman compartment
+  and attests what ran — Agenthof records that account and never runs the
+  command itself (an agent's own report of a command is refused and recorded);
   and sub-agent calls carry the caller's delegation binding;
 - **isolated agents** — a reference sandbox runtime (`deploy/refbox`) runs an
   agent — a Go echo agent or a Python LangChain agent, both shipped as
@@ -168,7 +168,7 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 - [`docs/lifecycle-model.md`](docs/lifecycle-model.md) — the life of a model
   call: logical model, injected provider key, `model_call`.
 - [`docs/lifecycle-exec.md`](docs/lifecycle-exec.md) — the life of an exec:
-  allowlist, the operator's sandbox, and the attested record.
+  allowlist, the operator's runtime, and the first-hand record.
 - [`docs/lifecycle-tool.md`](docs/lifecycle-tool.md) — the life of a tool call:
   the two MCP legs, the injected resource credential, and `tool_call`.
 - [`docs/lifecycle-spawn.md`](docs/lifecycle-spawn.md) — the life of a spawn:

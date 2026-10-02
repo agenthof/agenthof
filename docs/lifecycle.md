@@ -155,7 +155,7 @@ and what it is acting for. The headers, and what each carries, are:
   set, the listener is a Unix domain socket in that directory and
   `X-Agenthof-Proxy-URL` is `unix://` plus the socket path — the path names
   the socket only, and the HTTP routes stay the fixed ones (`/`,
-  `/exec/authorize`, `/exec/attest`, `/v1/chat/completions`). Either way the
+  `/exec/run`, `/v1/chat/completions`, `/spawn`). Either way the
   run token travels in the header, not in the URL. That listener is the model door
   ([`lifecycle-model.md`](lifecycle-model.md)) and, when declared, the tool
   and exec doors. An agent uses the doors it needs and ignores the rest.
@@ -250,22 +250,20 @@ No credential environment is passed into the compartment. A file written on
 workspace a first-hand exec compartment shares, living as long as the recipe.
 The run token is not on a network.
 
-What this does **not** do on its own: with `exec.mode: attested` the agent
-reports the command it ran; Agenthof checks the allowlist and records the
-report. A compromised agent can still run a command inside the compartment.
-The blast radius is the compartment (no network, no injected credentials, an
-ephemeral filesystem), and the exec line is the agent's report, not a record
-made by something that ran the command. Commands that need the network
+What this does **not** do on its own: the compartment contains the agent's
+own process, and a compromised agent can still run a command inside it. The
+blast radius is the compartment (no network, no injected credentials, an
+ephemeral filesystem) — but such a command is not an exec in Agenthof's
+sense and leaves no exec line. Commands that need the network
 (`npm install`, `pip install`, `git fetch`) do not work here. Offline
 commands do.
 
-The first-hand alternative is `exec.mode: runtime` with `refexec`
-(`deploy/refexec/`): an operator-side supervisor, a host process next to
-Agenthof, runs each allowlisted command in its own rootless-podman
-compartment with no network, on a workspace volume the recipe shares with
-refbox, and attests to Agenthof what ran; the exec line is then that
-runtime's account, not the agent's. It is core, offline-only, and trusts
-refexec. A narrow network allowlist for those commands is reserved. The CI job
+The exec door is `refexec` (`deploy/refexec/`): an operator-side supervisor,
+a host process next to Agenthof, runs each allowlisted command in its own
+rootless-podman compartment with no network, on a workspace volume the
+recipe shares with refbox, and attests to Agenthof what ran; the exec line
+is that runtime's account, never the agent's. It is core, offline-only, and
+trusts refexec. A narrow network allowlist for those commands is reserved. The CI job
 `refbox` runs this recipe for both images and checks the perimeter: the
 workflow finishes, a connect from inside the compartment to the internet
 fails, a connect to an open host port fails, the container environment
@@ -394,10 +392,10 @@ flag and exit-code reference.
 | Shipped today | Reserved for later |
 |---|---|
 | fronted agents: every step is an HTTP call to the agent's endpoint, with identity headers and `execution: fronted` stamped on the step events. Every fronted step also receives the per-run listener coordinates. The listener is TCP loopback unless `refbox_socket_dir` is set, in which case it is a Unix socket | streamed model-call usage (a streamed call is recorded without token counts) |
-| refbox reference compartment: a rootless-podman recipe (`deploy/refbox/`) with no network, no injected credentials, and an ephemeral workspace (or, with `REFBOX_WORKSPACE_VOLUME`, a named volume shared with `refexec`). The agent reaches Agenthof only over the socket directory; a Go echo agent and a Python LangChain agent both run there from their own images, the latter making its model call through the gateway socket in that directory. Exec inside it is the agent's report, or first-hand through `refexec` when the agent declares `exec.mode: runtime` | a network allowlist for first-hand commands |
+| refbox reference compartment: a rootless-podman recipe (`deploy/refbox/`) with no network, no injected credentials, and an ephemeral workspace (or, with `REFBOX_WORKSPACE_VOLUME`, a named volume shared with `refexec`). The agent reaches Agenthof only over the socket directory; a Go echo agent and a Python LangChain agent both run there from their own images, the latter making its model call through the gateway socket in that directory. Exec is first-hand through `refexec` when the agent declares `exec` | a network allowlist for first-hand commands |
 | model gateway: the agent calls `<proxy URL>v1/chat/completions` with the run token; Agenthof authorizes the logical model, injects the per-role provider key, and records `model_call`. Non-streaming calls record token counts. Budgets are the upstream gateway's, via the provisioned role key | Agenthof-side spend caps; a per-role list of models; OAuth-protected model providers |
 | inbound MCP proxy for an agent's declared tools — allowlisted, credential-injecting, ledgered, able to mint its own upstream token via the `client_credentials` grant, and able to call a per-user upstream on behalf of the invoking human via RFC 8693 token exchange (`grant_type: token_exchange`) | delegation with an actor token; re-authentication when the invoker's token expires mid-run |
-| exec, two ways: `mode: attested` — an allowlist check, then an agent-reported outcome recorded as `exec`; `mode: runtime` — the allowlist check, then `refexec` runs the command first-hand in a no-network compartment and Agenthof records its account as `exec` with `runtime_attestation`. Agenthof itself never runs the command | Agenthof running a command itself |
+| exec, first-hand: the allowlist check, then `refexec` runs the command in a no-network compartment and Agenthof records its account as `exec` with `runtime_attestation`; the retired agent-asserted routes answer a recorded refusal. Agenthof itself never runs the command | Agenthof running a command itself; an agent-reported exec (retired — historical `mode: attested` events still verify and render) |
 | spawn: an agent asks its gateway for a governed child run of a `may_spawn`-listed role/workflow; the child is a full run under the same invoker, with its own ledger linked to the parent, run in compartments of its own — one workspace volume shared by that child's agents, one refbox compartment per agent, one `refexec` — provisioned by the operator's supervisor (`deploy/refspawn`) and torn down with the parent step; bounded by `max_depth`, `max_parallel`, `max_total_spawns`; `investigate --run` shows the tree | a shared or persistent child workspace; an asynchronous submit-and-await spawn; a separate acting-agent identity |
 | hash-chained ledger + `audit` / `audit verify` | enforced capabilities beyond the tool allowlist (the proxy allowlists which tools an agent may reach; it does not otherwise constrain what the agent's own code does) |
 | RBAC by group; linear workflow + fail-back | multi-resource / cross-repo scope |

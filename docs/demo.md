@@ -16,14 +16,15 @@ It echoes each step's input back as the artifact and holds no credentials.
 If that port is taken, pass `-addr` and point every agent's `endpoint` at
 the same loopback URL.
 
-> **Exec door note.** The `coder` agent declares an attested `exec:`
-> allowlist in [`examples/config/agents/coder.yaml`](../examples/config/agents/coder.yaml)
-> — the door is attested (agent-reported), not enforced: a conforming agent
-> reports the command it ran, Agenthof records that report, and Agenthof does
-> not run the command itself. The echo-agent walkthrough below never calls
-> `/exec/authorize` or `/exec/attest`, so no exec event appears in its audit.
-> For an executable proof of the door itself, see the testscript
-> [`cmd/agenthof/testdata/script/door_exec.txtar`](../cmd/agenthof/testdata/script/door_exec.txtar)
+> **Exec door note.** The `coder` agent declares a first-hand `exec:` block
+> in [`examples/config/agents/coder.yaml`](../examples/config/agents/coder.yaml):
+> an allowlist and the operator-side runtime (`refexec`, `deploy/refexec/`)
+> that runs each allowlisted command and attests what ran; Agenthof records
+> that account and never runs the command itself. The runtime's socket is
+> dialed only when a step calls `/exec/run`, and the echo-agent walkthrough
+> below never does, so no refexec needs to be running and no exec event
+> appears in its audit. For an executable proof of the door itself, see the
+> testscript [`cmd/agenthof/testdata/script/door_exec_runtime.txtar`](../cmd/agenthof/testdata/script/door_exec_runtime.txtar)
 > and the life-of doc [`lifecycle-exec.md`](lifecycle-exec.md).
 
 > **Model door note.** Every example agent already declares a logical model

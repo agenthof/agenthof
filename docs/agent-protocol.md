@@ -113,26 +113,17 @@ URL's root. Connect an MCP client to `<proxy-url>` with `Authorization: Bearer
 injects the resource's credential (one credential per resource). Your agent sees only the
 tools it was granted.
 
-### Exec door — attested
-
-To run an allowlisted command, an agent (whose config declares `exec: {mode: attested,
-allow: [...]}`) calls `POST <proxy-url>/exec/authorize` with `{"command": [argv]}` → `200
-{"allowed": bool}` (200 even when refused), then, after running the command itself, `POST
-<proxy-url>/exec/attest` with `{"command": [...], "exit": <int>, "output_sha": "..."}` →
-`204`. The exec door is *attested*: Agenthof authorizes and records the reported command;
-containment of what actually runs is the operator's sandbox's job. See
-[`docs/lifecycle-exec.md`](lifecycle-exec.md).
-
 ### Exec door — first-hand
 
-An agent whose config declares `exec: {mode: runtime, runtime: refexec, url: unix://…,
-timeout: …, allow: [...]}` does not run the command: it calls `POST
-<proxy-url>/exec/run` with `{"command": [argv]}` and gets `200 {"exit": <int>, "output":
-"<string>", "truncated": <bool>}` once the operator's runtime has run it in a no-network
-compartment on the shared workspace — or `403` (off the allowlist, recorded) or `502`
-(the runtime call failed, recorded). On such an agent `/exec/authorize` and `/exec/attest`
-answer `403` and are recorded as refusals. See
-[`docs/lifecycle-exec.md`](lifecycle-exec.md#the-first-hand-door).
+An agent whose config declares `exec: {runtime: refexec, url: unix://…, timeout: …,
+allow: [...]}` does not run the command: it calls `POST <proxy-url>/exec/run` with
+`{"command": [argv]}` and gets `200 {"exit": <int>, "output": "<string>", "truncated":
+<bool>}` once the operator's runtime has run it in a no-network compartment on the shared
+workspace — or `403` (off the allowlist, or no `exec` declared; recorded) or `502` (the
+runtime call failed, recorded). The exec door is *first-hand*: the ledger gets the
+runtime's account of what ran, never the agent's. The retired agent-asserted routes
+`/exec/authorize` and `/exec/attest` answer `403` on every agent and are recorded as
+refusals. See [`docs/lifecycle-exec.md`](lifecycle-exec.md).
 
 ### Spawn door — a governed child run
 
