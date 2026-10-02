@@ -9,8 +9,9 @@
 # (argv, pid, session, injected environment NAMES — an unlisted variable is
 # never injected nor named), audit renders it on succeeded and failed lines,
 # the exec event never carries the output body; an off-allowlist command is
-# refused before the runtime is asked; the agent-asserted routes are refused
-# on a first-hand agent and /exec/run is refused on an agent that declares none; a
+# refused before the runtime is asked; /exec/run is refused on an agent that
+# declares no exec (the retired agent-asserted routes' recorded refusal is now
+# covered by the in-process rungateway tests, not this script); a
 # runtime that attests a different command, a missing runtime, a runtime in
 # a non-private socket directory and a runtime that outlives the deadline
 # each record a failed exec and fail the step; the deadline removes the
