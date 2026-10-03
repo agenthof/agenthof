@@ -277,6 +277,18 @@ class ArgsTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             agent.parse_args(["--driver", "nope"])
 
+    def test_workspace_is_accepted_and_ignored(self):
+        # A compartment supervisor appends "-socket <sock> -workspace <dir>"
+        # after the image; the agent must start, serve on the socket, and
+        # keep no files.
+        opts = agent.parse_args(["--driver", "model", "-socket", "/tmp/x/a.sock", "-workspace", "/tmp/x/work"])
+        self.assertEqual((opts.socket, opts.driver), ("/tmp/x/a.sock", "model"))
+        self.assertEqual(opts.workspace, "/tmp/x/work")
+
+    def test_last_socket_still_wins_with_workspace(self):
+        opts = agent.parse_args(["-socket", "/a.sock", "-socket", "/b.sock", "-workspace", "/w"])
+        self.assertEqual(opts.socket, "/b.sock")
+
 
 class RequirementsTest(unittest.TestCase):
     def test_every_requirement_is_pinned(self):

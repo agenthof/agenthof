@@ -375,6 +375,10 @@ def parse_args(argv=None):
     # Single dash on purpose: the refbox recipe appends "-socket <path>" after
     # the image name, and the last -socket given wins.
     p.add_argument("-socket", dest="socket", default="", help="Unix socket path to listen on; overrides --addr")
+    # Also single dash: a compartment supervisor (deploy/refspawn) appends
+    # "-workspace <dir>" after the image for agents that keep files there.
+    # This agent keeps none; the flag is accepted so the launch succeeds.
+    p.add_argument("-workspace", dest="workspace", default="", help="accepted and ignored: this agent keeps no files")
     p.add_argument("--addr", default="127.0.0.1:8082", help="TCP listen address when -socket is not set")
     p.add_argument("--model", default="fast", help="logical model name this agent is configured with")
     p.add_argument("--driver", choices=DRIVERS, default="model",
