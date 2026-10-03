@@ -277,6 +277,10 @@ class ArgsTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             agent.parse_args(["--driver", "nope"])
 
+    def test_spawns_must_be_at_least_one(self):
+        with self.assertRaises(SystemExit):
+            agent.parse_args(["--spawns", "0"])
+
     def test_workspace_is_accepted_and_ignored(self):
         # A compartment supervisor appends "-socket <sock> -workspace <dir>"
         # after the image; the agent must start, serve on the socket, and

@@ -229,6 +229,11 @@ def _leg(reason, fn, *args):
         raise StepFailed(reason, type(exc).__name__) from exc
 
 
+def _artifact_line(text):
+    """One ledger line: collapse whitespace so upstream text cannot forge extra lines."""
+    return " ".join(str(text).split())
+
+
 def run_scripted(proxy_url, run_token, model, text, scripted,
                  call_model=call_model, call_tools=call_tools, doors_factory=Doors):
     """The scripted driver: one model call, one first-hand exec, one call on
@@ -246,8 +251,8 @@ def run_scripted(proxy_url, run_token, model, text, scripted,
                        [(scripted.obo_tool, {}), (scripted.bridge_tool, {"text": text})])
         if len(results) != 2:
             raise StepFailed("tool call failed", "short result")
-        lines.append("tool %s: %s" % (scripted.obo_tool, results[0]))
-        lines.append("tool %s: %s" % (scripted.bridge_tool, results[1]))
+        lines.append("tool %s: %s" % (scripted.obo_tool, _artifact_line(results[0])))
+        lines.append("tool %s: %s" % (scripted.bridge_tool, _artifact_line(results[1])))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, scripted.spawns)) as pool:
             futures = [pool.submit(doors.spawn, scripted.spawn_role, scripted.spawn_workflow, text)
                        for _ in range(scripted.spawns)]
@@ -255,7 +260,8 @@ def run_scripted(proxy_url, run_token, model, text, scripted,
     finally:
         doors.close()
     for child in sorted(children, key=lambda c: c["child_run_id"]):
-        lines.append("spawn: %s %s %s" % (child["status"], child["child_run_id"], child.get("output_preview", "")))
+        preview = _artifact_line(child.get("output_preview", ""))
+        lines.append("spawn: %s %s %s" % (child["status"], child["child_run_id"], preview))
     return "\n".join(lines)
 
 
@@ -370,6 +376,13 @@ def make_server(socket_path, addr, model, call_model=call_model, driver="model",
     return srv
 
 
+def _at_least_one(value):
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return n
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="LangChain agent for Agenthof (one governed model call per step, or every door in a fixed order)")
     # Single dash on purpose: the refbox recipe appends "-socket <path>" after
@@ -388,7 +401,7 @@ def parse_args(argv=None):
     p.add_argument("--bridge-tool", default="echo", help="scripted: the tool to call on the bridged stdio resource (called with the step input as text)")
     p.add_argument("--spawn-role", default="acceptance-worker", help="scripted: the role of the sub-agent runs")
     p.add_argument("--spawn-workflow", default="acceptance-sub", help="scripted: the workflow of the sub-agent runs")
-    p.add_argument("--spawns", type=int, default=2, help="scripted: how many sub-agent runs to start in parallel")
+    p.add_argument("--spawns", type=_at_least_one, default=2, help="scripted: how many sub-agent runs to start in parallel")
     return p.parse_args(argv)
 
 
