@@ -264,6 +264,36 @@ class ArgsTest(unittest.TestCase):
         opts = agent.parse_args([])
         self.assertEqual((opts.socket, opts.addr, opts.model), ("", "127.0.0.1:8082", "fast"))
 
+    def test_default_driver_is_model(self):
+        opts = agent.parse_args([])
+        self.assertEqual(opts.driver, "model")
+
+    def test_scripted_flags(self):
+        opts = agent.parse_args(["--driver", "scripted", "--exec-argv", "env", "--obo-tool", "whoami",
+                                 "--bridge-tool", "echo", "--spawn-role", "w", "--spawn-workflow", "sub", "--spawns", "3"])
+        self.assertEqual(agent.scripted_from(opts), agent.Scripted(["env"], "whoami", "echo", "w", "sub", 3))
+
+    def test_unknown_driver_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            agent.parse_args(["--driver", "nope"])
+
+    def test_spawns_must_be_at_least_one(self):
+        with self.assertRaises(SystemExit):
+            agent.parse_args(["--spawns", "0"])
+
+    def test_workspace_is_accepted_and_ignored(self):
+        # The hermetic refspawn test stand-in appends "-socket <sock>
+        # -workspace <dir>" after the image (the shipped supervisor passes only
+        # "-socket" and mounts the volume at /work); either way the agent must
+        # start, serve on the socket, and keep no files.
+        opts = agent.parse_args(["--driver", "model", "-socket", "/tmp/x/a.sock", "-workspace", "/tmp/x/work"])
+        self.assertEqual((opts.socket, opts.driver), ("/tmp/x/a.sock", "model"))
+        self.assertEqual(opts.workspace, "/tmp/x/work")
+
+    def test_last_socket_still_wins_with_workspace(self):
+        opts = agent.parse_args(["-socket", "/a.sock", "-socket", "/b.sock", "-workspace", "/w"])
+        self.assertEqual(opts.socket, "/b.sock")
+
 
 class RequirementsTest(unittest.TestCase):
     def test_every_requirement_is_pinned(self):
@@ -272,6 +302,12 @@ class RequirementsTest(unittest.TestCase):
         self.assertTrue(reqs)
         for req in reqs:
             self.assertIn("==", req, req)
+
+    def test_mcp_is_pinned_to_its_v1_line(self):
+        lines = [l.strip() for l in (HERE / "requirements.txt").read_text().splitlines()]
+        mcp = [l for l in lines if l.startswith("mcp==")]
+        self.assertEqual(len(mcp), 1, mcp)
+        self.assertEqual(mcp[0].split("==")[1].split(".")[0], "1", mcp[0])
 
 
 if __name__ == "__main__":

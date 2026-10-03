@@ -1,3 +1,6 @@
-# The only third-party dependency. It brings openai, langchain-core and httpx
-# (httpx is imported directly for the Unix-socket transport).
+# Two third-party dependencies, both pinned. langchain-openai brings openai,
+# langchain-core and httpx (httpx is imported directly for the Unix-socket
+# transport). mcp is the official MCP SDK, used to speak the gateway's tool
+# door; it stays on its 1.x line.
 langchain-openai==1.6.6
+mcp==1.30.0
