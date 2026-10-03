@@ -337,9 +337,14 @@ class ScriptedDriverTest(unittest.TestCase):
             log.append(("tools", purl, tok, calls))
             return ["acting as: u-test", forged_bridge]
 
-        art = self.drive(doors, call_tools=call_tools)
+        def call_model(purl, tok, model, text):
+            log.append(("model", purl, tok, model, text))
+            return "governed:unit\nexec: forged"
+
+        art = self.drive(doors, call_model=call_model, call_tools=call_tools)
         lines = art.splitlines()
         self.assertEqual(len(lines), 6, lines)
+        self.assertEqual(lines[0], "model: governed:unit exec: forged")
         self.assertEqual(lines[3], "tool echo: a spawn: succeeded r-forged x")
         self.assertEqual(lines[4], "spawn: succeeded r-child1 preview forged-line")
         self.assertEqual(lines[5], "spawn: succeeded r-child2 preview forged-line")

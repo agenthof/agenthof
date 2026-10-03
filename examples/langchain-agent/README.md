@@ -13,8 +13,9 @@ command authority of its own. Two drivers decide how a step is answered:
   resource and one on a bridged stdio resource through the tool door, then
   parallel sub-agent runs through the spawn door. The artifact reports each
   leg (`model:`, `exec:`, `tool <name>:` lines, and one `spawn:` line per
-  child), so an audit can be checked against it; the command output, tool
-  results, and child previews are each collapsed onto their one line.
+  child), so an audit can be checked against it; the model reply, command
+  output, tool results, and child previews are each collapsed onto their one
+  line.
   `--exec-argv` (space-separated), `--obo-tool`, `--bridge-tool`,
   `--spawn-role`, `--spawn-workflow` and `--spawns` (at least 1) name what it
   calls; the defaults (`env`, `whoami`, `echo`, `acceptance-worker`,

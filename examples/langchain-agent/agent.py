@@ -5,7 +5,8 @@ It serves Agenthof's step contract — POST {"input", "artifacts", "agent"} →
 {"artifact", "success", "reason"} — on a TCP address or a Unix socket, and
 answers each step with ONE model call made through the per-run gateway that
 Agenthof names in the X-Agenthof-Proxy-URL header, authenticated with the
-X-Agenthof-Run-Token. It holds no provider key: the gateway injects that
+X-Agenthof-Run-Token — or, with `--driver scripted`, every door in a fixed
+order. It holds no provider key: the gateway injects that
 upstream. Inside a no-network compartment (deploy/refbox) the proxy URL is
 unix://<socket-path>; elsewhere it is http://127.0.0.1:<port>/.
 
@@ -242,11 +243,11 @@ def run_scripted(proxy_url, run_token, model, text, scripted,
     each. The first failing leg ends the step with that leg's fixed reason;
     nothing after it runs. The tool results go into the artifact on purpose:
     what the upstream answered is the step's evidence."""
-    lines = ["model: " + _leg("model call failed", call_model, proxy_url, run_token, model, text)]
+    lines = ["model: " + _artifact_line(_leg("model call failed", call_model, proxy_url, run_token, model, text))]
     doors = doors_factory(proxy_url, run_token)
     try:
         output = _leg("exec call failed", doors.exec_run, scripted.exec_argv)
-        lines.append("exec: " + " ".join(output.split()))
+        lines.append("exec: " + _artifact_line(output))
         results = _leg("tool call failed", call_tools, proxy_url, run_token,
                        [(scripted.obo_tool, {}), (scripted.bridge_tool, {"text": text})])
         if len(results) != 2:
@@ -260,8 +261,8 @@ def run_scripted(proxy_url, run_token, model, text, scripted,
     finally:
         doors.close()
     for child in sorted(children, key=lambda c: c["child_run_id"]):
-        preview = _artifact_line(child.get("output_preview", ""))
-        lines.append("spawn: %s %s %s" % (child["status"], child["child_run_id"], preview))
+        lines.append("spawn: %s %s %s" % (_artifact_line(child["status"]), _artifact_line(child["child_run_id"]),
+                                          _artifact_line(child.get("output_preview", ""))))
     return "\n".join(lines)
 
 
