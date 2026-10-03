@@ -94,8 +94,12 @@ sends; it must match the agent's configured `model`.
 `scripts/e2e-acceptance-local.sh` runs the scripted driver through every door
 in one governed run and checks the whole audit timeline, hermetically (it
 proves governance and audit, not containment — the compartments there are
-host processes). `deploy/refbox/Containerfile.python` builds the agent into a
-no-network compartment.
+host processes). `scripts/e2e-acceptance-llm-local.sh` runs the llm driver
+through the same harness, hermetically, with a tool-calling stand-in for the
+provider that plays a fixed script — governance and audit of the loop, not
+containment, and the stand-in is not a real model.
+`deploy/refbox/Containerfile.python` builds the agent into a no-network
+compartment.
 
 ## Behaviour on the step endpoint
 
