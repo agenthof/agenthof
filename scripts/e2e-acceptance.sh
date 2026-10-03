@@ -407,11 +407,116 @@ wait_live_children() {
 	fail "two child compartments never appeared together within 150 s (saw: ${LIVE:-none}); the children's cold start is slower than READY_TIMEOUT ($READY_TIMEOUT) allows, or DELAY ($DELAY s) is too short"
 }
 
+# --- containment helpers. A failing probe is a REAL gap in a ref* runtime:
+# print the evidence (mounts, environment NAMES — never values — and the
+# compartment's log), then fail. Never retried, never relaxed.
+containment_fail() { # $1 = compartment, $2.. = message
+	echo "$ME: containment gap in $1 — mounts:"
+	podman inspect "$1" --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}' 2>&1 || true
+	echo "$ME: environment names:"
+	podman inspect "$1" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | cut -d= -f1 || true
+	echo "$ME: log:"
+	podman logs "$1" 2>&1 | tail -40 || true
+	fail "${*:2}"
+}
+# no_credential_env COMPARTMENT: credential starvation — nothing credential-
+# like in the compartment's environment, no runtime socket mounted. The
+# hermetic run cannot make this check: its "compartments" inherit the host's
+# environment. Here the environment is what podman gave the image, and the
+# recipes pass no -e. Each inspection is captured, then searched: a
+# `podman inspect | grep` that matched early would SIGPIPE the inspect and
+# fail the pipeline under pipefail — turning a found credential name into a
+# passing check, which is the one thing this must never do. An empty
+# inspection is a failure too, for the same reason.
+no_credential_env() {
+	local names mounts
+	names="$(out_of podman inspect "$1" --format '{{range .Config.Env}}{{println .}}{{end}}')"
+	[ -n "$names" ] || fail "podman named no environment at all for $1, so the credential search would prove nothing"
+	if grep -Eqi 'TOKEN|SECRET|PASSWORD|API_KEY|AGENTHOF_' <<<"$names"; then
+		containment_fail "$1" "$1 has a credential-like name in its environment"
+	fi
+	mounts="$(out_of podman inspect "$1" --format '{{json .Mounts}}')"
+	[ -n "$mounts" ] || fail "podman named no mounts at all for $1, so the runtime-socket search would prove nothing"
+	if grep -Eq 'docker\.sock|podman\.sock' <<<"$mounts"; then
+		containment_fail "$1" "$1 can see a container-runtime socket"
+	fi
+}
+# no_egress COMPARTMENT: the probe runs (a positive control on the probe
+# itself), then cannot reach the provider at the host address the gateway
+# reaches it on, nor the internet. That address is live — the gateway's
+# governed calls reached it (provider.jsonl) — so a failed dial is the wall,
+# not a wrong address. The IdP and the upstream are deliberately not dialed:
+# nothing of theirs listens on the host address (the stub issuer refuses a
+# non-loopback -addr, and a tool resource's url must be loopback — see the
+# header), so a failed dial to one would prove nothing.
+no_egress() {
+	podman exec "$1" /probe -touch /work/probe-ok || containment_fail "$1" "/probe cannot run in $1, so the negatives below would prove nothing"
+	local addr
+	for addr in "$HOST_IP:$PROVIDER_PORT" 1.1.1.1:443; do
+		if podman exec "$1" /probe -dial "$addr"; then containment_fail "$1" "$1 reached $addr directly; the gateway socket must be its only way out"; fi
+	done
+}
+# inspect_child NAME: a live child compartment mounts exactly its own volume
+# (agenthof-spawn-<id>-work at /work) and its own socket directory, never the
+# exec dir, never the root's socket dir, never the bridge's or the
+# supervisor's; runs the image its agent maps to; is credential-starved;
+# cannot reach its refexec's directory; has no route out; and its refexec
+# is a host process. A real containment fact needing no agent cooperation.
+inspect_child() {
+	local name="$1" id image vols mounts
+	id="${name#agenthof-spawn-}"; id="${id%-acceptance-sub}"
+	# Not a bare inspection: a child that is already gone must say so, since
+	# every assertion below reads the same live compartment.
+	image="$(podman inspect "$name" --format '{{.ImageName}}')" || fail "podman cannot inspect child compartment $name; it was alive when the poll saw it ($LIVE) and is gone now, so raise DELAY ($DELAY s) to keep a child alive through its inspection"
+	[ "$image" = "localhost/$LC_IMAGE" ] || containment_fail "$name" "child $id runs $image, not the image its agent maps to"
+	vols="$(podman inspect "$name" --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{.Destination}}{{"\n"}}{{end}}{{end}}')"
+	grep -qx "agenthof-spawn-$id-work /work" <<<"$vols" || containment_fail "$name" "child $id's own volume is not the one at /work: $vols"
+	[ "$(out_of grep -c . <<<"$vols")" = 1 ] || containment_fail "$name" "child $id mounts more than its own volume: $vols"
+	mounts="$(podman inspect "$name" --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}')"
+	grep -q "^bind $SPAWN_ROOT/$id $SPAWN_ROOT/$id$" <<<"$mounts" || containment_fail "$name" "child $id's socket dir is not mounted at its own path: $mounts"
+	[ "$(out_of grep -c '^bind ' <<<"$mounts")" = 1 ] || containment_fail "$name" "child $id has binds beyond its socket dir: $mounts"
+	case "$mounts" in *-exec*) containment_fail "$name" "child $id's exec dir is mounted into its compartment: $mounts" ;; esac
+	case "$mounts" in *"$SOCK_DIR"*) containment_fail "$name" "the ROOT's socket dir is mounted into child $id: $mounts" ;; esac
+	case "$mounts" in *"$BRIDGE_DIR"*|*"$SUP_DIR"*|*"$EXEC_DIR"*) containment_fail "$name" "another runtime's socket dir is mounted into child $id: $mounts" ;; esac
+	no_credential_env "$name"
+	if podman exec "$name" /probe -touch "$SPAWN_ROOT/$id-exec/probe-was-here"; then containment_fail "$name" "child $id can reach its refexec's directory"; fi
+	no_egress "$name"
+	pgrep -f "refexec -config $SPAWN_ROOT/$id-exec" >/dev/null || fail "child $id's refexec is not running on the host"
+	podman stats --no-stream --format 'compartment {{.Name}}: mem {{.MemUsage}} pids {{.PIDs}}' "$name" || true
+	echo "child $id: own volume, own socket dir, mapped image, no exec dir, no credential, no route out — ok"
+}
+# nothing_left WHAT: teardown is asynchronous from the parent's side — the
+# held request closes and the run ends while the supervisor removes the set
+# in order afterwards — so wait, bounded, for everything the runtimes made
+# to be gone, and only then say what is left.
+nothing_left() {
+	local i
+	for i in $(seq 1 60); do
+		if [ -z "$(podman ps -aq --filter 'name=^agenthof-spawn-')" ] &&
+			[ -z "$(podman ps -aq --filter 'name=^refexec-')" ] &&
+			[ -z "$(podman volume ls -q --filter 'name=^agenthof-spawn-')" ] &&
+			[ -z "$(ls -A "$SPAWN_ROOT")" ] &&
+			! pgrep -f "refexec -config $SPAWN_ROOT" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 0.5
+	done
+	[ -z "$(podman ps -aq --filter 'name=^agenthof-spawn-')" ] || { podman ps -a --filter 'name=^agenthof-spawn-'; fail "$1: a child compartment outlived the run"; }
+	[ -z "$(podman ps -aq --filter 'name=^refexec-')" ] || { podman ps -a --filter 'name=^refexec-'; fail "$1: an exec compartment outlived the run"; }
+	[ -z "$(podman volume ls -q --filter 'name=^agenthof-spawn-')" ] || { podman volume ls --filter 'name=^agenthof-spawn-'; fail "$1: a child volume outlived the run"; }
+	[ -z "$(ls -A "$SPAWN_ROOT")" ] || { ls -la "$SPAWN_ROOT"; fail "$1: the spawn root is not empty"; }
+	if pgrep -f "refexec -config $SPAWN_ROOT" >/dev/null 2>&1; then pgrep -fl "refexec -config $SPAWN_ROOT"; fail "$1: a child's refexec outlived the run"; fi
+}
+
 # --- 4. The combined run: every door, one step, one human — with both
 # children inspected while alive (section 4g, below).
 start_run acceptance
 wait_live_children
 echo "live children: $LIVE"
+# 4g. Both children, inspected while they are alive (the provider is holding
+#     each one's model call): the mount scoping only a live compartment can
+#     show. Their names are checked against the ledger's child ids in 4e.
+for name in $LIVE; do inspect_child "$name"; done
 finish_run acceptance
 if ! grep -q "finished: succeeded" <<<"$OUT"; then
 	out_of podman logs "$ROOT_NAME" 2>&1 | tail -40
@@ -554,6 +659,38 @@ grep -q "^[0-9].* run workflow_started — dana@example.com" <<<"$TREE" || fail 
 [ "$(out_of grep -c "^  [0-9].* run workflow_started — dana@example.com .*parent=$PARENT" <<<"$TREE")" = 2 ] || fail "investigate --run does not show both children under the parent"
 echo "combined run: model, first-hand exec, on-behalf-of tool, bridged tool, two parallel children — one timeline, one human — ok"
 
+# 4h. The root and the bridge, after the run: credential-starved, no route
+#     out, each with exactly its own mounts — four runtimes in one run, five
+#     disjoint 0700 socket directories (the gateway's, the bridge's,
+#     refexec's, the supervisor's and the spawn root), nothing cross-mounted.
+#     refexec's one-shot compartments are too short-lived to probe here;
+#     their no-network is scripts/e2e-refexec.sh's proof.
+no_credential_env "$ROOT_NAME"
+no_credential_env "$BRIDGE_NAME"
+ROOT_MOUNTS="$(podman inspect "$ROOT_NAME" --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}')"
+grep -q "^bind $SOCK_DIR $SOCK_DIR$" <<<"$ROOT_MOUNTS" || containment_fail "$ROOT_NAME" "the gateway socket dir is not mounted into the root at its own path: $ROOT_MOUNTS"
+[ "$(out_of grep -c '^bind ' <<<"$ROOT_MOUNTS")" = 1 ] || containment_fail "$ROOT_NAME" "the root has binds beyond the socket dir: $ROOT_MOUNTS"
+ROOT_VOLS="$(podman inspect "$ROOT_NAME" --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{.Destination}}{{"\n"}}{{end}}{{end}}')"
+[ "$ROOT_VOLS" = "$VOLUME /work" ] || containment_fail "$ROOT_NAME" "the root's volumes are not exactly its workspace at /work: $ROOT_VOLS"
+case "$ROOT_MOUNTS" in *"$EXEC_DIR"*|*"$SUP_DIR"*|*"$SPAWN_ROOT"*|*"$BRIDGE_DIR"*) containment_fail "$ROOT_NAME" "another runtime's directory is mounted into the root: $ROOT_MOUNTS" ;; esac
+if podman exec "$ROOT_NAME" /probe -touch "$SUP_DIR/probe-was-here"; then containment_fail "$ROOT_NAME" "the root can reach refspawn's directory"; fi
+if podman exec "$ROOT_NAME" /probe -touch "$EXEC_DIR/probe-was-here"; then containment_fail "$ROOT_NAME" "the root can reach refexec's directory"; fi
+no_egress "$ROOT_NAME"
+BRIDGE_MOUNTS="$(podman inspect "$BRIDGE_NAME" --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}')"
+grep -q "^bind $BRIDGE_DIR $BRIDGE_DIR$" <<<"$BRIDGE_MOUNTS" || containment_fail "$BRIDGE_NAME" "the bridge socket dir is not mounted at its own path: $BRIDGE_MOUNTS"
+grep -q "^bind $WORK/bridge-config /config$" <<<"$BRIDGE_MOUNTS" || containment_fail "$BRIDGE_NAME" "the bridge config is not mounted: $BRIDGE_MOUNTS"
+[ "$(out_of grep -c '^bind ' <<<"$BRIDGE_MOUNTS")" = 2 ] || containment_fail "$BRIDGE_NAME" "the bridge has binds beyond its socket dir and config: $BRIDGE_MOUNTS"
+case "$BRIDGE_MOUNTS" in *"$SOCK_DIR"*|*"$EXEC_DIR"*|*"$SUP_DIR"*|*"$SPAWN_ROOT"*) containment_fail "$BRIDGE_NAME" "another runtime's directory is mounted into the bridge: $BRIDGE_MOUNTS" ;; esac
+no_egress "$BRIDGE_NAME"
+for d in "$SOCK_DIR" "$BRIDGE_DIR" "$EXEC_DIR" "$SUP_DIR" "$SPAWN_ROOT"; do
+	[ "$(stat -c %a "$d")" = 700 ] || fail "socket directory $d is not 0700"
+done
+# Measure — not assert — what the two long-lived compartments cost against
+# the recipes' limits (--memory=256m, --pids-limit=64).
+podman stats --no-stream --format 'compartment {{.Name}}: mem {{.MemUsage}} pids {{.PIDs}}' "$ROOT_NAME" "$BRIDGE_NAME" || true
+nothing_left "after the combined run"
+echo "containment: root and bridge credential-starved, no route to the provider at $HOST_IP or the internet, each with exactly its own mounts, five disjoint 0700 socket dirs, nothing left — ok"
+
 # --- 5. The recorded refusals, each on a run of its own so the combined
 # run above stays a pure positive. The driver is the same; the config is
 # what says no.
@@ -600,6 +737,7 @@ bound "$LS" "$NOSPAWN" dana@example.com
 [ "$(out_of grep -cF "spawn acceptance-worker/acceptance-sub → no child run refused (depth 1) — spawn target is not on the agent's may_spawn list" <<<"$AUDIT")" = 2 ] || fail "audit did not render both spawn refusals"
 grep -qF "step drive (agent acceptance-nospawn) failed — spawn call failed" <<<"$AUDIT" || fail "the agent did not report the spawn leg's fixed reason"
 echo "may_spawn-denied spawns: both refused and recorded, no child, nothing provisioned, the step failed with the fixed reason — ok"
+nothing_left "after the refused runs"
 
 # --- 6. Verify is per run: the parent, each child, and each refused run,
 # every one on its own. (verify_run is in scripts/acceptance-lib.sh.)
