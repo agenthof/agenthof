@@ -210,6 +210,9 @@ IDP_PORT="$(free_port)"
 UP_PORT="$(free_port)"
 ISSUER="http://127.0.0.1:$IDP_PORT"
 UP_AUD="https://obo-upstream.example"
+# An export attribute the caller's environment gave one of these names would
+# survive a plain assignment and carry the secret into every stand-in and child.
+unset GATEWAY_KEY IDP_SECRET TOOL_SECRET
 IDP_SECRET="idp-side-secret-$NONCE"
 TOOL_SECRET="tool-secret-$NONCE"
 # The key is a shell variable, never exported: it reaches agenthof per command

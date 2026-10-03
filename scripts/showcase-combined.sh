@@ -47,8 +47,12 @@ usage() {
 }
 [ -n "${SHOWCASE_PROVIDER_BASE_URL:-}" ] || usage
 [ -n "${SHOWCASE_PROVIDER_KEY:-}" ] || usage
-case "$SHOWCASE_PROVIDER_BASE_URL" in
-	*/v1 | */v1/)
+# Trailing slashes are stripped first, so the guard sees the value the gateway
+# will use (https://host/v1// is /v1 too).
+BASE_URL="$SHOWCASE_PROVIDER_BASE_URL"
+while [ "${BASE_URL%/}" != "$BASE_URL" ]; do BASE_URL="${BASE_URL%/}"; done
+case "$BASE_URL" in
+	*/v1)
 		echo "$ME: SHOWCASE_PROVIDER_BASE_URL must be the origin without /v1" >&2
 		exit 1
 		;;
@@ -83,7 +87,7 @@ unset ENV_DUMP
 # 2. The harness, with the model route at the real provider and the llm driver.
 ACCEPTANCE_DRIVER=llm
 ACCEPTANCE_AGENT_ARGS="--max-rounds 8 --step-budget $STEP_BUDGET"
-ACCEPTANCE_PROVIDER_URL="${SHOWCASE_PROVIDER_BASE_URL%/}"
+ACCEPTANCE_PROVIDER_URL="$BASE_URL"
 ACCEPTANCE_PROVIDER_MODEL="${SHOWCASE_PROVIDER_MODEL:-gpt-4o-mini}"
 unset ACCEPTANCE_PROVIDER_KEY # drop any export attribute a caller gave this name
 ACCEPTANCE_PROVIDER_KEY="$key" # a shell variable: the harness reads it, unsets it, and passes the key to agenthof per command
@@ -102,16 +106,22 @@ echo "$ME: this proves governance and audit, not containment (the compartments a
 run acceptance
 PARENT="$RUNID"
 case "$OUT" in
+	*"run $PARENT refused"*) echo "$ME: the run was refused before any step ran — the audit above shows the refusal" ;;
 	*"finished: succeeded"*) echo "$ME: the model finished the step" ;;
-	*) echo "$ME: the model did not finish the step (the step_failed reason is in the audit above) — the audit still shows every governed call it made" ;;
+	*) echo "$ME: the model did not finish the step (the failure reason is in the audit above) — the audit shows whatever it did before that" ;;
 esac
 echo
 echo "--- the step artifact (the agent's OWN summary, asserted; the ledger events above are the first-hand record) ---"
 # Only a succeeded step has an artifact; parent_artifact would fail the whole
 # script on any other run.
+HAD_ARTIFACT=
 if [ "$(count "$(ledger "$PARENT")" step_succeeded)" = 1 ]; then
-	ART="$(parent_artifact "$PARENT")" # an assignment: a missing body stops the script
+	if ! ART="$(parent_artifact "$PARENT")"; then
+		echo "$ART"
+		fail "the run succeeded but its artifact could not be read"
+	fi
 	echo "$ART"
+	HAD_ARTIFACT=1
 else
 	echo "(no succeeded step, so no artifact)"
 fi
@@ -125,7 +135,12 @@ echo
 # 4. Every run of the tree verifies on its own: the parent, then every child
 #    the model started, whatever came of it.
 verify_run "$PARENT" "the combined run"
-for c in $(field "$(ledger "$PARENT")" spawn child_run_id); do verify_run "$c" "a child run"; done
+NCHILD=0
+for c in $(field "$(ledger "$PARENT")" spawn child_run_id); do
+	verify_run "$c" "a child run"
+	NCHILD=$((NCHILD + 1))
+done
+[ "$NCHILD" -gt 0 ] || echo "no children: the model started no sub-agent runs, so there is no child ledger to verify"
 
 # 5. The key reached no ledger, artifact, log, or output. The positive
 #    control is the parent run id — on every ledger event's binding by
@@ -133,6 +148,11 @@ for c in $(field "$(ledger "$PARENT")" spawn child_run_id); do verify_run "$c" "
 #    reaches a ledger only if the model happened to echo it.
 printf '%s\n' "${OUTS[@]}" >"$WORK/outs.txt"
 grep -rqF -- "$PARENT" "$WORK/logs" || fail "the positive control (the run id, bound to every event) is missing, so the search for the key would prove nothing"
+# The other places no_leak searches must be populated too, or their absence proves nothing.
+[ -s "$WORK/agenthof.err" ] || fail "agenthof's operational log is empty, so searching it for the key would prove nothing"
+[ -s "$WORK/control.jsonl" ] || fail "the control log is empty, so searching it for the key would prove nothing"
+grep -qF "listening" "$WORK/agent.err" || fail "the agent's log is empty, so searching the process logs for the key would prove nothing"
+[ -z "$HAD_ARTIFACT" ] || [ -n "$(ls -A "$WORK/artifacts")" ] || fail "the artifact store is empty, so searching it for the key would prove nothing"
 no_leak "$GATEWAY_KEY" "the provider key"
 no_leak "$TOKEN" "the subject token"
 echo "no leak: the provider key and the subject token are in no ledger, artifact, log, or output — ok"
