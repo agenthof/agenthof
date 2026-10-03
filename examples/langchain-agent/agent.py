@@ -401,7 +401,8 @@ INVALID_ARGS = "invalid arguments"
 # view. The whole request (the conversation and the tool specs sent with it) is
 # checked against CONVERSATION_MAX before each model call: the model door caps
 # a request body at 1 MiB and answers an oversized one with 400 and no ledger
-# event, so the agent must stop first.
+# event, so the agent must stop first. The check is an estimate of the body
+# the SDK builds; the margin to the door's cap absorbs the SDK's own framing.
 TOOL_RESULT_MAX = 8192
 CONVERSATION_MAX = 512 << 10
 # The most door calls of one round in flight at once; the rest of the round

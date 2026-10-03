@@ -22,10 +22,10 @@ plus exactly the tools its grant mirrors on the tool door. It decides, round
 by round, which to call. Each model round is one governed `model_call`; each
 door it opens is its own first-hand event; a door that says no records the
 refusal, and the agent tells the model in fixed words that the call produced
-no result. The model door already forwards a tool-calling conversation
-unchanged and authorizes only the logical model name, so an agentic loop is
-just more governed model calls plus the doors the model chose; no new door was
-needed.
+no result. The model door already authorizes only the logical model name,
+rewrites it to the provider's, and forwards the rest of a tool-calling
+conversation as it is, so an agentic loop is just more governed model calls
+plus the doors the model chose; no new door was needed.
 
 What it shows: **governance and audit** — every capability the agent used
 reached it through a governed, logged door (Article I), bound to the human who
