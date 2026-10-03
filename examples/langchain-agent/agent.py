@@ -401,6 +401,9 @@ INVALID_ARGS = "invalid arguments"
 # oversized one with 400 and no ledger event, so the agent must stop first.
 TOOL_RESULT_MAX = 8192
 CONVERSATION_MAX = 512 << 10
+# The most door calls of one round in flight at once; the rest of the round
+# queues behind them, so a model asking for hundreds cannot open hundreds.
+MAX_PARALLEL_CALLS = 8
 
 
 def task_prompt(scripted, text):
@@ -429,6 +432,11 @@ def _truncate(text):
     if len(text) <= TOOL_RESULT_MAX:
         return text
     return text[:TOOL_RESULT_MAX] + " [truncated]"
+
+
+def _bounded_line(text):
+    """Model-chosen text (a tool name, the final answer) as one bounded artifact line."""
+    return _artifact_line(_truncate(text))
 
 
 def _label(name):
@@ -464,7 +472,7 @@ def _door_call(call, doors, mcp_names, call_tools, proxy_url, run_token, deadlin
         fixed, cause = (REFUSED if exc.status == 403 else FAILED), type(exc).__name__
     except Exception as exc:  # noqa: BLE001 — any failure is the fixed string; the class goes to the log
         fixed, cause = FAILED, type(exc).__name__
-    sys.stderr.write("langchain-agent: %s %s: %s\n" % (_artifact_line(_label(call.name)), fixed, cause))
+    sys.stderr.write("langchain-agent: %s %s: %s\n" % (_bounded_line(_label(call.name)), fixed, cause))
     return fixed
 
 
@@ -493,21 +501,29 @@ def run_llm(proxy_url, run_token, model, text, llm,
                 raise StepFailed("step deadline reached", "deadline")
             if len(json.dumps(messages)) > CONVERSATION_MAX:
                 raise StepFailed("conversation too large", "size")
-            reply = _leg("model call failed", invoke_model, proxy_url, run_token, model, messages, tools,
-                         min(REQUEST_TIMEOUT, remaining))
+            try:
+                reply = _leg("model call failed", invoke_model, proxy_url, run_token, model, messages, tools,
+                             min(REQUEST_TIMEOUT, remaining))
+            except StepFailed as exc:
+                # The call's timeout is the budget left, so a call cut off by
+                # the deadline fails as the deadline, not as the model.
+                if time.monotonic() < deadline:
+                    raise
+                sys.stderr.write("langchain-agent: model call cut off by the step deadline: %s\n" % exc.cause)
+                raise StepFailed("step deadline reached", "deadline") from exc
             if not reply.tool_calls:
-                lines.append("model: " + _artifact_line(reply.text))
+                lines.append("model: " + _bounded_line(reply.text))
                 return "\n".join(lines)
-            lines.append("model: called " + ", ".join(_artifact_line(c.name) for c in reply.tool_calls))
+            lines.append("model: called " + ", ".join(_bounded_line(c.name) for c in reply.tool_calls))
             messages.append(assistant_message(reply))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(reply.tool_calls)) as pool:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(reply.tool_calls), MAX_PARALLEL_CALLS)) as pool:
                 futures = [pool.submit(_door_call, c, doors, mcp_names, call_tools, proxy_url, run_token, deadline)
                            for c in reply.tool_calls]
                 results = [f.result() for f in futures]
             if any(r is None for r in results):
                 raise StepFailed("step deadline reached", "deadline")
             for call, result in zip(reply.tool_calls, results):
-                lines.append("%s: %s" % (_artifact_line(_label(call.name)), _artifact_line(result)))
+                lines.append("%s: %s" % (_bounded_line(_label(call.name)), _artifact_line(result)))
                 messages.append(tool_message(call, result))
         raise StepFailed("round cap reached", "rounds")
     finally:

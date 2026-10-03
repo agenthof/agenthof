@@ -219,6 +219,18 @@ class FakeModel:
         return agent.ModelReply(self.final, [])
 
 
+class TimeoutModel(FakeModel):
+    """Honours the timeout it is handed, as a real client does: a call that
+    would take longer than it is cut off there with a timeout error."""
+
+    def __call__(self, proxy_url, run_token, model, messages, tools, timeout):
+        if self.delay > timeout:
+            self.seen.append(timeout)
+            time.sleep(timeout)
+            raise TimeoutError("Request timed out.")
+        return super().__call__(proxy_url, run_token, model, messages, tools, timeout)
+
+
 class EndlessModel(FakeModel):
     """Calls exec every round, forever."""
 
@@ -309,7 +321,7 @@ class LlmDriverTest(unittest.TestCase):
         self.assertEqual([m["role"] for m in last], ["system", "user", "assistant", "tool", "assistant", "tool", "tool", "assistant", "tool", "tool"])
         self.assertEqual((last[3]["tool_call_id"], last[3]["content"]), ("call_0_0", "ACCEPTANCE_E2E_MARKER=1\n"))
         self.assertRegex(last[8]["content"], r"^succeeded r-child[12] governed:unit$")
-        self.assertEqual(log[0], ("exec", ["env"], log[0][2], log[0][3]))
+        self.assertEqual(log[0][:2], ("exec", ["env"]))
         self.assertEqual(sorted(e[3][0] for e in log if e[0] == "tools"), [("echo", {"text": "drive-1"}), ("whoami", {})])
         self.assertEqual([e[1:4] for e in log if e[0] == "spawn"], [("acceptance-worker", "acceptance-sub", "drive-1")] * 2)
         self.assertTrue(doors.closed)
@@ -396,14 +408,60 @@ class LlmDriverTest(unittest.TestCase):
         self.assertTrue(doors.closed)
 
     def test_deadline_passing_during_the_model_call_starts_no_door_call(self):
-        log, model = [], FakeModel(ROUNDS, delay=0.3)
+        log, model = [], TimeoutModel(ROUNDS, delay=0.3)
         doors = FakeDoors(log)
         with self.assertRaises(agent.StepFailed) as cm:
             self.drive(model, doors, llm=agent.Llm(SCRIPTED, 8, 0.2))
         self.assertEqual(cm.exception.reason, "step deadline reached")
         self.assertEqual(len(model.seen), 1)
+        self.assertLessEqual(model.seen[0], 0.2)
         self.assertEqual(log, [], "a door call started after the deadline")
         self.assertTrue(doors.closed)
+        self.assertIn("model call cut off by the step deadline: TimeoutError", self.stderr)
+
+    def test_a_model_reply_landing_past_the_deadline_starts_no_door_call(self):
+        log, model = [], FakeModel(ROUNDS, delay=0.3)
+        doors = FakeDoors(log)
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(model, doors, llm=agent.Llm(SCRIPTED, 8, 0.2))
+        self.assertEqual(cm.exception.reason, "step deadline reached")
+        self.assertEqual(log, [], "a door call started after the deadline")
+
+    def test_a_model_failure_before_the_deadline_stays_the_model_reason(self):
+        def boom(*a, **k):
+            raise TimeoutError("Request timed out.")
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(boom, FakeDoors([]))
+        self.assertEqual((cm.exception.reason, cm.exception.cause), ("model call failed", "TimeoutError"))
+
+    def test_model_chosen_text_is_bounded_in_the_artifact(self):
+        long = "n" * (2 * agent.TOOL_RESULT_MAX)
+        model = FakeModel([[(long, {})]], final="f" * (2 * agent.TOOL_RESULT_MAX))
+        art = self.drive(model, FakeDoors([]))
+        lines = art.splitlines()
+        self.assertEqual(lines[0], "model: called " + long[:agent.TOOL_RESULT_MAX] + " [truncated]")
+        self.assertEqual(lines[1], "tool " + long[:agent.TOOL_RESULT_MAX - 5] + " [truncated]: unknown tool")
+        self.assertEqual(lines[2], "model: " + "f" * agent.TOOL_RESULT_MAX + " [truncated]")
+
+    def test_a_round_runs_at_most_max_parallel_calls_at_once(self):
+        log, n = [], 3 * agent.MAX_PARALLEL_CALLS
+        doors = FakeDoors(log, spawn_delay=0.05)
+        in_flight, peak, lock = [0], [0], threading.Lock()
+        spawn = doors.spawn
+
+        def counted(*a):
+            with lock:
+                in_flight[0] += 1
+                peak[0] = max(peak[0], in_flight[0])
+            try:
+                return spawn(*a)
+            finally:
+                with lock:
+                    in_flight[0] -= 1
+        doors.spawn = counted
+        self.drive(FakeModel([[("spawn", SPAWN_ARGS)] * n]), doors)
+        self.assertEqual(len([e for e in log if e[0] == "spawn"]), n, "every call of the round ran")
+        self.assertEqual(peak[0], agent.MAX_PARALLEL_CALLS)
 
     def test_model_timeout_is_bounded_by_the_remaining_budget(self):
         model = FakeModel(ROUNDS[:1], delay=0.1)
@@ -481,6 +539,8 @@ class LlmDriverTest(unittest.TestCase):
         with self.assertRaises(agent.StepFailed) as cm:
             self.drive(boom, doors)
         self.assertEqual((cm.exception.reason, cm.exception.cause), ("model call failed", "RuntimeError"))
+        self.assertNotIn("secret-token-value", str(cm.exception))
+        self.assertNotIn("secret-token-value", cm.exception.reason)
         self.assertTrue(doors.closed)
 
     def test_door_text_cannot_forge_extra_artifact_lines(self):
