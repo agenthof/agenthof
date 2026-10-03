@@ -149,6 +149,50 @@ class DoorsTest(unittest.TestCase):
         finally:
             doors.close()
 
+    def test_refusal_status_is_carried(self):
+        self.srv, url = fake_gateway({"/exec/run": (403, "command is not on the exec allowlist\n"),
+                                      "/spawn": (403, {"status": "refused", "reason": "spawn target is not on the agent's may_spawn list"})})
+        doors = agent.Doors(url, TOKEN)
+        try:
+            with self.assertRaises(agent.DoorError) as cm:
+                doors.exec_run(["touch", "/x"])
+            self.assertEqual(cm.exception.status, 403)
+            with self.assertRaises(agent.DoorError) as cm:
+                doors.spawn("worker", "sub", "hi")
+            self.assertEqual(cm.exception.status, 403)
+        finally:
+            doors.close()
+
+    def test_failure_status_is_carried(self):
+        self.srv, url = fake_gateway({"/exec/run": (502, "runtime unreachable\n"),
+                                      "/spawn": (200, {"status": "failed", "child_run_id": "r-child"})})
+        doors = agent.Doors(url, TOKEN)
+        try:
+            with self.assertRaises(agent.DoorError) as cm:
+                doors.exec_run(["env"])
+            self.assertEqual(cm.exception.status, 502)
+            with self.assertRaises(agent.DoorError) as cm:
+                doors.spawn("worker", "sub", "hi")
+            self.assertEqual(cm.exception.status, 200)  # the door answered; the child failed
+        finally:
+            doors.close()
+
+    def test_nonzero_exit_carries_status_200(self):
+        self.srv, url = fake_gateway({"/exec/run": (200, {"exit": 1, "output": "", "truncated": False})})
+        doors = agent.Doors(url, TOKEN)
+        try:
+            with self.assertRaises(agent.DoorError) as cm:
+                doors.exec_run(["false"])
+            self.assertEqual(cm.exception.status, 200)
+        finally:
+            doors.close()
+
+
+class DoorErrorTest(unittest.TestCase):
+    # Its own class: DoorsTest's tearDown shuts down a fake gateway this test has no use for.
+    def test_door_error_without_an_answer_has_no_status(self):
+        self.assertIsNone(agent.DoorError("connection refused").status)
+
 
 class DoorBaseTest(unittest.TestCase):
     def test_http_base_strips_trailing_slash(self):
@@ -257,6 +301,21 @@ class ToolDoorTest(unittest.TestCase):
         seen = []
         self.fake = FakeMCP(seen)
         self.assertEqual(agent.call_tools(self.fake.url, TOKEN, [("echo", {"text": "x"})]), ["x"])
+
+    def test_list_tools_returns_specs_with_schemas(self):
+        seen = []
+        self.fake = FakeMCP(seen)
+        specs = agent.list_tools(self.fake.url, TOKEN)
+        self.assertEqual([s.name for s in specs], ["echo", "whoami"])
+        echo = [s for s in specs if s.name == "echo"][0]
+        self.assertIsInstance(echo, agent.ToolSpec)
+        self.assertEqual(echo.parameters["type"], "object")
+        self.assertIn("text", echo.parameters["properties"])
+        self.assertIsInstance(echo.description, str)
+        self.assertIn("DELETE", [m for m, _ in seen], "the listing session must be closed")
+        report = agent.tool_session(self.fake.url, TOKEN, [])
+        self.assertEqual([t.name for t in report.tools], ["echo", "whoami"])
+        self.assertEqual(report.results, [])
 
 
 class FakeDoorsObject:

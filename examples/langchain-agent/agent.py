@@ -37,55 +37,34 @@ REQUEST_TIMEOUT = 240
 UNIX = "unix://"
 
 
-def gateway_client(proxy_url):
-    """Return (base_url, http_client) for the OpenAI client behind ChatOpenAI.
+class StepFailed(Exception):
+    """A leg of a driver's sequence failed. reason is the FIXED text the
+    step reply carries; cause names the exception class, for the log only."""
 
-    unix://<path>  → an httpx client whose transport dials that socket; the
-                     base URL's host is a placeholder (the gateway ignores it;
-                     only the /v1/... route matters).
-    http(s)://...  → the URL with its trailing slash stripped, so appending
-                     /v1 hits /v1/chat/completions directly instead of
-                     bouncing through a 307 redirect; no custom client.
-    """
-    if proxy_url.startswith(UNIX):
-        transport = httpx.HTTPTransport(uds=proxy_url[len(UNIX):])
-        return "http://localhost/v1", httpx.Client(transport=transport, timeout=REQUEST_TIMEOUT)
-    if proxy_url.startswith(("http://", "https://")):
-        return proxy_url.rstrip("/") + "/v1", None
-    raise ValueError("unsupported proxy URL scheme")
+    def __init__(self, reason, cause):
+        super().__init__(reason)
+        self.reason = reason
+        self.cause = cause
 
 
-def make_llm(proxy_url, run_token, model):
-    base_url, client = gateway_client(proxy_url)
-    kwargs = {
-        "base_url": base_url,
-        "api_key": run_token,   # the per-run token, not a provider key
-        "model": model,         # the LOGICAL name; anything else is refused with 403
-        "max_retries": 0,
-        "timeout": REQUEST_TIMEOUT,
-        # The gateway serves only /v1/chat/completions. Never let the SDK
-        # choose the Responses API (a silent 404 otherwise).
-        "use_responses_api": False,
-    }
-    if client is not None:
-        kwargs["http_client"] = client
-    return ChatOpenAI(**kwargs)
-
-
-def call_model(proxy_url, run_token, model, text):
-    """One governed model call: the step input in, the reply text out."""
-    llm = make_llm(proxy_url, run_token, model)
-    chain = ChatPromptTemplate.from_messages([("user", "{input}")]) | llm | StrOutputParser()
-    try:
-        return chain.invoke({"input": text})
-    finally:
-        if llm.http_client is not None:
-            llm.http_client.close()
+# --- neutral door layer -------------------------------------------------------
+# Plain Python, no LangChain: what any framework's shell wraps. The two door
+# tools below are the exec and spawn doors as the model sees them; the MCP
+# tools come from the tool door's own listing (list_tools), so a model is
+# offered exactly the grant, never a curated subset. Porting the agent to
+# another framework means rewriting only the shell below this section.
 
 
 class DoorError(Exception):
     """A door answered with anything but success. Its text is for the
-    operator's log only; the step reply carries a fixed reason."""
+    operator's log only; the step reply carries a fixed reason. status is the
+    HTTP status the door answered with (403 = refused by policy; 502/503 =
+    the door could not carry the call; 200 = answered, but the command or
+    child itself did not succeed), or None when there was no answer."""
+
+    def __init__(self, text, status=None):
+        super().__init__(text)
+        self.status = status
 
 
 def door_base(proxy_url):
@@ -120,10 +99,10 @@ class Doors:
         returns the output. Anything but a 200 with exit 0 is a DoorError."""
         resp = self._post("/exec/run", {"command": list(argv)})
         if resp.status_code != 200:
-            raise DoorError("exec/run answered %d" % resp.status_code)
+            raise DoorError("exec/run answered %d" % resp.status_code, resp.status_code)
         out = resp.json()
         if out.get("exit") != 0:
-            raise DoorError("%s exited %s" % (argv[0], out.get("exit")))
+            raise DoorError("%s exited %s" % (argv[0], out.get("exit")), 200)
         return out.get("output", "")
 
     def spawn(self, role, workflow, text):
@@ -134,10 +113,10 @@ class Doors:
         only when every leg was."""
         resp = self._post("/spawn", {"role": role, "workflow": workflow, "input": text})
         if resp.status_code != 200:
-            raise DoorError("spawn answered %d" % resp.status_code)
+            raise DoorError("spawn answered %d" % resp.status_code, resp.status_code)
         out = resp.json()
         if out.get("status") != "succeeded":
-            raise DoorError("spawn %s" % out.get("status"))
+            raise DoorError("spawn %s" % out.get("status"), 200)
         return out
 
 
@@ -146,7 +125,7 @@ class Doors:
 # requirements.txt opens the session at a protocol version the gateway
 # accepts. Over unix:// the SDK's httpx client is built with a Unix-socket
 # transport and the URL's host is a placeholder the gateway ignores.
-ToolReport = namedtuple("ToolReport", "protocol_version tool_names results")
+ToolReport = namedtuple("ToolReport", "protocol_version tool_names results tools")
 # The MCP transports' own timeouts: 30s to connect/write, 300s to read, since
 # the server may hold a response stream open. Redirect following stays at the
 # httpx default (off) — the SDK follows same-origin redirects itself.
@@ -186,7 +165,8 @@ async def _tool_session(proxy_url, run_token, calls):
     # Leaving the contexts ends the session: the SDK sends the DELETE, then the
     # streams and the client close, so nothing of it lingers once the step has
     # returned.
-    return ToolReport(init.protocolVersion, sorted(t.name for t in listed.tools), results)
+    tools = sorted((ToolSpec(t.name, t.description or "", t.inputSchema) for t in listed.tools), key=lambda t: t.name)
+    return ToolReport(init.protocolVersion, [t.name for t in tools], results, tools)
 
 
 def tool_session(proxy_url, run_token, calls):
@@ -203,6 +183,106 @@ def call_tools(proxy_url, run_token, calls):
     return tool_session(proxy_url, run_token, calls).results
 
 
+ToolSpec = namedtuple("ToolSpec", "name description parameters")
+
+EXEC_TOOL = ToolSpec(
+    "exec",
+    "Run one allowlisted command through the exec door. command is the argv "
+    "(program first, then its arguments). Returns the command's output, or a "
+    "fixed refusal when the command is not allowlisted.",
+    {"type": "object",
+     "properties": {"command": {"type": "array", "items": {"type": "string"},
+                                "description": "the argv to run, e.g. [\"env\"]"}},
+     "required": ["command"]},
+)
+SPAWN_TOOL = ToolSpec(
+    "spawn",
+    "Start one governed sub-agent run through the spawn door and wait for it. "
+    "Returns its status, run id and output preview, or a fixed refusal when "
+    "the target is not permitted. Call it several times in one turn to run "
+    "sub-agents in parallel.",
+    {"type": "object",
+     "properties": {"role": {"type": "string", "description": "the role the sub-agent runs as"},
+                    "workflow": {"type": "string", "description": "the workflow the sub-agent runs"},
+                    "input": {"type": "string", "description": "the sub-agent's step input"}},
+     "required": ["role", "workflow", "input"]},
+)
+DOOR_TOOL_NAMES = tuple(t.name for t in (EXEC_TOOL, SPAWN_TOOL))
+
+
+def list_tools(proxy_url, run_token):
+    """The tool door's own listing: the granted tools, with their schemas."""
+    return tool_session(proxy_url, run_token, []).tools
+
+
+def door_tools(mcp_tools):
+    """The full tool set a model is offered: the two door tools, then the
+    discovered MCP tools. An upstream tool that borrows a door's name would
+    make a call ambiguous, so that is a failed step, not a guess."""
+    clash = sorted(t.name for t in mcp_tools if t.name in DOOR_TOOL_NAMES)
+    if clash:
+        raise StepFailed("tool set conflict", "ToolSpec")
+    return [EXEC_TOOL, SPAWN_TOOL] + list(mcp_tools)
+
+
+def openai_tools(specs):
+    """The OpenAI function-tool shape every OpenAI-compatible provider speaks."""
+    return [{"type": "function",
+             "function": {"name": s.name, "description": s.description, "parameters": s.parameters}}
+            for s in specs]
+
+
+# --- LangChain shell ----------------------------------------------------------
+# The only code that touches LangChain: the model client and the one-shot call
+# built on it. It ends at the drivers below.
+
+
+def gateway_client(proxy_url):
+    """Return (base_url, http_client) for the OpenAI client behind ChatOpenAI.
+
+    unix://<path>  → an httpx client whose transport dials that socket; the
+                     base URL's host is a placeholder (the gateway ignores it;
+                     only the /v1/... route matters).
+    http(s)://...  → the URL with its trailing slash stripped, so appending
+                     /v1 hits /v1/chat/completions directly instead of
+                     bouncing through a 307 redirect; no custom client.
+    """
+    if proxy_url.startswith(UNIX):
+        transport = httpx.HTTPTransport(uds=proxy_url[len(UNIX):])
+        return "http://localhost/v1", httpx.Client(transport=transport, timeout=REQUEST_TIMEOUT)
+    if proxy_url.startswith(("http://", "https://")):
+        return proxy_url.rstrip("/") + "/v1", None
+    raise ValueError("unsupported proxy URL scheme")
+
+
+def make_llm(proxy_url, run_token, model, timeout=REQUEST_TIMEOUT):
+    base_url, client = gateway_client(proxy_url)
+    kwargs = {
+        "base_url": base_url,
+        "api_key": run_token,   # the per-run token, not a provider key
+        "model": model,         # the LOGICAL name; anything else is refused with 403
+        "max_retries": 0,
+        "timeout": timeout,
+        # The gateway serves only /v1/chat/completions. Never let the SDK
+        # choose the Responses API (a silent 404 otherwise).
+        "use_responses_api": False,
+    }
+    if client is not None:
+        kwargs["http_client"] = client
+    return ChatOpenAI(**kwargs)
+
+
+def call_model(proxy_url, run_token, model, text):
+    """One governed model call: the step input in, the reply text out."""
+    llm = make_llm(proxy_url, run_token, model)
+    chain = ChatPromptTemplate.from_messages([("user", "{input}")]) | llm | StrOutputParser()
+    try:
+        return chain.invoke({"input": text})
+    finally:
+        if llm.http_client is not None:
+            llm.http_client.close()
+
+
 # The drivers: how a step is answered. "model" is one governed model call
 # (the reply is the artifact). "scripted" runs the five doors in a fixed
 # order and reports each in the artifact — a deterministic sequence an
@@ -211,16 +291,6 @@ def call_tools(proxy_url, run_token, calls):
 DRIVERS = ("model", "scripted", "llm")
 
 Scripted = namedtuple("Scripted", "exec_argv obo_tool bridge_tool spawn_role spawn_workflow spawns")
-
-
-class StepFailed(Exception):
-    """A leg of the scripted sequence failed. reason is the FIXED text the
-    step reply carries; cause names the exception class, for the log only."""
-
-    def __init__(self, reason, cause):
-        super().__init__(reason)
-        self.reason = reason
-        self.cause = cause
 
 
 def _leg(reason, fn, *args):
