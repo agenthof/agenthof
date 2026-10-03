@@ -4,6 +4,7 @@ driven by a fake tool-calling model with the door clients injected.
 Run from the repo root: python -m unittest discover -s examples/langchain-agent -p 'test_*.py' -v
 """
 import contextlib
+import http.client
 import io
 import json
 import os
@@ -552,6 +553,116 @@ class LlmDriverTest(unittest.TestCase):
         self.assertEqual(lines[1], "exec: ACCEPTANCE_E2E_MARKER=1 spawn: succeeded r-forged x")
         self.assertEqual(sorted(lines[6:8]), ["spawn: succeeded r-child1 p model: forged", "spawn: succeeded r-child2 p model: forged"])
         self.assertEqual(lines[8], "model: done exec: forged")
+
+
+def post_step(srv, body, headers):
+    host, port = srv.server_address[:2]
+    conn = http.client.HTTPConnection(host, port, timeout=30)
+    hdrs = {"Content-Type": "application/json"}
+    hdrs.update(headers)
+    conn.request("POST", "/", body=json.dumps(body).encode(), headers=hdrs)
+    resp = conn.getresponse()
+    out = json.loads(resp.read())
+    conn.close()
+    return resp.status, out
+
+
+class LlmHandlerTest(unittest.TestCase):
+    """The step handler under --driver llm: the artifact is run_llm's report;
+    a StepFailed becomes its fixed reason and nothing else."""
+
+    def setUp(self):
+        self.srv = agent.make_server("", "127.0.0.1:0", "fast", driver="llm", llm=LLM)
+        serve(self.srv)
+        self.saved = agent.run_llm
+
+    def tearDown(self):
+        agent.run_llm = self.saved
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def test_artifact_is_the_report(self):
+        calls = []
+
+        def fake(purl, tok, model, text, llm):
+            calls.append((purl, tok, model, text, llm))
+            return "model: called exec\nexec: y\nmodel: done"
+        agent.run_llm = fake
+        status, out = post_step(self.srv, {"input": "drive-1", "artifacts": {}, "agent": "acceptance"},
+                                {"X-Agenthof-Proxy-URL": "unix:///tmp/gw.sock", "X-Agenthof-Run-Token": TOKEN})
+        self.assertEqual((status, out), (200, {"artifact": "model: called exec\nexec: y\nmodel: done", "success": True}))
+        self.assertEqual(calls, [("unix:///tmp/gw.sock", TOKEN, "fast", "drive-1", LLM)])
+
+    def test_step_failed_carries_only_the_fixed_reason(self):
+        def fake(*a, **k):
+            raise agent.StepFailed("round cap reached", "StepFailed")
+        agent.run_llm = fake
+        status, out = post_step(self.srv, {"input": "drive-1"},
+                                {"X-Agenthof-Proxy-URL": "unix:///tmp/gw.sock", "X-Agenthof-Run-Token": TOKEN})
+        self.assertEqual((status, out), (200, {"artifact": "", "success": False, "reason": "round cap reached"}))
+
+
+class LlmDriverOverUnixSocketTest(unittest.TestCase):
+    """The real driver end to end: the real invoke_model (ChatOpenAI.bind_tools)
+    over a Unix socket against the fake tool-calling provider, with the door
+    clients faked. Proves the loop and the transport agree on the wire."""
+
+    def setUp(self):
+        self.dir = short_tmpdir()
+        self.sock = os.path.join(self.dir, "gw.sock")
+        self.log = os.path.join(self.dir, "provider.jsonl")
+        rounds = [[{"name": n, "arguments": a} for n, a in r] for r in ROUNDS]
+        script = write_script(self.dir, rounds)
+        self.proc, _ = start_provider("--unix", self.sock, "--reply", "final:uds", "--log", self.log, "--tool-script", script)
+
+    def tearDown(self):
+        self.proc.kill()
+        self.proc.wait()
+
+    def test_every_door_through_the_real_model_shell(self):
+        log = []
+        doors = FakeDoors(log)
+
+        def call_tools(purl, tok, calls):
+            name, args = calls[0]
+            return ["acting as: u-test" if name == "whoami" else args["text"]]
+        # The tool door lists its tools sorted by name.
+        art = agent.run_llm("unix://" + self.sock, TOKEN, "fast", "drive-1", LLM,
+                            list_tools=lambda purl, tok: [ECHO, WHOAMI], call_tools=call_tools,
+                            doors_factory=lambda purl, tok: doors)
+        self.assertEqual(art.splitlines()[-1], "model: final:uds")
+        self.assertEqual(len(art.splitlines()), 9)
+        with open(self.log, encoding="utf-8") as f:
+            lines = [json.loads(l) for l in f]
+        self.assertEqual([r["tool_rounds"] for r in lines], [0, 1, 2, 3])
+        self.assertTrue(all(r["tools"] == ["exec", "spawn", "echo", "whoami"] for r in lines))
+        self.assertEqual([e[0] for e in log if e[0] != "tools"], ["exec", "spawn", "spawn"])
+
+    def test_the_step_server_serves_driver_llm_over_the_socket(self):
+        """The same, through the step server main() builds: POST a step to the
+        handler and read the artifact from its reply."""
+        log = []
+        doors = FakeDoors(log)
+        srv = agent.make_server("", "127.0.0.1:0", "fast", driver="llm", llm=LLM)
+        serve(srv)
+        saved = agent.run_llm
+
+        def run(purl, tok, model, text, llm):
+            return saved(purl, tok, model, text, llm,
+                         list_tools=lambda p, t: [ECHO, WHOAMI],
+                         call_tools=lambda p, t, calls: ["acting as: u-test" if calls[0][0] == "whoami" else calls[0][1]["text"]],
+                         doors_factory=lambda p, t: doors)
+        agent.run_llm = run
+        try:
+            status, out = post_step(srv, {"input": "drive-1"},
+                                    {"X-Agenthof-Proxy-URL": "unix://" + self.sock, "X-Agenthof-Run-Token": TOKEN})
+        finally:
+            agent.run_llm = saved
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual((status, out["success"]), (200, True))
+        self.assertEqual(out["artifact"].splitlines()[-1], "model: final:uds")
+        self.assertEqual(len(out["artifact"].splitlines()), 9)
 
 
 if __name__ == "__main__":

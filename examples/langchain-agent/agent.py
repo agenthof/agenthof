@@ -6,7 +6,9 @@ It serves Agenthof's step contract — POST {"input", "artifacts", "agent"} →
 answers each step with ONE model call made through the per-run gateway that
 Agenthof names in the X-Agenthof-Proxy-URL header, authenticated with the
 X-Agenthof-Run-Token — or, with `--driver scripted`, every door in a fixed
-order. It holds no provider key: the gateway injects that
+order — or, with `--driver llm`, a model that is offered the doors as tools
+and decides, round by round, which to call. It holds no provider key: the
+gateway injects that
 upstream. Inside a no-network compartment (deploy/refbox) the proxy URL is
 unix://<socket-path>; elsewhere it is http://127.0.0.1:<port>/.
 
@@ -589,6 +591,8 @@ class StepHandler(BaseHTTPRequestHandler):
             if self.server.driver == "scripted":
                 reply = run_scripted(proxy_url, run_token, self.server.model, step["input"],
                                      self.server.scripted, call_model=self.server.call_model)
+            elif self.server.driver == "llm":
+                reply = run_llm(proxy_url, run_token, self.server.model, step["input"], self.server.llm)
             else:
                 reply = self.server.call_model(proxy_url, run_token, self.server.model, step["input"])
         except StepFailed as exc:
@@ -622,7 +626,7 @@ class UnixStepServer(_Threaded, socketserver.UnixStreamServer):
             pass
 
 
-def make_server(socket_path, addr, model, call_model=call_model, driver="model", scripted=None):
+def make_server(socket_path, addr, model, call_model=call_model, driver="model", scripted=None, llm=None):
     """Serve the step contract on socket_path (Unix) when given, else on addr
     (host:port), answering steps with the given driver."""
     if socket_path:
@@ -638,6 +642,7 @@ def make_server(socket_path, addr, model, call_model=call_model, driver="model",
     srv.call_model = call_model
     srv.driver = driver
     srv.scripted = scripted
+    srv.llm = llm
     return srv
 
 
@@ -648,8 +653,15 @@ def _at_least_one(value):
     return n
 
 
+def _positive_seconds(value):
+    s = float(value)
+    if not s > 0:
+        raise argparse.ArgumentTypeError("must be a positive number of seconds")
+    return s
+
+
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="LangChain agent for Agenthof (one governed model call per step, or every door in a fixed order)")
+    p = argparse.ArgumentParser(description="LangChain agent for Agenthof (one governed model call per step, every door in a fixed order, or a model choosing the doors)")
     # Single dash on purpose: the refbox recipe appends "-socket <path>" after
     # the image name, and the last -socket given wins.
     p.add_argument("-socket", dest="socket", default="", help="Unix socket path to listen on; overrides --addr")
@@ -662,13 +674,16 @@ def parse_args(argv=None):
     p.add_argument("--addr", default="127.0.0.1:8082", help="TCP listen address when -socket is not set")
     p.add_argument("--model", default="fast", help="logical model name this agent is configured with")
     p.add_argument("--driver", choices=DRIVERS, default="model",
-                   help="model: one governed model call per step (default); scripted: model, exec, two tool calls, parallel spawns, in that order; llm: reserved")
-    p.add_argument("--exec-argv", default="env", help="scripted: the allowlisted command to run through the exec door (space-separated)")
-    p.add_argument("--obo-tool", default="whoami", help="scripted: the tool to call on the on-behalf-of resource")
-    p.add_argument("--bridge-tool", default="echo", help="scripted: the tool to call on the bridged stdio resource (called with the step input as text)")
-    p.add_argument("--spawn-role", default="acceptance-worker", help="scripted: the role of the sub-agent runs")
-    p.add_argument("--spawn-workflow", default="acceptance-sub", help="scripted: the workflow of the sub-agent runs")
-    p.add_argument("--spawns", type=_at_least_one, default=2, help="scripted: how many sub-agent runs to start in parallel")
+                   help="model: one governed model call per step (default); scripted: model, exec, two tool calls, parallel spawns, in that order; llm: a model offered the doors as tools decides which to call")
+    p.add_argument("--exec-argv", default="env", help="scripted/llm: the allowlisted command to run through the exec door (space-separated)")
+    p.add_argument("--obo-tool", default="whoami", help="scripted/llm: the tool to call on the on-behalf-of resource")
+    p.add_argument("--bridge-tool", default="echo", help="scripted/llm: the tool to call on the bridged stdio resource (called with the step input as text)")
+    p.add_argument("--spawn-role", default="acceptance-worker", help="scripted/llm: the role of the sub-agent runs")
+    p.add_argument("--spawn-workflow", default="acceptance-sub", help="scripted/llm: the workflow of the sub-agent runs")
+    p.add_argument("--spawns", type=_at_least_one, default=2, help="scripted/llm: how many sub-agent runs to start in parallel")
+    p.add_argument("--max-rounds", type=_at_least_one, default=8, help="llm: the most model rounds one step may take before it fails")
+    p.add_argument("--step-budget", type=_positive_seconds, default=240.0,
+                   help="llm: seconds the whole step may take; set it below the engine's step_timeout. No model or door call starts once it is spent")
     return p.parse_args(argv)
 
 
@@ -676,12 +691,13 @@ def scripted_from(opts):
     return Scripted(opts.exec_argv.split(), opts.obo_tool, opts.bridge_tool, opts.spawn_role, opts.spawn_workflow, opts.spawns)
 
 
+def llm_from(opts):
+    return Llm(scripted_from(opts), opts.max_rounds, opts.step_budget)
+
+
 def main(argv=None):
     opts = parse_args(argv)
-    if opts.driver == "llm":
-        sys.stderr.write("langchain-agent: --driver llm is reserved and not implemented yet\n")
-        return 2
-    srv = make_server(opts.socket, opts.addr, opts.model, driver=opts.driver, scripted=scripted_from(opts))
+    srv = make_server(opts.socket, opts.addr, opts.model, driver=opts.driver, scripted=scripted_from(opts), llm=llm_from(opts))
     where = "unix:" + opts.socket if opts.socket else "%s:%d" % srv.server_address[:2]
     sys.stderr.write("langchain-agent listening on %s, logical model %s, driver %s\n" % (where, opts.model, opts.driver))
     sys.stderr.flush()
