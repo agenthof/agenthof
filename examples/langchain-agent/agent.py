@@ -251,8 +251,14 @@ def gateway_client(proxy_url):
 
 
 # --- LangChain shell ----------------------------------------------------------
-# The only code that touches LangChain: the model client and the one-shot call
-# built on it. It ends at the drivers below.
+# The only code that touches LangChain: the model transport. ChatOpenAI points
+# at the model door (make_llm), bind_tools puts the neutral tool specs on the
+# wire in the OpenAI function shape, and the reply's parsed tool calls come
+# back as plain tuples. The conversation itself is a list of OpenAI-style
+# dicts, which langchain-core accepts directly, so nothing of LangChain's
+# message types leaks out of this section. It ends at the drivers below.
+ToolCall = namedtuple("ToolCall", "id name args")
+ModelReply = namedtuple("ModelReply", "text tool_calls")
 
 
 def make_llm(proxy_url, run_token, model, timeout=REQUEST_TIMEOUT):
@@ -281,6 +287,36 @@ def call_model(proxy_url, run_token, model, text):
     finally:
         if llm.http_client is not None:
             llm.http_client.close()
+
+
+def invoke_model(proxy_url, run_token, model, messages, tools, timeout=REQUEST_TIMEOUT):
+    """One governed model call with the tool set offered; the reply's text
+    and parsed tool calls. No tools → a plain chat completion."""
+    llm = make_llm(proxy_url, run_token, model, timeout=timeout)
+    try:
+        runnable = llm.bind_tools(openai_tools(tools)) if tools else llm
+        reply = runnable.invoke(messages)
+    finally:
+        if llm.http_client is not None:
+            llm.http_client.close()
+    calls = [ToolCall(str(c.get("id") or ""), str(c.get("name") or ""), c.get("args") if isinstance(c.get("args"), dict) else {})
+             for c in (reply.tool_calls or [])]
+    return ModelReply(str(reply.text or ""), calls)
+
+
+def assistant_message(reply):
+    """The model's turn, as the next call will see it."""
+    msg = {"role": "assistant", "content": reply.text}
+    if reply.tool_calls:
+        msg["tool_calls"] = [{"id": c.id, "type": "function",
+                              "function": {"name": c.name, "arguments": json.dumps(c.args)}}
+                             for c in reply.tool_calls]
+    return msg
+
+
+def tool_message(call, text):
+    """One tool result, paired to its call by id."""
+    return {"role": "tool", "tool_call_id": call.id, "content": text}
 
 
 # The drivers: how a step is answered. "model" is one governed model call
