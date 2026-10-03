@@ -103,7 +103,10 @@ each kind of line proves.
   allowlist; the declared runtime ran it and attested first-hand what ran.
   The event carries the argv, the exit code, the runtime's hash of the
   output (checked by Agenthof against the output it returned) and the
-  runtime's attestation; the output itself is not on the ledger.
+  runtime's attestation; the **exec event does not carry the output**. (The
+  step's artifact preview can show a short head of the agent's own summary,
+  which under `--driver llm` may include a slice of what a tool returned — but
+  that preview is agent-asserted, not the door's first-hand record.)
 - **`tool whoami — args … (token_exchange)`.** The model called a tool on a
   per-user resource. The gateway exchanged the human's token for one
   audienced to that upstream (RFC 8693) and called it **as the human**; the

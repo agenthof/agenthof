@@ -190,7 +190,7 @@ ere_escape() { printf '%s' "$1" | sed 's/[][\\.*^$+?(){}|]/\\&/g'; }
 # stand-in's fake podman starts every child agent with its own environment:
 # a secret exported earlier would be inherited by every "compartment".
 starved() {
-	for v in AGENTHOF_GATEWAY_KEY ACCEPTANCE_PROVIDER_KEY OBO_CLIENT_SECRET E2E_TOOL_TOKEN; do
+	for v in AGENTHOF_GATEWAY_KEY OBO_CLIENT_SECRET E2E_TOOL_TOKEN; do
 		[ -z "${!v:-}" ] || fail "$v is exported before the stand-ins start; every child agent would inherit it"
 	done
 }

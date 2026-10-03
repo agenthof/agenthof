@@ -236,7 +236,7 @@ def openai_tools(specs):
 
 
 def gateway_client(proxy_url):
-    """Return (base_url, http_client) for the OpenAI client behind ChatOpenAI.
+    """Return (base_url, http_client) for an OpenAI-compatible client (framework-neutral).
 
     unix://<path>  → an httpx client whose transport dials that socket; the
                      base URL's host is a placeholder (the gateway ignores it;
