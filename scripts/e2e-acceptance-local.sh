@@ -393,4 +393,156 @@ export AGENTHOF_OIDC_SUBJECT_TOKEN_TYPE=urn:ietf:params:oauth:token-type:id_toke
 
 "$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups acceptance-users
 echo "apply: the combined config is valid — ok"
+
+run() { # $1 = workflow; sets OUT, RUNID, AUDIT. Identity is the verified
+	# token, never --as: an on-behalf-of workflow under --as is refused
+	# before the engine, and the children inherit the token's invoker.
+	OUT="$("$WORK/agenthof" run acceptance-operator "$1" --input "drive-$NONCE" --token "$TOKEN" \
+		--config "$WORK/config" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" \
+		--log-level debug 2>>"$WORK/agenthof.err" || true)"
+	OUTS+=("$OUT")
+	echo "$OUT"
+	RUNID="$(echo "$OUT" | sed -E -n 's/^run (r-[a-f0-9]+) (finished|refused).*/\1/p')"
+	[ -n "$RUNID" ] || fail "no run id in the output of $1"
+	AUDIT="$(out_of "$WORK/agenthof" audit "$RUNID" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
+	OUTS+=("$AUDIT")
+	echo "$AUDIT"
+	echo "$AUDIT" | grep -q "ledger integrity: verified" || fail "$1: ledger not verified"
+}
+ledger() { echo "$WORK/logs/$1.jsonl"; }
+parent_artifact() { # $1 = run id: the full step artifact body
+	local sha
+	sha="$(field "$(ledger "$1")" step_succeeded artifact_sha | tail -1)"
+	[ -n "$sha" ] || fail "run $1 has no step_succeeded artifact"
+	[ -s "$WORK/artifacts/$sha" ] || fail "run $1 names artifact $sha, but the store holds no such body"
+	cat "$WORK/artifacts/$sha"
+}
+provisioned_count() { out_of grep -c "set provisioned" "$WORK/refspawn.err"; }
+torn_down_count() { out_of grep -c "set torn down" "$WORK/refspawn.err"; }
+
+# --- 4. The combined run: every door, one step, one human.
+run acceptance
+echo "$OUT" | grep -q "finished: succeeded" || { cat "$WORK/agent.err"; fail "the combined run did not succeed"; }
+PARENT="$RUNID"
+L="$(ledger "$PARENT")"
+echo "$AUDIT" | grep -q "invoked by dana@example.com (oidc, issuer $ISSUER)" || fail "the run is not attributed to the verified human"
+[ "$(count "$L" step_succeeded)" = 1 ] || fail "expected exactly one succeeded step"
+ART="$(parent_artifact "$PARENT")"
+echo "$ART"
+
+# 4a. The model door: one model_call, the provider's nonce'd reply in the
+#     artifact — and what reached the provider: three calls so far (the
+#     parent's and each child's), each with the HOST key injected (never the
+#     run token), the logical model, the chat-completions route, and no
+#     X-Agenthof-* header. Checked here, before the refused runs add calls.
+[ "$(count "$L" model_call succeeded)" = 1 ] || fail "expected exactly one succeeded model_call on the parent"
+[ "$(count "$L" model_call)" = 1 ] || fail "the parent recorded a model_call that did not succeed"
+echo "$AUDIT" | grep -qF "model fast — 3 prompt / 5 completion tokens" || fail "audit did not render the model_call"
+echo "$ART" | grep -qxF "model: governed:$NONCE" || fail "the artifact does not carry the provider's reply"
+python3 - "$WORK/provider.jsonl" "$GATEWAY_KEY" <<'PY' || fail "the provider did not see exactly three governed calls with the host key injected"
+import json, sys
+lines = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+assert len(lines) == 3, "expected three provider calls (parent + two children), saw %d" % len(lines)
+for r in lines:
+    assert r["path"] == "/v1/chat/completions", r["path"]
+    assert r["authorization"] == "Bearer " + sys.argv[2], "the provider did not see the host key"
+    assert r["model"] == "fast", r["model"]
+    assert not [h for h in r["headers"] if h.startswith("x-agenthof")], r["headers"]
+print("provider saw: 3 calls, host key injected, model fast, /v1/chat/completions, no X-Agenthof-* headers")
+PY
+
+# 4b. The exec door, first-hand: mode runtime, refexec's attestation names
+#     env, and the output is exactly the allowlisted variable — nothing of
+#     this script's environment reached the compartment.
+[ "$(count "$L" exec succeeded)" = 1 ] || fail "expected exactly one succeeded exec"
+[ "$(count "$L" exec)" = 1 ] || fail "the parent recorded an exec that did not succeed"
+[ "$(field "$L" exec mode succeeded)" = runtime ] || fail "the exec is not mode runtime"
+EXEC_ATT="$(field "$L" exec runtime_attestation succeeded)"
+case "$EXEC_ATT" in *'"runtime": "refexec"'*) ;; *) fail "no refexec attestation on the exec" ;; esac
+case "$EXEC_ATT" in *'"command": ["env"]'*) ;; *) fail "the attestation does not name env" ;; esac
+echo "$AUDIT" | grep -Eq "exec env — exit 0 \(runtime\) \[runtime-attested: refexec env pid [0-9]+ spawn 1\]" || fail "audit did not render the first-hand exec"
+echo "$ART" | grep -qxF "exec: ACCEPTANCE_E2E_MARKER=1" || fail "the exec output is not exactly the allowlisted variable (the compartment's environment was not the allowlist)"
+if grep -q '"type":"exec".*ACCEPTANCE_E2E_MARKER=1' "$L"; then fail "the exec output body reached the exec event"; fi
+
+# 4c. The tool door, on behalf of the human: the upstream answered with her
+#     sub, which is in the artifact and (by design) in the tool_call preview;
+#     the issuer's log shows the exchange for her, audienced to the upstream.
+[ "$(tool_field "$L" whoami status)" = succeeded ] || fail "whoami did not succeed"
+[ "$(tool_field "$L" whoami auth_mode)" = token_exchange ] || fail "whoami is not auth_mode token_exchange"
+echo "$AUDIT" | grep -Eq "tool whoami — args [0-9a-f]{8} \(token_exchange\)" || fail "audit did not render the token_exchange call"
+echo "$ART" | grep -qxF "tool whoami: acting as: u-dana" || fail "the upstream did not see the human's sub"
+[ -s "$WORK/issued.jsonl" ] || fail "the issuer logged no exchanged token"
+grep -q '"sub":"u-dana"' "$WORK/issued.jsonl" || fail "the issuer exchanged for nobody in particular"
+grep -q "\"aud\":\"$UP_AUD\"" "$WORK/issued.jsonl" || fail "the issuer exchanged for no token audienced to the upstream"
+
+# 4d. The tool door, bridged: refbridge's first-hand attestation on the call.
+[ "$(tool_field "$L" echo status)" = succeeded ] || fail "echo did not succeed"
+[ "$(tool_field "$L" echo auth_mode)" = static_env ] || fail "echo is not auth_mode static_env"
+ECHO_ATT="$(tool_field "$L" echo runtime_attestation)"
+case "$ECHO_ATT" in *'"runtime": "refbridge"'*) ;; *) fail "no refbridge attestation on the bridged call" ;; esac
+echo "$AUDIT" | grep -Eq "tool echo — args [0-9a-f]{8} \(static_env\) \[runtime-attested: refbridge $(ere_escape "$WORK/stdio-tool") -credential-env DEMO_TOKEN pid [0-9]+ spawn 1\]" || fail "audit did not render the bridged call's attestation"
+echo "$ART" | grep -qxF "tool echo: drive-$NONCE" || fail "the bridged tool did not echo the step input"
+[ "$(count "$L" tool_call)" = 2 ] || fail "expected exactly two tool_call events (one per resource)"
+
+# 4e. The spawn door: two succeeded spawns, two children, each a governed
+#     run of its own under the same human, each with its own model_call,
+#     each in a compartment the supervisor provisioned, overlapping in time.
+[ "$(count "$L" spawn succeeded)" = 2 ] || fail "expected exactly two succeeded spawns"
+[ "$(count "$L" spawn)" = 2 ] || fail "the parent recorded a spawn that did not succeed"
+CHILDREN="$(field "$L" spawn child_run_id succeeded)"
+[ "$(echo "$CHILDREN" | sort -u | wc -l | tr -d ' ')" = 2 ] || fail "the two spawn events do not name two distinct children"
+for c in $CHILDREN; do
+	CL="$(ledger "$c")"
+	[ -f "$CL" ] || fail "child $c has no ledger of its own"
+	grep -q "\"parent_run_id\":\"$PARENT\"" "$CL" || fail "child $c does not name its parent"
+	grep -q '"depth":1' "$CL" || fail "child $c is not at depth 1"
+	grep -q '"subject":"dana@example.com"' "$CL" || fail "child $c is not attributed to the same human"
+	[ "$(field "$CL" workflow_finished status)" = succeeded ] || fail "child $c did not finish succeeded"
+	[ "$(count "$CL" model_call succeeded)" = 1 ] || fail "child $c did not make exactly one governed model call"
+	CSHA="$(field "$CL" step_succeeded artifact_sha)"
+	[ "$(cat "$WORK/artifacts/$CSHA")" = "governed:$NONCE" ] || fail "child $c's artifact is not the provider's reply"
+	echo "$ART" | grep -qxF "spawn: succeeded $c governed:$NONCE" || fail "child $c's preview did not reach the parent's artifact"
+	echo "$AUDIT" | grep -q "spawn acceptance-worker/acceptance-sub → run $c succeeded (depth 1) — artifact ${CSHA:0:8}" || fail "audit did not render the spawn of $c"
+	grep -q "compartment started.*child=$c.*compartment=agenthof-spawn-$c-acceptance-sub" "$WORK/refspawn.err" || fail "child $c's agent did not run in a compartment the supervisor provisioned"
+	CA="$(out_of "$WORK/agenthof" audit "$c" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
+	OUTS+=("$CA")
+	echo "$CA" | grep -q "ledger integrity: verified" || fail "child $c's ledger does not verify"
+	echo "$CA" | grep -q "invoked by dana@example.com (oidc, issuer $ISSUER)" || fail "child $c is not attributed to the verified human"
+	echo "$CA" | grep -qF "model fast — 3 prompt / 5 completion tokens" || fail "child $c's audit shows no model_call"
+done
+# shellcheck disable=SC2086  # run ids are hex and space-free: word-splitting them into two argv slots is the point
+python3 - "$WORK/logs" $CHILDREN <<'PY' || fail "the two children did not overlap in time (they ran one after another)"
+import json, sys
+from datetime import datetime
+logs, a, b = sys.argv[1:4]
+def parse(ts):
+    base, _, frac = ts.rstrip("Z").partition(".")
+    t = datetime.strptime(base, "%Y-%m-%dT%H:%M:%S")
+    return t.replace(microsecond=int((frac + "000000")[:6]))
+def span(run):
+    ts = [parse(json.loads(l)["time"]) for l in open(f"{logs}/{run}.jsonl") if l.strip()]
+    return min(ts), max(ts)
+(a0, a1), (b0, b1) = span(a), span(b)
+sys.exit(0 if a0 < b1 and b0 < a1 else 1)
+PY
+# The supervisor took every set back once the children were over.
+for i in $(seq 1 60); do
+	[ "$(provisioned_count)" = 2 ] && [ "$(torn_down_count)" = 2 ] && [ -z "$(ls -A "$SPAWN_ROOT")" ] && break
+	[ "$i" = 60 ] && fail "the supervisor provisioned $(provisioned_count) sets and tore down $(torn_down_count); something is still there"
+	sleep 0.25
+done
+# The model_call event carries the logical model and token counts, never the
+# reply body (the step_succeeded event's artifact preview does carry the
+# artifact's first line, by design — that is the step's output, not the door's).
+MODEL_LINE="$(out_of grep '"type":"model_call"' "$L")"
+[ -n "$MODEL_LINE" ] || fail "no model_call line to check, so the absence below would prove nothing"
+case "$MODEL_LINE" in *"governed:$NONCE"*) fail "the model reply body reached the model_call event" ;; esac
+
+# 4f. The tree, merged: investigate shows the parent and both children under it.
+TREE="$("$WORK/agenthof" investigate --run "$PARENT" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
+OUTS+=("$TREE")
+echo "$TREE"
+echo "$TREE" | grep -q "^[0-9].* run workflow_started — dana@example.com" || fail "investigate --run does not show the parent"
+[ "$(echo "$TREE" | grep -c "^  [0-9].* run workflow_started — dana@example.com .*parent=$PARENT")" = 2 ] || fail "investigate --run does not show both children under the parent"
+echo "combined run: model, first-hand exec, on-behalf-of tool, bridged tool, two parallel children — one timeline, one human — ok"
 echo "e2e-acceptance-local: PASS"
