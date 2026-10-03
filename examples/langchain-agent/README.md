@@ -56,7 +56,7 @@ library plus `langchain-openai`, which brings `httpx`, and `mcp`).
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python agent.py --addr 127.0.0.1:8082           # TCP, for local development
 .venv/bin/python agent.py -socket /path/to/agent.sock     # Unix socket (note the single dash)
-.venv/bin/python agent.py -socket /path/to/agent.sock -workspace /ignored  # a compartment supervisor appends -workspace; it is accepted and ignored
+.venv/bin/python agent.py -socket /path/to/agent.sock -workspace /ignored  # the hermetic refspawn test stand-in appends -workspace (the shipped supervisor mounts the volume at /work instead); accepted and ignored
 .venv/bin/python agent.py -socket /path/to/agent.sock --driver scripted     # every door in one step
 ```
 

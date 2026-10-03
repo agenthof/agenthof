@@ -282,9 +282,10 @@ class ArgsTest(unittest.TestCase):
             agent.parse_args(["--spawns", "0"])
 
     def test_workspace_is_accepted_and_ignored(self):
-        # A compartment supervisor appends "-socket <sock> -workspace <dir>"
-        # after the image; the agent must start, serve on the socket, and
-        # keep no files.
+        # The hermetic refspawn test stand-in appends "-socket <sock>
+        # -workspace <dir>" after the image (the shipped supervisor passes only
+        # "-socket" and mounts the volume at /work); either way the agent must
+        # start, serve on the socket, and keep no files.
         opts = agent.parse_args(["--driver", "model", "-socket", "/tmp/x/a.sock", "-workspace", "/tmp/x/work"])
         self.assertEqual((opts.socket, opts.driver), ("/tmp/x/a.sock", "model"))
         self.assertEqual(opts.workspace, "/tmp/x/work")

@@ -27,9 +27,9 @@
 # refused run — is bound to that run and invoked by the same human, and
 # every child event is linked to the parent (parent_run_id, depth 1); each
 # child has its own ledger with its own model_call, in a compartment the
-# supervisor provisioned, both children's compartments started before the
-# supervisor tore the first set down (they ran in parallel), and the
-# supervisor tore every set down; investigate --run shows the tree; an
+# supervisor provisioned, both of the parent's spawn requests were in flight
+# before either child returned (they ran in parallel), and the supervisor tore
+# every set down; investigate --run shows the tree; an
 # off-allowlist exec (nothing runs, no later door is reached) and a
 # may_spawn-denied spawn (no child, nothing provisioned, the run's model,
 # exec and tool legs still recorded) are recorded refusals on runs of their
@@ -587,17 +587,33 @@ for i in $(seq 1 60); do
 	[ "$i" = 60 ] && fail "the supervisor provisioned $(provisioned_count) sets and tore down $(torn_down_count); something is still there"
 	sleep 0.25
 done
-# Parallel, by the supervisor's own order: both children's compartments
-# started before it tore the first set down. Run one after the other, the
-# first child's teardown would come before the second child's start.
-FIRST_DOWN="$(line_of "set torn down")"
-[ -n "$FIRST_DOWN" ] || fail "the supervisor logged no teardown, so the order below would prove nothing"
-for c in $CHILDREN; do
-	STARTED="$(line_of "compartment started" "child=$c")"
-	[ -n "$STARTED" ] || fail "the supervisor logged no compartment start for child $c"
-	[ "$STARTED" -lt "$FIRST_DOWN" ] || fail "child $c's compartment started (supervisor log line $STARTED) only after the first set was torn down (line $FIRST_DOWN): the children ran one after another, not in parallel"
-done
-echo "parallel: both children's compartments started before the supervisor tore the first set down (line $FIRST_DOWN) — ok"
+# Parallel, by the gateway's own serialized order. The parent agent fires both
+# spawn requests from a thread pool; the gateway logs "spawn started" before it
+# calls the spawner and "spawn finished" before it answers — one process,
+# serialized by slog. If the children truly overlapped, BOTH of the parent's
+# "spawn started" lines precede the FIRST "spawn finished"; run one after the
+# other, a finish falls between the two starts. (The supervisor's own
+# compartment-start vs teardown timestamps are NOT a sound discriminator here:
+# a sequential second start routinely races the first set's ~20 ms teardown and
+# wins. Match the message text + the raw parent run-id so this holds for
+# --log-format text or json.)
+[ -f "$WORK/agenthof.err" ] || fail "no agenthof.err, so the parallel order could not be checked"
+par_rc=0
+awk -v parent="$PARENT" '
+	index($0, "spawn started")  && index($0, parent) { started++; if (started == 2) second_start = NR }
+	index($0, "spawn finished") && index($0, parent) && !first_finish { first_finish = NR }
+	END {
+		if (started < 2)   exit 2
+		if (!first_finish) exit 3
+		exit (second_start < first_finish ? 0 : 1)
+	}
+' "$WORK/agenthof.err" || par_rc=$?
+case "$par_rc" in
+	0) echo "parallel: both of the parent's spawn requests were in flight before either child returned (agenthof.err) — ok" ;;
+	2) fail "the gateway logged fewer than two 'spawn started' lines for the parent run; the parallel order could not be proven" ;;
+	3) fail "the gateway logged no 'spawn finished' line for the parent run; the parallel order could not be proven" ;;
+	*) fail "a child's spawn finished before the second spawn started: the children ran one after another, not in parallel" ;;
+esac
 # The model_call event carries the logical model and token counts, never the
 # reply body (the step_succeeded event's artifact preview does carry the
 # artifact's first line, by design — that is the step's output, not the door's).
@@ -705,7 +721,9 @@ grep -qF "spawn acceptance-worker/acceptance-sub" "$WORK/outs.txt" || fail "no c
 # provider.jsonl and issued.jsonl are not searched on purpose: the first
 # records the injected host key, which is section 4a's proof that the key
 # was injected upstream; the second is the issuer's own list of what it
-# issued, which is what this section searches FOR.)
+# issued, which is what this section searches FOR. Known limit: the per-run
+# gateway token agenthof mints for the agent is not searched here — the harness
+# never sees it, so no claim is made that it is checked.)
 no_leak() {
 	[ -n "$1" ] || fail "${*:2} is empty, so searching for it would prove nothing"
 	local value="$1"
