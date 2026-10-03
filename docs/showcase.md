@@ -13,7 +13,8 @@ model is handed the agent's actual capabilities as tools — the exec door, the
 spawn door, and exactly the tools its grant mirrors on the tool door — and it
 decides, round by round, which to call. Each model round is one governed
 `model_call`; each door it opens is its own first-hand event; a door that says
-no records the refusal, and the agent tells the model so in fixed words.
+no records the refusal, and the agent tells the model in fixed words that the
+call produced no result.
 Nothing in the core changed to make this possible: the model door authorizes
 only the logical model name, rewrites it to the provider's, and forwards the
 rest of the tool-calling conversation as it is, so an agentic loop is just
@@ -43,7 +44,9 @@ script against the same doors.
 You need `go`, a Python with `examples/langchain-agent/requirements.txt`
 installed (`PYTHON=...` selects it; the default is `python3`), and an
 OpenAI-compatible provider that supports tool calling. The key is yours and
-stays on your machine; this run cannot be part of the project's CI.
+stays on your machine; this run cannot be part of the project's CI. Run the
+commands below from the repository root (the `pip install` path is relative;
+the script itself finds the repository wherever it is started from).
 
 ```sh
 pip install -r examples/langchain-agent/requirements.txt
@@ -102,7 +105,7 @@ each kind of line proves.
   model called a tool fronted by a bridge runtime, which attests first-hand
   that it ran the tool process; the bridged tool's credential was
   materialized by the bridge, never seen by the agent.
-- **`spawn acceptance-worker/acceptance-sub → run r-… succeeded (depth 1)`,
+- **`spawn acceptance-worker/acceptance-sub → run r-… succeeded (depth 1) …`,
   twice.** The model asked for sub-agents; when it asks for both in one turn,
   as its instructions ask, they run in parallel. Each child is a governed
   run of its own, with its own ledger, bound to the same human and linked to
@@ -112,13 +115,18 @@ each kind of line proves.
   is not on the exec allowlist`, or `spawn … → no child run refused
   (depth 1) — spawn target is not on the agent's may_spawn list`. The door
   said no and recorded it. When the exec or spawn door refuses, the agent
-  tells the model `refused by policy` and the model decides what to do next;
-  the step may still succeed. A refusal in the audit is governance working,
-  not a bug. A refused model call (`model fast refused — …`) is different:
-  the model cannot be asked what to do without the model door, so the step
-  fails.
-- **`ledger integrity: verified`** at the end of the audit, and `audit
-  verify` on each run. The chain is append-only and hash-chained, so it
+  tells the model `refused by policy`; when the tool door refuses, the model
+  is told `the door call failed`. Either way the model decides what to do
+  next, and the step may still succeed. A refusal in the audit is governance
+  working, not a bug. A refused model call (`model fast refused — …`) is
+  different: the model cannot be asked what to do without the model door, so
+  the step fails. Not every `refused` model line is a policy decision: when
+  the provider itself answers with an error, the call is recorded as refused
+  too — `model fast refused — budget` for a rate limit (HTTP 429), or
+  `model fast refused — upstream <code> <status text>` for any other error.
+- **`ledger integrity: verified (N events)`** in the audit's header, above
+  the events, and `audit verify` on each run. The chain is append-only and
+  hash-chained, so it
   catches an edit, deletion, or reordering of committed events that does not
   recompute every later hash. It is tamper-evident within those limits, not
   tamper-proof; see [`concepts.md`](concepts.md#the-ledger) for the honest
@@ -156,9 +164,9 @@ with their schemas live in that layer. The **LangChain shell** is thin: it
 points `ChatOpenAI` at the model door, binds those tool specs, and carries
 each model turn. Porting to another framework means rewriting only the
 shell; the doors govern every framework identically because they all speak
-the same contract. LangChain is one example here; first-class support for
-agents built on other frameworks and runtimes is on the
-[roadmap](../ROADMAP.md).
+the same contract. LangChain is one example here; for first-class support
+for registering and governing agents built on other runtimes and frameworks,
+see "More harness adapters" on the [roadmap](../ROADMAP.md#next).
 
 See also: [`examples/langchain-agent/README.md`](../examples/langchain-agent/README.md)
 for the driver's flags and behaviour, [`lifecycle.md`](lifecycle.md) for the

@@ -52,7 +52,7 @@ the same loopback URL.
 > and the life-of doc [`lifecycle-tool.md`](lifecycle-tool.md).
 
 > **Every door, one real agent.** For a model deciding on its own which of
-> these doors to open — and the audit that shows it was governed the whole
+> the doors — these three and the spawn door — to open — and the audit that shows it was governed the whole
 > time — see [`showcase.md`](showcase.md).
 
 ## Part 1: CONFIG Moment — Registry Management & Kill Switches
