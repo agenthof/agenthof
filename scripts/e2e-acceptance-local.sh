@@ -36,7 +36,7 @@
 # own, each failing the step with the agent's fixed reason; audit verify
 # passes on the parent, on each child, and on each refused run separately;
 # and no secret — the subject token, every exchanged token (each in full
-# and by its signature segment alone), the broker's client secret, the
+# and by its payload and signature segments alone), the broker's client secret, the
 # bridged tool's credential, the provider key — reaches any ledger, any
 # artifact, the control log, agenthof's operational log, the stand-ins' and
 # the agent's stderr logs, or agenthof's captured output.
@@ -477,7 +477,7 @@ ART="$(parent_artifact "$PARENT")"
 echo "$ART"
 # One line per leg: model, exec, two tools, two spawns — and nothing an
 # upstream's text could have added.
-[ "$(grep -c . <<<"$ART")" = 6 ] || fail "the artifact is not exactly six lines (model, exec, two tool calls, two spawns)"
+[ "$(grep -c '' <<<"$ART")" = 6 ] || fail "the artifact is not exactly six lines (model, exec, two tool calls, two spawns)"
 
 # 4a. The model door: one model_call, the provider's nonce'd reply in the
 #     artifact — and what reached the provider: three calls so far (the
@@ -717,9 +717,14 @@ no_leak() {
 		fail "$* reached agenthof's output"
 	fi
 }
-# A JWT's signature segment is its last; searched alone too, so a copy that
-# was capped or cut before the token's start is still caught.
+# A JWT's payload and signature segments are searched alone too, so a copy
+# cut before the token's start or capped before its end is still caught.
+jwt_payload() {
+	local rest="${1#*.}"
+	printf '%s' "${rest%%.*}"
+}
 no_leak "$TOKEN" "the subject token"
+no_leak "$(jwt_payload "$TOKEN")" "the subject token's payload"
 no_leak "${TOKEN##*.}" "the subject token's signature"
 no_leak "$IDP_SECRET" "the broker's client secret"
 no_leak "$TOOL_SECRET" "the bridged tool's credential"
@@ -730,9 +735,10 @@ no_leak "$GATEWAY_KEY" "the provider key"
 EXCHANGED=0
 for exchanged in $(python3 -c 'import json, sys; [print(json.loads(l)["token"]) for l in open(sys.argv[1]) if l.strip()]' "$WORK/issued.jsonl"); do
 	no_leak "$exchanged" "an exchanged token"
+	no_leak "$(jwt_payload "$exchanged")" "an exchanged token's payload"
 	no_leak "${exchanged##*.}" "an exchanged token's signature"
 	EXCHANGED=$((EXCHANGED + 1))
 done
 [ "$EXCHANGED" -ge 1 ] || fail "the issuer's token log named no exchanged token, so the absence check above proved nothing"
-echo "no leak: subject token, $EXCHANGED exchanged token(s) (each also by its signature), client secret, tool credential, provider key — in no ledger, artifact, log, or output — ok"
+echo "no leak: subject token, $EXCHANGED exchanged token(s) (each also by its payload and signature), client secret, tool credential, provider key — in no ledger, artifact, log, or output — ok"
 echo "e2e-acceptance-local: PASS"
