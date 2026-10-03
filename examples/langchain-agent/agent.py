@@ -232,11 +232,6 @@ def openai_tools(specs):
             for s in specs]
 
 
-# --- LangChain shell ----------------------------------------------------------
-# The only code that touches LangChain: the model client and the one-shot call
-# built on it. It ends at the drivers below.
-
-
 def gateway_client(proxy_url):
     """Return (base_url, http_client) for the OpenAI client behind ChatOpenAI.
 
@@ -253,6 +248,11 @@ def gateway_client(proxy_url):
     if proxy_url.startswith(("http://", "https://")):
         return proxy_url.rstrip("/") + "/v1", None
     raise ValueError("unsupported proxy URL scheme")
+
+
+# --- LangChain shell ----------------------------------------------------------
+# The only code that touches LangChain: the model client and the one-shot call
+# built on it. It ends at the drivers below.
 
 
 def make_llm(proxy_url, run_token, model, timeout=REQUEST_TIMEOUT):
