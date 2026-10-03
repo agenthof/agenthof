@@ -19,6 +19,7 @@ import json
 import os
 import socketserver
 import sys
+import time
 from collections import namedtuple
 from http.server import BaseHTTPRequestHandler
 
@@ -332,8 +333,8 @@ def tool_message(call, text):
 # The drivers: how a step is answered. "model" is one governed model call
 # (the reply is the artifact). "scripted" runs the five doors in a fixed
 # order and reports each in the artifact — a deterministic sequence an
-# audit can be checked against. "llm" (a model deciding which doors to call)
-# is reserved and not implemented yet.
+# audit can be checked against. "llm" is a model deciding, round by round,
+# which doors to call (run_llm).
 DRIVERS = ("model", "scripted", "llm")
 
 Scripted = namedtuple("Scripted", "exec_argv obo_tool bridge_tool spawn_role spawn_workflow spawns")
@@ -380,6 +381,137 @@ def run_scripted(proxy_url, run_token, model, text, scripted,
         lines.append("spawn: %s %s %s" % (_artifact_line(child["status"]), _artifact_line(child["child_run_id"]),
                                           _artifact_line(child.get("output_preview", ""))))
     return "\n".join(lines)
+
+
+# --- the llm driver -----------------------------------------------------------
+Llm = namedtuple("Llm", "scripted max_rounds step_budget")
+
+# What the model is fed back when a door did not answer with a result. Fixed
+# strings on purpose: a door's error body can carry the proxy URL or an
+# upstream's text, and the model's conversation ends up in the provider's
+# hands. The ledger holds the first-hand record of each refusal and failure.
+REFUSED = "refused by policy"
+FAILED = "the door call failed"
+UNKNOWN_TOOL = "unknown tool"
+INVALID_ARGS = "invalid arguments"
+# A tool result fed back to the model is cut here; the full output is on the
+# door's own ledger event (exec) or at the upstream, never only in the model's
+# view. The whole conversation is checked against CONVERSATION_MAX before each
+# model call: the model door caps a request body at 1 MiB and answers an
+# oversized one with 400 and no ledger event, so the agent must stop first.
+TOOL_RESULT_MAX = 8192
+CONVERSATION_MAX = 512 << 10
+
+
+def task_prompt(scripted, text):
+    """The system instruction: the task the showcase and the e2e expect a
+    capable model to solve by using every door, in plain words. The step
+    input is the user message; text is repeated here only through the flags
+    that name what to call, never verbatim."""
+    return (
+        "You are an agent running under Agenthof. Everything you can do is one of the tools offered to "
+        "you; each call goes through a governed door and is recorded. A refused call comes back as a fixed "
+        "refusal: do not retry it, go on with the rest. Complete this task, then answer with one short "
+        "sentence saying what you did.\n"
+        "1. Run the command %s with the exec tool.\n"
+        "2. Call the tool %s with no arguments.\n"
+        "3. Call the tool %s with its text set to the step input.\n"
+        "4. Start %d sub-agents with the spawn tool, role %s, workflow %s, input set to the step input, "
+        "all in the same turn so they run in parallel.\n"
+        "The step input is the user message."
+        % (json.dumps(scripted.exec_argv), scripted.obo_tool, scripted.bridge_tool,
+           scripted.spawns, scripted.spawn_role, scripted.spawn_workflow)
+    )
+
+
+def _truncate(text):
+    text = str(text)
+    if len(text) <= TOOL_RESULT_MAX:
+        return text
+    return text[:TOOL_RESULT_MAX] + " [truncated]"
+
+
+def _label(name):
+    """The artifact label of one door call."""
+    return name if name in DOOR_TOOL_NAMES else "tool " + name
+
+
+def _door_call(call, doors, mcp_names, call_tools, proxy_url, run_token, deadline):
+    """One tool call the model made, carried to its door; the text the model
+    gets back, or None when the step deadline passed before the call could
+    start. Never raises: a door's refusal or failure is a fixed string."""
+    if time.monotonic() >= deadline:
+        return None
+    args = call.args
+    if not isinstance(args, dict):
+        return INVALID_ARGS
+    try:
+        if call.name == EXEC_TOOL.name:
+            argv = args.get("command")
+            if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+                return INVALID_ARGS
+            return _truncate(doors.exec_run(argv))
+        if call.name == SPAWN_TOOL.name:
+            role, workflow, text = (args.get(k) for k in ("role", "workflow", "input"))
+            if not (isinstance(role, str) and role and isinstance(workflow, str) and workflow and isinstance(text, str)):
+                return INVALID_ARGS
+            child = doors.spawn(role, workflow, text)
+            return _truncate("succeeded %s %s" % (child.get("child_run_id", ""), child.get("output_preview", "")))
+        if call.name in mcp_names:
+            return _truncate(call_tools(proxy_url, run_token, [(call.name, args)])[0])
+        return UNKNOWN_TOOL
+    except DoorError as exc:
+        fixed, cause = (REFUSED if exc.status == 403 else FAILED), type(exc).__name__
+    except Exception as exc:  # noqa: BLE001 — any failure is the fixed string; the class goes to the log
+        fixed, cause = FAILED, type(exc).__name__
+    sys.stderr.write("langchain-agent: %s %s: %s\n" % (_artifact_line(_label(call.name)), fixed, cause))
+    return fixed
+
+
+def run_llm(proxy_url, run_token, model, text, llm,
+            invoke_model=invoke_model, list_tools=list_tools, call_tools=call_tools, doors_factory=Doors):
+    """The llm driver: a model, offered the two door tools and the tools the
+    tool door actually grants, decides each round which to call; the round's
+    calls run concurrently through the neutral door clients, their results go
+    back to the model, and the model's first reply without tool calls is the
+    answer. Bounded by llm.max_rounds and llm.step_budget seconds — no model
+    or door call starts past the deadline; one already running finishes — and
+    by CONVERSATION_MAX. The artifact is one line per leg, in order: it is the
+    agent's own summary; the door events on the ledger are the first-hand
+    record."""
+    deadline = time.monotonic() + llm.step_budget
+    tools = door_tools(_leg("tool call failed", list_tools, proxy_url, run_token))
+    mcp_names = {t.name for t in tools if t.name not in DOOR_TOOL_NAMES}
+    messages = [{"role": "system", "content": task_prompt(llm.scripted, text)},
+                {"role": "user", "content": text}]
+    lines = []
+    doors = doors_factory(proxy_url, run_token)
+    try:
+        for _ in range(llm.max_rounds):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise StepFailed("step deadline reached", "deadline")
+            if len(json.dumps(messages)) > CONVERSATION_MAX:
+                raise StepFailed("conversation too large", "size")
+            reply = _leg("model call failed", invoke_model, proxy_url, run_token, model, messages, tools,
+                         min(REQUEST_TIMEOUT, remaining))
+            if not reply.tool_calls:
+                lines.append("model: " + _artifact_line(reply.text))
+                return "\n".join(lines)
+            lines.append("model: called " + ", ".join(_artifact_line(c.name) for c in reply.tool_calls))
+            messages.append(assistant_message(reply))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(reply.tool_calls)) as pool:
+                futures = [pool.submit(_door_call, c, doors, mcp_names, call_tools, proxy_url, run_token, deadline)
+                           for c in reply.tool_calls]
+                results = [f.result() for f in futures]
+            if any(r is None for r in results):
+                raise StepFailed("step deadline reached", "deadline")
+            for call, result in zip(reply.tool_calls, results):
+                lines.append("%s: %s" % (_artifact_line(_label(call.name)), _artifact_line(result)))
+                messages.append(tool_message(call, result))
+        raise StepFailed("round cap reached", "rounds")
+    finally:
+        doors.close()
 
 
 class StepHandler(BaseHTTPRequestHandler):

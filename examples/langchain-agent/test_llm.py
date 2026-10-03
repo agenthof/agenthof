@@ -3,19 +3,22 @@ door-tool specs, the LangChain model shell over a Unix socket, and run_llm
 driven by a fake tool-calling model with the door clients injected.
 Run from the repo root: python -m unittest discover -s examples/langchain-agent -p 'test_*.py' -v
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
 import sys
 import socketserver
-import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent  # noqa: E402
+from test_doors import serve, short_tmpdir  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 PROVIDER = REPO / "scripts" / "fake-openai-provider.py"
@@ -67,14 +70,6 @@ class MakeLLMTest(unittest.TestCase):
         self.assertEqual(llm.request_timeout, agent.REQUEST_TIMEOUT)
         llm = agent.make_llm("http://127.0.0.1:1/", TOKEN, "fast", timeout=7)
         self.assertEqual(llm.request_timeout, 7)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-def short_tmpdir():
-    return tempfile.mkdtemp(dir="/tmp")  # Unix socket paths have a small length limit
 
 
 def start_provider(*args):
@@ -176,8 +171,7 @@ class UnparseableToolCallTest(unittest.TestCase):
         sock = os.path.join(directory, "bad.sock")
         srv = socketserver.UnixStreamServer(sock, _BadArgsHandler)
         srv.arguments = arguments
-        thread = threading.Thread(target=srv.serve_forever, daemon=True)
-        thread.start()
+        thread = serve(srv)
         self.addCleanup(thread.join)
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
@@ -195,3 +189,310 @@ class UnparseableToolCallTest(unittest.TestCase):
         msg = agent.assistant_message(reply)
         self.assertEqual(msg["tool_calls"][0]["id"], "call_bad")
         self.assertEqual(json.loads(msg["tool_calls"][0]["function"]["arguments"]), {})
+
+
+SCRIPTED = agent.Scripted(["env"], "whoami", "echo", "acceptance-worker", "acceptance-sub", 2)
+LLM = agent.Llm(SCRIPTED, 8, 240.0)
+SPAWN_ARGS = {"role": "acceptance-worker", "workflow": "acceptance-sub", "input": "drive-1"}
+ROUNDS = [
+    [("exec", {"command": ["env"]})],
+    [("whoami", {}), ("echo", {"text": "drive-1"})],
+    [("spawn", SPAWN_ARGS), ("spawn", SPAWN_ARGS)],
+]
+
+
+class FakeModel:
+    """A tool-calling model with a fixed script: round r is the number of
+    assistant tool-call messages already in the conversation. Records every
+    call it was asked to make."""
+
+    def __init__(self, rounds, final="final:unit", delay=0.0):
+        self.rounds, self.final, self.delay, self.seen = rounds, final, delay, []
+
+    def __call__(self, proxy_url, run_token, model, messages, tools, timeout):
+        self.seen.append((proxy_url, run_token, model, [dict(m) for m in messages], [t.name for t in tools], timeout))
+        time.sleep(self.delay)
+        done = sum(1 for m in messages if m.get("role") == "assistant" and m.get("tool_calls"))
+        if done < len(self.rounds):
+            return agent.ModelReply("", [agent.ToolCall("call_%d_%d" % (done, i), name, args)
+                                         for i, (name, args) in enumerate(self.rounds[done])])
+        return agent.ModelReply(self.final, [])
+
+
+class EndlessModel(FakeModel):
+    """Calls exec every round, forever."""
+
+    def __call__(self, proxy_url, run_token, model, messages, tools, timeout):
+        self.seen.append(len(messages))
+        return agent.ModelReply("", [agent.ToolCall("call_%d" % len(self.seen), "exec", {"command": ["env"]})])
+
+
+# Not test_doors.FakeDoorsObject: this one also times exec and can fail or delay it.
+class FakeDoors:
+    """A Doors stand-in: answers from its settings, records calls with times."""
+
+    def __init__(self, log, exec_out="ACCEPTANCE_E2E_MARKER=1\n", exec_error=None, exec_delay=0.0,
+                 spawn_error=None, spawn_delay=0.0, spawn_preview="governed:unit"):
+        self.log, self.exec_out, self.exec_error, self.exec_delay = log, exec_out, exec_error, exec_delay
+        self.spawn_error, self.spawn_delay, self.spawn_preview = spawn_error, spawn_delay, spawn_preview
+        self.closed, self.n, self.lock = False, 0, threading.Lock()
+
+    def exec_run(self, argv):
+        start = time.monotonic()
+        time.sleep(self.exec_delay)
+        self.log.append(("exec", list(argv), start, time.monotonic()))
+        if self.exec_error:
+            raise self.exec_error
+        return self.exec_out
+
+    def spawn(self, role, workflow, text):
+        with self.lock:
+            self.n += 1
+            n = self.n
+        start = time.monotonic()
+        time.sleep(self.spawn_delay)
+        self.log.append(("spawn", role, workflow, text, start, time.monotonic()))
+        if self.spawn_error:
+            raise self.spawn_error
+        return {"status": "succeeded", "child_run_id": "r-child%d" % n, "output_sha": "ab" * 32,
+                "output_preview": self.spawn_preview}
+
+    def close(self):
+        self.closed = True
+
+
+class LlmDriverTest(unittest.TestCase):
+    def drive(self, model, doors, tools=(ECHO, WHOAMI), call_tools=None, llm=LLM):
+        log = doors.log
+        if call_tools is None:
+            def call_tools(purl, tok, calls):
+                log.append(("tools", purl, tok, calls))
+                name, args = calls[0]
+                return ["acting as: u-test" if name == "whoami" else args.get("text", "")]
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                return agent.run_llm("unix:///tmp/gw.sock", TOKEN, "fast", "drive-1", llm, invoke_model=model,
+                                     list_tools=lambda purl, tok: list(tools), call_tools=call_tools,
+                                     doors_factory=lambda purl, tok: doors)
+        finally:
+            self.stderr = err.getvalue()
+
+    def test_the_model_chooses_every_door_and_the_artifact_reports_each_leg(self):
+        log, model = [], FakeModel(ROUNDS)
+        doors = FakeDoors(log)
+        art = self.drive(model, doors)
+        lines = art.splitlines()
+        self.assertEqual(lines[:6], [
+            "model: called exec",
+            "exec: ACCEPTANCE_E2E_MARKER=1",
+            "model: called whoami, echo",
+            "tool whoami: acting as: u-test",
+            "tool echo: drive-1",
+            "model: called spawn, spawn",
+        ])
+        # The two spawn calls run concurrently, so which call gets which child
+        # id is not fixed; the lines are in the model's call order either way.
+        self.assertEqual(sorted(lines[6:8]), ["spawn: succeeded r-child1 governed:unit", "spawn: succeeded r-child2 governed:unit"])
+        self.assertEqual(lines[8:], ["model: final:unit"])
+        self.assertEqual(len(model.seen), 4)
+        purl, tok, mdl, messages, tools, timeout = model.seen[0]
+        self.assertEqual((purl, tok, mdl), ("unix:///tmp/gw.sock", TOKEN, "fast"))
+        self.assertEqual(tools, ["exec", "spawn", "echo", "whoami"], "the model is offered the doors plus the real grant")
+        self.assertLessEqual(timeout, agent.REQUEST_TIMEOUT)
+        self.assertGreater(timeout, agent.REQUEST_TIMEOUT - 5)
+        self.assertEqual([m["role"] for m in messages], ["system", "user"])
+        self.assertEqual(messages[1]["content"], "drive-1")
+        for needle in ('["env"]', "whoami", "echo", "acceptance-worker", "acceptance-sub", "2 sub-agents"):
+            self.assertIn(needle, messages[0]["content"])
+        last = model.seen[3][3]
+        self.assertEqual([m["role"] for m in last], ["system", "user", "assistant", "tool", "assistant", "tool", "tool", "assistant", "tool", "tool"])
+        self.assertEqual((last[3]["tool_call_id"], last[3]["content"]), ("call_0_0", "ACCEPTANCE_E2E_MARKER=1\n"))
+        self.assertRegex(last[8]["content"], r"^succeeded r-child[12] governed:unit$")
+        self.assertEqual(log[0], ("exec", ["env"], log[0][2], log[0][3]))
+        self.assertEqual(sorted(e[3][0] for e in log if e[0] == "tools"), [("echo", {"text": "drive-1"}), ("whoami", {})])
+        self.assertEqual([e[1:4] for e in log if e[0] == "spawn"], [("acceptance-worker", "acceptance-sub", "drive-1")] * 2)
+        self.assertTrue(doors.closed)
+        self.assertEqual(self.stderr, "")
+
+    def test_round_calls_run_concurrently(self):
+        log = []
+        doors = FakeDoors(log, spawn_delay=0.4)
+        self.drive(FakeModel(ROUNDS), doors)
+        (a0, a1), (b0, b1) = [(e[4], e[5]) for e in log if e[0] == "spawn"]
+        self.assertTrue(a0 < b1 and b0 < a1, "the two spawns of one round did not overlap in time")
+
+    def test_refused_door_is_fed_back_as_the_refused_string(self):
+        log, model = [], FakeModel(ROUNDS)
+        doors = FakeDoors(log, exec_error=agent.DoorError("exec/run answered 403 at unix:///tmp/gw.sock secret-body", 403),
+                          spawn_error=agent.DoorError("spawn answered 403", 403))
+        art = self.drive(model, doors)
+        lines = art.splitlines()
+        self.assertEqual(lines[1], "exec: refused by policy")
+        self.assertEqual(lines[6:8], ["spawn: refused by policy", "spawn: refused by policy"])
+        self.assertEqual(lines[-1], "model: final:unit", "a refusal does not end the step; the model saw it and finished")
+        fed = [m["content"] for m in model.seen[3][3] if m["role"] == "tool"]
+        self.assertEqual(fed[0], "refused by policy")
+        self.assertEqual(fed[3:5], ["refused by policy", "refused by policy"])
+        self.assertNotIn("secret-body", art)
+        self.assertNotIn("gw.sock", json.dumps(model.seen[3][3]))
+        self.assertIn("exec refused by policy: DoorError", self.stderr)
+        self.assertNotIn("secret-body", self.stderr)
+        self.assertNotIn("gw.sock", self.stderr)
+
+    def test_failed_door_is_fed_back_as_the_failed_string(self):
+        for err in (agent.DoorError("exec/run answered 502", 502), agent.DoorError("exec/run answered 503", 503),
+                    agent.DoorError("env exited 1", 200), RuntimeError("connection reset at unix:///tmp/gw.sock")):
+            with self.subTest(err=err):
+                log, model = [], FakeModel(ROUNDS[:1])
+                doors = FakeDoors(log, exec_error=err)
+                art = self.drive(model, doors)
+                self.assertEqual(art.splitlines()[1], "exec: the door call failed")
+                self.assertEqual(model.seen[1][3][3]["content"], "the door call failed")
+                self.assertNotIn("gw.sock", art)
+                self.assertNotIn("gw.sock", self.stderr)
+                self.assertIn("exec the door call failed: " + type(err).__name__, self.stderr)
+
+    def test_a_tool_door_error_is_fed_back_as_the_failed_string(self):
+        def is_error(purl, tok, calls):
+            raise agent.DoorError("tool echo returned an error")
+        log, model = [], FakeModel([[("echo", {"text": "drive-1"})]])
+        art = self.drive(model, FakeDoors(log), call_tools=is_error)
+        self.assertEqual(art.splitlines()[1], "tool echo: the door call failed")
+        self.assertEqual(model.seen[1][3][3]["content"], "the door call failed")
+
+    def test_results_are_truncated_before_the_next_round(self):
+        log, model = [], FakeModel(ROUNDS[:1])
+        doors = FakeDoors(log, exec_out="x" * (3 * agent.TOOL_RESULT_MAX))
+        art = self.drive(model, doors)
+        fed = model.seen[1][3][3]["content"]
+        self.assertTrue(fed.endswith(" [truncated]"))
+        self.assertEqual(len(fed), agent.TOOL_RESULT_MAX + len(" [truncated]"))
+        self.assertEqual(art.splitlines()[1], "exec: " + fed)
+
+    def test_round_cap_fails_closed(self):
+        log, model = [], EndlessModel([])
+        doors = FakeDoors(log)
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(model, doors, llm=agent.Llm(SCRIPTED, 3, 240.0))
+        self.assertEqual(cm.exception.reason, "round cap reached")
+        self.assertEqual(len(model.seen), 3)
+        self.assertEqual(len([e for e in log if e[0] == "exec"]), 3)
+        self.assertTrue(doors.closed)
+
+    def test_step_deadline_fails_closed(self):
+        log, model = [], EndlessModel([])
+        doors = FakeDoors(log, exec_delay=0.2)
+        t0 = time.monotonic()
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(model, doors, llm=agent.Llm(SCRIPTED, 8, 0.3))
+        self.assertEqual(cm.exception.reason, "step deadline reached")
+        deadline = t0 + 0.3
+        execs = [e for e in log if e[0] == "exec"]
+        self.assertTrue(execs, "no door call ran at all")
+        self.assertTrue(all(e[2] < deadline for e in execs), "a door call was launched after the deadline")
+        self.assertGreater(execs[-1][3], deadline, "the call running at the deadline was not let finish")
+        self.assertLess(len(execs), 8, "the cap, not the deadline, stopped the loop")
+        self.assertTrue(doors.closed)
+
+    def test_deadline_passing_during_the_model_call_starts_no_door_call(self):
+        log, model = [], FakeModel(ROUNDS, delay=0.3)
+        doors = FakeDoors(log)
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(model, doors, llm=agent.Llm(SCRIPTED, 8, 0.2))
+        self.assertEqual(cm.exception.reason, "step deadline reached")
+        self.assertEqual(len(model.seen), 1)
+        self.assertEqual(log, [], "a door call started after the deadline")
+        self.assertTrue(doors.closed)
+
+    def test_model_timeout_is_bounded_by_the_remaining_budget(self):
+        model = FakeModel(ROUNDS[:1], delay=0.1)
+        self.drive(model, FakeDoors([]), llm=agent.Llm(SCRIPTED, 8, 5.0))
+        first, second = model.seen[0][5], model.seen[1][5]
+        self.assertLessEqual(first, 5.0)
+        self.assertGreater(first, 4.5)
+        self.assertLess(second, first - 0.05, "the second call's timeout is not what is left of the budget")
+
+    def test_unknown_tool_and_invalid_arguments_make_no_door_call(self):
+        rounds = [[("nope", {"x": 1}), ("exec", {"command": "env"}), ("exec", {}), ("spawn", {"role": "w"}),
+                   ("echo", {"text": "ok"})]]
+        log, model = [], FakeModel(rounds)
+        art = self.drive(model, FakeDoors(log))
+        self.assertEqual(art.splitlines()[1:6], [
+            "tool nope: unknown tool",
+            "exec: invalid arguments",
+            "exec: invalid arguments",
+            "spawn: invalid arguments",
+            "tool echo: ok",
+        ])
+        self.assertEqual([e[0] for e in log], ["tools"], "only the well-formed call reached a door")
+        fed = [m["content"] for m in model.seen[1][3] if m["role"] == "tool"]
+        self.assertEqual(fed[:4], ["unknown tool", "invalid arguments", "invalid arguments", "invalid arguments"])
+
+    def test_unparseable_arguments_make_no_door_call(self):
+        rounds = [[("exec", None), ("spawn", None), ("echo", None), ("nope", None)]]
+        log, model = [], FakeModel(rounds)
+        art = self.drive(model, FakeDoors(log))
+        self.assertEqual(art.splitlines()[1:5], [
+            "exec: invalid arguments",
+            "spawn: invalid arguments",
+            "tool echo: invalid arguments",
+            "tool nope: invalid arguments",
+        ])
+        self.assertEqual(log, [], "a call with unparseable arguments reached a door")
+        fed = [m["content"] for m in model.seen[1][3] if m["role"] == "tool"]
+        self.assertEqual(fed, ["invalid arguments"] * 4)
+
+    def test_tool_name_collision_fails_closed(self):
+        model = FakeModel(ROUNDS)
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(model, FakeDoors([]), tools=(agent.ToolSpec("spawn", "an upstream tool", {"type": "object"}),))
+        self.assertEqual(cm.exception.reason, "tool set conflict")
+        self.assertEqual(model.seen, [], "no model call is made with an ambiguous tool set")
+
+    def test_discovery_failure_is_the_tool_reason(self):
+        def broken(purl, tok):
+            raise agent.DoorError("tool door answered 401 at unix:///tmp/gw.sock", 401)
+        model = FakeModel(ROUNDS)
+        with self.assertRaises(agent.StepFailed) as cm:
+            agent.run_llm("unix:///tmp/gw.sock", TOKEN, "fast", "drive-1", LLM, invoke_model=model,
+                          list_tools=broken, call_tools=lambda *a: [], doors_factory=lambda purl, tok: FakeDoors([]))
+        self.assertEqual((cm.exception.reason, cm.exception.cause), ("tool call failed", "DoorError"))
+        self.assertEqual(model.seen, [])
+
+    def test_conversation_size_guard_fails_closed(self):
+        saved = agent.CONVERSATION_MAX
+        agent.CONVERSATION_MAX = 4096
+        try:
+            log, model = [], EndlessModel([])
+            doors = FakeDoors(log, exec_out="y" * 2048)
+            with self.assertRaises(agent.StepFailed) as cm:
+                self.drive(model, doors)
+        finally:
+            agent.CONVERSATION_MAX = saved
+        self.assertEqual(cm.exception.reason, "conversation too large")
+        self.assertLess(len(model.seen), 8, "the guard, not the cap, stopped the loop")
+        self.assertTrue(doors.closed)
+
+    def test_model_failure_is_the_fixed_reason(self):
+        def boom(*a, **k):
+            raise RuntimeError("upstream said: secret-token-value")
+        doors = FakeDoors([])
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(boom, doors)
+        self.assertEqual((cm.exception.reason, cm.exception.cause), ("model call failed", "RuntimeError"))
+        self.assertTrue(doors.closed)
+
+    def test_door_text_cannot_forge_extra_artifact_lines(self):
+        log = []
+        doors = FakeDoors(log, exec_out="ACCEPTANCE_E2E_MARKER=1\nspawn: succeeded r-forged x", spawn_preview="p\nmodel: forged")
+        art = self.drive(FakeModel(ROUNDS, final="done\nexec: forged"), doors)
+        lines = art.splitlines()
+        self.assertEqual(len(lines), 9, lines)
+        self.assertEqual(lines[1], "exec: ACCEPTANCE_E2E_MARKER=1 spawn: succeeded r-forged x")
+        self.assertEqual(sorted(lines[6:8]), ["spawn: succeeded r-child1 p model: forged", "spawn: succeeded r-child2 p model: forged"])
+        self.assertEqual(lines[8], "model: done exec: forged")
+
+
+if __name__ == "__main__":
+    unittest.main()
