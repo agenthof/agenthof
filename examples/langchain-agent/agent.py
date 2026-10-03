@@ -86,6 +86,59 @@ class DoorError(Exception):
     operator's log only; the step reply carries a fixed reason."""
 
 
+def door_base(proxy_url):
+    """Return (base_url, httpx.Client) for the gateway's JSON doors
+    (/exec/run, /spawn). unix:// dials the socket and the base host is a
+    placeholder the gateway ignores; http(s) is used as given."""
+    if proxy_url.startswith(UNIX):
+        transport = httpx.HTTPTransport(uds=proxy_url[len(UNIX):])
+        return "http://localhost", httpx.Client(transport=transport, timeout=REQUEST_TIMEOUT)
+    if proxy_url.startswith(("http://", "https://")):
+        return proxy_url.rstrip("/"), httpx.Client(timeout=REQUEST_TIMEOUT)
+    raise ValueError("unsupported proxy URL scheme")
+
+
+class Doors:
+    """The exec and spawn doors of one step's gateway: one client, closed by
+    the caller once the step's calls are over; usable from the threads that
+    run parallel spawns."""
+
+    def __init__(self, proxy_url, run_token):
+        self.base, self.client = door_base(proxy_url)
+        self.headers = {"Authorization": "Bearer " + run_token}
+
+    def close(self):
+        self.client.close()
+
+    def _post(self, route, body):
+        return self.client.post(self.base + route, json=body, headers=self.headers)
+
+    def exec_run(self, argv):
+        """First-hand exec: the gateway has its declared runtime run argv and
+        returns the output. Anything but a 200 with exit 0 is a DoorError."""
+        resp = self._post("/exec/run", {"command": list(argv)})
+        if resp.status_code != 200:
+            raise DoorError("exec/run answered %d" % resp.status_code)
+        out = resp.json()
+        if out.get("exit") != 0:
+            raise DoorError("%s exited %s" % (argv[0], out.get("exit")))
+        return out.get("output", "")
+
+    def spawn(self, role, workflow, text):
+        """A governed child run; blocks until it is over and returns the
+        door's answer (status, child_run_id, output_sha, output_preview) for
+        a succeeded child. A refused or failed child is a DoorError: the
+        parent's ledger already records it, and a scripted step is a success
+        only when every leg was."""
+        resp = self._post("/spawn", {"role": role, "workflow": workflow, "input": text})
+        if resp.status_code != 200:
+            raise DoorError("spawn answered %d" % resp.status_code)
+        out = resp.json()
+        if out.get("status") != "succeeded":
+            raise DoorError("spawn %s" % out.get("status"))
+        return out
+
+
 # The MCP tool door is the gateway's root (/): a standard streamable-HTTP MCP
 # server. The official mcp SDK speaks it; the 1.x line pinned in
 # requirements.txt opens the session at a protocol version the gateway
