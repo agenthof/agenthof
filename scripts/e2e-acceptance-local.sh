@@ -17,18 +17,24 @@
 # Asserts: the combined run succeeds under a verified OIDC invoker and its
 # ledger carries one model_call, one runtime-attested exec, one tool_call
 # with auth_mode token_exchange, one runtime-attested tool_call through
-# refbridge and two succeeded spawn events; the step artifact carries the
+# refbridge and two succeeded spawn events; the provider saw each governed
+# call with the host key injected and no X-Agenthof-* header, and the
+# model_call event carries no reply body; the step artifact carries the
 # upstream's "acting as: <sub>" (the on-behalf-of proof, with the issuer's
 # token log), the provider's nonce'd reply, exactly the allowlisted
 # variable from the exec, and the bridged echo; each child has its own
 # ledger linked to the parent (parent_run_id, depth 1, the same human) with
-# its own model_call, and the two children overlapped in time; audit verify
-# passes on the parent and on each child separately and investigate --run
-# shows the tree; an off-allowlist exec and a may_spawn-denied spawn are
-# recorded refusals on runs of their own; and no secret — the subject token,
-# every exchanged token, the broker's client secret, the bridged tool's
-# credential, the provider key — reaches any ledger, artifact, log, or
-# output. Requires go and a python with examples/langchain-agent/
+# its own model_call, in a compartment the supervisor provisioned, the two
+# children overlapped in time, and the supervisor tore every set down;
+# investigate --run shows the tree; an off-allowlist exec (nothing runs, no
+# later door is reached) and a may_spawn-denied spawn (no child, nothing
+# provisioned) are recorded refusals on runs of their own, each failing the
+# step with the agent's fixed reason; audit verify passes on the parent, on
+# each child, and on each refused run separately; and no secret — the
+# subject token, every exchanged token, the broker's client secret, the
+# bridged tool's credential, the provider key — reaches any ledger,
+# artifact, the control log, any process log, or agenthof's output.
+# Requires go and a python with examples/langchain-agent/
 # requirements.txt installed (PYTHON=... selects it; default python3). Runs
 # on macOS and Linux.
 set -euo pipefail
@@ -545,4 +551,120 @@ echo "$TREE"
 echo "$TREE" | grep -q "^[0-9].* run workflow_started — dana@example.com" || fail "investigate --run does not show the parent"
 [ "$(echo "$TREE" | grep -c "^  [0-9].* run workflow_started — dana@example.com .*parent=$PARENT")" = 2 ] || fail "investigate --run does not show both children under the parent"
 echo "combined run: model, first-hand exec, on-behalf-of tool, bridged tool, two parallel children — one timeline, one human — ok"
+
+# --- 5. The recorded refusals, each on a run of its own so the combined
+# run above stays a pure positive. The driver is the same; the config is
+# what says no. Audit renders are searched through a here-string, not a
+# pipe, for the same SIGPIPE reason as out_of.
+
+# 5a. Off-allowlist exec: the driver asks for env, this agent's allowlist
+#     says true. Refused before the runtime is asked, recorded, and the
+#     driver stops there with its fixed reason — no tool call, no spawn.
+BEFORE_EXEC="$(out_of grep -c 'compartment started' "$WORK/refexec.err")"
+[ "$BEFORE_EXEC" -ge 1 ] || fail "the exec runtime logged no compartment for the combined run, so the count below would prove nothing"
+run acceptance-noexec
+echo "$OUT" | grep -q "finished: failed" || fail "an off-allowlist exec must fail the step"
+NOEXEC="$RUNID"
+LN="$(ledger "$NOEXEC")"
+[ "$(count "$LN" model_call succeeded)" = 1 ] || fail "the model leg before the refusal was not recorded"
+[ "$(count "$LN" exec refused)" = 1 ] || fail "expected exactly one refused exec"
+[ "$(count "$LN" exec)" = 1 ] || fail "the refused run recorded an exec that was not the refusal"
+[ "$(field "$LN" exec reason refused)" = "command is not on the exec allowlist" ] || fail "the exec refusal is not the allowlist reason"
+grep -qF "exec env refused — command is not on the exec allowlist" <<<"$AUDIT" || fail "audit did not render the exec refusal"
+grep -qF "step drive (agent acceptance-noexec) failed — exec call failed" <<<"$AUDIT" || fail "the agent did not report the exec leg's fixed reason"
+[ "$(count "$LN" tool_call)" = 0 ] || fail "the driver went on to the tool door after a refused exec"
+[ "$(count "$LN" spawn)" = 0 ] || fail "the driver went on to the spawn door after a refused exec"
+[ "$(out_of grep -c 'compartment started' "$WORK/refexec.err")" = "$BEFORE_EXEC" ] || fail "the runtime was asked to run an off-allowlist command"
+echo "off-allowlist exec: refused, recorded, nothing ran, the step failed with the fixed reason — ok"
+
+# 5b. may_spawn-denied children: the four other legs run and are recorded,
+#     both spawns are refused by the door, no child starts, nothing is
+#     provisioned, and the step fails with the spawn leg's fixed reason.
+BEFORE="$(provisioned_count)"
+run acceptance-nospawn
+echo "$OUT" | grep -q "finished: failed" || fail "a may_spawn-denied spawn must fail the step"
+NOSPAWN="$RUNID"
+LS="$(ledger "$NOSPAWN")"
+[ "$(count "$LS" model_call succeeded)" = 1 ] || fail "the model leg was not recorded on the no-spawn run"
+[ "$(count "$LS" exec succeeded)" = 1 ] || fail "the exec leg was not recorded on the no-spawn run"
+[ "$(count "$LS" tool_call succeeded)" = 2 ] || fail "the two tool legs were not recorded on the no-spawn run"
+[ "$(count "$LS" spawn refused)" = 2 ] || fail "expected exactly two refused spawns"
+[ "$(count "$LS" spawn succeeded)" = 0 ] || fail "a child ran although nothing is on may_spawn"
+[ "$(field "$LS" spawn reason refused | sort -u)" = "spawn target is not on the agent's may_spawn list" ] || fail "the spawn refusals are not the may_spawn reason"
+[ -z "$(field "$LS" spawn child_run_id refused)" ] || fail "a may_spawn refusal must start no child"
+[ "$(provisioned_count)" = "$BEFORE" ] || fail "a may_spawn refusal provisioned a set"
+[ "$(out_of grep -cF "spawn acceptance-worker/acceptance-sub → no child run refused (depth 1) — spawn target is not on the agent's may_spawn list" <<<"$AUDIT")" = 2 ] || fail "audit did not render both spawn refusals"
+grep -qF "step drive (agent acceptance-nospawn) failed — spawn call failed" <<<"$AUDIT" || fail "the agent did not report the spawn leg's fixed reason"
+echo "may_spawn-denied spawns: both refused and recorded, no child, nothing provisioned, the step failed with the fixed reason — ok"
+
+# --- 6. Verify is per run: the parent, each child, and each refused run,
+# every one on its own. There is no tree-wide verify, and this proves none
+# was assumed. verify_run ID WHAT: `audit verify` exits 0 and names the head.
+verify_run() {
+	local v
+	if ! v="$("$WORK/agenthof" audit verify "$1" --log-dir "$WORK/logs")"; then
+		echo "$v"
+		fail "$2 ($1): audit verify failed"
+	fi
+	OUTS+=("$v")
+	echo "$v"
+	grep -Eq "^head: [0-9a-f]{64} \([0-9]+ events\)$" <<<"$v" || fail "$2 ($1): audit verify reported no head"
+}
+verify_run "$PARENT" "the combined run"
+for c in $CHILDREN; do verify_run "$c" "a child run"; done
+verify_run "$NOEXEC" "the off-allowlist run"
+verify_run "$NOSPAWN" "the no-spawn run"
+echo "verify: parent, both children, and both refused runs each verify on their own — ok"
+
+# --- 7. Nothing secret reached anywhere it must not. An absence proves
+# something only where the places searched are populated and the same
+# search finds what IS there, so positive controls run first through the
+# identical grep.
+[ "$(find "$WORK/logs" -name '*.jsonl' | wc -l | tr -d ' ')" -ge 5 ] || fail "fewer ledgers than runs (parent, two children, two refusals), so the leak checks would search an incomplete tree"
+[ -n "$(ls -A "$WORK/artifacts")" ] || fail "the artifact store is empty, so the leak checks would search nothing there"
+[ -s "$WORK/agenthof.err" ] || fail "the operational log is empty, so the leak checks would search nothing"
+grep -q "level=DEBUG" "$WORK/agenthof.err" || fail "the operational log carries no debug records"
+[ -s "$WORK/control.jsonl" ] || fail "the control log is empty"
+for f in provider idp upstream bridge refexec refspawn agent; do
+	[ -f "$WORK/$f.err" ] || fail "$WORK/$f.err is missing, so the leak checks would skip that process"
+done
+grep -rqF "drive-$NONCE" "$WORK/logs" "$WORK/artifacts" || fail "the positive control (the step input, echoed into a tool_call preview and the artifact) is missing, so the identical search for a secret would prove nothing"
+grep -qF "listening" "$WORK/agent.err" || fail "the agent's log is empty, so the search across process logs would prove nothing there"
+# Written to a file, not piped: once the captured output outgrows the pipe
+# buffer, a grep -q that matches early would SIGPIPE the writer and fail the
+# pipeline under pipefail — reporting "no match" exactly when there is one.
+printf '%s\n' "${OUTS[@]}" >"$WORK/outs.txt"
+grep -qF "spawn acceptance-worker/acceptance-sub" "$WORK/outs.txt" || fail "no captured output names a spawn, so the search below would prove nothing"
+# no_leak VALUE WHAT...: VALUE must appear in no ledger, artifact, control
+# log, process log, agenthof operational log, or captured output. Never
+# prints VALUE. (The upstream's "acting as: u-dana" and the step input are
+# NOT secrets: they are in the artifact and the tool_call preview by design.
+# provider.jsonl and issued.jsonl are not searched on purpose: the first
+# records the injected host key, which is section 4a's proof that the key
+# was injected upstream; the second is the issuer's own list of what it
+# issued, which is what this section searches FOR.)
+no_leak() {
+	local value="$1"
+	shift
+	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK/control.jsonl" "$WORK"/*.err 2>/dev/null; then
+		fail "$* reached a ledger, an artifact, the control log, or a process log"
+	fi
+	if grep -qF -- "$value" "$WORK/outs.txt"; then
+		fail "$* reached agenthof's output"
+	fi
+}
+no_leak "$TOKEN" "the subject token"
+no_leak "$IDP_SECRET" "the broker's client secret"
+no_leak "$TOOL_SECRET" "the bridged tool's credential"
+no_leak "$GATEWAY_KEY" "the provider key"
+# Tokens are base64url: no whitespace, so word-splitting the output is safe,
+# and a plain for loop (not a piped while) runs no_leak in THIS shell, where
+# its fail exits the script.
+EXCHANGED=0
+for exchanged in $(python3 -c 'import json, sys; [print(json.loads(l)["token"]) for l in open(sys.argv[1]) if l.strip()]' "$WORK/issued.jsonl"); do
+	no_leak "$exchanged" "an exchanged token"
+	EXCHANGED=$((EXCHANGED + 1))
+done
+[ "$EXCHANGED" -ge 1 ] || fail "the issuer's token log named no exchanged token, so the absence check above proved nothing"
+echo "no leak: subject token, $EXCHANGED exchanged token(s), client secret, tool credential, provider key — in no ledger, artifact, log, or output — ok"
 echo "e2e-acceptance-local: PASS"
