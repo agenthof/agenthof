@@ -9,19 +9,23 @@ X-Agenthof-Run-Token. It holds no provider key: the gateway injects that
 upstream. Inside a no-network compartment (deploy/refbox) the proxy URL is
 unix://<socket-path>; elsewhere it is http://127.0.0.1:<port>/.
 
-Dependencies: the standard library plus langchain-openai (which brings httpx).
+Dependencies: the standard library plus langchain-openai (which brings httpx) and mcp.
 """
 import argparse
+import asyncio
 import json
 import os
 import socketserver
 import sys
+from collections import namedtuple
 from http.server import BaseHTTPRequestHandler
 
 import httpx
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
 # Same cap as Agenthof's adapter puts on the reply it will read from us.
 MAX_BODY = 1 << 20
@@ -75,6 +79,71 @@ def call_model(proxy_url, run_token, model, text):
     finally:
         if llm.http_client is not None:
             llm.http_client.close()
+
+
+class DoorError(Exception):
+    """A door answered with anything but success. Its text is for the
+    operator's log only; the step reply carries a fixed reason."""
+
+
+# The MCP tool door is the gateway's root (/): a standard streamable-HTTP MCP
+# server. The official mcp SDK speaks it; the 1.x line pinned in
+# requirements.txt opens the session at a protocol version the gateway
+# accepts. Over unix:// the SDK's httpx client is built with a Unix-socket
+# transport and the URL's host is a placeholder the gateway ignores.
+ToolReport = namedtuple("ToolReport", "protocol_version tool_names results")
+
+
+def mcp_endpoint(proxy_url):
+    """Return (url, httpx_client_factory) for the MCP door behind proxy_url."""
+    if proxy_url.startswith(UNIX):
+        path = proxy_url[len(UNIX):]
+
+        def factory(headers=None, timeout=None, auth=None):
+            return httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=path),
+                                     headers=headers, timeout=timeout, auth=auth)
+
+        return "http://localhost/", factory
+    if proxy_url.startswith(("http://", "https://")):
+
+        def factory(headers=None, timeout=None, auth=None):
+            return httpx.AsyncClient(headers=headers, timeout=timeout, auth=auth)
+
+        return proxy_url.rstrip("/") + "/", factory
+    raise ValueError("unsupported proxy URL scheme")
+
+
+async def _tool_session(proxy_url, run_token, calls):
+    url, factory = mcp_endpoint(proxy_url)
+    headers = {"Authorization": "Bearer " + run_token}
+    results = []
+    async with streamablehttp_client(url, headers=headers, httpx_client_factory=factory) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            init = await session.initialize()
+            listed = await session.list_tools()
+            for name, args in calls:
+                res = await session.call_tool(name, args)
+                text = " ".join(c.text for c in res.content if getattr(c, "type", "") == "text")
+                if res.isError:
+                    raise DoorError("tool %s returned an error" % name)
+                results.append(text)
+    # Leaving both contexts ends the session: the SDK sends the DELETE and
+    # closes its streams, so nothing of it lingers once the step has returned.
+    return ToolReport(init.protocolVersion, sorted(t.name for t in listed.tools), results)
+
+
+def tool_session(proxy_url, run_token, calls):
+    """Open ONE MCP session on the gateway, list its tools, make each
+    (name, arguments) call in order, close the session; a ToolReport. The
+    listing is kept on every step on purpose: it is the agent's own check
+    that the grant mirrored the tools it is about to call (what the unit
+    test asserts), and it is one cheap request on a session already open."""
+    return asyncio.run(_tool_session(proxy_url, run_token, calls))
+
+
+def call_tools(proxy_url, run_token, calls):
+    """The tool door: the text of each call's result, in order."""
+    return tool_session(proxy_url, run_token, calls).results
 
 
 class StepHandler(BaseHTTPRequestHandler):

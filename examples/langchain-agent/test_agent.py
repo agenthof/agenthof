@@ -273,6 +273,12 @@ class RequirementsTest(unittest.TestCase):
         for req in reqs:
             self.assertIn("==", req, req)
 
+    def test_mcp_is_pinned_to_its_v1_line(self):
+        lines = [l.strip() for l in (HERE / "requirements.txt").read_text().splitlines()]
+        mcp = [l for l in lines if l.startswith("mcp==")]
+        self.assertEqual(len(mcp), 1, mcp)
+        self.assertEqual(mcp[0].split("==")[1].split(".")[0], "1", mcp[0])
+
 
 if __name__ == "__main__":
     unittest.main()
