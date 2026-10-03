@@ -248,5 +248,161 @@ class ToolDoorTest(unittest.TestCase):
         self.assertEqual(agent.call_tools(self.fake.url, TOKEN, [("echo", {"text": "x"})]), ["x"])
 
 
+class FakeDoorsObject:
+    """A Doors stand-in that records calls and answers from a script."""
+
+    def __init__(self, log, exec_out="ACCEPTANCE_E2E_MARKER=1\n", spawn_error=None, spawn_delay=0.0):
+        self.log, self.exec_out, self.spawn_error, self.spawn_delay = log, exec_out, spawn_error, spawn_delay
+        self.closed = False
+        self.n = 0
+        self.lock = threading.Lock()
+
+    def exec_run(self, argv):
+        self.log.append(("exec", list(argv)))
+        if isinstance(self.exec_out, Exception):
+            raise self.exec_out
+        return self.exec_out
+
+    def spawn(self, role, workflow, text):
+        with self.lock:
+            self.n += 1
+            n = self.n
+        start = time.monotonic()
+        time.sleep(self.spawn_delay)
+        self.log.append(("spawn", role, workflow, text, start, time.monotonic()))
+        if self.spawn_error:
+            raise self.spawn_error
+        return {"status": "succeeded", "child_run_id": "r-child%d" % (3 - n), "output_sha": "ab" * 32, "output_preview": "governed:unit"}
+
+    def close(self):
+        self.closed = True
+
+
+SCRIPTED = agent.Scripted(["env"], "whoami", "echo", "acceptance-worker", "acceptance-sub", 2)
+
+
+class ScriptedDriverTest(unittest.TestCase):
+    def drive(self, doors, call_model=None, call_tools=None):
+        log = doors.log
+        if call_model is None:
+            def call_model(purl, tok, model, text):
+                log.append(("model", purl, tok, model, text))
+                return "governed:unit"
+        if call_tools is None:
+            def call_tools(purl, tok, calls):
+                log.append(("tools", purl, tok, calls))
+                return ["acting as: u-test", calls[1][1]["text"]]
+        return agent.run_scripted("unix:///tmp/gw.sock", TOKEN, "fast", "drive-1", SCRIPTED,
+                                  call_model=call_model, call_tools=call_tools, doors_factory=lambda purl, tok: doors)
+
+    def test_fixed_order_and_artifact(self):
+        log = []
+        doors = FakeDoorsObject(log)
+        art = self.drive(doors)
+        self.assertEqual([e[0] for e in log], ["model", "exec", "tools", "spawn", "spawn"])
+        self.assertEqual(log[0], ("model", "unix:///tmp/gw.sock", TOKEN, "fast", "drive-1"))
+        self.assertEqual(log[1], ("exec", ["env"]))
+        self.assertEqual(log[2], ("tools", "unix:///tmp/gw.sock", TOKEN, [("whoami", {}), ("echo", {"text": "drive-1"})]))
+        self.assertEqual(log[3][1:4], ("acceptance-worker", "acceptance-sub", "drive-1"))
+        self.assertEqual(art.splitlines(), [
+            "model: governed:unit",
+            "exec: ACCEPTANCE_E2E_MARKER=1",
+            "tool whoami: acting as: u-test",
+            "tool echo: drive-1",
+            "spawn: succeeded r-child1 governed:unit",
+            "spawn: succeeded r-child2 governed:unit",
+        ])
+        self.assertTrue(doors.closed)
+
+    def test_spawns_run_in_parallel(self):
+        log = []
+        doors = FakeDoorsObject(log, spawn_delay=0.4)
+        self.drive(doors)
+        (a0, a1), (b0, b1) = [(e[4], e[5]) for e in log if e[0] == "spawn"]
+        self.assertTrue(a0 < b1 and b0 < a1, "the two spawns did not overlap in time")
+
+    def test_exec_failure_stops_the_sequence_with_its_fixed_reason(self):
+        log = []
+        doors = FakeDoorsObject(log, exec_out=agent.DoorError("exec/run answered 403 at unix:///tmp/gw.sock"))
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(doors)
+        self.assertEqual(cm.exception.reason, "exec call failed")
+        self.assertEqual(cm.exception.cause, "DoorError")
+        self.assertEqual([e[0] for e in log], ["model", "exec"])
+        self.assertTrue(doors.closed)
+
+    def test_refused_spawn_is_a_failed_step(self):
+        log = []
+        doors = FakeDoorsObject(log, spawn_error=agent.DoorError("spawn answered 403"))
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(doors)
+        self.assertEqual(cm.exception.reason, "spawn call failed")
+
+    def test_model_failure_reason(self):
+        def boom(*a):
+            raise RuntimeError("secret-token-value")
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(FakeDoorsObject([]), call_model=boom)
+        self.assertEqual(cm.exception.reason, "model call failed")
+        self.assertNotIn("secret", cm.exception.reason)
+
+    def test_tool_failure_reason(self):
+        def bad_tools(*a):
+            raise agent.DoorError("tool whoami returned an error")
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(FakeDoorsObject([]), call_tools=bad_tools)
+        self.assertEqual(cm.exception.reason, "tool call failed")
+
+    def test_short_tool_result_is_a_tool_failure(self):
+        with self.assertRaises(agent.StepFailed) as cm:
+            self.drive(FakeDoorsObject([]), call_tools=lambda *a: ["only one"])
+        self.assertEqual(cm.exception.reason, "tool call failed")
+
+
+class ScriptedHandlerTest(unittest.TestCase):
+    """The step handler under --driver scripted: the artifact is the driver's
+    report; a StepFailed becomes the fixed reason, nothing else."""
+
+    def setUp(self):
+        self.srv = agent.make_server("", "127.0.0.1:0", "fast", driver="scripted", scripted=SCRIPTED)
+        serve(self.srv)
+        self.saved = agent.run_scripted
+
+    def tearDown(self):
+        agent.run_scripted = self.saved
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def post(self, body):
+        import http.client
+        host, port = self.srv.server_address[:2]
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("POST", "/", body=json.dumps(body).encode(), headers={
+            "Content-Type": "application/json",
+            "X-Agenthof-Proxy-URL": "unix:///tmp/gw.sock", "X-Agenthof-Run-Token": TOKEN})
+        resp = conn.getresponse()
+        out = json.loads(resp.read())
+        conn.close()
+        return resp.status, out
+
+    def test_artifact_is_the_report(self):
+        calls = []
+
+        def fake(purl, tok, model, text, scripted, call_model):
+            calls.append((purl, tok, model, text, scripted))
+            return "model: x\nexec: y"
+        agent.run_scripted = fake
+        status, out = self.post({"input": "drive-1", "artifacts": {}, "agent": "acceptance"})
+        self.assertEqual((status, out), (200, {"artifact": "model: x\nexec: y", "success": True}))
+        self.assertEqual(calls, [("unix:///tmp/gw.sock", TOKEN, "fast", "drive-1", SCRIPTED)])
+
+    def test_step_failed_carries_only_the_fixed_reason(self):
+        def fake(*a, **k):
+            raise agent.StepFailed("exec call failed", "DoorError")
+        agent.run_scripted = fake
+        status, out = self.post({"input": "drive-1"})
+        self.assertEqual((status, out), (200, {"artifact": "", "success": False, "reason": "exec call failed"}))
+
+
 if __name__ == "__main__":
     unittest.main()

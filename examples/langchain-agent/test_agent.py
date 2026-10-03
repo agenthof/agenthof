@@ -264,6 +264,19 @@ class ArgsTest(unittest.TestCase):
         opts = agent.parse_args([])
         self.assertEqual((opts.socket, opts.addr, opts.model), ("", "127.0.0.1:8082", "fast"))
 
+    def test_default_driver_is_model(self):
+        opts = agent.parse_args([])
+        self.assertEqual(opts.driver, "model")
+
+    def test_scripted_flags(self):
+        opts = agent.parse_args(["--driver", "scripted", "--exec-argv", "env", "--obo-tool", "whoami",
+                                 "--bridge-tool", "echo", "--spawn-role", "w", "--spawn-workflow", "sub", "--spawns", "3"])
+        self.assertEqual(agent.scripted_from(opts), agent.Scripted(["env"], "whoami", "echo", "w", "sub", 3))
+
+    def test_unknown_driver_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            agent.parse_args(["--driver", "nope"])
+
 
 class RequirementsTest(unittest.TestCase):
     def test_every_requirement_is_pinned(self):

@@ -13,6 +13,7 @@ Dependencies: the standard library plus langchain-openai (which brings httpx) an
 """
 import argparse
 import asyncio
+import concurrent.futures
 import json
 import os
 import socketserver
@@ -201,6 +202,63 @@ def call_tools(proxy_url, run_token, calls):
     return tool_session(proxy_url, run_token, calls).results
 
 
+# The drivers: how a step is answered. "model" is one governed model call
+# (the reply is the artifact). "scripted" runs the five doors in a fixed
+# order and reports each in the artifact — a deterministic sequence an
+# audit can be checked against. "llm" (a model deciding which doors to call)
+# is reserved and not implemented yet.
+DRIVERS = ("model", "scripted", "llm")
+
+Scripted = namedtuple("Scripted", "exec_argv obo_tool bridge_tool spawn_role spawn_workflow spawns")
+
+
+class StepFailed(Exception):
+    """A leg of the scripted sequence failed. reason is the FIXED text the
+    step reply carries; cause names the exception class, for the log only."""
+
+    def __init__(self, reason, cause):
+        super().__init__(reason)
+        self.reason = reason
+        self.cause = cause
+
+
+def _leg(reason, fn, *args):
+    try:
+        return fn(*args)
+    except Exception as exc:  # noqa: BLE001 — any failure is this leg's fixed reason
+        raise StepFailed(reason, type(exc).__name__) from exc
+
+
+def run_scripted(proxy_url, run_token, model, text, scripted,
+                 call_model=call_model, call_tools=call_tools, doors_factory=Doors):
+    """The scripted driver: one model call, one first-hand exec, one call on
+    the on-behalf-of tool, one on the bridged tool, then scripted.spawns
+    parallel sub-agent runs — in that order — and the artifact that reports
+    each. The first failing leg ends the step with that leg's fixed reason;
+    nothing after it runs. The tool results go into the artifact on purpose:
+    what the upstream answered is the step's evidence."""
+    lines = ["model: " + _leg("model call failed", call_model, proxy_url, run_token, model, text)]
+    doors = doors_factory(proxy_url, run_token)
+    try:
+        output = _leg("exec call failed", doors.exec_run, scripted.exec_argv)
+        lines.append("exec: " + " ".join(output.split()))
+        results = _leg("tool call failed", call_tools, proxy_url, run_token,
+                       [(scripted.obo_tool, {}), (scripted.bridge_tool, {"text": text})])
+        if len(results) != 2:
+            raise StepFailed("tool call failed", "short result")
+        lines.append("tool %s: %s" % (scripted.obo_tool, results[0]))
+        lines.append("tool %s: %s" % (scripted.bridge_tool, results[1]))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, scripted.spawns)) as pool:
+            futures = [pool.submit(doors.spawn, scripted.spawn_role, scripted.spawn_workflow, text)
+                       for _ in range(scripted.spawns)]
+            children = _leg("spawn call failed", lambda: [f.result() for f in futures])
+    finally:
+        doors.close()
+    for child in sorted(children, key=lambda c: c["child_run_id"]):
+        lines.append("spawn: %s %s %s" % (child["status"], child["child_run_id"], child.get("output_preview", "")))
+    return "\n".join(lines)
+
+
 class StepHandler(BaseHTTPRequestHandler):
     server_version = "langchain-agent/0"
 
@@ -257,10 +315,19 @@ class StepHandler(BaseHTTPRequestHandler):
             self._json({"artifact": "", "success": False, "reason": "model proxy coordinates missing"})
             return
         try:
-            reply = self.server.call_model(proxy_url, run_token, self.server.model, step["input"])
+            if self.server.driver == "scripted":
+                reply = run_scripted(proxy_url, run_token, self.server.model, step["input"],
+                                     self.server.scripted, call_model=self.server.call_model)
+            else:
+                reply = self.server.call_model(proxy_url, run_token, self.server.model, step["input"])
+        except StepFailed as exc:
+            # The reason is fixed per leg: exception text can carry the proxy
+            # URL, the token, or upstream error bodies, none of which belong
+            # in a ledger. The class name is for the operator's log.
+            self.log_message("%s: %s", exc.reason, exc.cause)
+            self._json({"artifact": "", "success": False, "reason": exc.reason})
+            return
         except Exception as exc:  # noqa: BLE001 — any failure is a failed step
-            # The reason is fixed: exception text can carry the proxy URL, the
-            # token, or upstream error bodies, none of which belong in a ledger.
             self.log_message("model call failed: %s", type(exc).__name__)
             self._json({"artifact": "", "success": False, "reason": "model call failed"})
             return
@@ -284,8 +351,9 @@ class UnixStepServer(_Threaded, socketserver.UnixStreamServer):
             pass
 
 
-def make_server(socket_path, addr, model, call_model=call_model):
-    """Serve the step contract on socket_path (Unix) when given, else on addr (host:port)."""
+def make_server(socket_path, addr, model, call_model=call_model, driver="model", scripted=None):
+    """Serve the step contract on socket_path (Unix) when given, else on addr
+    (host:port), answering steps with the given driver."""
     if socket_path:
         try:
             os.unlink(socket_path)  # a stale file from a killed process would make bind fail
@@ -297,24 +365,41 @@ def make_server(socket_path, addr, model, call_model=call_model):
         srv = TCPStepServer((host, int(port)), StepHandler)
     srv.model = model
     srv.call_model = call_model
+    srv.driver = driver
+    srv.scripted = scripted
     return srv
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="LangChain agent for Agenthof (one governed model call per step)")
+    p = argparse.ArgumentParser(description="LangChain agent for Agenthof (one governed model call per step, or every door in a fixed order)")
     # Single dash on purpose: the refbox recipe appends "-socket <path>" after
     # the image name, and the last -socket given wins.
     p.add_argument("-socket", dest="socket", default="", help="Unix socket path to listen on; overrides --addr")
     p.add_argument("--addr", default="127.0.0.1:8082", help="TCP listen address when -socket is not set")
     p.add_argument("--model", default="fast", help="logical model name this agent is configured with")
+    p.add_argument("--driver", choices=DRIVERS, default="model",
+                   help="model: one governed model call per step (default); scripted: model, exec, two tool calls, parallel spawns, in that order; llm: reserved")
+    p.add_argument("--exec-argv", default="env", help="scripted: the allowlisted command to run through the exec door (space-separated)")
+    p.add_argument("--obo-tool", default="whoami", help="scripted: the tool to call on the on-behalf-of resource")
+    p.add_argument("--bridge-tool", default="echo", help="scripted: the tool to call on the bridged stdio resource (called with the step input as text)")
+    p.add_argument("--spawn-role", default="acceptance-worker", help="scripted: the role of the sub-agent runs")
+    p.add_argument("--spawn-workflow", default="acceptance-sub", help="scripted: the workflow of the sub-agent runs")
+    p.add_argument("--spawns", type=int, default=2, help="scripted: how many sub-agent runs to start in parallel")
     return p.parse_args(argv)
+
+
+def scripted_from(opts):
+    return Scripted(opts.exec_argv.split(), opts.obo_tool, opts.bridge_tool, opts.spawn_role, opts.spawn_workflow, opts.spawns)
 
 
 def main(argv=None):
     opts = parse_args(argv)
-    srv = make_server(opts.socket, opts.addr, opts.model)
+    if opts.driver == "llm":
+        sys.stderr.write("langchain-agent: --driver llm is reserved and not implemented yet\n")
+        return 2
+    srv = make_server(opts.socket, opts.addr, opts.model, driver=opts.driver, scripted=scripted_from(opts))
     where = "unix:" + opts.socket if opts.socket else "%s:%d" % srv.server_address[:2]
-    sys.stderr.write("langchain-agent listening on %s, logical model %s\n" % (where, opts.model))
+    sys.stderr.write("langchain-agent listening on %s, logical model %s, driver %s\n" % (where, opts.model, opts.driver))
     sys.stderr.flush()
     try:
         srv.serve_forever()
@@ -322,7 +407,8 @@ def main(argv=None):
         pass
     finally:
         srv.server_close()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
