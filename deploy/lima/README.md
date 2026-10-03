@@ -21,7 +21,7 @@ compartmented tests locally.
 
 ```sh
 deploy/lima/lima.sh up            # create + provision the VM (first run takes a few minutes)
-deploy/lima/lima.sh e2e           # run the refbox, refbridge, refexec and spawn e2es, then self-clean
+deploy/lima/lima.sh e2e           # run the refbox, refbridge, refexec, refspawn and acceptance e2es, then self-clean
 ```
 
 `up` provisions rootless podman, Go, and python3, and mounts the repository
@@ -33,8 +33,8 @@ automatically, so the VM definition carries no machine-specific path.
 | Command | What it does |
 | --- | --- |
 | `lima.sh up` | Create the VM on first run, or start it if it already exists. |
-| `lima.sh e2e [refbox\|refbridge\|refexec\|spawn\|all] [--keep]` | Run the compartment e2e(s) (default `all`), then self-clean unless `--keep`. |
-| `lima.sh build` | Compile `agenthof` (to `~/agenthof`) and build the compartment images, ready for manual runs. |
+| `lima.sh e2e [refbox\|refbridge\|refexec\|refspawn\|acceptance\|all] [--keep]` | Run the compartment e2e(s) (default `all`), then self-clean unless `--keep` — which is also passed to the script, so `acceptance --keep` leaves its compartments and scratch directory for inspection. |
+| `lima.sh build` | Compile `agenthof` (to `~/agenthof`) and build the compartment images (`refbridge:test`, `refbox-echo:test`, `refbox-langchain:test`), ready for manual runs. |
 | `lima.sh shell` | Open a shell in the VM at `/agenthof`, with Go, podman, and python3 on `PATH`. |
 | `lima.sh clean [--all]` | Remove stopped containers and dangling images; `--all` also drops cached base images. |
 | `lima.sh down` | Stop the VM, keeping it for next time. |
@@ -50,7 +50,7 @@ deploy/lima/lima.sh shell         # you are now in the VM, in /agenthof
 ```
 
 Inside the shell, `~/agenthof` is the built binary and the compartment images
-(`refbridge:test`, `refbox-echo:test`) are ready.
+(`refbridge:test`, `refbox-echo:test`, `refbox-langchain:test`) are ready.
 
 The e2e scripts are the canonical worked examples of a full governed run: they
 set up the socket directories, rewrite the demo config to point at them, export
@@ -61,7 +61,8 @@ the agent process, then `apply` and `run`. Run one end to end:
 bash scripts/e2e-refbridge.sh   # a stdio tool, run in refbridge, over unix://
 bash scripts/e2e-refbox.sh      # the agent itself, run inside refbox
 bash scripts/e2e-refexec.sh     # a command run first-hand by refexec, on a workspace shared with refbox
-bash scripts/e2e-refspawn.sh       # a spawned child run, in the compartments refspawn provisions for it
+bash scripts/e2e-refspawn.sh    # a spawned child run, in the compartments refspawn provisions for it
+bash scripts/e2e-acceptance.sh  # every door in one run, every compartment real: the combined containment proof (--keep to inspect)
 ```
 
 To drive Agenthof by hand, follow the same steps that script does. The detail a
@@ -81,3 +82,10 @@ after each run and prints `podman system df` before and after, so growth is
 always visible. Run `lima.sh clean` any time to prune on demand, or
 `lima.sh clean --all` to also drop the cached base images (the next run
 re-pulls them).
+
+## From the repository root
+
+`make acceptance-podman` runs the combined containment proof: on macOS it starts
+this VM if needed and runs `lima.sh e2e acceptance` inside it; on Linux with
+rootless podman it runs `scripts/e2e-acceptance.sh` directly. `KEEP=1` passes
+`--keep`.

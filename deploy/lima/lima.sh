@@ -2,10 +2,13 @@
 # lima.sh — drive the Agenthof local test harness (a headless Ubuntu 24.04
 # rootless-podman VM) on macOS. See deploy/lima/README.md.
 #
-#   lima.sh up                 create (first run) or start the VM
+#   lima.sh up                 create (first run) or start the VM (a running VM is left as it is)
 #   lima.sh shell              open a shell in the VM at the repo (/agenthof)
 #   lima.sh build              compile agenthof and build the compartment images
-#   lima.sh e2e [name] [--keep] run e2e(s): refbox | refbridge | refexec | refspawn | all (default all)
+#   lima.sh e2e [name] [--keep] [--flag…]
+#                              run e2e(s): refbox | refbridge | refexec | refspawn | acceptance | all (default all);
+#                              --keep skips the prune below and is passed to each script (only acceptance acts on it),
+#                              as is any other --flag
 #   lima.sh clean [--all]      prune compartment leftovers; --all drops cached images
 #   lima.sh down               stop the VM (keeps it for next time)
 #   lima.sh destroy            delete the VM entirely
@@ -27,8 +30,12 @@ vm() { limactl shell --workdir "$MOUNT" "$VM" -- bash -lc "$1"; }
 cmd_up() {
 	command -v limactl >/dev/null || die "limactl not found — install Lima (e.g. 'brew install lima')"
 	if have_vm; then
-		echo "starting existing VM '$VM'…"
-		limactl start "$VM"
+		if [ "$(limactl list --format '{{.Status}}' "$VM" 2>/dev/null)" = Running ]; then
+			echo "VM '$VM' is running"
+		else
+			echo "starting existing VM '$VM'…"
+			limactl start "$VM"
+		fi
 	else
 		echo "creating VM '$VM' (Ubuntu 24.04, rootless podman, Go — first run provisions, several minutes)…"
 		# --set injects the real repo path so agenthof.yaml stays machine-independent.
@@ -50,18 +57,20 @@ cmd_build() {
 	echo "building agenthof + compartment images inside the VM…"
 	vm "go build -o \$HOME/agenthof ./cmd/agenthof && echo 'built ~/agenthof' \
 		&& podman build -f deploy/refbridge/Containerfile -t refbridge:test . \
-		&& podman build -f deploy/refbox/Containerfile -t refbox-echo:test ."
-	echo "done — in 'lima.sh shell', ~/agenthof is the binary; images refbridge:test and refbox-echo:test are built."
+		&& podman build -f deploy/refbox/Containerfile -t refbox-echo:test . \
+		&& podman build -f deploy/refbox/Containerfile.python -t refbox-langchain:test ."
+	echo "done — in 'lima.sh shell', ~/agenthof is the binary; images refbridge:test, refbox-echo:test and refbox-langchain:test are built."
 }
 
 cmd_e2e() {
 	require_vm
-	local name="all" keep=0
+	local name="all" keep=0 extra=()
 	for a in "$@"; do
 		case "$a" in
-			refbox|refbridge|refexec|refspawn|all) name="$a" ;;
-			--keep) keep=1 ;;
-			*) die "unknown e2e argument: $a (want refbox | refbridge | refexec | refspawn | all [--keep])" ;;
+			refbox|refbridge|refexec|refspawn|acceptance|all) name="$a" ;;
+			--keep) keep=1; extra+=("$a") ;;
+			--*) extra+=("$a") ;;
+			*) die "unknown e2e argument: $a (want refbox | refbridge | refexec | refspawn | acceptance | all [--keep] [--flag…])" ;;
 		esac
 	done
 	local scripts=()
@@ -70,12 +79,17 @@ cmd_e2e() {
 		refbridge) scripts=("scripts/e2e-refbridge.sh") ;;
 		refexec) scripts=("scripts/e2e-refexec.sh") ;;
 		refspawn) scripts=("scripts/e2e-refspawn.sh") ;;
-		all) scripts=("scripts/e2e-refbox.sh" "scripts/e2e-refbridge.sh" "scripts/e2e-refexec.sh" "scripts/e2e-refspawn.sh") ;;
+		acceptance) scripts=("scripts/e2e-acceptance.sh") ;;
+		all) scripts=("scripts/e2e-refbox.sh" "scripts/e2e-refbridge.sh" "scripts/e2e-refexec.sh" "scripts/e2e-refspawn.sh" "scripts/e2e-acceptance.sh") ;;
 	esac
+	# Flags go to every script as given: the per-slice scripts read no
+	# arguments, so this is harmless to them; e2e-acceptance.sh acts on --keep.
+	# (${extra[*]+…}: an empty array under set -u is an error on bash 3.2.)
+	local args="${extra[*]+${extra[*]}}"
 	local rc=0
 	for s in "${scripts[@]}"; do
 		echo "== $s =="
-		vm "bash $s" || { rc=1; break; }
+		vm "bash $s${args:+ $args}" || { rc=1; break; }
 	done
 	# Self-clean so rebuild leftovers do not pile up unnoticed (--keep opts out).
 	if [ "$keep" = 1 ]; then
