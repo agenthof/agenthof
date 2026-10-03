@@ -226,7 +226,11 @@ bound "$LN" "$NOEXEC" dana@example.com
 [ "$(count "$LN" exec)" = 1 ] || fail "the refused run recorded an exec that was not the refusal"
 [ "$(field "$LN" exec reason refused)" = "command is not on the exec allowlist" ] || fail "the exec refusal is not the allowlist reason"
 grep -qF "exec env refused — command is not on the exec allowlist" <<<"$AUDIT" || fail "audit did not render the exec refusal"
-grep -qxF "exec: refused by policy" <<<"$(parent_artifact "$NOEXEC")" || fail "the model was not told the fixed refusal"
+if ! NOEXEC_ART="$(parent_artifact "$NOEXEC")"; then
+	echo "$NOEXEC_ART"
+	fail "no artifact on the off-allowlist run"
+fi
+grep -qxF "exec: refused by policy" <<<"$NOEXEC_ART" || fail "the model was not told the fixed refusal"
 [ "$(count "$LN" tool_call succeeded)" = 2 ] || fail "the model did not go on to the tool door after the refusal"
 [ "$(count "$LN" spawn succeeded)" = 2 ] || fail "the model did not go on to the spawn door after the refusal"
 [ "$(count "$LN" model_call succeeded)" = 4 ] || fail "the refused run did not take four model rounds"
@@ -248,7 +252,11 @@ bound "$LS" "$NOSPAWN" dana@example.com
 [ "$(field "$LS" spawn reason refused | sort -u)" = "spawn target is not on the agent's may_spawn list" ] || fail "the spawn refusals are not the may_spawn reason"
 [ -z "$(field "$LS" spawn child_run_id refused)" ] || fail "a may_spawn refusal must start no child"
 [ "$(provisioned_count)" = "$BEFORE" ] || fail "a may_spawn refusal provisioned a set"
-[ "$(out_of grep -c '^spawn: refused by policy$' <<<"$(parent_artifact "$NOSPAWN")")" = 2 ] || fail "the model was not told both fixed refusals"
+if ! NOSPAWN_ART="$(parent_artifact "$NOSPAWN")"; then
+	echo "$NOSPAWN_ART"
+	fail "no artifact on the may_spawn-denied run"
+fi
+[ "$(out_of grep -c '^spawn: refused by policy$' <<<"$NOSPAWN_ART")" = 2 ] || fail "the model was not told both fixed refusals"
 [ "$(out_of grep -cF "spawn acceptance-worker/acceptance-sub → no child run refused (depth 1) — spawn target is not on the agent's may_spawn list" <<<"$AUDIT")" = 2 ] || fail "audit did not render both spawn refusals"
 [ "$(count "$LS" model_call succeeded)" = 4 ] || fail "the no-spawn run did not take four model rounds"
 [ "$(count "$LS" exec succeeded)" = 1 ] || fail "the exec leg was not recorded on the no-spawn run"

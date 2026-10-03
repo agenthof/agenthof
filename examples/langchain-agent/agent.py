@@ -8,9 +8,9 @@ Agenthof names in the X-Agenthof-Proxy-URL header, authenticated with the
 X-Agenthof-Run-Token — or, with `--driver scripted`, every door in a fixed
 order — or, with `--driver llm`, a model that is offered the doors as tools
 and decides, round by round, which to call. It holds no provider key: the
-gateway injects that
-upstream. Inside a no-network compartment (deploy/refbox) the proxy URL is
-unix://<socket-path>; elsewhere it is http://127.0.0.1:<port>/.
+gateway injects that upstream. Inside a no-network compartment
+(deploy/refbox) the proxy URL is unix://<socket-path>; elsewhere it is
+http://127.0.0.1:<port>/.
 
 Dependencies: the standard library plus langchain-openai (which brings httpx) and mcp.
 """
@@ -398,9 +398,10 @@ UNKNOWN_TOOL = "unknown tool"
 INVALID_ARGS = "invalid arguments"
 # A tool result fed back to the model is cut here; the full output is on the
 # door's own ledger event (exec) or at the upstream, never only in the model's
-# view. The whole conversation is checked against CONVERSATION_MAX before each
-# model call: the model door caps a request body at 1 MiB and answers an
-# oversized one with 400 and no ledger event, so the agent must stop first.
+# view. The whole request (the conversation and the tool specs sent with it) is
+# checked against CONVERSATION_MAX before each model call: the model door caps
+# a request body at 1 MiB and answers an oversized one with 400 and no ledger
+# event, so the agent must stop first.
 TOOL_RESULT_MAX = 8192
 CONVERSATION_MAX = 512 << 10
 # The most door calls of one round in flight at once; the rest of the round
@@ -492,6 +493,7 @@ def run_llm(proxy_url, run_token, model, text, llm,
     deadline = time.monotonic() + llm.step_budget
     tools = door_tools(_leg("tool call failed", list_tools, proxy_url, run_token))
     mcp_names = {t.name for t in tools if t.name not in DOOR_TOOL_NAMES}
+    tools_size = len(json.dumps(openai_tools(tools)))  # sent with every request; fixed for the step
     messages = [{"role": "system", "content": task_prompt(llm.scripted, text)},
                 {"role": "user", "content": text}]
     lines = []
@@ -501,7 +503,7 @@ def run_llm(proxy_url, run_token, model, text, llm,
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise StepFailed("step deadline reached", "deadline")
-            if len(json.dumps(messages)) > CONVERSATION_MAX:
+            if len(json.dumps(messages)) + tools_size > CONVERSATION_MAX:
                 raise StepFailed("conversation too large", "size")
             try:
                 reply = _leg("model call failed", invoke_model, proxy_url, run_token, model, messages, tools,
@@ -516,7 +518,7 @@ def run_llm(proxy_url, run_token, model, text, llm,
             if not reply.tool_calls:
                 lines.append("model: " + _bounded_line(reply.text))
                 return "\n".join(lines)
-            lines.append("model: called " + ", ".join(_bounded_line(c.name) for c in reply.tool_calls))
+            lines.append(_bounded_line("model: called " + ", ".join(c.name for c in reply.tool_calls)))
             messages.append(assistant_message(reply))
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(reply.tool_calls), MAX_PARALLEL_CALLS)) as pool:
                 futures = [pool.submit(_door_call, c, doors, mcp_names, call_tools, proxy_url, run_token, deadline)
@@ -683,7 +685,7 @@ def parse_args(argv=None):
     p.add_argument("--spawns", type=_at_least_one, default=2, help="scripted/llm: how many sub-agent runs to start in parallel")
     p.add_argument("--max-rounds", type=_at_least_one, default=8, help="llm: the most model rounds one step may take before it fails")
     p.add_argument("--step-budget", type=_positive_seconds, default=240.0,
-                   help="llm: seconds the whole step may take; set it below the engine's step_timeout. No model or door call starts once it is spent")
+                   help="llm: seconds after which no further model or door call starts; set it below the engine's step_timeout")
     return p.parse_args(argv)
 
 

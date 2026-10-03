@@ -1,7 +1,9 @@
 # langchain-agent
 
 A [LangChain](https://python.langchain.com/) agent that runs governed under
-Agenthof. It serves the [agent protocol](../../docs/agent-protocol.md) and
+Agenthof. It is a separate program that `agenthof` calls over a socket, not
+part of `agenthof`: `--driver` below is this agent's flag, not an `agenthof`
+subcommand. It serves the [agent protocol](../../docs/agent-protocol.md) and
 reaches models, commands, tools, and sub-agents **only through Agenthof's
 per-run gateway** — it holds no provider key, no tool credential, and no
 command authority of its own. Three drivers decide how a step is answered:
@@ -36,7 +38,8 @@ command authority of its own. Three drivers decide how a step is answered:
   is `the door call failed`. Each result fed back is cut at 8 KiB. The step
   fails, with a fixed reason, when `--max-rounds` (default 8) or
   `--step-budget` seconds (default 240; set it below the engine's
-  `step_timeout`) is spent, or when the conversation would outgrow the model
+  `step_timeout`) have passed — after that no further model or door call
+  starts, though one already running finishes — or when the conversation would outgrow the model
   door's request limit. The `scripted` flags name what the prompt asks the
   model to do. The artifact has one line per leg the model actually took
   (`model: called …`/`model: <answer>`, `exec:`, `tool <name>:`, `spawn:`).

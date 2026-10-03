@@ -235,8 +235,13 @@ class TimeoutModel(FakeModel):
 class EndlessModel(FakeModel):
     """Calls exec every round, forever."""
 
+    def __init__(self, rounds):
+        super().__init__(rounds)
+        self.sent_sizes = []
+
     def __call__(self, proxy_url, run_token, model, messages, tools, timeout):
         self.seen.append(len(messages))
+        self.sent_sizes.append(len(json.dumps(messages)))
         return agent.ModelReply("", [agent.ToolCall("call_%d" % len(self.seen), "exec", {"command": ["env"]})])
 
 
@@ -440,7 +445,7 @@ class LlmDriverTest(unittest.TestCase):
         model = FakeModel([[(long, {})]], final="f" * (2 * agent.TOOL_RESULT_MAX))
         art = self.drive(model, FakeDoors([]))
         lines = art.splitlines()
-        self.assertEqual(lines[0], "model: called " + long[:agent.TOOL_RESULT_MAX] + " [truncated]")
+        self.assertEqual(lines[0], ("model: called " + long)[:agent.TOOL_RESULT_MAX] + " [truncated]", "the whole line is cut, not each name")
         self.assertEqual(lines[1], "tool " + long[:agent.TOOL_RESULT_MAX - 5] + " [truncated]: unknown tool")
         self.assertEqual(lines[2], "model: " + "f" * agent.TOOL_RESULT_MAX + " [truncated]")
 
@@ -531,6 +536,7 @@ class LlmDriverTest(unittest.TestCase):
             agent.CONVERSATION_MAX = saved
         self.assertEqual(cm.exception.reason, "conversation too large")
         self.assertLess(len(model.seen), 8, "the guard, not the cap, stopped the loop")
+        self.assertTrue(all(size <= 4096 for size in model.sent_sizes), "an over-cap conversation was sent to the model")
         self.assertTrue(doors.closed)
 
     def test_model_failure_is_the_fixed_reason(self):

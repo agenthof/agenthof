@@ -5,20 +5,27 @@ shows it was governed the whole time.
 
 ## What this shows, and what it does not
 
+Two programs are involved. `agenthof` is the governance engine
+(`apply`, `run`, `audit`, `investigate`); the agent is a separate program,
+`examples/langchain-agent/agent.py`, that `agenthof` calls over a socket.
+`--driver llm` is the agent's flag (`python agent.py --driver llm`), not an
+`agenthof` subcommand: Agenthof never embeds the agent or chooses how it
+thinks (Article VII). `scripts/showcase-combined.sh` runs both sides for you;
+this page still names them separately.
+
 The scripted acceptance run (`scripts/e2e-acceptance-local.sh`) proves the
 doors with an agent whose every move is fixed in advance. That is a fair proof
 of the doors, but nothing in it could have gone another way. This showcase
-removes the script: the same LangChain agent runs with `--driver llm`, the
-model is handed the agent's actual capabilities as tools — the exec door, the
-spawn door, and exactly the tools its grant mirrors on the tool door — and it
-decides, round by round, which to call. Each model round is one governed
-`model_call`; each door it opens is its own first-hand event; a door that says
-no records the refusal, and the agent tells the model in fixed words that the
-call produced no result.
-Nothing in the core changed to make this possible: the model door authorizes
-only the logical model name, rewrites it to the provider's, and forwards the
-rest of the tool-calling conversation as it is, so an agentic loop is just
-more governed calls.
+removes the script: the same LangChain agent runs with
+`python agent.py --driver llm`, and the model is handed the two door tools
+plus exactly the tools its grant mirrors on the tool door. It decides, round
+by round, which to call. Each model round is one governed `model_call`; each
+door it opens is its own first-hand event; a door that says no records the
+refusal, and the agent tells the model in fixed words that the call produced
+no result. The model door already forwards a tool-calling conversation
+unchanged and authorizes only the logical model name, so an agentic loop is
+just more governed model calls plus the doors the model chose; no new door was
+needed.
 
 What it shows: **governance and audit** — every capability the agent used
 reached it through a governed, logged door (Article I), bound to the human who
@@ -169,6 +176,6 @@ for registering and governing agents built on other runtimes and frameworks,
 see "More harness adapters" on the [roadmap](../ROADMAP.md#next).
 
 See also: [`examples/langchain-agent/README.md`](../examples/langchain-agent/README.md)
-for the driver's flags and behaviour, [`lifecycle.md`](lifecycle.md) for the
+for the agent's flags and behaviour, [`lifecycle.md`](lifecycle.md) for the
 life of a run, and the four life-of-a-door pages linked from the
 [README](../README.md#documentation).
