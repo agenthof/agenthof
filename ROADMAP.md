@@ -31,7 +31,7 @@ The governed core is real and runnable today:
 - **Identity & RBAC** — invokers are established by a pluggable authenticator
   (`static` for dev, OIDC for production); roles gate access by group.
 - **Fronted agents** — every agent is an external HTTP endpoint, governed at
-  the tool/MCP, exec, and model doors. The agent runs in an operator-provided
+  the tool/MCP, exec, model, and sub-agent-spawn doors. The agent runs in an operator-provided
   sandbox; that sandbox's network and exec confinement is required, and
   Agenthof does not verify it. `execution: fronted` (the default when the
   field is empty) is stamped on every step event.
@@ -44,7 +44,9 @@ The governed core is real and runnable today:
   Two reference images run there today: a Go echo agent and a Python
   LangChain agent whose model call reaches Agenthof through the gateway
   socket in that same directory — a framework agent governed with no
-  provider key and no network.
+  provider key and no network. That same LangChain agent can also drive the
+  tool/MCP (via the official MCP SDK), exec, and sub-agent-spawn doors
+  through that one gateway — a single framework agent exercising every door.
 - **Model gateway** — a fronted agent reaches models through Agenthof. The
   per-role provider key is injected and is not passed through to the agent.
   The logical model is authorized, the provider model is rewritten on the
@@ -57,7 +59,9 @@ The governed core is real and runnable today:
   kill switch* is recorded to its own hash-chained control ledger, so "who
   changed the setup on the 14th, and who approved what's running?" is
   answerable; `audit control`, `audit verify control`, and `audit repair
-  control` read, verify, and recover it.
+  control` read, verify, and recover it. `agenthof investigate` merges this
+  control ledger with the run ledgers into one timeline — human-readable or
+  `--json` — each source carrying its own verification verdict.
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
   reach declared MCP tool resources only through Agenthof, which mirrors a
   whole resource (written `mode: all` — every-tool access is always an
@@ -116,8 +120,7 @@ The governed core is real and runnable today:
 - **Governed skills & capabilities** — named capability bundles an agent may
   load, enabled or disabled per agent, workflow, or role.
 - **Finer-grained privileges** — per-agent scoping of what an agent may
-  touch beyond today's tool grants. (Read-only tool grants have shipped: see
-  the tool gateway under Now.)
+  touch, beyond today's per-tool, read-only, exec, and spawn grants.
 
 ## Exploring
 
