@@ -25,7 +25,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 # Same cap as Agenthof's adapter puts on the reply it will read from us.
 MAX_BODY = 1 << 20
@@ -92,32 +92,33 @@ class DoorError(Exception):
 # accepts. Over unix:// the SDK's httpx client is built with a Unix-socket
 # transport and the URL's host is a placeholder the gateway ignores.
 ToolReport = namedtuple("ToolReport", "protocol_version tool_names results")
+# The MCP transports' own timeouts: 30s to connect/write, 300s to read, since
+# the server may hold a response stream open. Redirect following stays at the
+# httpx default (off) — the SDK follows same-origin redirects itself.
+DOOR_TIMEOUT = httpx.Timeout(30.0, read=300.0)
 
 
-def mcp_endpoint(proxy_url):
-    """Return (url, httpx_client_factory) for the MCP door behind proxy_url."""
+def mcp_endpoint(proxy_url, run_token=""):
+    """Return (url, http_client) for the MCP door behind proxy_url."""
     if proxy_url.startswith(UNIX):
-        path = proxy_url[len(UNIX):]
-
-        def factory(headers=None, timeout=None, auth=None):
-            return httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=path),
-                                     headers=headers, timeout=timeout, auth=auth)
-
-        return "http://localhost/", factory
-    if proxy_url.startswith(("http://", "https://")):
-
-        def factory(headers=None, timeout=None, auth=None):
-            return httpx.AsyncClient(headers=headers, timeout=timeout, auth=auth)
-
-        return proxy_url.rstrip("/") + "/", factory
-    raise ValueError("unsupported proxy URL scheme")
+        url = "http://localhost/"
+        transport = httpx.AsyncHTTPTransport(uds=proxy_url[len(UNIX):])
+    elif proxy_url.startswith(("http://", "https://")):
+        url = proxy_url.rstrip("/") + "/"
+        transport = None
+    else:
+        raise ValueError("unsupported proxy URL scheme")
+    client = httpx.AsyncClient(transport=transport, timeout=DOOR_TIMEOUT,
+                               headers={"Authorization": "Bearer " + run_token})
+    return url, client
 
 
 async def _tool_session(proxy_url, run_token, calls):
-    url, factory = mcp_endpoint(proxy_url)
-    headers = {"Authorization": "Bearer " + run_token}
+    url, client = mcp_endpoint(proxy_url, run_token)
     results = []
-    async with streamablehttp_client(url, headers=headers, httpx_client_factory=factory) as (read, write, _):
+    # The client is the outermost context: the SDK does not own a client it was
+    # handed, so closing it is ours, and it has to outlive the transport.
+    async with client, streamable_http_client(url, http_client=client) as (read, write, _):
         async with ClientSession(read, write) as session:
             init = await session.initialize()
             listed = await session.list_tools()
@@ -127,8 +128,9 @@ async def _tool_session(proxy_url, run_token, calls):
                 if res.isError:
                     raise DoorError("tool %s returned an error" % name)
                 results.append(text)
-    # Leaving both contexts ends the session: the SDK sends the DELETE and
-    # closes its streams, so nothing of it lingers once the step has returned.
+    # Leaving the contexts ends the session: the SDK sends the DELETE, then the
+    # streams and the client close, so nothing of it lingers once the step has
+    # returned.
     return ToolReport(init.protocolVersion, sorted(t.name for t in listed.tools), results)
 
 
