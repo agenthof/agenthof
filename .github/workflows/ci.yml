@@ -56,6 +56,22 @@ jobs:
         env:
           PYTHON: python
 
+  acceptance-llm-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r examples/langchain-agent/requirements.txt
+      - run: ./scripts/e2e-acceptance-llm-local.sh
+        env:
+          PYTHON: python
+
   refbridge-local:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -160,6 +160,9 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 - [`docs/agent-protocol.md`](docs/agent-protocol.md) — the agent wire contract:
   how to build an agent in any language (the step JSON, the gateway headers, and
   the model/tool/exec/spawn call patterns).
+- [`docs/showcase.md`](docs/showcase.md) — governance in action: a real model
+  choosing the doors on its own, and how to read the audit that proves it was
+  governed (bring your own provider key; not a CI run).
 - [`docs/concepts.md`](docs/concepts.md) — the ideas behind Agenthof:
   planes, gateways, identity, the ledger.
 - [`docs/lifecycle.md`](docs/lifecycle.md) — the life of a run: how one

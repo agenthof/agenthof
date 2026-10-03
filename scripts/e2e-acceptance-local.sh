@@ -42,15 +42,29 @@
 # the agent's stderr logs, or agenthof's captured output.
 # Requires go and a python with examples/langchain-agent/
 # requirements.txt installed (PYTHON=... selects it; default python3). Runs
-# on macOS and Linux.
+# on macOS and Linux. Other scripts source this file (ACCEPTANCE_* knobs; see
+# the top of the file) to run the same harness with another driver or a real
+# provider.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# BASH_SOURCE, not $0: when another script sources this file, $0 is that script.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 PYTHON="${PYTHON:-python3}"
+ME="${ME:-e2e-acceptance-local}"   # the name failures carry; a sourcing script sets its own
+
+# Knobs for the scripts that build on this harness (scripts/e2e-acceptance-llm-local.sh,
+# scripts/showcase-combined.sh). Every default is this gate's own behaviour, so
+# running the file as-is is the scripted gate exactly as before.
+ACCEPTANCE_DRIVER="${ACCEPTANCE_DRIVER:-scripted}"        # the host agent's --driver
+ACCEPTANCE_AGENT_ARGS="${ACCEPTANCE_AGENT_ARGS:-}"         # extra host-agent flags, word-split
+ACCEPTANCE_PROVIDER_ARGS="${ACCEPTANCE_PROVIDER_ARGS:-}"   # extra fake-provider flags, word-split
+ACCEPTANCE_PROVIDER_URL="${ACCEPTANCE_PROVIDER_URL:-}"     # a provider origin to use INSTEAD of the fake (no /v1)
+ACCEPTANCE_PROVIDER_MODEL="${ACCEPTANCE_PROVIDER_MODEL:-fast}"  # the provider-side model name of the "fast" route
+ACCEPTANCE_HARNESS_ONLY="${ACCEPTANCE_HARNESS_ONLY:-}"     # set, and sourced: stop after apply, leave the harness up
 
 "$PYTHON" -c 'import langchain_openai, httpx, mcp' 2>/dev/null || {
-	echo "e2e-acceptance-local: $PYTHON lacks the pinned deps; run: $PYTHON -m pip install -r examples/langchain-agent/requirements.txt"
+	echo "$ME: $PYTHON lacks the pinned deps; run: $PYTHON -m pip install -r examples/langchain-agent/requirements.txt"
 	exit 1
 }
 
@@ -80,7 +94,7 @@ trap cleanup EXIT
 unset AGENTHOF_TOKEN || true
 
 fail() {
-	echo "e2e-acceptance-local: FAIL — $*"
+	echo "$ME: FAIL — $*"
 	exit 1
 }
 free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'; }
@@ -189,23 +203,38 @@ go build -o "$WORK/stdio-tool" ./examples/stdio-tool
 go test -c -o "$WORK/refexec-stub" ./deploy/refexec
 go test -c -o "$WORK/refspawn-stub" ./deploy/refspawn
 
-NONCE="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+NONCE="${ACCEPTANCE_NONCE:-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 OUTS=()
 PROVIDER_PORT="$(free_port)"
 IDP_PORT="$(free_port)"
 UP_PORT="$(free_port)"
 ISSUER="http://127.0.0.1:$IDP_PORT"
 UP_AUD="https://obo-upstream.example"
+# An export attribute the caller's environment gave one of these names would
+# survive a plain assignment and carry the secret into every stand-in and child.
+unset GATEWAY_KEY IDP_SECRET TOOL_SECRET
 IDP_SECRET="idp-side-secret-$NONCE"
 TOOL_SECRET="tool-secret-$NONCE"
-GATEWAY_KEY="host-side-dummy-key-$NONCE"
+# The key is a shell variable, never exported: it reaches agenthof per command
+# only (see --- 3.). A caller hands it in through the ACCEPTANCE_PROVIDER_KEY
+# environment variable, so that variable is dropped from the environment right
+# here — before any stand-in starts, since every child agent inherits the
+# environment (see starved).
+GATEWAY_KEY="${ACCEPTANCE_PROVIDER_KEY:-host-side-dummy-key-$NONCE}"
+unset ACCEPTANCE_PROVIDER_KEY
 export OBO_CLIENT_ID=agenthof-broker   # an id, not a secret: the broker reads it by name
 
 # --- 1. The stand-ins, BEFORE any secret is exported (see starved). The
 # IdP's own secret is a per-command variable on its line, nowhere else.
 starved
-python3 scripts/fake-openai-provider.py --bind "127.0.0.1:$PROVIDER_PORT" --reply "governed:$NONCE" --log "$WORK/provider.jsonl" >/dev/null 2>"$WORK/provider.err" &
-PIDS+=($!)
+if [ -z "$ACCEPTANCE_PROVIDER_URL" ]; then
+	# shellcheck disable=SC2086  # the extra flags are meant to be word-split
+	python3 scripts/fake-openai-provider.py --bind "127.0.0.1:$PROVIDER_PORT" --reply "governed:$NONCE" --log "$WORK/provider.jsonl" $ACCEPTANCE_PROVIDER_ARGS >/dev/null 2>"$WORK/provider.err" &
+	PIDS+=($!)
+	PROVIDER_URL="http://127.0.0.1:$PROVIDER_PORT"
+else
+	PROVIDER_URL="$ACCEPTANCE_PROVIDER_URL"
+fi
 OBO_IDP_CLIENT_SECRET="$IDP_SECRET" "$WORK/obo-idp" -addr "127.0.0.1:$IDP_PORT" -client-id "$OBO_CLIENT_ID" -client-secret-env OBO_IDP_CLIENT_SECRET \
 	-audiences "$UP_AUD" -subject-token-type urn:ietf:params:oauth:token-type:id_token \
 	-token-log "$WORK/issued.jsonl" 2>"$WORK/idp.err" &
@@ -290,14 +319,16 @@ EOF
 REFSPAWN_TEST_VOLROOT="$VOLROOT" "$WORK/refspawn-stub" -refspawn-test-stub -config "$WORK/refspawn.yaml" 2>"$WORK/refspawn.err" &
 PIDS+=($!)
 
-# The host agent: the scripted driver, every door in a fixed order.
-"$PYTHON" examples/langchain-agent/agent.py -socket "$SOCK_DIR/lc.sock" --model fast --driver scripted \
+# The host agent: the scripted driver, every door in a fixed order — or the
+# driver a building script asked for.
+# shellcheck disable=SC2086  # the extra flags are meant to be word-split
+"$PYTHON" examples/langchain-agent/agent.py -socket "$SOCK_DIR/lc.sock" --model fast --driver "$ACCEPTANCE_DRIVER" \
 	--exec-argv env --obo-tool whoami --bridge-tool echo \
-	--spawn-role acceptance-worker --spawn-workflow acceptance-sub --spawns 2 2>"$WORK/agent.err" &
+	--spawn-role acceptance-worker --spawn-workflow acceptance-sub --spawns 2 $ACCEPTANCE_AGENT_ARGS 2>"$WORK/agent.err" &
 PIDS+=($!)
 
 wait_port "$UP_PORT" "obo-upstream"
-wait_port "$PROVIDER_PORT" "the provider stand-in"
+[ -n "$ACCEPTANCE_PROVIDER_URL" ] || wait_port "$PROVIDER_PORT" "the provider stand-in"
 wait_socket "$BRIDGE_DIR/tool.sock" "the bridge socket" "$WORK/bridge.err"
 wait_socket "$EXEC_DIR/exec.sock" "the exec runtime socket" "$WORK/refexec.err"
 wait_socket "$SUP_DIR/refspawn.sock" "the supervisor socket" "$WORK/refspawn.err"
@@ -329,8 +360,8 @@ cat >"$WORK/config/gateway.yaml" <<EOF
 refbox_socket_dir: $SOCK_DIR
 models:
   fast:
-    endpoint: http://127.0.0.1:$PROVIDER_PORT
-    model: fast
+    endpoint: $PROVIDER_URL
+    model: $ACCEPTANCE_PROVIDER_MODEL
     api_key_env: AGENTHOF_GATEWAY_KEY
 defaults:
   model: fast
@@ -429,20 +460,24 @@ allowed_groups: ["acceptance-users"]
 EOF
 
 # --- 3. Secrets, only now: everything that could inherit them is running.
-export AGENTHOF_GATEWAY_KEY="$GATEWAY_KEY"
+# The provider key is never exported at all: it rides each agenthof command
+# line (apply here, run below), so no helper process — not even this
+# script's own python3 one-liners — ever has it in its environment. Even a key
+# a caller supplied through ACCEPTANCE_PROVIDER_KEY left the environment at
+# the top (unset as it was read), before the stand-ins started.
 export OBO_CLIENT_SECRET="$IDP_SECRET"
 export E2E_TOOL_TOKEN="$TOOL_SECRET"
 export AGENTHOF_OIDC_ISSUER="$ISSUER"
 export AGENTHOF_OIDC_CLIENT_ID=agenthof
 export AGENTHOF_OIDC_SUBJECT_TOKEN_TYPE=urn:ietf:params:oauth:token-type:id_token
 
-"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups acceptance-users
+AGENTHOF_GATEWAY_KEY="$GATEWAY_KEY" "$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups acceptance-users
 echo "apply: the combined config is valid — ok"
 
 run() { # $1 = workflow; sets OUT, RUNID, AUDIT. Identity is the verified
 	# token, never --as: an on-behalf-of workflow under --as is refused
 	# before the engine, and the children inherit the token's invoker.
-	OUT="$("$WORK/agenthof" run acceptance-operator "$1" --input "drive-$NONCE" --token "$TOKEN" \
+	OUT="$(AGENTHOF_GATEWAY_KEY="$GATEWAY_KEY" "$WORK/agenthof" run acceptance-operator "$1" --input "drive-$NONCE" --token "$TOKEN" \
 		--config "$WORK/config" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" \
 		--log-level debug 2>>"$WORK/agenthof.err" || true)"
 	OUTS+=("$OUT")
@@ -464,6 +499,52 @@ parent_artifact() { # $1 = run id: the full step artifact body
 }
 provisioned_count() { out_of grep -c "set provisioned" "$WORK/refspawn.err"; }
 torn_down_count() { out_of grep -c "set torn down" "$WORK/refspawn.err"; }
+# verify_run ID WHAT: `audit verify` exits 0 and names the head.
+verify_run() {
+	local v
+	if ! v="$("$WORK/agenthof" audit verify "$1" --log-dir "$WORK/logs")"; then
+		echo "$v"
+		fail "$2 ($1): audit verify failed"
+	fi
+	OUTS+=("$v")
+	echo "$v"
+	grep -Eq "^head: [0-9a-f]{64} \([0-9]+ events\)$" <<<"$v" || fail "$2 ($1): audit verify reported no head"
+}
+# no_leak VALUE WHAT...: VALUE must appear in no ledger, artifact, control
+# log, process log, agenthof operational log, or captured output. Never
+# prints VALUE. (The upstream's "acting as: u-dana" and the step input are
+# NOT secrets: they are in the artifact and the tool_call preview by design.
+# provider.jsonl and issued.jsonl are not searched on purpose: the first
+# records the injected host key, which is section 4a's proof that the key
+# was injected upstream; the second is the issuer's own list of what it
+# issued, which is what this section searches FOR. Known limit: the per-run
+# gateway token agenthof mints for the agent is not searched here — the harness
+# never sees it, so no claim is made that it is checked.) The caller writes
+# $WORK/outs.txt (the captured outputs) before calling.
+no_leak() {
+	[ -n "$1" ] || fail "${*:2} is empty, so searching for it would prove nothing"
+	local value="$1"
+	shift
+	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK/control.jsonl" "$WORK"/*.err 2>/dev/null; then
+		fail "$* reached a ledger, an artifact, the control log, or a process log"
+	fi
+	if grep -qF -- "$value" "$WORK/outs.txt"; then
+		fail "$* reached agenthof's output"
+	fi
+}
+# A JWT's payload and signature segments are searched alone too, so a copy
+# cut before the token's start or capped before its end is still caught.
+jwt_payload() {
+	local rest="${1#*.}"
+	printf '%s' "${rest%%.*}"
+}
+
+# A building script that sourced this file with ACCEPTANCE_HARNESS_ONLY set
+# wants the harness up and the helpers defined, and runs its own sections 4-7.
+if [ -n "$ACCEPTANCE_HARNESS_ONLY" ]; then
+	# shellcheck disable=SC2317  # the fail is reachable: `return` errors when the file is run, not sourced
+	return 0 2>/dev/null || fail "ACCEPTANCE_HARNESS_ONLY is for a script that sources this file, not for running it"
+fi
 
 # --- 4. The combined run: every door, one step, one human.
 run acceptance
@@ -678,17 +759,7 @@ echo "may_spawn-denied spawns: both refused and recorded, no child, nothing prov
 
 # --- 6. Verify is per run: the parent, each child, and each refused run,
 # every one on its own. There is no tree-wide verify, and this proves none
-# was assumed. verify_run ID WHAT: `audit verify` exits 0 and names the head.
-verify_run() {
-	local v
-	if ! v="$("$WORK/agenthof" audit verify "$1" --log-dir "$WORK/logs")"; then
-		echo "$v"
-		fail "$2 ($1): audit verify failed"
-	fi
-	OUTS+=("$v")
-	echo "$v"
-	grep -Eq "^head: [0-9a-f]{64} \([0-9]+ events\)$" <<<"$v" || fail "$2 ($1): audit verify reported no head"
-}
+# was assumed. (verify_run is defined with the helpers above.)
 verify_run "$PARENT" "the combined run"
 for c in $CHILDREN; do verify_run "$c" "a child run"; done
 verify_run "$NOEXEC" "the off-allowlist run"
@@ -714,33 +785,6 @@ grep -qF "listening" "$WORK/agent.err" || fail "the agent's log is empty, so the
 # pipeline under pipefail — reporting "no match" exactly when there is one.
 printf '%s\n' "${OUTS[@]}" >"$WORK/outs.txt"
 grep -qF "spawn acceptance-worker/acceptance-sub" "$WORK/outs.txt" || fail "no captured output names a spawn, so the search below would prove nothing"
-# no_leak VALUE WHAT...: VALUE must appear in no ledger, artifact, control
-# log, process log, agenthof operational log, or captured output. Never
-# prints VALUE. (The upstream's "acting as: u-dana" and the step input are
-# NOT secrets: they are in the artifact and the tool_call preview by design.
-# provider.jsonl and issued.jsonl are not searched on purpose: the first
-# records the injected host key, which is section 4a's proof that the key
-# was injected upstream; the second is the issuer's own list of what it
-# issued, which is what this section searches FOR. Known limit: the per-run
-# gateway token agenthof mints for the agent is not searched here — the harness
-# never sees it, so no claim is made that it is checked.)
-no_leak() {
-	[ -n "$1" ] || fail "${*:2} is empty, so searching for it would prove nothing"
-	local value="$1"
-	shift
-	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK/control.jsonl" "$WORK"/*.err 2>/dev/null; then
-		fail "$* reached a ledger, an artifact, the control log, or a process log"
-	fi
-	if grep -qF -- "$value" "$WORK/outs.txt"; then
-		fail "$* reached agenthof's output"
-	fi
-}
-# A JWT's payload and signature segments are searched alone too, so a copy
-# cut before the token's start or capped before its end is still caught.
-jwt_payload() {
-	local rest="${1#*.}"
-	printf '%s' "${rest%%.*}"
-}
 no_leak "$TOKEN" "the subject token"
 no_leak "$(jwt_payload "$TOKEN")" "the subject token's payload"
 no_leak "${TOKEN##*.}" "the subject token's signature"

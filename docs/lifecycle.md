@@ -295,6 +295,17 @@ injects the per-role provider key and records a `model_call`. The walkthrough
 is [`lifecycle-model.md`](lifecycle-model.md). An agent that never calls the
 proxy does not get a model credential from Agenthof.
 
+A step is not limited to one model call. Under an agentic driver — a model
+offered the doors as tools, deciding round by round which to call — a single
+step may be several governed model calls, with whatever doors the model chose
+in between: an exec, a tool call, a spawn. Each of those is its own event on
+the same run ledger, written as it happens, and the step succeeds or fails
+once, at the end. The doors do not know or care that a model chose them; they
+govern and record each call the same way.
+In the project's hermetic CI run of such a driver, one step is four model
+calls, one exec, two tool calls and two spawns. [`showcase.md`](showcase.md)
+shows how to run one against a real model and how to read its audit.
+
 Tool credentials use the hold-and-inject shape described
 above: the credential is held and injected by Agenthof, resolved from an
 environment variable named in `gateway.yaml` (never a value stored in

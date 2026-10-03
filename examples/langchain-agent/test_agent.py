@@ -281,6 +281,23 @@ class ArgsTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             agent.parse_args(["--spawns", "0"])
 
+    def test_llm_flags(self):
+        opts = agent.parse_args(["--driver", "llm", "--max-rounds", "5", "--step-budget", "150"])
+        self.assertEqual(opts.driver, "llm")
+        self.assertEqual(agent.llm_from(opts), agent.Llm(agent.scripted_from(opts), 5, 150.0))
+
+    def test_llm_defaults(self):
+        opts = agent.parse_args(["--driver", "llm"])
+        self.assertEqual((opts.max_rounds, opts.step_budget), (8, 240.0))
+
+    def test_max_rounds_must_be_at_least_one(self):
+        with self.assertRaises(SystemExit):
+            agent.parse_args(["--max-rounds", "0"])
+
+    def test_step_budget_must_be_positive(self):
+        with self.assertRaises(SystemExit):
+            agent.parse_args(["--step-budget", "0"])
+
     def test_workspace_is_accepted_and_ignored(self):
         # The hermetic refspawn test stand-in appends "-socket <sock>
         # -workspace <dir>" after the image (the shipped supervisor passes only

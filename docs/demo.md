@@ -51,6 +51,11 @@ the same loopback URL.
 > [`cmd/agenthof/testdata/script/door_tool.txtar`](../cmd/agenthof/testdata/script/door_tool.txtar)
 > and the life-of doc [`lifecycle-tool.md`](lifecycle-tool.md).
 
+> **Every door, one real agent.** For a model deciding on its own which of
+> the doors to open (these three and the spawn door), see
+> [`showcase.md`](showcase.md). It also shows the audit that records the
+> agent being governed the whole time.
+
 ## Part 1: CONFIG Moment — Registry Management & Kill Switches
 
 Demonstrates how roles, workflows, and agents are defined in YAML and validated on apply; and how the kill switch prevents invalid configurations from running.
