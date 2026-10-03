@@ -257,6 +257,9 @@ def gateway_client(proxy_url):
 # back as plain tuples. The conversation itself is a list of OpenAI-style
 # dicts, which langchain-core accepts directly, so nothing of LangChain's
 # message types leaks out of this section. It ends at the drivers below.
+# args is the parsed arguments dict, or None when the model's arguments were
+# not a JSON object: the call is still reported, so the caller can answer it
+# rather than lose it.
 ToolCall = namedtuple("ToolCall", "id name args")
 ModelReply = namedtuple("ModelReply", "text tool_calls")
 
@@ -299,17 +302,24 @@ def invoke_model(proxy_url, run_token, model, messages, tools, timeout=REQUEST_T
     finally:
         if llm.http_client is not None:
             llm.http_client.close()
-    calls = [ToolCall(str(c.get("id") or ""), str(c.get("name") or ""), c.get("args") if isinstance(c.get("args"), dict) else {})
+    # The SDK splits the model's calls into parsed ones and ones whose
+    # arguments did not parse; its split does not keep their interleaving, so
+    # the parsed calls come first, then the unparseable ones with args=None.
+    calls = [ToolCall(str(c.get("id") or ""), str(c.get("name") or ""), c.get("args") if isinstance(c.get("args"), dict) else None)
              for c in (reply.tool_calls or [])]
+    calls += [ToolCall(str(c.get("id") or ""), str(c.get("name") or ""), None)
+              for c in (reply.invalid_tool_calls or [])]
     return ModelReply(str(reply.text or ""), calls)
 
 
 def assistant_message(reply):
-    """The model's turn, as the next call will see it."""
+    """The model's turn, as the next call will see it. A call whose arguments
+    did not parse (args None) is replayed with empty arguments, so the
+    conversation stays well-formed."""
     msg = {"role": "assistant", "content": reply.text}
     if reply.tool_calls:
         msg["tool_calls"] = [{"id": c.id, "type": "function",
-                              "function": {"name": c.name, "arguments": json.dumps(c.args)}}
+                              "function": {"name": c.name, "arguments": json.dumps(c.args if c.args is not None else {})}}
                              for c in reply.tool_calls]
     return msg
 

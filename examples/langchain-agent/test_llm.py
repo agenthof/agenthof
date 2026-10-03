@@ -7,8 +7,11 @@ import json
 import os
 import subprocess
 import sys
+import socketserver
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -139,3 +142,56 @@ class RealBindToolsWireTest(unittest.TestCase):
         reply = agent.invoke_model("unix://" + self.sock, TOKEN, "fast", [{"role": "user", "content": "hi"}], [])
         self.assertEqual(reply, agent.ModelReply("final:unit", []))
         self.assertEqual(self.log_lines()[0]["tools"], [])
+
+
+class _BadArgsHandler(BaseHTTPRequestHandler):
+    """Answers every chat completion with one tool call whose arguments
+    string is self.server.arguments, which the fake provider cannot produce."""
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def address_string(self):
+        return "unix"
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        body = json.dumps({
+            "id": "chatcmpl-bad", "object": "chat.completion", "created": 0, "model": "fast",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "call_bad", "type": "function",
+                                "function": {"name": "exec", "arguments": self.server.arguments}}]}}],
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class UnparseableToolCallTest(unittest.TestCase):
+    def serve(self, arguments):
+        directory = short_tmpdir()
+        sock = os.path.join(directory, "bad.sock")
+        srv = socketserver.UnixStreamServer(sock, _BadArgsHandler)
+        srv.arguments = arguments
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return "unix://" + sock
+
+    def test_arguments_that_are_not_json_surface_as_a_call_with_no_args(self):
+        url = self.serve("not json")
+        reply = agent.invoke_model(url, TOKEN, "fast", [{"role": "user", "content": "go"}], agent.door_tools([]))
+        self.assertEqual(reply.text, "")
+        self.assertEqual(reply.tool_calls, [agent.ToolCall("call_bad", "exec", None)])
+
+    def test_the_conversation_stays_well_formed_after_one(self):
+        url = self.serve("not json")
+        reply = agent.invoke_model(url, TOKEN, "fast", [{"role": "user", "content": "go"}], agent.door_tools([]))
+        msg = agent.assistant_message(reply)
+        self.assertEqual(msg["tool_calls"][0]["id"], "call_bad")
+        self.assertEqual(json.loads(msg["tool_calls"][0]["function"]["arguments"]), {})
