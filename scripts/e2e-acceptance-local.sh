@@ -190,7 +190,7 @@ ere_escape() { printf '%s' "$1" | sed 's/[][\\.*^$+?(){}|]/\\&/g'; }
 # stand-in's fake podman starts every child agent with its own environment:
 # a secret exported earlier would be inherited by every "compartment".
 starved() {
-	for v in AGENTHOF_GATEWAY_KEY OBO_CLIENT_SECRET E2E_TOOL_TOKEN; do
+	for v in AGENTHOF_GATEWAY_KEY ACCEPTANCE_PROVIDER_KEY OBO_CLIENT_SECRET E2E_TOOL_TOKEN; do
 		[ -z "${!v:-}" ] || fail "$v is exported before the stand-ins start; every child agent would inherit it"
 	done
 }
@@ -212,7 +212,13 @@ ISSUER="http://127.0.0.1:$IDP_PORT"
 UP_AUD="https://obo-upstream.example"
 IDP_SECRET="idp-side-secret-$NONCE"
 TOOL_SECRET="tool-secret-$NONCE"
-GATEWAY_KEY="${ACCEPTANCE_PROVIDER_KEY:-host-side-dummy-key-$NONCE}"   # a shell variable, never exported: it reaches agenthof per command only (see --- 3.)
+# The key is a shell variable, never exported: it reaches agenthof per command
+# only (see --- 3.). A caller hands it in through the ACCEPTANCE_PROVIDER_KEY
+# environment variable, so that variable is dropped from the environment right
+# here — before any stand-in starts, since every child agent inherits the
+# environment (see starved).
+GATEWAY_KEY="${ACCEPTANCE_PROVIDER_KEY:-host-side-dummy-key-$NONCE}"
+unset ACCEPTANCE_PROVIDER_KEY
 export OBO_CLIENT_ID=agenthof-broker   # an id, not a secret: the broker reads it by name
 
 # --- 1. The stand-ins, BEFORE any secret is exported (see starved). The
@@ -453,7 +459,9 @@ EOF
 # --- 3. Secrets, only now: everything that could inherit them is running.
 # The provider key is never exported at all: it rides each agenthof command
 # line (apply here, run below), so no helper process — not even this
-# script's own python3 one-liners — ever has it in its environment.
+# script's own python3 one-liners — ever has it in its environment. Even a key
+# a caller supplied through ACCEPTANCE_PROVIDER_KEY left the environment at
+# the top (unset as it was read), before the stand-ins started.
 export OBO_CLIENT_SECRET="$IDP_SECRET"
 export E2E_TOOL_TOKEN="$TOOL_SECRET"
 export AGENTHOF_OIDC_ISSUER="$ISSUER"
