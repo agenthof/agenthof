@@ -47,6 +47,9 @@ The governed core is real and runnable today:
   provider key and no network. That same LangChain agent can also drive the
   tool/MCP (via the official MCP SDK), exec, and sub-agent-spawn doors
   through that one gateway — a single framework agent exercising every door.
+  With `--driver llm` that agent lets a real model choose the doors itself;
+  [`docs/showcase.md`](docs/showcase.md) shows how to run it against your own
+  provider and read the audit.
 - **Model gateway** — a fronted agent reaches models through Agenthof. The
   per-role provider key is injected and is not passed through to the agent.
   The logical model is authorized, the provider model is rewritten on the

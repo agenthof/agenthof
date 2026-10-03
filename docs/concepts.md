@@ -69,12 +69,14 @@ as building every mode of it now:
    expires. Either way the gateway injects the value outbound; the agent
    never holds it, and its own inbound run token is never forwarded upstream
    in its place. See [`lifecycle-tool.md`](lifecycle-tool.md).
-3. **Exec gateway** — the door an agent uses to run an allowlisted command
-   in the operator's sandbox and report the result. Agenthof checks the
-   reported argv against the agent's config allowlist and records the
-   agent's attestation. It does not run the command and does not contain it.
-   Allowlisting an executable trusts that program's full capability surface.
-   See [`lifecycle-exec.md`](lifecycle-exec.md).
+3. **Exec gateway** — the door an agent uses to run an allowlisted command.
+   Agenthof checks the argv against the agent's config allowlist and hands it
+   to the operator's declared runtime (the reference one is `refexec`), which
+   runs the command and attests first-hand what ran; Agenthof records that
+   account. Agenthof itself never runs the command and does not contain it;
+   an agent's own report of a command is refused at the door, and the refusal
+   is recorded. Allowlisting an executable trusts that program's full
+   capability surface. See [`lifecycle-exec.md`](lifecycle-exec.md).
 4. **Control tower** — the platform itself: the config directory, `apply`,
    and the registry. Unlike the network doors this is not a facade; it is
    the config, validation, and registry path described above.
@@ -113,9 +115,10 @@ call against that allowlist, and injects the resource's credential, so the
 agent itself never holds one (see
 [`docs/lifecycle.md`](lifecycle.md#how-an-agent-actually-runs) for the full
 flow). It may also declare `exec`, an allowlist of commands it may run in
-the operator's sandbox; that door lives on the same per-run listener, and
-Agenthof records what the agent attests without running or containing the
-command (see [`lifecycle-exec.md`](lifecycle-exec.md)). Its model calls go
+the operator's sandbox; that door lives on the same per-run listener;
+Agenthof authorizes the command and records the declared runtime's
+first-hand account of running it, without running or containing the command
+itself (see [`lifecycle-exec.md`](lifecycle-exec.md)). Its model calls go
 through the same listener: the agent sends the logical name, and Agenthof
 resolves it (see [`lifecycle-model.md`](lifecycle-model.md) and
 [`docs/reference/config.md`](reference/config.md#execution) for how
