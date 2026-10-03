@@ -10,8 +10,9 @@ Reference implementations: [`examples/echo-agent`](../examples/echo-agent) (Go, 
 its input and shows both the TCP and `unix://` gateway forms),
 [`examples/model-agent`](../examples/model-agent) (Go, makes one model call over TCP),
 and [`examples/langchain-agent`](../examples/langchain-agent) (Python, LangChain; serves
-the contract over TCP or a Unix socket and makes one model call through the gateway in
-either form).
+the contract over TCP or a Unix socket, makes one model call through the gateway in
+either form, or — with its scripted driver — drives the model, exec, tool and spawn
+doors in one step).
 
 ## The one rule: an agent needs no credentials
 

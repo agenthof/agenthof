@@ -9,6 +9,15 @@ the *verbs*: how the pieces move together over time.
 Everything below describes what ships **today**. Where something is reserved for
 a later version, it says so — only shipped behavior is a guarantee.
 
+For an executable walk through every door in one run — a model call, a
+first-hand command, an on-behalf-of tool call, a bridged stdio tool call, and
+parallel sub-agent runs, on one audited timeline — see
+[`scripts/e2e-acceptance-local.sh`](../scripts/e2e-acceptance-local.sh). It
+runs without a container runtime, so it demonstrates governance and audit,
+not containment; the per-door podman proofs (`scripts/e2e-refbox.sh`,
+`e2e-refexec.sh`, `e2e-refbridge.sh`, `e2e-refspawn.sh`) cover the
+compartments.
+
 ## The command
 
 ```
