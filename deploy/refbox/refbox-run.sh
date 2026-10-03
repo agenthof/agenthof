@@ -6,6 +6,7 @@
 # compartment for the recipe's lifetime. Agenthof is reached only through the
 # bind-mounted socket directory. Requires podman and a Linux host. The CI job
 # runs this script.
+# REFBOX_ARGS appends agent arguments after -socket (see below).
 set -euo pipefail
 
 # $XDG_RUNTIME_DIR (/run/user/<uid>) is user-owned. /run itself is root-owned,
@@ -18,6 +19,11 @@ NAME="${REFBOX_NAME:-refbox-echo}"
 # another runtime's image (deploy/refbox/Containerfile.python) names its own.
 SOCKET="${REFBOX_SOCKET:-refbox-echo.sock}"
 # REFBOX_TIMEOUT: podman --timeout in seconds for the compartment (default 300).
+# REFBOX_ARGS: extra arguments for the agent, word-split and appended AFTER
+# -socket (e.g. "--driver scripted" for the LangChain image). Unset or empty,
+# nothing is appended and the recipe runs the image's default driver.
+extra=()
+[ -z "${REFBOX_ARGS:-}" ] || read -r -a extra <<<"$REFBOX_ARGS"
 
 mkdir -p "$SOCK_DIR"
 # The socket directory must be exclusive to this one compartment. The default
@@ -57,9 +63,11 @@ common=(
 )
 
 # Args after the image append to the entrypoint. The last -socket wins, so
-# SOCK_DIR overrides the image's /run/agenthof path and matches the mount.
+# SOCK_DIR overrides the image's /run/agenthof path and matches the mount;
+# REFBOX_ARGS follows it. (${extra[@]+…}: an empty array under set -u is an
+# error on bash 3.2.)
 if [ "${REFBOX_DETACH:-}" = 1 ]; then
-	podman run -d "${common[@]}" "$IMAGE" -socket "$SOCK_DIR/$SOCKET"
+	podman run -d "${common[@]}" "$IMAGE" -socket "$SOCK_DIR/$SOCKET" ${extra[@]+"${extra[@]}"}
 else
-	exec podman run --rm "${common[@]}" "$IMAGE" -socket "$SOCK_DIR/$SOCKET"
+	exec podman run --rm "${common[@]}" "$IMAGE" -socket "$SOCK_DIR/$SOCKET" ${extra[@]+"${extra[@]}"}
 fi
