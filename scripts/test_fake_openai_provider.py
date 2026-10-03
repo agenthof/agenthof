@@ -225,5 +225,47 @@ class ToolScriptValidationTest(unittest.TestCase):
         self.assertIn("fake-provider: --tool-script", proc.stderr)
 
 
+class DelayTest(unittest.TestCase):
+    def test_delay_holds_the_answer(self):
+        import time
+        proc, listening = start("--bind", "127.0.0.1:0", "--delay", "1.5")
+        try:
+            t0 = time.monotonic()
+            status, data = post(tcp_conn(listening), "/v1/chat/completions", CHAT, {"Authorization": "Bearer k"})
+            held = time.monotonic() - t0
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)["choices"][0]["message"]["content"], "fake reply")
+        self.assertGreaterEqual(held, 1.5)
+
+    def test_no_delay_by_default(self):
+        import time
+        proc, listening = start("--bind", "127.0.0.1:0")
+        try:
+            t0 = time.monotonic()
+            status, _ = post(tcp_conn(listening), "/v1/chat/completions", CHAT, {"Authorization": "Bearer k"})
+            held = time.monotonic() - t0
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertEqual(status, 200)
+        self.assertLess(held, 1.0)
+
+    def test_a_refused_call_is_not_delayed(self):
+        import time
+        proc, listening = start("--bind", "127.0.0.1:0", "--delay", "2")
+        try:
+            t0 = time.monotonic()
+            status, _ = post(tcp_conn(listening), "/v1/chat/completions", CHAT, {})
+            held = time.monotonic() - t0
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertEqual(status, 401)
+        self.assertLess(held, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

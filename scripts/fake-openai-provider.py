@@ -10,7 +10,9 @@ round is the number of assistant tool-call messages already in the
 conversation, read from the request body, never from a call counter, so one
 process can serve a parent's rounds and its children's plain calls at once —
 and the fixed --reply once the script is exhausted; a request offering no
-tools gets the plain --reply as before. It never contacts a real provider
+tools gets the plain --reply as before. With --delay it holds every
+successful answer for that many seconds, so a test that must inspect a
+caller's compartment while its call is in flight has time to. It never contacts a real provider
 and holds no real credential.
 """
 import argparse
@@ -18,6 +20,7 @@ import json
 import os
 import socketserver
 import sys
+import time
 from http.server import BaseHTTPRequestHandler
 
 ROUTE = "/v1/chat/completions"
@@ -91,6 +94,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             message = {"role": "assistant", "content": opts.reply}
             finish = "stop"
+        if opts.delay > 0:
+            time.sleep(opts.delay)
         self._send(200, {
             "id": "chatcmpl-fake",
             "object": "chat.completion",
@@ -122,6 +127,8 @@ def parse_args(argv=None):
     p.add_argument("--log", help="append one JSON line per request to this file")
     p.add_argument("--status", type=int, default=200, help="HTTP status to answer with; non-200 simulates a refusal")
     p.add_argument("--tool-script", help="JSON file {\"rounds\": [[{\"name\", \"arguments\"}, ...], ...]}: play a tool-calling model for requests that offer tools")
+    p.add_argument("--delay", type=float, default=0.0,
+                   help="hold every 200 answer this many seconds before sending it (keeps a caller's compartment alive for inspection)")
     return p.parse_args(argv)
 
 
