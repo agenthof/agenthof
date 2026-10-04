@@ -44,7 +44,8 @@
 # requirements.txt installed (PYTHON=... selects it; default python3). Runs
 # on macOS and Linux. Other scripts source this file (ACCEPTANCE_* knobs; see
 # the top of the file) to run the same harness with another driver or a real
-# provider.
+# provider. The ledger helpers and the config generator live in
+# scripts/acceptance-lib.sh, which this file sources.
 set -euo pipefail
 
 # BASH_SOURCE, not $0: when another script sources this file, $0 is that script.
@@ -97,6 +98,9 @@ fail() {
 	echo "$ME: FAIL — $*"
 	exit 1
 }
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=acceptance-lib.sh
+. "$ROOT/scripts/acceptance-lib.sh"
 free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'; }
 wait_port() { # $1 = port, $2 = what
 	for i in $(seq 1 60); do
@@ -112,79 +116,6 @@ wait_socket() { # $1 = socket path, $2 = what, $3 = log to show on failure
 		sleep 0.5
 	done
 }
-# field FILE TYPE KEY [STATUS]: print KEY of every TYPE event (optionally only
-# those with STATUS) in a ledger, one per line; a dict value is printed as JSON.
-field() {
-	python3 - "$1" "$2" "$3" "${4:-}" <<'PY'
-import json, sys
-path, typ, key, status = sys.argv[1:5]
-for line in open(path):
-    if not line.strip():
-        continue
-    e = json.loads(line)
-    if e.get("type") != typ or (status and e.get("status") != status):
-        continue
-    v = e.get(key, "")
-    print(v if not isinstance(v, dict) else json.dumps(v))
-PY
-}
-# count FILE TYPE [STATUS]: how many such events.
-count() { field "$1" "$2" type "${3:-}" | wc -l | tr -d ' '; }
-# tool_field FILE TOOL KEY: KEY of every tool_call event for TOOL.
-tool_field() {
-	python3 - "$1" "$2" "$3" <<'PY'
-import json, sys
-path, tool, key = sys.argv[1:4]
-for line in open(path):
-    if not line.strip():
-        continue
-    e = json.loads(line)
-    if e.get("type") != "tool_call" or e.get("tool") != tool:
-        continue
-    v = e.get(key, "")
-    print(v if not isinstance(v, dict) else json.dumps(v))
-PY
-}
-# bound FILE RUN SUBJECT [PARENT]: every event in FILE carries a binding for
-# RUN invoked by SUBJECT; with PARENT, every event is also linked under
-# PARENT at depth 1, and without it none is linked to anything. Prints how
-# many events it checked; fails unless all of them pass and there is one.
-bound() {
-	if ! python3 - "$1" "$2" "$3" "${4:-}" >"$WORK/bound.out" <<'PY'; then
-import json, sys
-path, run, subject, parent = sys.argv[1:5]
-n = 0
-for i, line in enumerate(open(path), 1):
-    if not line.strip():
-        continue
-    b = json.loads(line).get("binding") or {}
-    got = ((b.get("invoker") or {}).get("subject"), b.get("run_id"), b.get("parent_run_id", ""), b.get("depth", 0))
-    want = (subject, run, parent, 1 if parent else 0)
-    if got != want:
-        print("event on line %d is bound as (subject, run, parent, depth) %r, not %r" % (i, got, want))
-        sys.exit(1)
-    n += 1
-if n < 1:
-    print("no events at all")
-    sys.exit(1)
-print(n)
-PY
-		fail "run $2 is not bound to $3 throughout: $(cat "$WORK/bound.out")"
-	fi
-	echo "bound: run $2 — $(cat "$WORK/bound.out") events, every one invoked by $3${4:+, linked under $4 at depth 1}"
-}
-# line_of TEXT [MORE]: the number of the first supervisor log line holding
-# TEXT (and MORE, when given), or nothing.
-line_of() {
-	awk -v a="$1" -v b="${2:-}" 'index($0, a) && (b == "" || index($0, b)) { print NR; exit }' "$WORK/refspawn.err"
-}
-# Output is captured into a variable before it is grepped — through a
-# here-string, never piped straight in: under `set -o pipefail` a `grep -q`
-# that matches early kills the writer with SIGPIPE and fails the pipeline —
-# inverting a negative assertion, the one thing this script must never do.
-out_of() { "$@" || true; }
-# ere_escape: a literal string made safe inside a grep -E pattern.
-ere_escape() { printf '%s' "$1" | sed 's/[][\\.*^$+?(){}|]/\\&/g'; }
 # starved: no secret this script will export later is in the environment
 # NOW. Called right before the stand-ins start, because the refspawn
 # stand-in's fake podman starts every child agent with its own environment:
@@ -334,130 +265,23 @@ wait_socket "$EXEC_DIR/exec.sock" "the exec runtime socket" "$WORK/refexec.err"
 wait_socket "$SUP_DIR/refspawn.sock" "the supervisor socket" "$WORK/refspawn.err"
 wait_socket "$SOCK_DIR/lc.sock" "the agent socket" "$WORK/agent.err"
 
-# mint SUB AUD [GROUPS]: a subject token from the stub issuer (a real IdP
-# mints through a login flow). Printed once, kept in a shell variable, never
-# exported: the children act for the same human through the gateway, not
-# through the environment.
-mint() {
-	python3 - "$ISSUER" "$1" "$2" "${3:-}" <<'PY'
-import json, sys, urllib.request
-issuer, sub, aud, groups = sys.argv[1:5]
-body = {"sub": sub, "email": "dana@example.com", "aud": aud}
-if groups:
-    body["groups"] = groups.split(",")
-req = urllib.request.Request(issuer + "/mint", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-print(json.load(urllib.request.urlopen(req))["token"])
-PY
-}
 TOKEN="$(mint u-dana agenthof acceptance-users)"
 [ -n "$TOKEN" ] || fail "the issuer minted no token"
 
-# --- 2. A hermetic Agenthof config, written from scratch: every door in one
-# agent, a sub-agent the supervisor launches, and two variants of the main
-# agent for the recorded refusals.
-mkdir -p "$WORK/config/agents" "$WORK/config/workflows" "$WORK/config/roles"
-cat >"$WORK/config/gateway.yaml" <<EOF
-refbox_socket_dir: $SOCK_DIR
-models:
-  fast:
-    endpoint: $PROVIDER_URL
-    model: $ACCEPTANCE_PROVIDER_MODEL
-    api_key_env: AGENTHOF_GATEWAY_KEY
-defaults:
-  model: fast
-tools:
-  obo-upstream:
-    kind: mcp
-    url: http://127.0.0.1:$UP_PORT/
-    credential_source: static_env
-    grant_type: token_exchange
-    client_auth: client_secret_basic
-    token_endpoint: $ISSUER/token
-    audience: $UP_AUD
-    client_id_env: OBO_CLIENT_ID
-    client_secret_env: OBO_CLIENT_SECRET
-  stdio-tool:
-    kind: mcp
-    url: unix://$BRIDGE_DIR/tool.sock
-    runtime: refbridge
-    credential_source: static_env
-    token_env: E2E_TOOL_TOKEN
-spawn_supervisor: unix://$SUP_DIR/refspawn.sock
-spawn:
-  max_depth: 1
-  max_parallel: 2
-  max_total_spawns: 3
-step_timeout: 3m
-EOF
-main_agent() { # $1 = name, $2 = the one allowlisted exe, $3 = may_spawn block ("" for none)
-	{
-		cat <<EOF
-name: $1
-description: the LangChain agent, every door in one step (e2e)
-model: fast
-instruction: Drive every door once and report.
-output: report
-execution: fronted
-endpoint: unix://$SOCK_DIR/lc.sock
-tools:
-  - resource: obo-upstream
-    mode: all
-  - resource: stdio-tool
-    mode: all
-exec:
-  runtime: refexec
-  url: unix://$EXEC_DIR/exec.sock
-  timeout: 30s
-  allow:
-    - exe: $2
-EOF
-		[ -z "$3" ] || printf '%s\n' "$3"
-	} >"$WORK/config/agents/$1.yaml"
-	cat >"$WORK/config/workflows/$1.yaml" <<EOF
-name: $1
-description: one step through $1
-steps:
-  - name: drive
-    agent: $1
-EOF
-}
-MAY_SPAWN="may_spawn:
-  - role: acceptance-worker
-    workflow: acceptance-sub"
-main_agent acceptance env "$MAY_SPAWN"
-main_agent acceptance-noexec true "$MAY_SPAWN"   # the driver asks for env; this allowlist says otherwise
-main_agent acceptance-nospawn env ""              # the driver asks to spawn; nothing is on may_spawn
-# The sub-agent's configured endpoint is never dialed under spawn — the
-# supervisor's sockets win — so it names a socket nothing serves: a child
-# that reached it would fail loudly instead of quietly running elsewhere.
-cat >"$WORK/config/agents/acceptance-sub.yaml" <<EOF
-name: acceptance-sub
-description: the sub-agent, one governed model call under the delegation binding (e2e)
-model: fast
-instruction: Answer the input with one model call.
-output: reply
-execution: fronted
-endpoint: unix://$SOCK_DIR/unused.sock
-EOF
-cat >"$WORK/config/workflows/acceptance-sub.yaml" <<EOF
-name: acceptance-sub
-description: one governed model call in a child run
-steps:
-  - name: answer
-    agent: acceptance-sub
-EOF
-cat >"$WORK/config/roles/acceptance-operator.yaml" <<EOF
-name: acceptance-operator
-description: Runs the acceptance workflows
-workflows: [acceptance, acceptance-noexec, acceptance-nospawn]
-allowed_groups: ["acceptance-users"]
-EOF
-cat >"$WORK/config/roles/acceptance-worker.yaml" <<EOF
-name: acceptance-worker
-description: Runs the sub-agent workflow
-workflows: [acceptance-sub]
-allowed_groups: ["acceptance-users"]
-EOF
+# --- 2. A hermetic Agenthof config, written from scratch by the shared
+# generator: every door in one agent, a sub-agent the supervisor launches,
+# and two variants of the main agent for the recorded refusals. Only where
+# things listen is this run's own.
+AC_SOCK_DIR="$SOCK_DIR"
+AC_PROVIDER_URL="$PROVIDER_URL"
+AC_PROVIDER_MODEL="$ACCEPTANCE_PROVIDER_MODEL"
+AC_UP_URL="http://127.0.0.1:$UP_PORT/"
+AC_ISSUER="$ISSUER"
+AC_UP_AUD="$UP_AUD"
+AC_BRIDGE_URL="unix://$BRIDGE_DIR/tool.sock"
+AC_EXEC_URL="unix://$EXEC_DIR/exec.sock"
+AC_SUP_URL="unix://$SUP_DIR/refspawn.sock"
+acceptance_config "$WORK/config"
 
 # --- 3. Secrets, only now: everything that could inherit them is running.
 # The provider key is never exported at all: it rides each agenthof command
@@ -499,45 +323,6 @@ parent_artifact() { # $1 = run id: the full step artifact body
 }
 provisioned_count() { out_of grep -c "set provisioned" "$WORK/refspawn.err"; }
 torn_down_count() { out_of grep -c "set torn down" "$WORK/refspawn.err"; }
-# verify_run ID WHAT: `audit verify` exits 0 and names the head.
-verify_run() {
-	local v
-	if ! v="$("$WORK/agenthof" audit verify "$1" --log-dir "$WORK/logs")"; then
-		echo "$v"
-		fail "$2 ($1): audit verify failed"
-	fi
-	OUTS+=("$v")
-	echo "$v"
-	grep -Eq "^head: [0-9a-f]{64} \([0-9]+ events\)$" <<<"$v" || fail "$2 ($1): audit verify reported no head"
-}
-# no_leak VALUE WHAT...: VALUE must appear in no ledger, artifact, control
-# log, process log, agenthof operational log, or captured output. Never
-# prints VALUE. (The upstream's "acting as: u-dana" and the step input are
-# NOT secrets: they are in the artifact and the tool_call preview by design.
-# provider.jsonl and issued.jsonl are not searched on purpose: the first
-# records the injected host key, which is section 4a's proof that the key
-# was injected upstream; the second is the issuer's own list of what it
-# issued, which is what this section searches FOR. Known limit: the per-run
-# gateway token agenthof mints for the agent is not searched here — the harness
-# never sees it, so no claim is made that it is checked.) The caller writes
-# $WORK/outs.txt (the captured outputs) before calling.
-no_leak() {
-	[ -n "$1" ] || fail "${*:2} is empty, so searching for it would prove nothing"
-	local value="$1"
-	shift
-	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK/control.jsonl" "$WORK"/*.err 2>/dev/null; then
-		fail "$* reached a ledger, an artifact, the control log, or a process log"
-	fi
-	if grep -qF -- "$value" "$WORK/outs.txt"; then
-		fail "$* reached agenthof's output"
-	fi
-}
-# A JWT's payload and signature segments are searched alone too, so a copy
-# cut before the token's start or capped before its end is still caught.
-jwt_payload() {
-	local rest="${1#*.}"
-	printf '%s' "${rest%%.*}"
-}
 
 # A building script that sourced this file with ACCEPTANCE_HARNESS_ONLY set
 # wants the harness up and the helpers defined, and runs its own sections 4-7.
@@ -759,7 +544,7 @@ echo "may_spawn-denied spawns: both refused and recorded, no child, nothing prov
 
 # --- 6. Verify is per run: the parent, each child, and each refused run,
 # every one on its own. There is no tree-wide verify, and this proves none
-# was assumed. (verify_run is defined with the helpers above.)
+# was assumed. (verify_run is in scripts/acceptance-lib.sh.)
 verify_run "$PARENT" "the combined run"
 for c in $CHILDREN; do verify_run "$c" "a child run"; done
 verify_run "$NOEXEC" "the off-allowlist run"
