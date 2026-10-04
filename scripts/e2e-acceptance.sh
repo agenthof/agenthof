@@ -449,11 +449,26 @@ no_credential_env() {
 # nothing of theirs listens on the host address (the stub issuer refuses a
 # non-loopback -addr, and a tool resource's url must be loopback — see the
 # header), so a failed dial to one would prove nothing.
+# must_be_blocked NAME WHY PROBE...: run a /probe NEGATIVE inside a live
+# compartment and require it to be the WALL — the probe ran and was refused
+# (rc 1). rc 0 means it got through (a containment breach → containment_fail);
+# ANY other rc means the compartment vanished mid-inspection (podman exec
+# returns 125/255 on a stopped/removed container), which must fail LOUDLY
+# (raise DELAY) — a dead child must never read as "contained".
+must_be_blocked() {
+	local name="$1" why="$2"; shift 2
+	local rc=0; podman exec "$name" "$@" || rc=$?
+	case "$rc" in
+		0) containment_fail "$name" "$why" ;;
+		1) ;;  # probe ran, refused — the wall
+		*) fail "$name vanished mid-inspection (podman exec rc=$rc); raise DELAY ($DELAY s) to hold a child through its inspection" ;;
+	esac
+}
 no_egress() {
 	podman exec "$1" /probe -touch /work/probe-ok || containment_fail "$1" "/probe cannot run in $1, so the negatives below would prove nothing"
 	local addr
 	for addr in "$HOST_IP:$PROVIDER_PORT" 1.1.1.1:443; do
-		if podman exec "$1" /probe -dial "$addr"; then containment_fail "$1" "$1 reached $addr directly; the gateway socket must be its only way out"; fi
+		must_be_blocked "$1" "$1 reached $addr directly; the gateway socket must be its only way out" /probe -dial "$addr"
 	done
 }
 # inspect_child NAME: a live child compartment mounts exactly its own volume
@@ -479,10 +494,13 @@ inspect_child() {
 	case "$mounts" in *"$SOCK_DIR"*) containment_fail "$name" "the ROOT's socket dir is mounted into child $id: $mounts" ;; esac
 	case "$mounts" in *"$BRIDGE_DIR"*|*"$SUP_DIR"*|*"$EXEC_DIR"*) containment_fail "$name" "another runtime's socket dir is mounted into child $id: $mounts" ;; esac
 	no_credential_env "$name"
-	if podman exec "$name" /probe -touch "$SPAWN_ROOT/$id-exec/probe-was-here"; then containment_fail "$name" "child $id can reach its refexec's directory"; fi
+	must_be_blocked "$name" "child $id can reach its refexec's directory" /probe -touch "$SPAWN_ROOT/$id-exec/probe-was-here"
 	no_egress "$name"
 	pgrep -f "refexec -config $SPAWN_ROOT/$id-exec" >/dev/null || fail "child $id's refexec is not running on the host"
 	podman stats --no-stream --format 'compartment {{.Name}}: mem {{.MemUsage}} pids {{.PIDs}}' "$name" || true
+	# Capture the child's compartment log into the *.err glob the no-leak search
+	# sweeps (the child is torn down before that search runs).
+	podman logs "$name" >"$WORK/child-$id.err" 2>&1 || true
 	echo "child $id: own volume, own socket dir, mapped image, no exec dir, no credential, no route out — ok"
 }
 # nothing_left WHAT: teardown is asynchronous from the parent's side — the
@@ -673,8 +691,8 @@ grep -q "^bind $SOCK_DIR $SOCK_DIR$" <<<"$ROOT_MOUNTS" || containment_fail "$ROO
 ROOT_VOLS="$(podman inspect "$ROOT_NAME" --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{.Destination}}{{"\n"}}{{end}}{{end}}')"
 [ "$ROOT_VOLS" = "$VOLUME /work" ] || containment_fail "$ROOT_NAME" "the root's volumes are not exactly its workspace at /work: $ROOT_VOLS"
 case "$ROOT_MOUNTS" in *"$EXEC_DIR"*|*"$SUP_DIR"*|*"$SPAWN_ROOT"*|*"$BRIDGE_DIR"*) containment_fail "$ROOT_NAME" "another runtime's directory is mounted into the root: $ROOT_MOUNTS" ;; esac
-if podman exec "$ROOT_NAME" /probe -touch "$SUP_DIR/probe-was-here"; then containment_fail "$ROOT_NAME" "the root can reach refspawn's directory"; fi
-if podman exec "$ROOT_NAME" /probe -touch "$EXEC_DIR/probe-was-here"; then containment_fail "$ROOT_NAME" "the root can reach refexec's directory"; fi
+must_be_blocked "$ROOT_NAME" "the root can reach refspawn's directory" /probe -touch "$SUP_DIR/probe-was-here"
+must_be_blocked "$ROOT_NAME" "the root can reach refexec's directory" /probe -touch "$EXEC_DIR/probe-was-here"
 no_egress "$ROOT_NAME"
 BRIDGE_MOUNTS="$(podman inspect "$BRIDGE_NAME" --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}')"
 grep -q "^bind $BRIDGE_DIR $BRIDGE_DIR$" <<<"$BRIDGE_MOUNTS" || containment_fail "$BRIDGE_NAME" "the bridge socket dir is not mounted at its own path: $BRIDGE_MOUNTS"

@@ -40,8 +40,9 @@ proofs (`scripts/e2e-refbox.sh`, `scripts/e2e-refexec.sh`,
 `scripts/e2e-refbridge.sh`, `scripts/e2e-refspawn.sh`), and for this combined
 scenario by `scripts/e2e-acceptance.sh` (`make acceptance-podman`), which runs
 the scripted agent on real rootless podman and checks that the agent, bridge
-and sub-agent compartments cannot reach the provider at the host's address, or an address on the
-internet, except through the gateway. That proof is run on a developer machine,
+and sub-agent compartments cannot reach the provider at the host's address, nor an
+address on the internet — only the gateway, on the host, reaches the provider.
+That proof is run on a developer machine,
 not in CI; this page makes no containment claim of its own.
 
 **Real models vary.** A given run may take a different path, call a door

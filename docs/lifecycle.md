@@ -19,7 +19,8 @@ not containment. The same combined run on real rootless podman —
 `make acceptance-podman` — is the containment proof for the combination:
 every compartment is started with no network; the long-lived ones are
 reached only through the socket directory mounted into them, and a first-hand
-command's compartment has no way out but its output. The per-door podman proofs
+command's compartment has no network; its result returns through the gateway.
+The per-door podman proofs
 (`scripts/e2e-refbox.sh`, `e2e-refexec.sh`, `e2e-refbridge.sh`,
 `e2e-refspawn.sh`) cover each compartment on its own.
 
