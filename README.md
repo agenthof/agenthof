@@ -17,9 +17,9 @@ the door rather than trusting the agent.
 > *Agenthof* — from the German **Hof**: the court. Where your agents are
 > housed, and what they answer to.
 
-![Agenthof quickstart: apply a config, run a workflow, then audit the run — who asked, what ran, and the ledger's integrity verified](docs/assets/quickstart-demo.gif)
+![Agenthof: one agent driving every governed door — a model call, a first-hand command, two tool calls, and two sub-agents — in one run, then the investigate tree and audit verify showing every event bound to the human](docs/assets/every-door-demo.gif)
 
-*`apply` → `run` → `audit`: every action attributed to a human and verified against a hash-chained ledger. Full walkthrough in the [quickstart](docs/quickstart.md).*
+*One governed run through every door — model, exec, tool, and sub-agent spawn — then `investigate --run` shows the whole tree and `audit verify` confirms the hash-chained ledger. Recorded against the hermetic harness (stand-ins, no container runtime; the containment proof is `make acceptance-podman`). See the [quickstart](docs/quickstart.md), the [demos](docs/demo.md), and [governance in action](docs/showcase.md).*
 
 ## What Agenthof is — and isn't
 
@@ -62,7 +62,9 @@ Pre-release, and the governed core is real and runnable today:
   which runs the allowlisted command in a no-network rootless-podman compartment
   and attests what ran — Agenthof records that account and never runs the
   command itself (an agent's own report of a command is refused and recorded);
-  and sub-agent calls carry the caller's delegation binding;
+  and the **spawn** door runs each sub-agent as its own governed child run —
+  isolated in its own compartments and workspace by the reference supervisor in
+  `deploy/refspawn` — with the caller's delegation binding carried down;
 - **isolated agents** — a reference sandbox runtime (`deploy/refbox`) runs an
   agent — a Go echo agent or a Python LangChain agent, both shipped as
   reference images — with **no network at all**, reaching Agenthof only over a
@@ -79,6 +81,23 @@ Pre-release, and the governed core is real and runnable today:
 - incident investigation — `agenthof investigate` merges the control log and
   every run log into one filterable, time-ordered timeline (human or `--json`),
   and `audit <run-id>` names the exact `apply` that put a run's config on record.
+
+**The reference runtimes (`ref*`)** are operator-side runtimes that run on the
+host and drive rootless podman, so the agent reaches a capability only through
+Agenthof and the operator's sandbox contains it — Agenthof itself runs and
+isolates nothing. Each ships as a reference you can run or replace:
+
+- **`deploy/refbox`** — the no-network sandbox an agent *runs in*, reaching
+  Agenthof only over a bind-mounted Unix socket;
+- **`deploy/refexec`** — runs an allowlisted command first-hand in a no-network
+  compartment and attests what ran (the **exec** door);
+- **`deploy/refbridge`** — fronts a stdio-only MCP server over a socket and
+  attests first-hand on every call (the **tool** door for stdio tools);
+- **`deploy/refspawn`** — gives each sub-agent run its own isolated
+  compartments and workspace (the **spawn** door).
+
+The containment guarantee is the sandbox's, not Agenthof's, and is stated
+plainly in each runtime's docs.
 
 What's shipped versus what's coming — governed skills, multi-resource scope,
 finer-grained privileges — is laid out in the [roadmap](ROADMAP.md). Only shipped
