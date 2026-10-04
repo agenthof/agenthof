@@ -35,9 +35,14 @@ started the run and, for the on-behalf-of tool, acting as that human
 What it does **not** show: **containment.** The compartments in this run are
 host processes started by test stand-ins; nothing here proves no-egress or
 that an agent could not reach a provider on its own. Those walls are the job
-of the operator's runtime — the podman proofs (`scripts/e2e-refbox.sh`,
-`scripts/e2e-refexec.sh`, `scripts/e2e-refbridge.sh`,
-`scripts/e2e-refspawn.sh`) — and this page makes no claim about them.
+of the operator's runtime. They are proven separately: per door by the podman
+proofs (`scripts/e2e-refbox.sh`, `scripts/e2e-refexec.sh`,
+`scripts/e2e-refbridge.sh`, `scripts/e2e-refspawn.sh`), and for this combined
+scenario by `scripts/e2e-acceptance.sh` (`make acceptance-podman`), which runs
+the scripted agent on real rootless podman and checks that the agent, bridge
+and sub-agent compartments cannot reach the provider, or anything else off the
+machine, except through the gateway. That proof is run on a developer machine,
+not in CI; this page makes no containment claim of its own.
 
 **Real models vary.** A given run may take a different path, call a door
 twice, or skip one. The page does not promise an outcome; it promises that
