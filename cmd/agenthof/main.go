@@ -737,6 +737,12 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 	}
 	p := gateway.Provisioner{AdminBase: *adminBase, MasterKey: masterKey, HTTP: http.DefaultClient}
 	for _, role := range cfg.Roles {
+		// A control-only role runs nothing, so it needs no provider key: a
+		// key with budget $0 would be a credential nothing consumes.
+		if len(role.Workflows) == 0 {
+			_, _ = fmt.Fprintf(out, "role %s: owns no workflows; no key provisioned\n", role.Name)
+			continue
+		}
 		created, err := p.EnsureRoleKey(".", role)
 		if err != nil {
 			_, _ = fmt.Fprintf(out, "role %s: %v\n", role.Name, err)

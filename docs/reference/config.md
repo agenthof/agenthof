@@ -391,7 +391,7 @@ steps:
 |---|---|---|---|---|
 | Name | `name` | string | yes | — |
 | Description | `description` | string | no | — |
-| Workflows | `workflows` | list of strings | yes (non-empty) | — |
+| Workflows | `workflows` | list of strings | yes, unless `control` grants an operation | — |
 | AllowedGroups | `allowed_groups` | list of strings | yes (non-empty) | — |
 | Control | `control` | list of strings | no | none — absent means no control-plane permission |
 | BudgetUSDMonth | `budget_usd_month` | float | no | — |
@@ -404,9 +404,12 @@ a second role reusing a name is rejected with `duplicate-name`.
 
 ### `workflows`
 
-Required to be non-empty: a role owning zero workflows is rejected with
-`no-workflows`. Every name in the list must match a defined workflow, or
-`apply` rejects it with `dangling-workflow-ref`.
+A role must own at least one workflow **or** grant at least one control
+operation (see [`control`](#control)); a role with neither is rejected with
+`no-capability`. A role that grants control operations and owns no workflows
+is an operator role — it can change governance but run nothing. Every name in
+the list must match a defined workflow, or `apply` rejects it with
+`dangling-workflow-ref`.
 
 ### `allowed_groups`
 

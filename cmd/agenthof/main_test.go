@@ -1720,3 +1720,43 @@ func stubCallSpawn(proxyURL, token, spec string) (string, error) {
 	}
 	return strings.TrimSpace(fmt.Sprintf("spawn %s %s %s", out.Status, id, detail)), nil
 }
+
+// TestGatewayProvisionSkipsWorkflowLessRole: a control-only role runs nothing,
+// so provision mints it no provider key — a key with budget $0 would be a
+// credential nothing consumes. The mock counts key generations.
+func TestGatewayProvisionSkipsWorkflowLessRole(t *testing.T) {
+	root := writeSample(t)
+	if err := os.WriteFile(filepath.Join(root, "roles", "se.yaml"), []byte("name: software-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 50\nallowed_groups: [\"*\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "roles", "ops.yaml"), []byte("name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	generated := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/key/generate" {
+			generated++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"key":"sk-test"}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	t.Chdir(t.TempDir())
+
+	var out bytes.Buffer
+	if code := cmdGateway([]string{"provision", "--config", root, "--admin-base", srv.URL}, &out); code != 0 {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "role platform-admin: owns no workflows; no key provisioned") {
+		t.Fatalf("missing skip line: %s", out.String())
+	}
+	if generated != 1 {
+		t.Fatalf("key generations = %d, want 1 (software-engineer only)", generated)
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "platform-admin.key")); !os.IsNotExist(err) {
+		t.Fatalf("a control-only role must get no key file; stat err = %v", err)
+	}
+}
