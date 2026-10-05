@@ -1,0 +1,36 @@
+# A public role (allowed_groups ["*"]) that grants control operations is
+# rejected at apply: the control gate never honors "*", so such a role could
+# never authorize anyone, and the operator meant something by it. The
+# separate, well-formed platform-admin role is what authorizes the applier —
+# without it the broken role's own grant would never reach validation.
+
+! exec agenthof apply --config config --control-log control.jsonl --as ops@example.com --groups platform-eng
+stdout 'roles/open\.yaml: open: a role that grants control operations must name real groups in allowed_groups, not \["\*"\]'
+! stdout 'registry ok'
+grep '"outcome":"rejected"' control.jsonl
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+-- config/roles/open.yaml --
+name: open
+workflows: [plan-only]
+allowed_groups: ["*"]
+control: [disable]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

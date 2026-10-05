@@ -1,0 +1,35 @@
+# A role that grants control operations and owns no workflows applies (a role
+# must own a workflow OR grant a control operation), gets its members through
+# the control plane, and gives them nothing at run time.
+
+exec agenthof apply --config config --control-log control.jsonl --as ops@example.com --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
+
+# the control-only role owns no workflow, so a run under it is refused
+! exec agenthof run platform-admin plan-only --input hello --as ops@example.com --groups platform-eng --config config --log-dir logs --artifact-dir artifacts
+stdout 'does not own workflow "plan-only"'
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

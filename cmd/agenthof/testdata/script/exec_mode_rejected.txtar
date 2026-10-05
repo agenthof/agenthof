@@ -4,6 +4,8 @@
 # the replacement stated; the key is never silently dropped and no later
 # error about a missing runtime masks it. An exec block that merely omits
 # the runtime fields is rejected at validation for each missing field by name.
+# That second config parses, so the applier has to get past the control gate
+# to reach validation at all — hence missing-runtime's platform-admin role.
 
 ! exec agenthof apply --config stale-mode
 stdout 'agents/runtime-shaped\.yaml: bad-exec-config: line 7: exec\.mode is no longer supported; exec is always first-hand via a runtime \(set runtime/url/timeout\)'
@@ -12,7 +14,7 @@ stdout 'agents/attested-shaped\.yaml: bad-exec-config: line 7: exec\.mode is no 
 ! stdout 'exec\.url must be'
 ! stdout 'registry ok'
 
-! exec agenthof apply --config missing-runtime
+! exec agenthof apply --config missing-runtime --as dana@example.com --groups platform-eng
 stdout 'agents/allow-only\.yaml: allow-only: exec\.runtime is required'
 stdout 'agents/allow-only\.yaml: allow-only: exec\.url must be a unix:// socket path'
 stdout 'agents/allow-only\.yaml: allow-only: exec\.timeout is required'
@@ -75,6 +77,10 @@ steps:
 name: se
 workflows: [exec-demo]
 allowed_groups: ["*"]
+-- missing-runtime/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
 -- missing-runtime/gateway.yaml --
 models:
   fast:

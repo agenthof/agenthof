@@ -16,6 +16,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/audit"
+	"github.com/agenthof/agenthof/internal/authz"
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/control"
@@ -119,8 +120,11 @@ var hashConfigDir = config.HashDir
 // outcome "error"/io_error with no config_hash when it can't (the bytes
 // are genuinely unreadable); a validation failure likewise records outcome
 // "rejected"/validation_failed with a config_hash over the rejected
-// bytes. Apply never mutates files, so unlike cmdRegistryFlip there is no
-// "state changed; event NOT recorded" case — a failed success/rejected
+// bytes. After LoadDir succeeds the invoker is authorized against the
+// proposed config's roles (authz.ControlAllows, "apply"); a refusal is
+// recorded refused/not_authorized with the config_hash, before any
+// validation runs. Apply never mutates files, so unlike cmdRegistryFlip
+// there is no "state changed; event NOT recorded" case — a failed success/rejected
 // Append is just reported and the process exits nonzero.
 func cmdApply(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
@@ -206,6 +210,39 @@ func cmdApply(args []string, out io.Writer) int {
 			event.ConfigHash = ""
 		}
 		head, appendErr := control.Append(*controlLog, event)
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+
+	// Authorize BEFORE validation, against the proposed config's own roles:
+	// a caller no role grants `apply` learns one refusal — never the proposed
+	// config's validation errors. In CLI mode the filesystem is the root of
+	// trust (whoever can edit the config dir can edit control:), so this is
+	// a recorded default-deny decision, not a wall against a
+	// filesystem-privileged actor; docs/control-plane-lifecycle.md says so.
+	if !authz.ControlAllows(cfg.Roles, inv, "apply") {
+		reason := control.NotAuthorized("apply")
+		_, _ = fmt.Fprintf(out, "apply: %s\n", reason.Message)
+		// The refused event carries the hash of what the unauthorized party
+		// tried to apply — that is the forensic value of recording it. The
+		// same rule as success/rejected applies: no hash, no refused record.
+		h, hashErr := hashConfigDir(*cfgDir)
+		if hashErr != nil {
+			return appendApplyHashFailure(*controlLog, inv, assertedAs, hashErr, out)
+		}
+		head, appendErr := control.Append(*controlLog, control.Event{
+			Action:     "apply",
+			Outcome:    "refused",
+			Reason:     reason,
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+			ConfigHash: h,
+		})
 		if appendErr != nil {
 			_, _ = fmt.Fprintln(out, appendErr)
 			return 1

@@ -19,12 +19,20 @@ const (
 	CodeLedgerDamaged           = "ledger_damaged"
 	CodeAgentNotFound           = "agent_not_found"
 	CodeIOError                 = "io_error"
+	CodeNotAuthorized           = "not_authorized"
 )
 
 // Reason explains a non-success outcome.
 type Reason struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// NotAuthorized is the reason for a control action no role grants the
+// invoker (authz.ControlAllows said no). The message is fixed and
+// self-describing: it names the operation, never the invoker's groups.
+func NotAuthorized(op string) *Reason {
+	return &Reason{Code: CodeNotAuthorized, Message: "not authorized: no role grants " + op + " to the invoker"}
 }
 
 // Witness records the local OS user and hostname that produced a control

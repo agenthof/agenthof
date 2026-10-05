@@ -269,3 +269,113 @@ func TestApplyTornControlLedgerRefusesWithoutEvent(t *testing.T) {
 		t.Fatalf("a damaged control log must not be written to; got:\n%s", after)
 	}
 }
+
+// TestApplyNotAuthorizedRecordsRefusedWithConfigHash: a caller whose groups
+// no role grants `apply` is refused — recorded refused/not_authorized with the
+// hash of the config they tried to apply — and the fixed message never echoes
+// their groups.
+func TestApplyNotAuthorizedRecordsRefusedWithConfigHash(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+
+	var out bytes.Buffer
+	code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "mallory@example.com", "--groups", "finance"}, &out)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "apply: not authorized: no role grants apply to the invoker") {
+		t.Fatalf("missing refusal line: %s", out.String())
+	}
+	if strings.Contains(out.String(), "registry ok") {
+		t.Fatalf("an unauthorized apply must not report success: %s", out.String())
+	}
+	h, err := config.HashDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(controlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"action":"apply"`, `"outcome":"refused"`, `"code":"not_authorized"`,
+		`"message":"not authorized: no role grants apply to the invoker"`,
+		`"config_hash":"` + h + `"`, `"subject":"mallory@example.com"`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("control log missing %q:\n%s", want, data)
+		}
+	}
+}
+
+// TestApplyNoGroupsIsRefused: the OS user with no groups asserted is nobody's
+// member — default-deny.
+func TestApplyNoGroupsIsRefused(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out); code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
+	}
+	data, _ := os.ReadFile(controlLog)
+	if !strings.Contains(string(data), `"not_authorized"`) {
+		t.Fatalf("expected a not_authorized record:\n%s", data)
+	}
+}
+
+// TestApplyNotAuthorizedPrecedesValidation: an unauthorized caller applying an
+// INVALID config learns one refusal — not the config's validation errors —
+// and the record is refused, not rejected.
+func TestApplyNotAuthorizedPrecedesValidation(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	coderPath := filepath.Join(root, "agents", "coder.yaml")
+	data, err := os.ReadFile(coderPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coderPath, append(data, []byte("enabled: false\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "finance"}, &out); code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "depends on agent") {
+		t.Fatalf("validation errors leaked to an unauthorized caller: %s", out.String())
+	}
+	logData, _ := os.ReadFile(controlLog)
+	if strings.Contains(string(logData), `"rejected"`) || !strings.Contains(string(logData), `"refused"`) {
+		t.Fatalf("want refused, not rejected:\n%s", logData)
+	}
+}
+
+// TestApplyNotAuthorizedHashFailureRecordsIOError: the refused event needs a
+// config_hash; if it cannot be computed the honest record is error/io_error,
+// never a hash-less refusal (same rule as success/rejected).
+func TestApplyNotAuthorizedHashFailureRecordsIOError(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	orig := hashConfigDir
+	hashConfigDir = func(string) (string, error) { return "", errors.New("simulated hash failure") }
+	t.Cleanup(func() { hashConfigDir = orig })
+
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "finance"}, &out); code == 0 {
+		t.Fatalf("expected nonzero exit: %s", out.String())
+	}
+	data, _ := os.ReadFile(controlLog)
+	for _, want := range []string{`"outcome":"error"`, `"io_error"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("control log missing %q:\n%s", want, data)
+		}
+	}
+	if strings.Contains(string(data), `"refused"`) {
+		t.Fatalf("a hash failure must never be recorded as a hash-less refusal:\n%s", data)
+	}
+}
