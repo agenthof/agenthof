@@ -20,7 +20,7 @@ func TestAuditVerifyControlCleanExitsZero(t *testing.T) {
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var applyOut bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &applyOut); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &applyOut); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, applyOut.String())
 	}
 
@@ -42,7 +42,7 @@ func TestAuditVerifyControlExpectHeadMatchExitsZero(t *testing.T) {
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var applyOut bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &applyOut); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &applyOut); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, applyOut.String())
 	}
 
@@ -73,7 +73,7 @@ func TestAuditVerifyControlExpectHeadMismatchExitsFour(t *testing.T) {
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var applyOut bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &applyOut); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &applyOut); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, applyOut.String())
 	}
 

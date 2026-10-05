@@ -2,15 +2,15 @@
 # enable/disable as a human-readable audit trail with a final
 # integrity line — spec §3.6.
 
-exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com
-stdout 'registry ok: 5 agents, 2 workflows, 2 roles'
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
 stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
 
-exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com
+exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
 stdout 'agent coder disabled'
 stdout 'control head: seq=2 sha256=[0-9a-f]{64}'
 
-exec agenthof registry enable coder --config examples/config --control-log control.jsonl --as dana@example.com
+exec agenthof registry enable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
 stdout 'agent coder enabled'
 stdout 'control head: seq=3 sha256=[0-9a-f]{64}'
 

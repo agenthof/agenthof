@@ -20,7 +20,7 @@ func TestAuditRunConfigJoinShowsApply(t *testing.T) {
 
 	// apply FIRST so the apply's time precedes the run's workflow_started
 	// time (spec §2 requires apply.Time <= run.Time).
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &out); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("apply: %d\n%s", code, out.String())
 	}
 	out.Reset()
@@ -57,7 +57,7 @@ func TestAuditRunConfigJoinNoRegressionWhenControlMissing(t *testing.T) {
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 	var out bytes.Buffer
 
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &out); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("apply: %d\n%s", code, out.String())
 	}
 	out.Reset()

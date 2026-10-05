@@ -220,6 +220,7 @@ name: acceptance-operator
 description: Runs the acceptance workflows
 workflows: [acceptance, acceptance-noexec, acceptance-nospawn]
 allowed_groups: ["acceptance-users"]
+control: [apply]
 EOF
 	cat >"$dir/roles/acceptance-worker.yaml" <<EOF
 name: acceptance-worker

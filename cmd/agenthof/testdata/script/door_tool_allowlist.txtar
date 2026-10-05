@@ -5,8 +5,8 @@
 
 env AGENTHOF_TOOL_TOKEN=tool-secret
 
-exec agenthof apply --config config
-stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+exec agenthof apply --config config --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
 
 # the allowlisted tool is reachable and recorded succeeded
 exec agenthof run se tool-demo --input 'tool:echo' --as tester --config config --log-dir logs-ok --artifact-dir artifacts
@@ -51,6 +51,10 @@ steps:
 name: se
 workflows: [tool-demo]
 allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
 -- config/gateway.yaml --
 models:
   fast:

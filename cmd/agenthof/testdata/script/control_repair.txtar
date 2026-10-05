@@ -11,17 +11,17 @@
 # ("fix-bug" depends on "coder"). So there is exactly one mutating
 # disable in this whole script, run last.
 
-exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com
-stdout 'registry ok: 5 agents, 2 workflows, 2 roles'
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
 stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
 
 # A second control log that will stay clean, for the "not torn" case.
-exec agenthof apply --config examples/config --control-log clean.jsonl --as dana@example.com
+exec agenthof apply --config examples/config --control-log clean.jsonl --as dana@example.com --groups platform-eng
 
 # A third control log, seeded with two genuine records via two plain
 # applies (never touching registry state), for the "chain break" case.
-exec agenthof apply --config examples/config --control-log broken.jsonl --as dana@example.com
-exec agenthof apply --config examples/config --control-log broken.jsonl --as dana@example.com
+exec agenthof apply --config examples/config --control-log broken.jsonl --as dana@example.com --groups platform-eng
+exec agenthof apply --config examples/config --control-log broken.jsonl --as dana@example.com --groups platform-eng
 stdout 'control head: seq=2 sha256=[0-9a-f]{64}'
 
 # Corrupt control.jsonl's tail: append a partial line with no trailing
@@ -32,7 +32,7 @@ exec sh -c 'printf ''{"v":"control/1","seq":2,"partial'' >> control.jsonl'
 # refuses with the "audit repair control" hint rather than mutating
 # anything or appending on top of the damage.
 ! exec agenthof audit verify control --control-log control.jsonl
-! exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com
+! exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
 stdout 'audit repair control'
 
 exec agenthof audit repair control --control-log control.jsonl --as ops@example.com
@@ -44,7 +44,7 @@ exec sh -c 'ls control.jsonl.torn-*'
 
 # The live file is structurally clean again, so a write path works — this
 # is the one and only mutating registry call in the whole script.
-exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com
+exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
 stdout 'agent coder disabled'
 
 # ...but the ledger is tainted forever: verify now exits 3.

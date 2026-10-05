@@ -2,3 +2,4 @@ name: refbox-operator
 description: Runs the reference agent inside a refbox compartment
 workflows: [refbox-smoke, refbox-langchain]
 allowed_groups: ["refbox-users"]
+control: [apply]

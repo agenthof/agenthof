@@ -21,7 +21,7 @@ func TestAuditRepairControlTornTailSucceeds(t *testing.T) {
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var applyOut bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com"}, &applyOut); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &applyOut); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, applyOut.String())
 	}
 
@@ -79,7 +79,7 @@ func TestAuditRepairControlTerminatedUnparseableLineTaints(t *testing.T) {
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var applyOut bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com"}, &applyOut); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &applyOut); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, applyOut.String())
 	}
 
@@ -138,7 +138,7 @@ func TestAuditRepairControlCleanLogRefused(t *testing.T) {
 	root := writeSample(t)
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
 	var applyOut bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com"}, &applyOut); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &applyOut); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, applyOut.String())
 	}
 

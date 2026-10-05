@@ -1,0 +1,4 @@
+name: platform-admin
+description: Operates the control plane — applies configuration, flips kill switches, repairs the control ledger. Owns no workflows.
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]

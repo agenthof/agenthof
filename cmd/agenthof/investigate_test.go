@@ -20,7 +20,7 @@ func TestInvestigateJSONEnvelope(t *testing.T) {
 	ctl := filepath.Join(t.TempDir(), "control.jsonl")
 	var out bytes.Buffer
 
-	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com"}, &out); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("apply: %d\n%s", code, out.String())
 	}
 	out.Reset()
@@ -56,7 +56,7 @@ func TestInvestigateAgentFilterNarrows(t *testing.T) {
 	ctl := filepath.Join(t.TempDir(), "control.jsonl")
 	var out bytes.Buffer
 
-	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com"}, &out); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("apply: %d\n%s", code, out.String())
 	}
 	out.Reset()
@@ -66,7 +66,7 @@ func TestInvestigateAgentFilterNarrows(t *testing.T) {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
 	out.Reset()
-	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com"}, &out); code != 0 {
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("disable: %d\n%s", code, out.String())
 	}
 

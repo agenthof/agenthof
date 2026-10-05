@@ -56,7 +56,7 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-go run ./cmd/agenthof apply --config examples/config
+go run ./cmd/agenthof apply --config examples/config --as ci --groups platform-eng
 OUT=$(go run ./cmd/agenthof run software-engineer fix-bug \
   --input "e2e oidc smoke" --token "$TOKEN" \
   --config examples/config --log-dir "$WORK/logs" \

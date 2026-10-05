@@ -20,11 +20,11 @@ func TestApplyRecordsSuccessEvent(t *testing.T) {
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var out bytes.Buffer
-	code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &out)
+	code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
 	if code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "registry ok: 2 agents, 1 workflows, 1 roles") {
+	if !strings.Contains(out.String(), "registry ok: 2 agents, 1 workflows, 2 roles") {
 		t.Fatalf("missing registry-ok line: %s", out.String())
 	}
 	if !strings.Contains(out.String(), "control head: seq=1 sha256=") {
@@ -72,7 +72,7 @@ func TestApplyRecordsRejectedEventWithConfigHash(t *testing.T) {
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var out bytes.Buffer
-	code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out)
+	code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out)
 	if code != 1 {
 		t.Fatalf("apply must fail with a disabled dependency: exit %d\n%s", code, out.String())
 	}
@@ -116,7 +116,7 @@ func TestApplyHashFailureRecordsIOErrorNotSuccess(t *testing.T) {
 	t.Cleanup(func() { hashConfigDir = orig })
 
 	var out bytes.Buffer
-	code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out)
+	code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out)
 	if code == 0 {
 		t.Fatalf("expected nonzero exit when config_hash cannot be computed: %s", out.String())
 	}
@@ -157,7 +157,7 @@ func TestApplyHashFailureOnRejectedConfigRecordsIOErrorNotRejected(t *testing.T)
 	t.Cleanup(func() { hashConfigDir = orig })
 
 	var out bytes.Buffer
-	code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out)
+	code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out)
 	if code == 0 {
 		t.Fatalf("expected nonzero exit when config_hash cannot be computed: %s", out.String())
 	}
@@ -193,7 +193,7 @@ func TestApplyUnparseableConfigRecordsRejectedNotIOError(t *testing.T) {
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var out bytes.Buffer
-	code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out)
+	code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out)
 	if code != 1 {
 		t.Fatalf("apply must fail on unparseable config: exit %d\n%s", code, out.String())
 	}
@@ -253,7 +253,7 @@ func TestApplyTornControlLedgerRefusesWithoutEvent(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out)
+	code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out)
 	if code == 0 {
 		t.Fatalf("expected nonzero exit for a damaged control ledger: %s", out.String())
 	}

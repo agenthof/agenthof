@@ -212,6 +212,7 @@ name: bridge-operator
 description: Runs the refbridge e2e workflows
 workflows: [bridge-demo, bridge-rotation]
 allowed_groups: ["bridge-users"]
+control: [apply]
 EOF
 
 # Credentials live with the HOST agenthof process only.

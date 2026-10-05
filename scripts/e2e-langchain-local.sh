@@ -119,6 +119,7 @@ name: lc-operator
 description: Runs the LangChain e2e workflows
 workflows: [lc-smoke, lc-bad-smoke]
 allowed_groups: ["lc-users"]
+control: [apply]
 EOF
 
 go build -o "$WORK/agenthof" ./cmd/agenthof

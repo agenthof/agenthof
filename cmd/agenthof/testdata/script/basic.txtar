@@ -1,7 +1,7 @@
 # apply validates and counts the registry; unknown subcommands print usage.
 
-exec agenthof apply --config config
-stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+exec agenthof apply --config config --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
 
 ! exec agenthof bogus
 stderr 'Usage:'
@@ -30,6 +30,10 @@ steps:
 name: software-engineer
 workflows: [plan-only]
 allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
 -- config/gateway.yaml --
 models:
   fast:

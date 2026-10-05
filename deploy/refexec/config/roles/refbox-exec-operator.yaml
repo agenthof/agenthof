@@ -2,3 +2,4 @@ name: refbox-exec-operator
 description: Runs the first-hand exec workflow
 workflows: [refbox-exec]
 allowed_groups: ["refbox-users"]
+control: [apply]

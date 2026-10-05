@@ -35,7 +35,7 @@ func TestAuditControlTornExitsOneWithRenderedPrefix(t *testing.T) {
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var applyOut bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &applyOut); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &applyOut); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, applyOut.String())
 	}
 
@@ -75,15 +75,15 @@ func TestAuditControlCleanExitsZero(t *testing.T) {
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var buf bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &buf); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, buf.String())
 	}
 	buf.Reset()
-	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &buf); code != 0 {
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
 		t.Fatalf("disable: exit %d\n%s", code, buf.String())
 	}
 	buf.Reset()
-	if code := cmdRegistry([]string{"enable", "coder", "--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &buf); code != 0 {
+	if code := cmdRegistry([]string{"enable", "coder", "--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
 		t.Fatalf("enable: exit %d\n%s", code, buf.String())
 	}
 

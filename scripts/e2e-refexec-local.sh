@@ -177,6 +177,7 @@ name: exec-operator
 description: Runs the refexec e2e workflows
 workflows: [exec-runner, exec-slow, exec-forged, exec-missing, exec-open, exec-none]
 allowed_groups: ["exec-users"]
+control: [apply]
 EOF
 export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE"   # the model route is never called; the key only lets it resolve
 

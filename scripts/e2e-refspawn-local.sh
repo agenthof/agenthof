@@ -384,6 +384,7 @@ name: lead
 description: Runs the parent workflow
 workflows: [lead-wf]
 allowed_groups: ["devs"]
+control: [apply]
 EOF
 	cat >"$dir/roles/worker.yaml" <<EOF
 name: worker

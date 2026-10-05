@@ -26,7 +26,7 @@ func TestRegistryFlipSuccessRecordsControlEvent(t *testing.T) {
 
 	var out bytes.Buffer
 	code := cmdRegistry([]string{"disable", "coder", "--config", root,
-		"--control-log", controlPath, "--as", "dana@example.com"}, &out)
+		"--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
 	if code != 0 {
 		t.Fatalf("disable: exit %d\n%s", code, out.String())
 	}
@@ -56,7 +56,7 @@ func TestRegistryFlipSuccessRecordsControlEvent(t *testing.T) {
 
 	out.Reset()
 	code = cmdRegistry([]string{"enable", "coder", "--config", root,
-		"--control-log", controlPath, "--as", "dana@example.com"}, &out)
+		"--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
 	if code != 0 {
 		t.Fatalf("enable: exit %d\n%s", code, out.String())
 	}
@@ -82,7 +82,7 @@ func TestRegistryFlipUnknownAgentRefused(t *testing.T) {
 
 	var out bytes.Buffer
 	code := cmdRegistry([]string{"disable", "ghost", "--config", root,
-		"--control-log", controlPath}, &out)
+		"--control-log", controlPath, "--groups", "platform-eng"}, &out)
 	if code == 0 {
 		t.Fatalf("expected nonzero exit for an unknown agent: %s", out.String())
 	}
@@ -153,7 +153,7 @@ func TestRegistryFlipSetEnabledIOErrorRecordsEvent(t *testing.T) {
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var out bytes.Buffer
-	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath}, &out)
+	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath, "--groups", "platform-eng"}, &out)
 	if code == 0 {
 		t.Fatalf("expected nonzero exit for a SetEnabled I/O failure: %s", out.String())
 	}
@@ -334,7 +334,7 @@ func TestRegistryFlipHashFailureViaSeamRecordsStateChangedNotRecorded(t *testing
 	t.Cleanup(func() { hashConfigDir = orig })
 
 	var out bytes.Buffer
-	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath}, &out)
+	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath, "--groups", "platform-eng"}, &out)
 	if code == 0 {
 		t.Fatalf("expected nonzero exit when the post-flip hash fails: %s", out.String())
 	}
@@ -374,7 +374,7 @@ func TestRegistryFlipCrashHookAfterStateBeforeAppend(t *testing.T) {
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var out bytes.Buffer
-	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath}, &out)
+	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath, "--groups", "platform-eng"}, &out)
 	if code == 0 {
 		t.Fatalf("expected nonzero exit when the crash hook fires: %s", out.String())
 	}
@@ -409,12 +409,12 @@ func TestRegistryFlipNoOpRecordsSuccess(t *testing.T) {
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var out bytes.Buffer
-	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath}, &out); code != 0 {
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath, "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("first disable: exit %d\n%s", code, out.String())
 	}
 
 	out.Reset()
-	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath}, &out)
+	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath, "--groups", "platform-eng"}, &out)
 	if code != 0 {
 		t.Fatalf("no-op disable: exit %d\n%s", code, out.String())
 	}
