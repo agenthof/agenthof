@@ -387,7 +387,7 @@ func Validate(cfg config.Config) []ValidationError {
 		// it loudly here.
 		if len(r.Control) > 0 && slices.Contains(r.AllowedGroups, "*") {
 			add(r.SourceFile, r.Name, "public-control-role",
-				`a role that grants control operations must name real groups in allowed_groups, not ["*"]: a public control role would let any invoker change governance`)
+				`a role that grants control operations must name real groups in allowed_groups, not ["*"]: the control gate never honors the public marker, so such a role would authorize no one — a silent no-op you meant something by`)
 		}
 		if len(r.AllowedGroups) == 0 {
 			add(r.SourceFile, r.Name, "no-access-floor",

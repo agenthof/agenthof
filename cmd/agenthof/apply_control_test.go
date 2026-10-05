@@ -319,7 +319,10 @@ func TestApplyNoGroupsIsRefused(t *testing.T) {
 	if code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out); code != 1 {
 		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
 	}
-	data, _ := os.ReadFile(controlLog)
+	data, err := os.ReadFile(controlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(string(data), `"not_authorized"`) {
 		t.Fatalf("expected a not_authorized record:\n%s", data)
 	}
@@ -348,7 +351,10 @@ func TestApplyNotAuthorizedPrecedesValidation(t *testing.T) {
 	if strings.Contains(out.String(), "depends on agent") {
 		t.Fatalf("validation errors leaked to an unauthorized caller: %s", out.String())
 	}
-	logData, _ := os.ReadFile(controlLog)
+	logData, err := os.ReadFile(controlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(string(logData), `"rejected"`) || !strings.Contains(string(logData), `"refused"`) {
 		t.Fatalf("want refused, not rejected:\n%s", logData)
 	}
@@ -369,7 +375,10 @@ func TestApplyNotAuthorizedHashFailureRecordsIOError(t *testing.T) {
 	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "finance"}, &out); code == 0 {
 		t.Fatalf("expected nonzero exit: %s", out.String())
 	}
-	data, _ := os.ReadFile(controlLog)
+	data, err := os.ReadFile(controlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{`"outcome":"error"`, `"io_error"`} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("control log missing %q:\n%s", want, data)

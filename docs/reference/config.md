@@ -434,8 +434,9 @@ left null) grants none, and a present-but-empty `control: []` is rejected by
 `apply` with `control-empty`. An unknown token is rejected with
 `control-bad-op`. A role that grants control operations must name real
 groups — `allowed_groups: ["*"]` alongside a non-empty `control` is rejected
-with `public-control-role`, since a public control role would let any
-invoker change governance. A role may grant control operations and own no
+with `public-control-role`, because the control gate never honors the public
+marker, so such a role would authorize no one — a silent no-op. A role may
+grant control operations and own no
 workflows (an operator role): see [`workflows`](#workflows).
 
 How the grant is enforced — which command checks which operation, what a

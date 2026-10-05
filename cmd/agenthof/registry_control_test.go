@@ -484,7 +484,10 @@ func TestRegistryFlipNotAuthorizedPrecedesAgentLookup(t *testing.T) {
 	if code := cmdRegistry([]string{"disable", "ghost", "--config", root, "--control-log", controlPath, "--groups", "finance"}, &out); code != 1 {
 		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
 	}
-	data, _ := os.ReadFile(controlPath)
+	data, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(string(data), "agent_not_found") || !strings.Contains(string(data), "not_authorized") {
 		t.Fatalf("want not_authorized and no agent_not_found:\n%s", data)
 	}

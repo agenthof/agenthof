@@ -190,6 +190,31 @@ func TestAuditRepairControlMissingLogExitsOne(t *testing.T) {
 	}
 }
 
+// TestAuditRepairControlNotAuthorizedPrecedesMissingLedgerCheck: authorization
+// runs before the "no control ledger at …" existence check, so an unauthorized
+// caller learns only that they are not authorized — never whether a ledger
+// exists — and nothing is written.
+func TestAuditRepairControlNotAuthorizedPrecedesMissingLedgerCheck(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "never-written.jsonl")
+
+	var out bytes.Buffer
+	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", root, "--as", "mallory@example.com", "--groups", "finance"}, &out)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "not authorized: no role grants repair to the invoker") {
+		t.Fatalf("want a not-authorized refusal, got: %q", out.String())
+	}
+	if strings.Contains(out.String(), "no control ledger at") {
+		t.Fatalf("leaked ledger existence to an unauthorized caller: %q", out.String())
+	}
+	if _, err := os.Stat(controlPath); !os.IsNotExist(err) {
+		t.Fatalf("a refused repair must write nothing; stat(%s) err = %v", controlPath, err)
+	}
+}
+
 // TestAuditRepairControlMissingSubcommandExitsTwo covers `audit repair`
 // with no "control" argument: a usage error.
 func TestAuditRepairControlMissingSubcommandExitsTwo(t *testing.T) {

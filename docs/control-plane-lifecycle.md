@@ -126,7 +126,11 @@ changes nothing *and* does not yet stop anyone from running against the
 un-applied directory. What the gate buys now is that an unauthorized change
 attempt yields a `refused` row instead of a silent change, and the same
 decision is where a future service — whose callers have no filesystem — can
-enforce it for real. One more edge to know: a configuration that grants
+enforce it for real. The roles are also read once to make the decision and the
+recorded configuration hash is computed by a second read, so a concurrent edit
+between the two could make the recorded hash differ from what was authorized;
+a future `apply --if-head` closes that window. One more edge to know: a
+configuration that grants
 `repair` to nobody is a valid configuration; if its ledger then tears, repair
 is refused for everyone until the role file is edited — in CLI mode, the
 filesystem is the way out.
