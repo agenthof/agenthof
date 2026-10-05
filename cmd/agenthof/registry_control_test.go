@@ -434,3 +434,79 @@ func TestRegistryFlipNoOpRecordsSuccess(t *testing.T) {
 		t.Fatalf("the no-op flip's second record must still be a success disable: %s", lines[1])
 	}
 }
+
+// TestRegistryFlipNotAuthorizedRefusedWithoutFlipping: a caller no role
+// grants `disable` is refused — recorded refused/not_authorized — and the
+// agent's enabled bit is untouched.
+func TestRegistryFlipNotAuthorizedRefusedWithoutFlipping(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+
+	var out bytes.Buffer
+	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath, "--as", "mallory@example.com", "--groups", "finance"}, &out)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "registry disable: not authorized: no role grants disable to the invoker") {
+		t.Fatalf("missing refusal line: %s", out.String())
+	}
+	if strings.Contains(out.String(), "agent coder disabled") {
+		t.Fatal("must not report a flip")
+	}
+	data, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"action":"disable"`, `"agent":"coder"`, `"outcome":"refused"`, `"code":"not_authorized"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("control log missing %q:\n%s", want, data)
+		}
+	}
+	agentData, err := os.ReadFile(filepath.Join(root, "agents", "coder.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(agentData), "enabled: false") {
+		t.Fatal("agent must not be flipped by an unauthorized caller")
+	}
+}
+
+// TestRegistryFlipNotAuthorizedPrecedesAgentLookup: an unauthorized caller
+// naming an unknown agent gets not_authorized, never agent_not_found — the
+// agent list is not probeable by someone who may not flip anything.
+func TestRegistryFlipNotAuthorizedPrecedesAgentLookup(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "ghost", "--config", root, "--control-log", controlPath, "--groups", "finance"}, &out); code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
+	}
+	data, _ := os.ReadFile(controlPath)
+	if strings.Contains(string(data), "agent_not_found") || !strings.Contains(string(data), "not_authorized") {
+		t.Fatalf("want not_authorized and no agent_not_found:\n%s", data)
+	}
+}
+
+// TestRegistryEnableAfterDisableIsAuthorizedWithoutValidation: with coder
+// disabled, registry.Build would reject the config (disabled-agent-ref); the
+// kill switch authorizes against LoadDir's roles, so re-enabling still works.
+func TestRegistryEnableAfterDisableIsAuthorizedWithoutValidation(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath, "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("disable: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--groups", "platform-eng"}, &out); code != 1 || !strings.Contains(out.String(), "depends on agent") {
+		t.Fatalf("apply must reject the disabled dependency: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := cmdRegistry([]string{"enable", "coder", "--config", root, "--control-log", controlPath, "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("enable after disable must succeed: %d\n%s", code, out.String())
+	}
+}

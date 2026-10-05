@@ -450,7 +450,8 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	// outcome "error", reason io_error — rather than a silent, unlogged
 	// exit; it is still never conflated with "agent not found", which is
 	// reserved for a config that loaded cleanly and genuinely lacks the
-	// name.
+	// name. LoadDir — not Build — also supplies the roles the invoker is
+	// authorized against below.
 	cfg, loadErrs := config.LoadDir(cfgDir)
 	if len(loadErrs) > 0 {
 		for _, e := range loadErrs {
@@ -472,6 +473,32 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
 		return 1
 	}
+
+	// Authorize against the config dir's roles as LoadDir read them — never
+	// registry.Build: with the target agent disabled, Build rejects the
+	// config (disabled-agent-ref), which would make a disabled agent
+	// un-re-enableable. Authorization runs before the agent lookup so an
+	// unauthorized caller learns one refusal and cannot probe agent names.
+	if !authz.ControlAllows(cfg.Roles, inv, action) {
+		reason := control.NotAuthorized(action)
+		_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, reason.Message)
+		head, appendErr := control.Append(controlLog, control.Event{
+			Action:     action,
+			Agent:      target,
+			Outcome:    "refused",
+			Reason:     reason,
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+
 	known := false
 	for _, a := range cfg.Agents {
 		if a.Name == target {

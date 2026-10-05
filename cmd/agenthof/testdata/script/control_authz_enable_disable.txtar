@@ -1,0 +1,36 @@
+# The kill switch is authorized default-deny against the config dir's roles,
+# read without validation: an unauthorized flip is refused and recorded, the
+# agent's state untouched, the agent list unprobed; and an agent that has been
+# disabled — which validation would reject — can still be re-enabled.
+
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+cp examples/config/agents/coder.yaml coder.before.yaml
+
+# unauthorized disable: refused, recorded, the kill switch untouched
+! exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as mallory@example.com --groups finance
+stdout 'registry disable: not authorized: no role grants disable to the invoker'
+! stdout 'agent coder disabled'
+stdout 'control head: seq=2 sha256=[0-9a-f]{64}'
+grep '"code":"not_authorized"' control.jsonl
+cmp examples/config/agents/coder.yaml coder.before.yaml
+
+# unauthorized disable of an unknown agent: still not_authorized — the
+# authorization decision precedes the agent lookup
+! exec agenthof registry disable ghost --config examples/config --control-log control.jsonl --as mallory@example.com --groups finance
+stdout 'not authorized'
+! stdout 'not found'
+! grep 'agent_not_found' control.jsonl
+
+# authorized disable; apply now rejects the config; authorized enable still works
+exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'agent coder disabled'
+! exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'depends on agent "coder", which is disabled'
+exec agenthof registry enable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'agent coder enabled'
+
+exec agenthof audit control --control-log control.jsonl
+stdout 'disable agent coder refused — mallory@example.com \(asserted\)'
+stdout 'disable agent ghost refused — mallory@example.com \(asserted\)'
+stdout 'disabled agent coder — dana@example.com \(asserted\)'
+stdout 'enabled agent coder — dana@example.com \(asserted\)'
