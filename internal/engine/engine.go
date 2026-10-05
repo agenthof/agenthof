@@ -9,43 +9,12 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/artifact"
+	"github.com/agenthof/agenthof/internal/authz"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/obs"
 	"github.com/agenthof/agenthof/internal/registry"
 )
-
-// groupsIntersect reports whether any of the invoker's groups appear in the
-// role's allowed groups.
-func groupsIntersect(invokerGroups, allowedGroups []string) bool {
-	for _, g := range invokerGroups {
-		for _, a := range allowedGroups {
-			if g == a {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// containsStar reports whether allowed_groups carries the public marker "*",
-// which admits any authenticated invoker — including one with no groups.
-func containsStar(allowedGroups []string) bool {
-	for _, g := range allowedGroups {
-		if g == "*" {
-			return true
-		}
-	}
-	return false
-}
-
-// roleAllows is the default-deny authorization decision: an invoker is allowed
-// iff the role is public ("*") or the invoker shares one of the role's groups.
-// An empty allowed_groups denies (fail-closed); apply-time validation rejects
-// such roles, so the gate should not see one, but it denies defensively.
-func roleAllows(invokerGroups, allowedGroups []string) bool {
-	return containsStar(allowedGroups) || groupsIntersect(invokerGroups, allowedGroups)
-}
 
 type StepResult struct {
 	Artifact string
@@ -164,7 +133,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	if !reg.RoleOwnsWorkflow(role, workflow) {
 		return refuse(fmt.Sprintf("role %q does not own workflow %q", role, workflow))
 	}
-	if !roleAllows(inv.Groups, ro.AllowedGroups) {
+	if !authz.GroupsAllow(inv.Groups, ro.AllowedGroups) {
 		return refuse(fmt.Sprintf(
 			"role %q requires membership in one of its allowed groups (%s); the invoker's groups don't qualify",
 			role, strings.Join(ro.AllowedGroups, ", ")))
