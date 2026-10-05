@@ -393,6 +393,7 @@ steps:
 | Description | `description` | string | no | — |
 | Workflows | `workflows` | list of strings | yes (non-empty) | — |
 | AllowedGroups | `allowed_groups` | list of strings | yes (non-empty) | — |
+| Control | `control` | list of strings | no | none — absent means no control-plane permission |
 | BudgetUSDMonth | `budget_usd_month` | float | no | — |
 
 ### `name` / `description`
@@ -419,6 +420,30 @@ the explicit marker for "public"; anything else in the list is treated as a
 real group name and `apply` does not otherwise check group names against an
 external source (see [`docs/concepts.md`](../concepts.md) for how identity
 and groups are used outside of `apply`).
+
+### `control`
+
+Optional. The control-plane operations this role's `allowed_groups` members
+may perform: any of `apply`, `enable`, `disable`, `repair` — the four fixed
+operations, named individually. There is no wildcard spelling and no
+operation is granted by omission: a role with no `control` key (or `control:`
+left null) grants none, and a present-but-empty `control: []` is rejected by
+`apply` with `control-empty`. An unknown token is rejected with
+`control-bad-op`. A role that grants control operations must name real
+groups — `allowed_groups: ["*"]` alongside a non-empty `control` is rejected
+with `public-control-role`, since a public control role would let any
+invoker change governance. A role may grant control operations and own no
+workflows (an operator role): see [`workflows`](#workflows).
+
+How the grant is enforced — which command checks which operation, what a
+refusal records, and the honest limits — is in
+[`docs/control-plane-lifecycle.md`](../control-plane-lifecycle.md).
+
+```yaml
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+```
 
 ### `budget_usd_month`
 
