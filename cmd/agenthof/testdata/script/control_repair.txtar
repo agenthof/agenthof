@@ -35,7 +35,7 @@ exec sh -c 'printf ''{"v":"control/1","seq":2,"partial'' >> control.jsonl'
 ! exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
 stdout 'audit repair control'
 
-exec agenthof audit repair control --control-log control.jsonl --as ops@example.com
+exec agenthof audit repair control --control-log control.jsonl --config examples/config --as ops@example.com --groups platform-eng
 stdout 'repaired: moved \d+ bytes \(sha256=[0-9a-f]{64}\) to .*control\.jsonl\.torn-\d+; control ledger tainted'
 stdout 'control head: seq=2 sha256=[0-9a-f]{64}'
 # exists has no glob support, so confirm the sibling fragment file via a
@@ -52,15 +52,15 @@ stdout 'agent coder disabled'
 stdout 'TAINTED'
 
 # Repairing an already-clean (non-torn) log is refused.
-! exec agenthof audit repair control --control-log clean.jsonl --as ops@example.com
+! exec agenthof audit repair control --control-log clean.jsonl --config examples/config --as ops@example.com --groups platform-eng
 stdout 'not torn; nothing to repair'
 
 # A chain break (not a simple torn tail) is not auto-repairable: a
 # well-formed record whose "prev" disagrees with the chain.
 exec sh -c 'printf ''{"v":"control/1","seq":3,"prev":"deadbeef","time":"2026-01-01T00:00:00Z","action":"enable","outcome":"success","invoker":{},"witness":{}}\n'' >> broken.jsonl'
-! exec agenthof audit repair control --control-log broken.jsonl --as ops@example.com
+! exec agenthof audit repair control --control-log broken.jsonl --config examples/config --as ops@example.com --groups platform-eng
 stdout 'not auto-repairable'
 
 # A control log that was never written to reports plainly, exit 1.
-! exec agenthof audit repair control --control-log never-written.jsonl --as ops@example.com
+! exec agenthof audit repair control --control-log never-written.jsonl --config examples/config --as ops@example.com --groups platform-eng
 stdout 'no control ledger at never-written.jsonl — nothing recorded yet'

@@ -41,7 +41,7 @@ Usage:
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
   agenthof audit control [--control-log <path>]
-  agenthof audit repair control [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
+  agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
   agenthof gateway provision --config <dir> [--admin-base <url>]  (provisions a per-role model key for the reserved model gateway; no run consumes it)
   agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>]
@@ -1017,12 +1017,18 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 }
 
 // cmdAuditRepairControl implements `audit repair control [--control-log
-// <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` (spec §3.6): it
-// resolves the repairing operator's identity exactly as apply/registry
-// do, then hands off to control.Repair to move the torn fragment aside,
-// truncate the live file, and append the chained "repair" event that
-// taints the ledger forever (control.IsTainted; reported by a later
-// `audit verify control` as exit 3).
+// <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]`
+// (spec §3.6): it resolves the repairing operator's identity exactly as
+// apply/registry do, then hands off to control.Repair to move the torn
+// fragment aside, truncate the live file, and append the chained "repair"
+// event that taints the ledger forever (control.IsTainted; reported by a
+// later `audit verify control` as exit 3).
+//
+// The invoker is then authorized against that config's roles
+// (authz.ControlAllows, "repair"); a refusal — like an authentication
+// refusal and like roles that cannot be read — is printed and exits
+// nonzero WITHOUT writing any control event, because the ledger here may
+// be exactly the torn file being repaired.
 //
 // A missing control log is reported plainly rather than as a generic
 // open error, matching cmdAuditControl/cmdAuditVerifyControl. An
@@ -1038,6 +1044,7 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	}
 	fs := flag.NewFlagSet("audit repair control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	cfgDir := fs.String("config", "./config", "config directory; its roles decide who may repair")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
 	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
@@ -1058,6 +1065,26 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 		// this refusal against, unlike apply/registry's refusal path. Print
 		// and exit; do not attempt a control.Append here.
 		_, _ = fmt.Fprintf(out, "audit repair control: token authentication failed: %v\n", verifyErr)
+		return 1
+	}
+
+	// Authorize against the config dir's roles, read without validation
+	// (the ledger may be the torn one, so the config is the only input).
+	// Nothing in this stretch appends: a refusal — or a config whose roles
+	// cannot be read — is printed and exits nonzero, fail-closed, because
+	// the one ledger to record it in is the damaged one. The check runs
+	// before the ledger is even looked at, so a refused caller learns
+	// nothing about it.
+	cfg, loadErrs := config.LoadDir(*cfgDir)
+	if len(loadErrs) > 0 {
+		for _, e := range loadErrs {
+			_, _ = fmt.Fprintln(out, e)
+		}
+		_, _ = fmt.Fprintf(out, "audit repair control: cannot read roles from %s; refusing to repair\n", *cfgDir)
+		return 1
+	}
+	if !authz.ControlAllows(cfg.Roles, inv, "repair") {
+		_, _ = fmt.Fprintf(out, "audit repair control: %s\n", control.NotAuthorized("repair").Message)
 		return 1
 	}
 
