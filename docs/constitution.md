@@ -88,21 +88,30 @@ before anything runs. The engine executes only what validated config
 permits — no hidden capability, no implicit behavior not traceable to a
 config file.
 
-Authorization is default-deny: a role grants access only to invokers whose
-groups appear in its declared `allowed_groups`; the value `["*"]` is the
-explicit marker for a role open to any authenticated invoker; a role that
-declares no access floor at all is rejected at `apply`, never treated as open.
+Authorization is default-deny, at both the run boundary and the control
+plane: a role grants access only to invokers whose groups appear in its
+declared `allowed_groups`; the value `["*"]` is the explicit marker for a role
+open to any authenticated invoker; a role that declares no access floor at all
+is rejected at `apply`, never treated as open.
 A grant that names a set of reachable capabilities — invokers, tools,
 executables — declares which ones; the widest such set is an explicit marker
 (a role's `["*"]`, a tool grant's `mode: all`), and a grant that names none is
-rejected at `apply`, never widened to the maximum. Where a shipped shape
-conflicts with this rule it is retired by amendment — rejected at `apply` with
-its replacement named — never by silently changing what it means.
+rejected at `apply`, never widened to the maximum. One grant is shaped
+differently because its set is internal and fixed: `control:` is an optional
+grant over a fixed, enumerable set of control operations; it carries no widest
+marker, an absent key means no control permission (not "names none"), and a
+present-but-empty `control: []` is rejected at `apply` like any other grant
+that names none. Where a shipped shape conflicts with this rule it is retired
+by amendment — rejected at `apply` with its replacement named — never by
+silently changing what it means.
 
 Schema changes must be backward compatible: additive only,
 never a breaking change to an existing field's meaning. Engine capability
 may grow (e.g. linear+fail-back today, DAG execution later) behind schemas
-that do not change shape for existing users. Control-plane actions (apply, and the enable/disable kill switch) are themselves recorded in a hash-chained control ledger.
+that do not change shape for existing users. Control-plane actions (apply, the enable/disable kill switch, and
+control-ledger repair) are themselves authorized — default-deny, against the
+`control` operations a role declares — and recorded in a hash-chained control
+ledger.
 
 ## Article VII — Scope discipline
 
