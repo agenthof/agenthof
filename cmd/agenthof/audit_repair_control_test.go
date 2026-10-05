@@ -318,7 +318,7 @@ func TestAuditRepairControlUnreadableConfigFailsClosed(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "refusing to repair") {
+	if !strings.Contains(out.String(), "cannot read the configuration at /nonexistent-agenthof-config-root; refusing to repair") {
 		t.Fatalf("missing fail-closed line: %s", out.String())
 	}
 	after, _ := os.ReadFile(controlPath)

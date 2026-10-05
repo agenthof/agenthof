@@ -151,7 +151,7 @@ func cmdApply(args []string, out io.Writer) int {
 	// branch would otherwise have run next.
 	c, err := ledger.Open(*controlLog, ledger.Locked)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s\n", *controlLog)
+		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s --config %s\n", *controlLog, *cfgDir)
 		return 1
 	}
 	_ = c.Close()
@@ -413,7 +413,7 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	// regardless of which branch would otherwise have run next.
 	c, err := ledger.Open(controlLog, ledger.Locked)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s\n", controlLog)
+		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s --config %s\n", controlLog, cfgDir)
 		return 1
 	}
 	_ = c.Close()
@@ -1019,16 +1019,15 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 // cmdAuditRepairControl implements `audit repair control [--control-log
 // <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]`
 // (spec §3.6): it resolves the repairing operator's identity exactly as
-// apply/registry do, then hands off to control.Repair to move the torn
-// fragment aside, truncate the live file, and append the chained "repair"
-// event that taints the ledger forever (control.IsTainted; reported by a
-// later `audit verify control` as exit 3).
-//
-// The invoker is then authorized against that config's roles
-// (authz.ControlAllows, "repair"); a refusal — like an authentication
-// refusal and like roles that cannot be read — is printed and exits
-// nonzero WITHOUT writing any control event, because the ledger here may
-// be exactly the torn file being repaired.
+// apply/registry do and authorizes that invoker against the config's
+// roles (authz.ControlAllows, "repair"); a refusal — like an
+// authentication refusal and like roles that cannot be read — is printed
+// and exits nonzero WITHOUT writing any control event, because the ledger
+// here may be exactly the torn file being repaired. Only an authorized
+// invoker reaches control.Repair, which moves the torn fragment aside,
+// truncates the live file, and appends the chained "repair" event that
+// taints the ledger forever (control.IsTainted; reported by a later
+// `audit verify control` as exit 3).
 //
 // A missing control log is reported plainly rather than as a generic
 // open error, matching cmdAuditControl/cmdAuditVerifyControl. An
@@ -1080,7 +1079,7 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 		for _, e := range loadErrs {
 			_, _ = fmt.Fprintln(out, e)
 		}
-		_, _ = fmt.Fprintf(out, "audit repair control: cannot read roles from %s; refusing to repair\n", *cfgDir)
+		_, _ = fmt.Fprintf(out, "audit repair control: cannot read the configuration at %s; refusing to repair\n", *cfgDir)
 		return 1
 	}
 	if !authz.ControlAllows(cfg.Roles, inv, "repair") {

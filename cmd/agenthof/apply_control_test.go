@@ -257,8 +257,8 @@ func TestApplyTornControlLedgerRefusesWithoutEvent(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected nonzero exit for a damaged control ledger: %s", out.String())
 	}
-	if !strings.Contains(out.String(), "audit repair control") || !strings.Contains(out.String(), controlLog) {
-		t.Fatalf("must name the repair command and the ledger path: %s", out.String())
+	if want := "audit repair control --control-log " + controlLog + " --config " + root; !strings.Contains(out.String(), want) {
+		t.Fatalf("must print the repair hint %q: %s", want, out.String())
 	}
 
 	after, err := os.ReadFile(controlLog)

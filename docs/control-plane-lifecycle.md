@@ -190,7 +190,7 @@ gap that a purely local log can't close on its own.
 ```
 agenthof audit control                          # render the chain + an integrity line
 agenthof audit verify control [--expect-head H] # verify, and optionally check the head
-agenthof audit repair control                   # repair a torn tail (see below)
+agenthof audit repair control [--config <dir>]  # repair a torn tail (see below)
 ```
 
 Integrity is always stated, never assumed. Every read ends with a verdict:
