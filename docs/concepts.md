@@ -271,12 +271,14 @@ reads immediately after the flip — so "who approved what's running", or
 what a rejected config looked like, needs no cross-referencing. (Because
 enabling or disabling an agent rewrites that agent's YAML formatting, the
 hash on a flip event changes on every flip, even one that leaves the
-enabled bit as it was.) A denial is an event too: a failed token, a
-rejected config, and an unknown agent name are all recorded, each with a
-reason code. The one exception is a control log that itself cannot be
-written — torn or broken — where the refusal is loud (naming the repair
-command to run) but unrecorded, since there is no known-good chain left to
-safely record it against. A second, narrower exception exists on
+enabled bit as it was.) A denial is an event too: a failed token, an invoker
+no role grants the operation, a rejected config, and an unknown agent name
+are all recorded, each with a reason code. The one exception is a control log
+that itself cannot be written — torn or broken — where the refusal is loud
+(naming the repair command to run) but unrecorded, since there is no
+known-good chain left to safely record it against; for the same reason a
+refused ledger repair is printed, never recorded. A second, narrower
+exception exists on
 `enable`/`disable`: if the enabled bit is flipped but computing the fresh
 hash or appending the event then fails, the command prints "state changed;
 event NOT recorded" and exits nonzero — the one case where the registry's

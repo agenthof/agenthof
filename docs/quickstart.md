@@ -18,18 +18,24 @@ every example agent's `endpoint` to match:
 Then, from the repository root:
 
     go build -o agenthof ./cmd/agenthof
-    ./agenthof apply --as you@example.com --config examples/config
+    ./agenthof apply --as you@example.com --groups platform-eng --config examples/config
     ./agenthof run software-engineer fix-bug --input "fix the login bug" --as you@example.com --config examples/config
     ./agenthof audit <run-id>
 
 Expected output from `apply`:
 
-    registry ok: 5 agents, 2 workflows, 2 roles
+    registry ok: 5 agents, 2 workflows, 3 roles
     control head: seq=1 sha256=<hex>
 
 The `control head` line is the control ledger recording the apply (see the
 control-plane audit below); the `seq` advances with each control action and
 the hash varies.
+
+The `--groups platform-eng` is the authorization:
+`examples/config/roles/platform-admin.yaml` grants `apply`, `enable`,
+`disable`, and `repair` to that group and owns no workflows. Drop the flag and
+the apply is refused — recorded as `refused`/`not_authorized`, with the hash of
+the config you tried to apply.
 
 `run` prints the run id it assigned (`run <run-id> finished: succeeded`).
 Pass that id to `audit`. With the echo agent, each of the three steps
@@ -49,8 +55,8 @@ and [`docs/demo.md`](demo.md) for the AUDIT and GOVERNANCE walkthroughs.
 
 Try the kill switch:
 
-    ./agenthof registry disable coder --as you@example.com --config examples/config
-    ./agenthof apply --as you@example.com --config examples/config   # fails, naming every dependent workflow
+    ./agenthof registry disable coder --as you@example.com --groups platform-eng --config examples/config
+    ./agenthof apply --as you@example.com --groups platform-eng --config examples/config   # fails, naming every dependent workflow
 
 The disable is itself recorded in the control ledger, attributed to `--as`.
 (`disable`/`enable` also rewrites `coder.yaml`'s YAML formatting, so `git status`
