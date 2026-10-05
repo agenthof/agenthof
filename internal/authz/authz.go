@@ -7,7 +7,12 @@
 // of two drifting copies.
 package authz
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/identity"
+)
 
 // ControlOps is the fixed, enumerable set of control-plane operations a role
 // may be granted through its control: list. The set is internal and fixed, so
@@ -37,4 +42,31 @@ func GroupsIntersect(invokerGroups, allowedGroups []string) bool {
 // gate should never see one, but it denies defensively.
 func GroupsAllow(invokerGroups, allowedGroups []string) bool {
 	return slices.Contains(allowedGroups, "*") || GroupsIntersect(invokerGroups, allowedGroups)
+}
+
+// ControlAllows is the control-plane default-deny decision: the invoker may
+// perform op iff some role both lists op in its control: grant AND names one
+// of the invoker's groups in allowed_groups — membership AND grant, never the
+// grant alone. It never honors the "*" marker, on either side: a public role
+// grants no control operation, and an invoker claiming the group "*" is not a
+// member of anything. The callers that authorize enable/disable/repair read
+// the config dir without validation, so the apply-time public-control-role
+// rejection cannot be relied on here — this is the guard. An op outside
+// ControlOps is denied regardless of what a role lists, so a typo in a raw,
+// never-applied config grants nothing.
+func ControlAllows(roles []config.RoleDef, inv identity.Invoker, op string) bool {
+	if !KnownControlOp(op) {
+		return false
+	}
+	for _, r := range roles {
+		if !slices.Contains(r.Control, op) {
+			continue
+		}
+		for _, g := range inv.Groups {
+			if g != "*" && slices.Contains(r.AllowedGroups, g) {
+				return true
+			}
+		}
+	}
+	return false
 }
