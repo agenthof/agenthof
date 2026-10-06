@@ -16,6 +16,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/audit"
+	"github.com/agenthof/agenthof/internal/authz"
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/control"
@@ -40,7 +41,7 @@ Usage:
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
   agenthof audit control [--control-log <path>]
-  agenthof audit repair control [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
+  agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
   agenthof gateway provision --config <dir> [--admin-base <url>]  (provisions a per-role model key for the reserved model gateway; no run consumes it)
   agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>]
@@ -119,8 +120,11 @@ var hashConfigDir = config.HashDir
 // outcome "error"/io_error with no config_hash when it can't (the bytes
 // are genuinely unreadable); a validation failure likewise records outcome
 // "rejected"/validation_failed with a config_hash over the rejected
-// bytes. Apply never mutates files, so unlike cmdRegistryFlip there is no
-// "state changed; event NOT recorded" case — a failed success/rejected
+// bytes. After LoadDir succeeds the invoker is authorized against the
+// proposed config's roles (authz.ControlAllows, "apply"); a refusal is
+// recorded refused/not_authorized with the config_hash, before any
+// validation runs. Apply never mutates files, so unlike cmdRegistryFlip
+// there is no "state changed; event NOT recorded" case — a failed success/rejected
 // Append is just reported and the process exits nonzero.
 func cmdApply(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
@@ -147,7 +151,7 @@ func cmdApply(args []string, out io.Writer) int {
 	// branch would otherwise have run next.
 	c, err := ledger.Open(*controlLog, ledger.Locked)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s\n", *controlLog)
+		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s --config %s\n", *controlLog, *cfgDir)
 		return 1
 	}
 	_ = c.Close()
@@ -206,6 +210,39 @@ func cmdApply(args []string, out io.Writer) int {
 			event.ConfigHash = ""
 		}
 		head, appendErr := control.Append(*controlLog, event)
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+
+	// Authorize BEFORE validation, against the proposed config's own roles:
+	// a caller no role grants `apply` learns one refusal — never the proposed
+	// config's validation errors. In CLI mode the filesystem is the root of
+	// trust (whoever can edit the config dir can edit control:), so this is
+	// a recorded default-deny decision, not a wall against a
+	// filesystem-privileged actor; docs/control-plane-lifecycle.md says so.
+	if !authz.ControlAllows(cfg.Roles, inv, "apply") {
+		reason := control.NotAuthorized("apply")
+		_, _ = fmt.Fprintf(out, "apply: %s\n", reason.Message)
+		// The refused event carries the hash of what the unauthorized party
+		// tried to apply — that is the forensic value of recording it. The
+		// same rule as success/rejected applies: no hash, no refused record.
+		h, hashErr := hashConfigDir(*cfgDir)
+		if hashErr != nil {
+			return appendApplyHashFailure(*controlLog, inv, assertedAs, hashErr, out)
+		}
+		head, appendErr := control.Append(*controlLog, control.Event{
+			Action:     "apply",
+			Outcome:    "refused",
+			Reason:     reason,
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+			ConfigHash: h,
+		})
 		if appendErr != nil {
 			_, _ = fmt.Fprintln(out, appendErr)
 			return 1
@@ -376,7 +413,7 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	// regardless of which branch would otherwise have run next.
 	c, err := ledger.Open(controlLog, ledger.Locked)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s\n", controlLog)
+		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s --config %s\n", controlLog, cfgDir)
 		return 1
 	}
 	_ = c.Close()
@@ -413,7 +450,8 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	// outcome "error", reason io_error — rather than a silent, unlogged
 	// exit; it is still never conflated with "agent not found", which is
 	// reserved for a config that loaded cleanly and genuinely lacks the
-	// name.
+	// name. LoadDir — not Build — also supplies the roles the invoker is
+	// authorized against below.
 	cfg, loadErrs := config.LoadDir(cfgDir)
 	if len(loadErrs) > 0 {
 		for _, e := range loadErrs {
@@ -435,6 +473,32 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
 		return 1
 	}
+
+	// Authorize against the config dir's roles as LoadDir read them — never
+	// registry.Build: with the target agent disabled, Build rejects the
+	// config (disabled-agent-ref), which would make a disabled agent
+	// un-re-enableable. Authorization runs before the agent lookup so an
+	// unauthorized caller learns one refusal and cannot probe agent names.
+	if !authz.ControlAllows(cfg.Roles, inv, action) {
+		reason := control.NotAuthorized(action)
+		_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, reason.Message)
+		head, appendErr := control.Append(controlLog, control.Event{
+			Action:     action,
+			Agent:      target,
+			Outcome:    "refused",
+			Reason:     reason,
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+
 	known := false
 	for _, a := range cfg.Agents {
 		if a.Name == target {
@@ -737,6 +801,12 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 	}
 	p := gateway.Provisioner{AdminBase: *adminBase, MasterKey: masterKey, HTTP: http.DefaultClient}
 	for _, role := range cfg.Roles {
+		// A control-only role runs nothing, so it needs no provider key: a
+		// key with budget $0 would be a credential nothing consumes.
+		if len(role.Workflows) == 0 {
+			_, _ = fmt.Fprintf(out, "role %s: owns no workflows; no key provisioned\n", role.Name)
+			continue
+		}
 		created, err := p.EnsureRoleKey(".", role)
 		if err != nil {
 			_, _ = fmt.Fprintf(out, "role %s: %v\n", role.Name, err)
@@ -947,10 +1017,15 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 }
 
 // cmdAuditRepairControl implements `audit repair control [--control-log
-// <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` (spec §3.6): it
-// resolves the repairing operator's identity exactly as apply/registry
-// do, then hands off to control.Repair to move the torn fragment aside,
-// truncate the live file, and append the chained "repair" event that
+// <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]`
+// (spec §3.6): it resolves the repairing operator's identity exactly as
+// apply/registry do and authorizes that invoker against the config's
+// roles (authz.ControlAllows, "repair"); a refusal — like an
+// authentication refusal and like roles that cannot be read — is printed
+// and exits nonzero WITHOUT writing any control event, because the ledger
+// here may be exactly the torn file being repaired. Only an authorized
+// invoker reaches control.Repair, which moves the torn fragment aside,
+// truncates the live file, and appends the chained "repair" event that
 // taints the ledger forever (control.IsTainted; reported by a later
 // `audit verify control` as exit 3).
 //
@@ -968,6 +1043,7 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	}
 	fs := flag.NewFlagSet("audit repair control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	cfgDir := fs.String("config", "./config", "config directory; its roles decide who may repair")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
 	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
@@ -988,6 +1064,26 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 		// this refusal against, unlike apply/registry's refusal path. Print
 		// and exit; do not attempt a control.Append here.
 		_, _ = fmt.Fprintf(out, "audit repair control: token authentication failed: %v\n", verifyErr)
+		return 1
+	}
+
+	// Authorize against the config dir's roles, read without validation
+	// (the ledger may be the torn one, so the config is the only input).
+	// Nothing in this stretch appends: a refusal — or a config whose roles
+	// cannot be read — is printed and exits nonzero, fail-closed, because
+	// the one ledger to record it in is the damaged one. The check runs
+	// before the ledger is even looked at, so a refused caller learns
+	// nothing about it.
+	cfg, loadErrs := config.LoadDir(*cfgDir)
+	if len(loadErrs) > 0 {
+		for _, e := range loadErrs {
+			_, _ = fmt.Fprintln(out, e)
+		}
+		_, _ = fmt.Fprintf(out, "audit repair control: cannot read the configuration at %s; refusing to repair\n", *cfgDir)
+		return 1
+	}
+	if !authz.ControlAllows(cfg.Roles, inv, "repair") {
+		_, _ = fmt.Fprintf(out, "audit repair control: %s\n", control.NotAuthorized("repair").Message)
 		return 1
 	}
 

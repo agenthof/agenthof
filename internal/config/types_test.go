@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -428,5 +429,36 @@ func TestExecConfigNullBlockStaysUndeclared(t *testing.T) {
 	}
 	if a.Exec.Declared() {
 		t.Fatalf("a bare exec: with no value must stay undeclared, got %+v", a.Exec)
+	}
+}
+
+// TestRoleControlParse pins the decoding the control-empty validation rule
+// depends on: an absent key and an explicit null both leave Control nil (no
+// control permission); a present-but-empty list is a non-nil empty slice
+// (rejected at apply); a list decodes verbatim.
+func TestRoleControlParse(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want []string // nil = absent
+	}{
+		{"absent", "name: r\nallowed_groups: [a]\n", nil},
+		{"null", "name: r\nallowed_groups: [a]\ncontrol:\n", nil},
+		{"present-empty", "name: r\nallowed_groups: [a]\ncontrol: []\n", []string{}},
+		{"listed", "name: r\nallowed_groups: [a]\ncontrol: [apply, repair]\n", []string{"apply", "repair"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var r RoleDef
+			if err := yaml.Unmarshal([]byte(tc.src), &r); err != nil {
+				t.Fatal(err)
+			}
+			if (r.Control == nil) != (tc.want == nil) {
+				t.Fatalf("control nil-ness: got %#v, want %#v", r.Control, tc.want)
+			}
+			if !slices.Equal(r.Control, tc.want) {
+				t.Fatalf("control: got %v, want %v", r.Control, tc.want)
+			}
+		})
 	}
 }

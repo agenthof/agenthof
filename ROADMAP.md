@@ -65,6 +65,12 @@ The governed core is real and runnable today:
   control` read, verify, and recover it. `agenthof investigate` merges this
   control ledger with the run ledgers into one timeline — human-readable or
   `--json` — each source carrying its own verification verdict.
+  Those control actions are themselves **authorized, default-deny**: a
+  role's `control:` grant names which of `apply`, `enable`, `disable`, and
+  `repair` its groups may perform — each named explicitly, no wildcard,
+  nothing by omission — and a caller no role grants is refused and the
+  refusal recorded (a refused ledger repair is printed, not recorded, since
+  the ledger it would go to is the damaged one).
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
   reach declared MCP tool resources only through Agenthof, which mirrors a
   whole resource (written `mode: all` — every-tool access is always an

@@ -17,7 +17,7 @@ func TestApplyRejectsRoleWithNoAccessFloor(t *testing.T) {
 	}
 	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
 	var out bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com"}, &out); code != 1 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 {
 		t.Fatalf("apply should fail for a role with no access floor; code=%d out=%s", code, out.String())
 	}
 	// ValidationError.Error() (internal/registry/validate.go) prints the

@@ -1,0 +1,35 @@
+# A role whose control: key is present but names no operations is rejected at
+# apply: an empty grant is an operator mistake, not "no permission". The
+# separate, well-formed platform-admin role is what authorizes the applier —
+# without it the broken role's own grant would never reach validation.
+
+! exec agenthof apply --config config --control-log control.jsonl --as ops@example.com --groups platform-eng
+stdout 'roles/empty\.yaml: empty: control is present but names no operations'
+! stdout 'registry ok'
+grep '"outcome":"rejected"' control.jsonl
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+-- config/roles/empty.yaml --
+name: empty
+workflows: [plan-only]
+allowed_groups: [release]
+control: []
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

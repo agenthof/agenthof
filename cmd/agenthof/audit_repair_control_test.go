@@ -21,7 +21,7 @@ func TestAuditRepairControlTornTailSucceeds(t *testing.T) {
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var applyOut bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com"}, &applyOut); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &applyOut); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, applyOut.String())
 	}
 
@@ -43,7 +43,7 @@ func TestAuditRepairControlTornTailSucceeds(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--as", "ops@example.com"}, &out)
+	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", root, "--as", "ops@example.com", "--groups", "platform-eng"}, &out)
 	if code != 0 {
 		t.Fatalf("repair: exit %d\n%s", code, out.String())
 	}
@@ -79,7 +79,7 @@ func TestAuditRepairControlTerminatedUnparseableLineTaints(t *testing.T) {
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
 
 	var applyOut bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com"}, &applyOut); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &applyOut); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, applyOut.String())
 	}
 
@@ -101,7 +101,7 @@ func TestAuditRepairControlTerminatedUnparseableLineTaints(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--as", "ops@example.com"}, &out)
+	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", root, "--as", "ops@example.com", "--groups", "platform-eng"}, &out)
 	if code != 0 {
 		t.Fatalf("repair: exit %d\n%s", code, out.String())
 	}
@@ -138,12 +138,12 @@ func TestAuditRepairControlCleanLogRefused(t *testing.T) {
 	root := writeSample(t)
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
 	var applyOut bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com"}, &applyOut); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &applyOut); code != 0 {
 		t.Fatalf("apply: exit %d\n%s", code, applyOut.String())
 	}
 
 	var out bytes.Buffer
-	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--as", "ops@example.com"}, &out)
+	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", root, "--as", "ops@example.com", "--groups", "platform-eng"}, &out)
 	if code == 0 {
 		t.Fatalf("expected nonzero exit repairing a clean log: %s", out.String())
 	}
@@ -155,6 +155,7 @@ func TestAuditRepairControlCleanLogRefused(t *testing.T) {
 // TestAuditRepairControlChainBrokenRefused covers Repair's refusal (via
 // the command) on a mid-file chain break, naming the broken line.
 func TestAuditRepairControlChainBrokenRefused(t *testing.T) {
+	root := writeSample(t)
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
 	const broken = `{"v":"control/1","seq":1,"prev":"deadbeef","time":"2026-01-01T00:00:00Z","action":"apply","outcome":"success","invoker":{},"witness":{},"log_id":"x"}` + "\n"
 	if err := os.WriteFile(controlPath, []byte(broken), 0o600); err != nil {
@@ -162,7 +163,7 @@ func TestAuditRepairControlChainBrokenRefused(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--as", "ops@example.com"}, &out)
+	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", root, "--as", "ops@example.com", "--groups", "platform-eng"}, &out)
 	if code == 0 {
 		t.Fatalf("expected nonzero exit repairing a chain-broken log: %s", out.String())
 	}
@@ -175,16 +176,42 @@ func TestAuditRepairControlChainBrokenRefused(t *testing.T) {
 // never been written to: reported plainly, exit 1, matching
 // cmdAuditControl/cmdAuditVerifyControl's own wording.
 func TestAuditRepairControlMissingLogExitsOne(t *testing.T) {
+	root := writeSample(t)
 	controlPath := filepath.Join(t.TempDir(), "never-written.jsonl")
 
 	var out bytes.Buffer
-	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--as", "ops@example.com"}, &out)
+	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", root, "--as", "ops@example.com", "--groups", "platform-eng"}, &out)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1: %s", code, out.String())
 	}
 	want := "no control ledger at " + controlPath + " — nothing recorded yet\n"
 	if out.String() != want {
 		t.Fatalf("output = %q, want %q", out.String(), want)
+	}
+}
+
+// TestAuditRepairControlNotAuthorizedPrecedesMissingLedgerCheck: authorization
+// runs before the "no control ledger at …" existence check, so an unauthorized
+// caller learns only that they are not authorized — never whether a ledger
+// exists — and nothing is written.
+func TestAuditRepairControlNotAuthorizedPrecedesMissingLedgerCheck(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "never-written.jsonl")
+
+	var out bytes.Buffer
+	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", root, "--as", "mallory@example.com", "--groups", "finance"}, &out)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "not authorized: no role grants repair to the invoker") {
+		t.Fatalf("want a not-authorized refusal, got: %q", out.String())
+	}
+	if strings.Contains(out.String(), "no control ledger at") {
+		t.Fatalf("leaked ledger existence to an unauthorized caller: %q", out.String())
+	}
+	if _, err := os.Stat(controlPath); !os.IsNotExist(err) {
+		t.Fatalf("a refused repair must write nothing; stat(%s) err = %v", controlPath, err)
 	}
 }
 
@@ -263,5 +290,80 @@ func TestAuditRepairControlTokenRefusedDoesNotAppend(t *testing.T) {
 	}
 	if matches, _ := filepath.Glob(controlPath + ".torn-*"); len(matches) != 0 {
 		t.Fatalf("a refused token must not create a fragment file: %v", matches)
+	}
+}
+
+// tornLedger seeds a torn-tail control log and returns its path and bytes.
+func tornLedger(t *testing.T) (string, []byte) {
+	t.Helper()
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+	torn := []byte(`{"v":"control/1","seq":1,"prev":""`)
+	if err := os.WriteFile(controlPath, torn, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return controlPath, torn
+}
+
+// TestAuditRepairControlNotAuthorizedLeavesLedgerUntouched: a caller no role
+// grants `repair` is refused — printed, not recorded, because the only ledger
+// to record it in is the damaged one — and nothing on disk changes.
+func TestAuditRepairControlNotAuthorizedLeavesLedgerUntouched(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath, torn := tornLedger(t)
+
+	var out bytes.Buffer
+	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", root, "--as", "mallory@example.com", "--groups", "finance"}, &out)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "audit repair control: not authorized: no role grants repair to the invoker") {
+		t.Fatalf("missing refusal line: %s", out.String())
+	}
+	after, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(torn) {
+		t.Fatalf("a refused repair must not touch the ledger; got:\n%s", after)
+	}
+	if matches, _ := filepath.Glob(controlPath + ".torn-*"); len(matches) != 0 {
+		t.Fatalf("a refused repair must not create a fragment: %v", matches)
+	}
+}
+
+// TestAuditRepairControlUnreadableConfigFailsClosed: roles that cannot be
+// read mean nobody can be authorized — print, exit 1, touch nothing.
+func TestAuditRepairControlUnreadableConfigFailsClosed(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	controlPath, torn := tornLedger(t)
+
+	var out bytes.Buffer
+	code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", "/nonexistent-agenthof-config-root", "--groups", "platform-eng"}, &out)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "cannot read the configuration at /nonexistent-agenthof-config-root; refusing to repair") {
+		t.Fatalf("missing fail-closed line: %s", out.String())
+	}
+	after, _ := os.ReadFile(controlPath)
+	if string(after) != string(torn) {
+		t.Fatalf("ledger must be untouched; got:\n%s", after)
+	}
+}
+
+// TestAuditRepairControlDefaultConfigDir: --config defaults to ./config, as
+// apply and registry do.
+func TestAuditRepairControlDefaultConfigDir(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	t.Chdir(filepath.Dir(root))
+	if err := os.Rename(root, filepath.Join(filepath.Dir(root), "config")); err != nil {
+		t.Fatal(err)
+	}
+	controlPath, _ := tornLedger(t)
+	var out bytes.Buffer
+	if code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--as", "ops@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("repair with the default ./config: %d\n%s", code, out.String())
 	}
 }

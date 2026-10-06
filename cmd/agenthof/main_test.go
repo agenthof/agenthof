@@ -310,6 +310,7 @@ func writeSample(t *testing.T) string {
 		"agents/coder.yaml":      "name: coder\nmodel: fast\ninstruction: code\noutput: patch\n" + ep,
 		"workflows/fix-bug.yaml": "name: fix-bug\nsteps:\n  - name: plan\n    agent: planner\n  - name: code\n    agent: coder\n    on_failure: plan\n",
 		"roles/se.yaml":          "name: software-engineer\nworkflows: [fix-bug]\nallowed_groups: [\"*\"]\n",
+		"roles/ops.yaml":         "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair]\n",
 		"gateway.yaml":           "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\n",
 	}
 	for rel, content := range files {
@@ -331,19 +332,19 @@ func TestApplyOKAndFailure(t *testing.T) {
 	// otherwise be created next to the test binary, outside t.TempDir()).
 	controlLog := filepath.Join(root, "control.jsonl")
 	var out bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out); code != 0 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("apply: %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "registry ok: 2 agents, 1 workflows, 1 roles") {
+	if !strings.Contains(out.String(), "registry ok: 2 agents, 1 workflows, 2 roles") {
 		t.Fatalf("out: %s", out.String())
 	}
 	// break it: disable coder, apply must fail naming fix-bug
 	out.Reset()
-	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlLog}, &out); code != 0 {
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("disable: %s", out.String())
 	}
 	out.Reset()
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out); code != 1 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out); code != 1 {
 		t.Fatal("apply must fail with a disabled dependency")
 	}
 	if !strings.Contains(out.String(), "fix-bug") || !strings.Contains(out.String(), "disabled") {
@@ -360,7 +361,7 @@ func TestApplyFailsOnFrontedAgentMissingEndpoint(t *testing.T) {
 	}
 	controlLog := filepath.Join(root, "control.jsonl")
 	var out bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog}, &out); code != 1 {
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out); code != 1 {
 		t.Fatalf("apply must fail with fronted agent missing endpoint, got code %d\n%s", code, out.String())
 	}
 	if !strings.Contains(out.String(), "helper") {
@@ -994,7 +995,7 @@ func TestRunValidationFailureIsLedgered(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "") // a token exported in the ambient shell must not divert this static-path test onto OIDC
 	root := writeSample(t)
 	var discard bytes.Buffer
-	if code := cmdRegistry([]string{"disable", "coder", "--config", root}, &discard); code != 0 {
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--groups", "platform-eng"}, &discard); code != 0 {
 		t.Fatalf("disable: %d\n%s", code, discard.String())
 	}
 	logs := t.TempDir()
@@ -1719,4 +1720,44 @@ func stubCallSpawn(proxyURL, token, spec string) (string, error) {
 		detail = out.Reason
 	}
 	return strings.TrimSpace(fmt.Sprintf("spawn %s %s %s", out.Status, id, detail)), nil
+}
+
+// TestGatewayProvisionSkipsWorkflowLessRole: a control-only role runs nothing,
+// so provision mints it no provider key — a key with budget $0 would be a
+// credential nothing consumes. The mock counts key generations.
+func TestGatewayProvisionSkipsWorkflowLessRole(t *testing.T) {
+	root := writeSample(t)
+	if err := os.WriteFile(filepath.Join(root, "roles", "se.yaml"), []byte("name: software-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 50\nallowed_groups: [\"*\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "roles", "ops.yaml"), []byte("name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	generated := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/key/generate" {
+			generated++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"key":"sk-test"}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	t.Chdir(t.TempDir())
+
+	var out bytes.Buffer
+	if code := cmdGateway([]string{"provision", "--config", root, "--admin-base", srv.URL}, &out); code != 0 {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "role platform-admin: owns no workflows; no key provisioned") {
+		t.Fatalf("missing skip line: %s", out.String())
+	}
+	if generated != 1 {
+		t.Fatalf("key generations = %d, want 1 (software-engineer only)", generated)
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "platform-admin.key")); !os.IsNotExist(err) {
+		t.Fatalf("a control-only role must get no key file; stat err = %v", err)
+	}
 }

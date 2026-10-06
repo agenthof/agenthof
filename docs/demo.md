@@ -64,12 +64,12 @@ Demonstrates how roles, workflows, and agents are defined in YAML and validated 
 
 ```bash
 cd <path-to-your-clone>
-./agenthof apply --as dana@example.com --config examples/config
+./agenthof apply --as dana@example.com --groups platform-eng --config examples/config
 ```
 
 Expected output:
 ```
-registry ok: 5 agents, 2 workflows, 2 roles
+registry ok: 5 agents, 2 workflows, 3 roles
 control head: seq=1 sha256=<hex>
 ```
 
@@ -79,9 +79,14 @@ increments with each control action and the hash varies. The registry now
 includes:
 - 5 agents: planner, coder, reviewer, categorizer, reconciler
 - 2 workflows: fix-bug, reconcile-lite
-- 2 roles: software-engineer, accountant — `software-engineer` declares
-  `allowed_groups: ["*"]` (open to any authenticated invoker), while
-  `accountant` declares `allowed_groups: [finance]` (gated to that group)
+- 3 roles: software-engineer, accountant, platform-admin — `software-engineer`
+  declares `allowed_groups: ["*"]` (open to any authenticated invoker),
+  `accountant` declares `allowed_groups: [finance]` (gated to that group), and
+  `platform-admin` owns no workflows but grants the control-plane operations
+  (`control: [apply, enable, disable, repair]`) to the `platform-eng` group —
+  which is why every `apply` and kill-switch command in this demo passes
+  `--groups platform-eng`. A caller no role grants is refused, and the refusal
+  is recorded.
 
 ### 1.2 Edit an agent instruction and re-apply
 
@@ -100,12 +105,12 @@ Edit `examples/config/agents/reviewer.yaml` and change the instruction:
 Then re-apply:
 
 ```bash
-./agenthof apply --as dana@example.com --config examples/config
+./agenthof apply --as dana@example.com --groups platform-eng --config examples/config
 ```
 
 Expected output (the `seq` has advanced — this is the second control action):
 ```
-registry ok: 5 agents, 2 workflows, 2 roles
+registry ok: 5 agents, 2 workflows, 3 roles
 control head: seq=2 sha256=<hex>
 ```
 
@@ -116,7 +121,7 @@ Configuration changes are validated immediately; no stale configs can propagate.
 Disable the coder agent:
 
 ```bash
-./agenthof registry disable coder --as dana@example.com --config examples/config
+./agenthof registry disable coder --as dana@example.com --groups platform-eng --config examples/config
 ```
 
 Expected output (the kill-switch flip is recorded in the control ledger,
@@ -129,7 +134,7 @@ control head: seq=3 sha256=<hex>
 Now try to apply:
 
 ```bash
-./agenthof apply --as dana@example.com --config examples/config
+./agenthof apply --as dana@example.com --groups platform-eng --config examples/config
 ```
 
 Expected output:
@@ -142,7 +147,7 @@ The registry refuses to load because fix-bug depends on coder, which is now disa
 Re-enable the agent:
 
 ```bash
-./agenthof registry enable coder --as dana@example.com --config examples/config
+./agenthof registry enable coder --as dana@example.com --groups platform-eng --config examples/config
 ```
 
 Expected output:
@@ -154,12 +159,12 @@ control head: seq=5 sha256=<hex>
 Verify the registry is healthy again:
 
 ```bash
-./agenthof apply --as dana@example.com --config examples/config
+./agenthof apply --as dana@example.com --groups platform-eng --config examples/config
 ```
 
 Expected output:
 ```
-registry ok: 5 agents, 2 workflows, 2 roles
+registry ok: 5 agents, 2 workflows, 3 roles
 control head: seq=6 sha256=<hex>
 ```
 
@@ -437,9 +442,9 @@ One identity pulls an agent's kill switch; another tries to run:
 
 ```bash
 # run in a fresh working directory (or after `rm -rf .agenthof`) for the output shown
-./agenthof apply --as dana@example.com --config examples/config
+./agenthof apply --as dana@example.com --groups platform-eng --config examples/config
 ./agenthof run software-engineer fix-bug --input "fix the login bug" --as dana@example.com --config examples/config
-./agenthof registry disable coder --as ops@example.com --config examples/config
+./agenthof registry disable coder --as ops@example.com --groups platform-eng --config examples/config
 ./agenthof run software-engineer fix-bug --input "urgent prod bug" --as dana@example.com --config examples/config
 ```
 

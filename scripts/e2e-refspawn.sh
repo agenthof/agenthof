@@ -202,6 +202,7 @@ name: lead
 description: Runs the parent workflow
 workflows: [lead-wf]
 allowed_groups: ["refbox-users"]
+control: [apply]
 EOF
 cat >"$WORK/config/roles/worker.yaml" <<EOF
 name: worker

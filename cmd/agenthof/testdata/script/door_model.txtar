@@ -4,8 +4,8 @@
 
 env AGENTHOF_GATEWAY_KEY=dummy
 
-exec agenthof apply --config config
-stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+exec agenthof apply --config config --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
 
 exec agenthof run se model-demo --input 'model:fast' --as tester --config config --log-dir logs --artifact-dir artifacts
 stdout 'finished: succeeded'
@@ -32,6 +32,10 @@ steps:
 name: se
 workflows: [model-demo]
 allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
 -- config/gateway.yaml --
 models:
   fast:

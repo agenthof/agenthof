@@ -115,7 +115,7 @@ func TestValidateDuplicatesAndEmptiness(t *testing.T) {
 	cfg.Workflows = append(cfg.Workflows, config.WorkflowDef{Name: "empty", SourceFile: "workflows/empty.yaml"})
 	cfg.Roles = append(cfg.Roles, config.RoleDef{Name: "idle", AllowedGroups: []string{"*"}, SourceFile: "roles/idle.yaml"})
 	c := codes(Validate(cfg))
-	if c["duplicate-name"] != 1 || c["no-steps"] != 1 || c["no-workflows"] != 1 {
+	if c["duplicate-name"] != 1 || c["no-steps"] != 1 || c["no-capability"] != 1 {
 		t.Fatalf("codes: %v", c)
 	}
 }
@@ -716,5 +716,74 @@ func TestValidateToolResourceRuntime(t *testing.T) {
 				t.Fatalf("bad-tool-resource = %v, want %v", got, c.bad)
 			}
 		})
+	}
+}
+
+func roleOnlyCfg(role config.RoleDef) config.Config {
+	cfg := baseCfg()
+	role.SourceFile = "roles/x.yaml"
+	cfg.Roles = append(cfg.Roles, role)
+	return cfg
+}
+
+// TestValidateControlGrants covers the four control: rules (spec §7): known
+// tokens only, present-empty rejected, no public control role, and a role
+// must own a workflow OR grant a control operation.
+func TestValidateControlGrants(t *testing.T) {
+	cases := []struct {
+		name     string
+		role     config.RoleDef
+		wantCode string
+		wantMsg  string
+	}{
+		{"unknown token", config.RoleDef{Name: "x", AllowedGroups: []string{"ops"}, Control: []string{"apply", "nuke"}},
+			"control-bad-op", `control names "nuke", which is not a control operation (apply, enable, disable, repair)`},
+		{"present-empty", config.RoleDef{Name: "x", Workflows: []string{"fix-bug"}, AllowedGroups: []string{"ops"}, Control: []string{}},
+			"control-empty", "control is present but names no operations"},
+		{"public control role", config.RoleDef{Name: "x", AllowedGroups: []string{"*"}, Control: []string{"disable"}},
+			"public-control-role", `must name real groups in allowed_groups, not ["*"]`},
+		{"neither workflows nor control", config.RoleDef{Name: "x", AllowedGroups: []string{"ops"}},
+			"no-capability", "role owns no workflows and grants no control operations"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := Validate(roleOnlyCfg(tc.role))
+			found := false
+			for _, e := range errs {
+				if e.Code == tc.wantCode {
+					found = true
+					if !strings.Contains(e.Msg, tc.wantMsg) {
+						t.Fatalf("%s message = %q, want it to contain %q", tc.wantCode, e.Msg, tc.wantMsg)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("expected %s, got %v", tc.wantCode, errs)
+			}
+		})
+	}
+}
+
+// TestValidateControlOnlyRoleIsACapability: a role that grants control
+// operations and owns no workflows is legitimate (an operator role) — the
+// old no-workflows rule is relaxed to no-capability.
+func TestValidateControlOnlyRoleIsACapability(t *testing.T) {
+	errs := Validate(roleOnlyCfg(config.RoleDef{Name: "platform-admin", AllowedGroups: []string{"platform-eng"}, Control: []string{"apply", "enable", "disable", "repair"}}))
+	if len(errs) != 0 {
+		t.Fatalf("a control-only role must validate; got %v", errs)
+	}
+	if hasCode(Validate(baseCfg()), "no-workflows") {
+		t.Fatal("no-workflows no longer exists")
+	}
+}
+
+// TestValidateAbsentControlIsFine: no control: key grants nothing and is not
+// an error — the grant is optional.
+func TestValidateAbsentControlIsFine(t *testing.T) {
+	c := codes(Validate(baseCfg()))
+	for _, code := range []string{"control-empty", "control-bad-op", "public-control-role", "no-capability"} {
+		if c[code] != 0 {
+			t.Fatalf("unexpected %s on a role with no control key: %v", code, c)
+		}
 	}
 }

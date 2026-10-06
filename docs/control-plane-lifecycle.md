@@ -18,10 +18,10 @@ a later version, it says so — only shipped behavior is a guarantee.
 Three commands write to the control plane:
 
 ```
-agenthof apply --config ./config --as dana@example.com          # adopt a configuration
-agenthof registry disable coder --config ./config --as dana@example.com   # the kill switch
-agenthof registry enable  coder --config ./config --as dana@example.com   # …and back on
-agenthof audit repair control --as dana@example.com             # repair a torn ledger tail
+agenthof apply --config ./config --as dana@example.com --groups platform-eng                   # adopt a configuration
+agenthof registry disable coder --config ./config --as dana@example.com --groups platform-eng  # the kill switch
+agenthof registry enable  coder --config ./config --as dana@example.com --groups platform-eng  # …and back on
+agenthof audit repair control --config ./config --as dana@example.com --groups platform-eng    # repair a torn ledger tail
 ```
 
 Each one is an *attempt* to change governance state, and each attempt — whether
@@ -39,17 +39,20 @@ a record you can later verify**.
   1. Who is changing it?   authenticate  ──►  Invoker {subject, issuer, method}
       │                                        + asserted_as (claimed) + witness (machine)
       ▼
-  2. Is the change valid?  validate  ──►  no ──►  rejected / refused  (recorded, then stop)
+  2. May they change it?    authorize  ──►  no ──►  refused / not_authorized (recorded*, then stop)
+      │ yes                                           *repair: printed, not recorded (see below)
+      ▼
+  3. Is the change valid?  validate  ──►  no ──►  rejected / refused  (recorded, then stop)
       │ yes
       ▼
-  3. Record it            open the Locked ledger, append a control/1 event:
+  4. Record it            open the Locked ledger, append a control/1 event:
       │                     { action, outcome, invoker, witness, config_hash, seq, prev }
       │                     outcome ∈ success | rejected | refused | error — ALL recorded
       ▼
-  4. Return the head       print the new chain head (a hash) — save it off-machine
+  5. Return the head       print the new chain head (a hash) — save it off-machine
       │
       ▼
-  5. Read it back          agenthof audit control        ──► the story, in order
+  6. Read it back          agenthof audit control        ──► the story, in order
                            agenthof audit verify control ──► verified | torn | broken | tainted
 ```
 
@@ -74,7 +77,65 @@ A `--token` that fails verification is not a silent no-op: it is recorded as a
 `refused` event (reason `token_verification_failed`) and the command exits
 non-zero.
 
-## 2. Is the change valid?
+## 2. May they change it? (authorization)
+
+Knowing who asked is not the same as letting them. Every control action is
+**authorized, default-deny**, from two facts: the invoker's groups and the
+roles in the configuration directory. A role may carry a `control:` grant —
+any of `apply`, `enable`, `disable`, `repair`, named one by one, no wildcard —
+and the action is allowed only if some role both names one of the invoker's
+groups in `allowed_groups` **and** lists that operation. Membership and grant,
+never the grant alone. A role with no `control:` grants nothing; a public role
+(`allowed_groups: ["*"]`) can never grant a control operation, and `apply`
+rejects one that tries. A role may grant control operations and own no
+workflows at all — an operator who changes governance but runs nothing.
+
+```yaml
+# config/roles/platform-admin.yaml
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+```
+
+What each command authorizes against:
+
+- **`apply`** — the roles of the configuration being applied. The first apply
+  therefore authorizes itself: an operator grants their own group `control:
+  [apply]` in the config they apply. Forget, and the apply is refused — and
+  nothing changes.
+- **`registry enable|disable`** and **`audit repair control`** — the roles in
+  `--config`, read as they are on disk, without validation. That matters for
+  the kill switch: once an agent is disabled the configuration no longer
+  validates, and re-enabling it must still be possible.
+
+A refused `apply`, `enable`, or `disable` is recorded like every other
+turned-away attempt — outcome `refused`, reason `not_authorized`, a fixed
+message that names the operation and nothing else (never the caller's claimed
+groups), and for `apply` the hash of the configuration they tried to apply.
+A refused **repair is printed, not recorded**: the only ledger it could be
+written to is the damaged one being repaired. The same holds when the roles
+cannot be read at all — repair refuses, prints why, and touches nothing.
+
+**Honest limits.** In CLI mode the filesystem is the root of trust. Anyone who
+can edit the configuration directory can edit `control:` too, so this gate is
+a *recorded default-deny decision* on the invoker's identity — meaningful
+under `--token`, where the groups are verified; self-asserted under `--as
+--groups` — not a wall against someone who already holds write access to the
+files. Today `run` reads its configuration directly, so a refused `apply`
+changes nothing *and* does not yet stop anyone from running against the
+un-applied directory. What the gate buys now is that an unauthorized change
+attempt yields a `refused` row instead of a silent change, and the same
+decision is where a future service — whose callers have no filesystem — can
+enforce it for real. The roles are also read once to make the decision and the
+recorded configuration hash is computed by a second read, so a concurrent edit
+between the two could make the recorded hash differ from what was authorized;
+a future `apply --if-head` closes that window. One more edge to know: a
+configuration that grants
+`repair` to nobody is a valid configuration; if its ledger then tears, repair
+is refused for everyone until the role file is edited — in CLI mode, the
+filesystem is the way out.
+
+## 3. Is the change valid?
 
 What "valid" means depends on the action:
 
@@ -86,12 +147,14 @@ What "valid" means depends on the action:
 - **`registry enable|disable`** checks that the named agent exists; an unknown
   agent is recorded as `refused` (reason `agent_not_found`) — `rejected` means a
   change was evaluated and turned down, while `refused` means the actor or target
-  wasn't admitted in the first place.
+  wasn't admitted in the first place (the invoker was authorized first — see §2;
+  an unauthorized caller is refused before the agent lookup, so the agent list
+  is not probeable).
 
 Either way the outcome is written down. A turned-away change is a governed event,
 not an error swallowed at the door.
 
-## 3. Record it on the chain
+## 4. Record it on the chain
 
 A valid change (and every rejection and refusal above) is appended to the
 control ledger, which is:
@@ -118,7 +181,7 @@ flip that lands but whose recording append then fails prints `state changed;
 event NOT recorded` — the one case where state changed with no event to show for
 it. Both are surfaced loudly; neither is glossed over.
 
-## 4. Return the head
+## 5. Return the head
 
 On success the command prints the ledger's new **head** — the hash of the latest
 record. Save that hash somewhere off this machine (a chat, a ticket, a password
@@ -126,12 +189,12 @@ manager). Later you can hand it to `audit verify control --expect-head <hash>`
 to prove the on-disk chain still ends exactly where you last saw it, closing the
 gap that a purely local log can't close on its own.
 
-## 5. Reading it back
+## 6. Reading it back
 
 ```
 agenthof audit control                          # render the chain + an integrity line
 agenthof audit verify control [--expect-head H] # verify, and optionally check the head
-agenthof audit repair control                   # repair a torn tail (see below)
+agenthof audit repair control [--config <dir>]  # repair a torn tail (see below)
 ```
 
 Integrity is always stated, never assumed. Every read ends with a verdict:
@@ -170,6 +233,7 @@ both carry the same key:
 | Shipped today | Reserved for later |
 |---|---|
 | `apply`, `registry enable/disable`, `audit repair control` | policy-as-config approval workflows |
+| default-deny authorization of every control action against `control:` grants; refusals recorded (repair: printed) | per-object ownership; authorizing against the last *applied* configuration |
 | hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts | external anchoring / write-once sink for the ledger |
 | three identities per action (invoker / asserted_as / witness) | agent-to-IdP federation for the invoker's authority |
 | `--expect-head` off-machine head check | continuous/remote attestation of the head |

@@ -3,8 +3,8 @@
 # renders — the exec event with the runtime's first-hand attestation. The
 # agent-asserted routes are refused on such an agent, and recorded.
 
-exec agenthof apply --config config
-stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+exec agenthof apply --config config --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
 
 exec agenthof run se exec-demo --input 'exec-run:true' --as tester --config config --log-dir logs --artifact-dir artifacts
 stdout 'finished: succeeded'
@@ -47,6 +47,10 @@ steps:
 name: se
 workflows: [exec-demo]
 allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
 -- config/gateway.yaml --
 models:
   fast:

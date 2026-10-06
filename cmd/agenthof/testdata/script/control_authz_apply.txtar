@@ -1,0 +1,40 @@
+# Control-plane authorization at apply (Article VI): a caller whose groups no
+# role grants `apply` is refused — recorded refused/not_authorized with the
+# hash of the config they tried to apply — and nothing changes. A member of a
+# granting group applies. examples/config's platform-admin role grants the four
+# control operations to platform-eng and owns no workflows.
+
+# wrong group: refused, recorded, the message names the op and nothing else
+! exec agenthof apply --config examples/config --control-log control.jsonl --as mallory@example.com --groups finance
+stdout 'apply: not authorized: no role grants apply to the invoker'
+! stdout 'registry ok'
+stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
+grep '"outcome":"refused"' control.jsonl
+grep '"code":"not_authorized"' control.jsonl
+grep '"message":"not authorized: no role grants apply to the invoker"' control.jsonl
+grep '"config_hash":"sha256:[0-9a-f]{64}"' control.jsonl
+
+# no groups at all (the OS user): refused the same way
+! exec agenthof apply --config examples/config --control-log control.jsonl --as nobody@example.com
+stdout 'not authorized: no role grants apply to the invoker'
+stdout 'control head: seq=2'
+
+# authorization precedes validation: break the config (an authorized disable),
+# then an unauthorized apply learns one refusal, not the validation error
+exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+! exec agenthof apply --config examples/config --control-log control.jsonl --as mallory@example.com --groups finance
+stdout 'not authorized'
+! stdout 'depends on agent'
+exec agenthof registry enable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+
+# a platform-eng member applies
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
+stdout 'control head: seq=6 sha256=[0-9a-f]{64}'
+
+# the refusals read back as refusals, attributed
+exec agenthof audit control --control-log control.jsonl
+stdout 'config apply refused — mallory@example.com \(asserted\)'
+stdout 'config apply refused — nobody@example.com \(asserted\)'
+stdout 'config applied — dana@example.com \(asserted\)'
+stdout 'control ledger integrity: verified \(6 events\)'

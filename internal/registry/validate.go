@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/authz"
 	"github.com/agenthof/agenthof/internal/config"
 )
 
@@ -358,8 +359,35 @@ func Validate(cfg config.Config) []ValidationError {
 			continue
 		}
 		roles[r.Name] = r
-		if len(r.Workflows) == 0 {
-			add(r.SourceFile, r.Name, "no-workflows", "role owns no workflows")
+		// A role is a bundle of capability: the workflows it owns (run time)
+		// and/or the control operations it grants (control plane). One with
+		// neither does nothing and is rejected; one with only control: is an
+		// operator role that applies config and runs nothing — legitimate.
+		if len(r.Workflows) == 0 && len(r.Control) == 0 {
+			add(r.SourceFile, r.Name, "no-capability",
+				"role owns no workflows and grants no control operations; list at least one workflow or one control operation")
+		}
+		// control: is an optional grant over a fixed set (authz.ControlOps).
+		// Absent means no control permission; present-but-empty names none and
+		// is rejected like any other empty grant (Article VI); an unknown token
+		// is a typo that must fail here, not silently grant nothing at the gate.
+		if r.Control != nil && len(r.Control) == 0 {
+			add(r.SourceFile, r.Name, "control-empty",
+				"control is present but names no operations; list the operations this role may perform (apply, enable, disable, repair) or omit the key")
+		}
+		for _, op := range r.Control {
+			if !authz.KnownControlOp(op) {
+				add(r.SourceFile, r.Name, "control-bad-op",
+					fmt.Sprintf("control names %q, which is not a control operation (apply, enable, disable, repair)", op))
+			}
+		}
+		// The control gate never honors "*" (authz.ControlAllows), so a public
+		// control role could never authorize anyone — but it is a footgun the
+		// operator meant something by. Make the bad outcome impossible: reject
+		// it loudly here.
+		if len(r.Control) > 0 && slices.Contains(r.AllowedGroups, "*") {
+			add(r.SourceFile, r.Name, "public-control-role",
+				`a role that grants control operations must name real groups in allowed_groups, not ["*"]: the control gate never honors the public marker, so such a role would authorize no one — a silent no-op you meant something by`)
 		}
 		if len(r.AllowedGroups) == 0 {
 			add(r.SourceFile, r.Name, "no-access-floor",

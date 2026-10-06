@@ -30,7 +30,7 @@ In another terminal, from the repository root:
 
 ```bash
 go build -o agenthof ./cmd/agenthof
-./agenthof apply --as you@example.com --config examples/config
+./agenthof apply --as you@example.com --groups platform-eng --config examples/config
 ./agenthof run software-engineer fix-bug \
   --input "fix the login bug" \
   --as you@example.com \
@@ -40,7 +40,7 @@ go build -o agenthof ./cmd/agenthof
 Expected `apply`:
 
 ```
-registry ok: 5 agents, 2 workflows, 2 roles
+registry ok: 5 agents, 2 workflows, 3 roles
 control head: seq=1 sha256=<hex>
 ```
 

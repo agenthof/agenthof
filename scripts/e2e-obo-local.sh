@@ -177,6 +177,7 @@ name: obo-operator
 description: Runs the OBO e2e workflows
 workflows: [obo-run, obo-wrong, obo-rejects, obo-unreachable]
 allowed_groups: ["obo-users"]
+control: [apply]
 EOF
 export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE"   # the model route is never called; the key only lets it resolve
 export AGENTHOF_OIDC_ISSUER="$ISSUER"

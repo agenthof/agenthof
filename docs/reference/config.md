@@ -391,8 +391,9 @@ steps:
 |---|---|---|---|---|
 | Name | `name` | string | yes | — |
 | Description | `description` | string | no | — |
-| Workflows | `workflows` | list of strings | yes (non-empty) | — |
+| Workflows | `workflows` | list of strings | yes, unless `control` grants an operation | — |
 | AllowedGroups | `allowed_groups` | list of strings | yes (non-empty) | — |
+| Control | `control` | list of strings | no | none — absent means no control-plane permission |
 | BudgetUSDMonth | `budget_usd_month` | float | no | — |
 
 ### `name` / `description`
@@ -403,9 +404,12 @@ a second role reusing a name is rejected with `duplicate-name`.
 
 ### `workflows`
 
-Required to be non-empty: a role owning zero workflows is rejected with
-`no-workflows`. Every name in the list must match a defined workflow, or
-`apply` rejects it with `dangling-workflow-ref`.
+A role must own at least one workflow **or** grant at least one control
+operation (see [`control`](#control)); a role with neither is rejected with
+`no-capability`. A role that grants control operations and owns no workflows
+is an operator role — it can change governance but run nothing. Every name in
+the list must match a defined workflow, or `apply` rejects it with
+`dangling-workflow-ref`.
 
 ### `allowed_groups`
 
@@ -419,6 +423,31 @@ the explicit marker for "public"; anything else in the list is treated as a
 real group name and `apply` does not otherwise check group names against an
 external source (see [`docs/concepts.md`](../concepts.md) for how identity
 and groups are used outside of `apply`).
+
+### `control`
+
+Optional. The control-plane operations this role's `allowed_groups` members
+may perform: any of `apply`, `enable`, `disable`, `repair` — the four fixed
+operations, named individually. There is no wildcard spelling and no
+operation is granted by omission: a role with no `control` key (or `control:`
+left null) grants none, and a present-but-empty `control: []` is rejected by
+`apply` with `control-empty`. An unknown token is rejected with
+`control-bad-op`. A role that grants control operations must name real
+groups — `allowed_groups: ["*"]` alongside a non-empty `control` is rejected
+with `public-control-role`, because the control gate never honors the public
+marker, so such a role would authorize no one — a silent no-op. A role may
+grant control operations and own no
+workflows (an operator role): see [`workflows`](#workflows).
+
+How the grant is enforced — which command checks which operation, what a
+refusal records, and the honest limits — is in
+[`docs/control-plane-lifecycle.md`](../control-plane-lifecycle.md).
+
+```yaml
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+```
 
 ### `budget_usd_month`
 
@@ -786,7 +815,7 @@ recorded and why; this section is the flag-by-flag and exit-code reference.
 | `agenthof registry enable\|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | same |
 | `agenthof audit control [--control-log <path>]` | `--control-log` |
 | `agenthof audit verify control [--control-log <path>] [--expect-head <hex>]` | `--control-log`, `--expect-head` |
-| `agenthof audit repair control [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--as`, `--groups`, `--token` |
+| `agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--config`, `--as`, `--groups`, `--token` |
 | `agenthof investigate [--since <dur\|ts>] [--until <dur\|ts>] [--invoker <id>] [--agent <name>] [--outcome <value>] [--run <run-id>] [--config-hash <sha256:…>] [--json] [--log-dir <dir>] [--control-log <path>]` | `--since`, `--until`, `--invoker`, `--agent`, `--outcome`, `--run`, `--config-hash`, `--json`, `--log-dir`, `--control-log` |
 
 ### `--control-log`
@@ -800,13 +829,31 @@ by name (`control.jsonl` and anything containing `.torn-`) — a control log
 saved under a different name inside `--log-dir` has no such protection and
 can be pruned like any other aged `.jsonl` file.
 
+### `--config`
+
+`apply` and `registry enable|disable` take it already; `audit repair control`
+takes it too (default `./config`) because the roles in it decide who may
+repair. Repair reads the directory without validating it; a directory that
+cannot be read means nobody can be authorized, and the command prints
+`refusing to repair` and exits 1 without touching the ledger.
+
 ### `--as`, `--groups`, `--token`
 
 The same invoker-identity flags `agenthof run` takes. `--as` asserts an
 invoker identity (default: the OS user); `--groups` is a comma-separated
-list recorded alongside it — self-asserted, not verified, and not checked
-against any role's `allowed_groups` by these commands, so it authorizes
-nothing here on its own. `--token` authenticates the invoker from a raw
+list recorded alongside it — self-asserted, not verified — and the groups
+these commands authorize against: `apply`, `registry enable|disable`, and
+`audit repair control` each require that some role name one of the invoker's
+groups in `allowed_groups` **and** list that operation in its
+[`control`](#control) grant (`allowed_groups: ["*"]` never qualifies). A
+caller no role grants is refused: `apply` and `registry enable|disable`
+record it as a `refused` event with reason `not_authorized` (apply's carries
+the `config_hash` of the config it tried to apply); `audit repair control`
+prints it and records nothing, since the only ledger to write to may be the
+torn one. Under `--as`/`--groups` the decision is computed on self-asserted
+groups and is a recorded decision, not a wall — see
+[`docs/control-plane-lifecycle.md`](../control-plane-lifecycle.md) for the
+honest limits. `--token` authenticates the invoker from a raw
 OIDC ID token instead (env `AGENTHOF_TOKEN` fallback); when given, identity
 comes from the verified token rather than `--as`/`--groups`, and
 `AGENTHOF_OIDC_ISSUER` must be set in the environment or the command exits
@@ -896,7 +943,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
-| `1` | The attempt was rejected, refused, or errored (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed but the config hash or the append that would record it then failed — printed as `state changed; event NOT recorded`, the one case where the registry changed with no event to show for it |
+| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed but the config hash or the append that would record it then failed — printed as `state changed; event NOT recorded`, the one case where the registry changed with no event to show for it |
 | `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set |
 
 `agenthof audit control`:
@@ -922,7 +969,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | A torn tail was repaired: the damaged bytes were moved to a `<log>.torn-<timestamp>` fragment, the live log truncated to its last valid record, and a `repair` event appended — the ledger is now tainted |
-| `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; or another IO error. None of these write a control event, since the ledger being repaired may itself be the file in question |
+| `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; no role grants `repair` to the invoker, or `--config` cannot be read (both printed, never recorded); or another IO error. None of these write a control event, since the ledger being repaired may itself be the file in question |
 | `2` | Usage error |
 
 `agenthof investigate`:

@@ -1,7 +1,7 @@
 # investigate merges the control ledger and every run log into one timeline.
 
-exec agenthof apply --config config --as tester --control-log control.jsonl
-stdout 'registry ok: 1 agents, 1 workflows, 1 roles'
+exec agenthof apply --config config --as tester --control-log control.jsonl --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
 
 exec agenthof run se plan-only --input hello --as tester --config config --log-dir logs --artifact-dir artifacts
 stdout 'finished: succeeded'
@@ -42,6 +42,10 @@ steps:
 name: se
 workflows: [plan-only]
 allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
 -- config/gateway.yaml --
 models:
   fast:

@@ -117,15 +117,19 @@ running:
 Then, from the repository root:
 
     go build -o agenthof ./cmd/agenthof
-    ./agenthof apply --as you@example.com --config examples/config
+    ./agenthof apply --as you@example.com --groups platform-eng --config examples/config
     ./agenthof run software-engineer fix-bug --input "fix the login bug" --as you@example.com --config examples/config
     ./agenthof audit <run-id>
 
 `apply` prints the registry summary and records itself to the control ledger,
 attributed to `--as` (or your OS user if omitted):
 
-    registry ok: 5 agents, 2 workflows, 2 roles
+    registry ok: 5 agents, 2 workflows, 3 roles
     control head: seq=1 sha256=<hex>
+
+The `--groups platform-eng` flag is what authorizes the apply: the example
+config's `platform-admin` role grants the control-plane operations to that
+group, and a caller no role grants is refused — and that refusal is recorded.
 
 `run` prints the run id it assigned (`run <run-id> finished: succeeded`). Pass
 that id to `audit` to see who asked, what ran, and whether the record can be
