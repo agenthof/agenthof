@@ -51,6 +51,26 @@ type ToolGrant struct {
 	Mode     string   `yaml:"mode"` // "", "all", or "read-only"
 }
 
+// AllTools reports whether the grant's breadth is the whole resource: tools
+// is exactly ["*"]. It says nothing about read/write — a ["*"] grant with
+// mode: read-only is AllTools and resolves to the resource's read_only_tools,
+// never to every tool. Every caller that reads Tools branches on this first,
+// so the marker is never looked up as a tool name.
+func (g ToolGrant) AllTools() bool { return len(g.Tools) == 1 && g.Tools[0] == "*" }
+
+// ReadOnly reports whether the grant is mode: read-only, so its effective
+// set is intersected with the resource's read_only_tools.
+func (g ToolGrant) ReadOnly() bool { return g.Mode == "read-only" }
+
+// EveryToolReadWrite reports whether the grant is the widest one — tools:
+// ["*"] with mode: read-write. It is the only shape that resolves to the
+// "every tool" (nil) allow set and the only shape a resource may carry twice.
+// It is positive on the closed enum, deliberately not AllTools() &&
+// !ReadOnly(): a grant whose mode is absent, retired, or unknown is never
+// every-tool, whichever check a caller happens to run first. Fail-closed by
+// construction, not by check ordering.
+func (g ToolGrant) EveryToolReadWrite() bool { return g.AllTools() && g.Mode == "read-write" }
+
 // GrantScope is how wide a tool grant is. Callers branch on this, not on
 // len(Tools): a read-only grant has no tools list and would otherwise look
 // like a named grant with nothing named. The lone exception is the empty

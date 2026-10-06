@@ -462,3 +462,42 @@ func TestRoleControlParse(t *testing.T) {
 		})
 	}
 }
+
+// TestToolGrantPredicates pins the three predicates Validate and Start branch
+// on. EveryToolReadWrite is the one shape that resolves to the "every tool"
+// (nil) set, and it is positive on the closed enum: a ["*"] grant whose mode
+// is read-only, absent, retired, or unknown is AllTools but is never
+// every-tool — fail-closed by construction, not by which check runs first.
+func TestToolGrantPredicates(t *testing.T) {
+	cases := []struct {
+		name                        string
+		g                           ToolGrant
+		allTools, readOnly, everyRW bool
+	}{
+		{"star read-write", ToolGrant{Resource: "github", Tools: []string{"*"}, Mode: "read-write"}, true, false, true},
+		{"star read-only", ToolGrant{Resource: "github", Tools: []string{"*"}, Mode: "read-only"}, true, true, false},
+		{"named read-write", ToolGrant{Resource: "github", Tools: []string{"a", "b"}, Mode: "read-write"}, false, false, false},
+		{"named read-only", ToolGrant{Resource: "github", Tools: []string{"a"}, Mode: "read-only"}, false, true, false},
+		{"star with no mode never resolves to every tool", ToolGrant{Resource: "github", Tools: []string{"*"}}, true, false, false},
+		{"star with unknown mode never resolves to every tool", ToolGrant{Resource: "github", Tools: []string{"*"}, Mode: "typo"}, true, false, false},
+		{"star with retired mode all never resolves to every tool", ToolGrant{Resource: "github", Tools: []string{"*"}, Mode: "all"}, true, false, false},
+		{"star not alone is not AllTools", ToolGrant{Resource: "github", Tools: []string{"*", "a"}, Mode: "read-write"}, false, false, false},
+		{"star second is not AllTools", ToolGrant{Resource: "github", Tools: []string{"a", "*"}, Mode: "read-write"}, false, false, false},
+		{"nil tools", ToolGrant{Resource: "github", Mode: "read-write"}, false, false, false},
+		{"empty tools", ToolGrant{Resource: "github", Tools: []string{}, Mode: "read-write"}, false, false, false},
+		{"bare grant", ToolGrant{Resource: "github"}, false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.g.AllTools(); got != tc.allTools {
+				t.Errorf("AllTools = %v, want %v", got, tc.allTools)
+			}
+			if got := tc.g.ReadOnly(); got != tc.readOnly {
+				t.Errorf("ReadOnly = %v, want %v", got, tc.readOnly)
+			}
+			if got := tc.g.EveryToolReadWrite(); got != tc.everyRW {
+				t.Errorf("EveryToolReadWrite = %v, want %v", got, tc.everyRW)
+			}
+		})
+	}
+}
