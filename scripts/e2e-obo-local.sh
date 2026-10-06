@@ -158,7 +158,8 @@ execution: fronted
 endpoint: http://127.0.0.1:$AGENT_PORT/
 tools:
   - resource: $2
-    mode: all
+    tools: ["*"]
+    mode: read-write
 EOF
 	cat >"$WORK/config/workflows/$1.yaml" <<EOF
 name: $1

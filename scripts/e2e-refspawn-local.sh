@@ -364,7 +364,8 @@ EOF
 	agent ghost ""
 	agent obo-child "tools:
   - resource: obo-tool
-    mode: all"
+    tools: [\"*\"]
+    mode: read-write"
 	wf() { # $1 = workflow, $2.. = agents, one step each
 		local name="$1"
 		shift

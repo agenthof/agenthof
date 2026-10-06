@@ -179,7 +179,8 @@ execution: fronted
 endpoint: unix://$SOCK_DIR/agent.sock
 tools:
   - resource: stdio-tool
-    mode: all
+    tools: ["*"]
+    mode: read-write
 EOF
 cat >"$WORK/config/agents/bridge-rot.yaml" <<EOF
 name: bridge-rot
@@ -191,7 +192,8 @@ execution: fronted
 endpoint: unix://$SOCK_DIR/agent.sock
 tools:
   - resource: stdio-tool-rot
-    mode: all
+    tools: ["*"]
+    mode: read-write
 EOF
 cat >"$WORK/config/workflows/bridge-demo.yaml" <<EOF
 name: bridge-demo

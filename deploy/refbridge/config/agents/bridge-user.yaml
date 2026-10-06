@@ -7,4 +7,5 @@ execution: fronted
 endpoint: unix:///run/agenthof-bridge-agent/agent.sock
 tools:
   - resource: stdio-tool
-    mode: all
+    tools: ["*"]
+    mode: read-write
