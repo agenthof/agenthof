@@ -95,7 +95,7 @@ open to any authenticated invoker; a role that declares no access floor at all
 is rejected at `apply`, never treated as open.
 A grant that names a set of reachable capabilities — invokers, tools,
 executables — declares which ones; the widest such set is an explicit marker
-(a role's `["*"]`, a tool grant's `mode: all`), and a grant that names none is
+(a role's `["*"]`, a tool grant's `tools: ["*"]`), and a grant that names none is
 rejected at `apply`, never widened to the maximum. One grant is shaped
 differently because its set is internal and fixed: `control:` is an optional
 grant over a fixed, enumerable set of control operations; it carries no widest

@@ -42,6 +42,7 @@ execution: fronted
 tools:
   - resource: echo-tool
     tools: [echo]
+    mode: read-write
 -- config/workflows/tool-demo.yaml --
 name: tool-demo
 steps:

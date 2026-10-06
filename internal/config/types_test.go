@@ -18,9 +18,11 @@ model: fast
 instruction: You are a planner.
 tools:
   - resource: read_file
-    mode: all
+    tools: ["*"]
+    mode: read-write
   - resource: search_files
-    mode: all
+    tools: ["*"]
+    mode: read-write
 output: plan
 `
 	var a AgentDef
@@ -30,11 +32,11 @@ output: plan
 	if a.Name != "planner" || a.Model != "fast" || len(a.Tools) != 2 || a.Output != "plan" {
 		t.Fatalf("parsed: %+v", a)
 	}
-	// Each mode: all entry grants every tool that resource exposes.
+	// Each ["*"] + read-write entry grants every tool that resource exposes.
 	// (ToolGrant holds a slice, so it is not ==-comparable; compare the
 	// fields.)
-	if a.Tools[0].Resource != "read_file" || a.Tools[0].Scope() != ScopeAll ||
-		a.Tools[1].Resource != "search_files" || a.Tools[1].Scope() != ScopeAll {
+	if a.Tools[0].Resource != "read_file" || !a.Tools[0].EveryToolReadWrite() ||
+		a.Tools[1].Resource != "search_files" || !a.Tools[1].EveryToolReadWrite() {
 		t.Fatalf("parsed: %+v", a)
 	}
 	if !a.IsEnabled() {
@@ -186,15 +188,15 @@ func TestExecConfigDeclared(t *testing.T) {
 // first one and aborts that file's parse — it does not enumerate them.
 func TestToolGrantScalarRejected(t *testing.T) {
 	var got []ToolGrant
-	err := yaml.Unmarshal([]byte("- resource: ok\n  mode: all\n- code-search\n- github\n"), &got)
+	err := yaml.Unmarshal([]byte("- resource: ok\n  tools: [\"*\"]\n  mode: read-write\n- code-search\n- github\n"), &got)
 	if err == nil {
 		t.Fatalf("expected an error, parsed %+v", got)
 	}
 	msg := err.Error()
 	for _, want := range []string{
-		"bad-tool-grant: line 3: a bare tool grant is no longer accepted",
-		`{resource: "code-search", tools: [...]}`,
-		`{resource: "code-search", mode: all}`,
+		"bad-tool-grant: line 4: a bare tool grant is no longer accepted",
+		`{resource: "code-search", tools: ["*"], mode: read-write}`,
+		"or list tools and set mode",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error = %q, want it to contain %q", msg, want)
@@ -208,23 +210,25 @@ func TestToolGrantScalarRejected(t *testing.T) {
 func TestToolGrantMappingRestrictsToNamedTools(t *testing.T) {
 	src := `
 - resource: code-search
-  mode: all
+  tools: ["*"]
+  mode: read-write
 - resource: github
   tools: [list_issues, get_issue]
+  mode: read-write
 `
 	var got []ToolGrant
 	if err := yaml.Unmarshal([]byte(src), &got); err != nil {
 		t.Fatal(err)
 	}
 	want := []ToolGrant{
-		{Resource: "code-search", Mode: "all"},
-		{Resource: "github", Tools: []string{"list_issues", "get_issue"}},
+		{Resource: "code-search", Tools: []string{"*"}, Mode: "read-write"},
+		{Resource: "github", Tools: []string{"list_issues", "get_issue"}, Mode: "read-write"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parsed %+v, want %+v", got, want)
 	}
-	if got[0].Scope() != ScopeAll || got[1].Scope() != ScopeNamed {
-		t.Fatalf("Scope(): all=%v restricted=%v", got[0].Scope(), got[1].Scope())
+	if !got[0].EveryToolReadWrite() || got[1].AllTools() {
+		t.Fatalf("predicates: every=%v named-is-all=%v", got[0].EveryToolReadWrite(), got[1].AllTools())
 	}
 }
 
@@ -233,8 +237,10 @@ func TestToolGrantToolsAcceptsAlias(t *testing.T) {
 tools:
   - resource: a
     tools: &shared [list_issues, get_issue]
+    mode: read-write
   - resource: b
     tools: *shared
+    mode: read-write
 `
 	var got struct {
 		Tools []ToolGrant `yaml:"tools"`
@@ -257,14 +263,15 @@ func TestToolGrantFailsClosed(t *testing.T) {
 		src  string
 		want string // substring of the error after the bad-tool-grant code
 	}{
-		{"singular tool: typo is an unknown key", "- resource: github\n  tool: [list_issues]\n", `unknown key "tool"`},
+		{"singular tool: typo is an unknown key", "- resource: github\n  tool: [list_issues]\n  mode: read-write\n", `unknown key "tool"`},
 		{"future mode: typo is an unknown key", "- resource: github\n  tools: [x]\n  mod: read\n", `unknown key "mod"`},
-		{"object with tools absent", "- resource: github\n", "must set tools or mode"},
-		{"object with tools absent names both remedies", "- resource: github\n", "or write mode: all to grant every tool"},
-		{"object with tools null", "- resource: github\n  tools: null\n", "at least one tool"},
-		{"object with tools empty", "- resource: github\n  tools: []\n", "at least one tool"},
-		{"object with empty resource", "- resource: \"\"\n  tools: [x]\n", "empty resource"},
-		{"object with resource absent", "- tools: [x]\n", "empty resource"},
+		{"object with tools and mode absent", "- resource: github\n", "needs tools and mode"},
+		{"object with tools and mode absent names the every-tool remedy", "- resource: github\n", `{resource: "github", tools: ["*"], mode: read-write}`},
+		{"object with tools absent", "- resource: github\n  mode: read-write\n", "has no tools"},
+		{"object with tools null", "- resource: github\n  tools: null\n  mode: read-write\n", "has no tools"},
+		{"object with tools empty", "- resource: github\n  tools: []\n  mode: read-write\n", "has no tools"},
+		{"object with empty resource", "- resource: \"\"\n  tools: [x]\n  mode: read-write\n", "empty resource"},
+		{"object with resource absent", "- tools: [x]\n  mode: read-write\n", "empty resource"},
 		{"empty scalar", "- \"\"\n", "empty resource"},
 		{"sequence is neither form", "- [github]\n", "must be a {resource, tools, mode} object"},
 	}
@@ -297,36 +304,17 @@ func TestToolGrantNullElementIsDropped(t *testing.T) {
 	}
 }
 
-func TestToolGrantScope(t *testing.T) {
-	cases := []struct {
-		name string
-		g    ToolGrant
-		want GrantScope
-	}{
-		{"no mode and no tools", ToolGrant{Resource: "github"}, ScopeNamed},
-		{"no mode, empty tools slice", ToolGrant{Resource: "github", Tools: []string{}}, ScopeNamed},
-		{"mode all", ToolGrant{Resource: "github", Mode: "all"}, ScopeAll},
-		{"named tools", ToolGrant{Resource: "github", Tools: []string{"echo"}}, ScopeNamed},
-		{"read-only", ToolGrant{Resource: "github", Mode: "read-only"}, ScopeReadOnly},
-		{"named and read-only", ToolGrant{Resource: "github", Mode: "read-only", Tools: []string{"echo"}}, ScopeReadOnly},
-		{"bad mode is not all", ToolGrant{Resource: "github", Mode: "write"}, ScopeNamed},
-	}
-	for _, tc := range cases {
-		if got := tc.g.Scope(); got != tc.want {
-			t.Errorf("%s: Scope = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
-func TestToolGrantModeYAML(t *testing.T) {
+// TestToolGrantFourShapesParse: breadth × read/write, every one explicit.
+func TestToolGrantFourShapesParse(t *testing.T) {
 	ok := []struct {
 		name string
 		src  string
 		want ToolGrant
 	}{
-		{"mode all", "- resource: github\n  mode: all\n", ToolGrant{Resource: "github", Mode: "all"}},
-		{"mode read-only", "- resource: github\n  mode: read-only\n", ToolGrant{Resource: "github", Mode: "read-only"}},
-		{"tools plus read-only", "- resource: github\n  tools: [echo]\n  mode: read-only\n", ToolGrant{Resource: "github", Tools: []string{"echo"}, Mode: "read-only"}},
+		{"every tool, read-write", "- resource: github\n  tools: [\"*\"]\n  mode: read-write\n", ToolGrant{Resource: "github", Tools: []string{"*"}, Mode: "read-write"}},
+		{"every read-only tool", "- resource: github\n  tools: [\"*\"]\n  mode: read-only\n", ToolGrant{Resource: "github", Tools: []string{"*"}, Mode: "read-only"}},
+		{"named, read-write", "- resource: github\n  tools: [echo, other]\n  mode: read-write\n", ToolGrant{Resource: "github", Tools: []string{"echo", "other"}, Mode: "read-write"}},
+		{"named, read-only", "- resource: github\n  tools: [echo]\n  mode: read-only\n", ToolGrant{Resource: "github", Tools: []string{"echo"}, Mode: "read-only"}},
 	}
 	for _, tc := range ok {
 		t.Run(tc.name, func(t *testing.T) {
@@ -341,15 +329,27 @@ func TestToolGrantModeYAML(t *testing.T) {
 	}
 }
 
-func TestToolGrantModeRejected(t *testing.T) {
-	cases := []struct{ name, src, want string }{
-		{"bad mode", "- resource: github\n  mode: write\n", `mode "write"`},
-		{"neither tools nor mode", "- resource: github\n", "must set tools or mode"},
-		{"mode empty string is neither", "- resource: github\n  mode: \"\"\n", "must set tools or mode"},
-		{"mode null is neither", "- resource: github\n  mode: null\n", "must set tools or mode"},
-		{"empty tools with read-only", "- resource: github\n  tools: []\n  mode: read-only\n", "at least one tool"},
-		{"empty tools with all", "- resource: github\n  tools: []\n  mode: all\n", "at least one tool"},
-		{"mode all plus tools", "- resource: github\n  mode: all\n  tools: [echo]\n", "mode all"},
+// TestToolGrantShapeRejected: every malformed shape is bad-tool-grant with
+// the offending line and a remedy. The rule order matters because yaml.v3
+// stops at the first error per file: the retired mode: all is named before
+// "has no tools", so the most common old shape is told its replacement.
+func TestToolGrantShapeRejected(t *testing.T) {
+	cases := []struct{ name, src, line, want string }{
+		{"mode all retired", "- resource: github\n  mode: all\n", "line 2", "mode: all is retired"},
+		{"mode all retired names its replacement", "- resource: github\n  mode: all\n", "line 2", `write tools: ["*"], mode: read-write for every tool, or mode: read-only`},
+		{"mode all with tools is still retired", "- resource: github\n  tools: [echo]\n  mode: all\n", "line 3", "mode: all is retired"},
+		{"bad mode", "- resource: github\n  tools: [\"*\"]\n  mode: write\n", "line 3", `mode "write" (want read-only or read-write)`},
+		{"bad mode without tools is still a bad mode", "- resource: github\n  mode: write\n", "line 2", `mode "write"`},
+		{"tools absent with a mode", "- resource: github\n  mode: read-only\n", "line 1", "has no tools"},
+		{"empty tools with read-only", "- resource: github\n  tools: []\n  mode: read-only\n", "line 2", "has no tools"},
+		{"star not alone", "- resource: github\n  tools: [\"*\", echo]\n  mode: read-write\n", "line 2", `"*" must be the only entry`},
+		{"star not alone, star last", "- resource: github\n  tools: [echo, \"*\"]\n  mode: read-only\n", "line 2", `"*" must be the only entry`},
+		{"mode absent on a named grant", "- resource: github\n  tools: [echo]\n", "line 1", "has no mode: set mode: read-only or read-write"},
+		{"mode absent on a star grant never widens", "- resource: github\n  tools: [\"*\"]\n", "line 1", "has no mode"},
+		{"mode empty string", "- resource: github\n  tools: [echo]\n  mode: \"\"\n", "line 3", "has no mode"},
+		{"mode null", "- resource: github\n  tools: [echo]\n  mode: null\n", "line 3", "has no mode"},
+		{"neither tools nor mode", "- resource: github\n", "line 1", "needs tools and mode"},
+		{"mode null and no tools is the bare shape", "- resource: github\n  mode: null\n", "line 1", "needs tools and mode"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -358,19 +358,33 @@ func TestToolGrantModeRejected(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected an error, parsed %+v", got)
 			}
-			if !strings.Contains(err.Error(), "bad-tool-grant: line ") || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error = %q, want %q", err.Error(), tc.want)
+			if !strings.Contains(err.Error(), "bad-tool-grant: "+tc.line+":") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want bad-tool-grant at %s with %q", err.Error(), tc.line, tc.want)
 			}
 		})
 	}
 }
 
+// TestToolGrantUnquotedStarIsAYAMLError: `tools: [*]` is YAML alias syntax,
+// so it is a syntax error from yaml.v3 before any grant rule runs — not a
+// bad-tool-grant and never a grant. config.md tells operators to quote it.
+func TestToolGrantUnquotedStarIsAYAMLError(t *testing.T) {
+	var got []ToolGrant
+	err := yaml.Unmarshal([]byte("- resource: github\n  tools: [*]\n  mode: read-write\n"), &got)
+	if err == nil {
+		t.Fatalf("an unquoted * must not parse, got %+v", got)
+	}
+	if strings.Contains(err.Error(), "bad-tool-grant") {
+		t.Fatalf("an unquoted * is a YAML syntax error, not a grant rule: %v", err)
+	}
+}
+
 func TestToolGrantErrorNamesTheLine(t *testing.T) {
-	src := "- resource: ok\n  mode: all\n- resource: github\n  tool: [x]\n"
+	src := "- resource: ok\n  tools: [\"*\"]\n  mode: read-write\n- resource: github\n  tool: [x]\n"
 	var got []ToolGrant
 	err := yaml.Unmarshal([]byte(src), &got)
-	if err == nil || !strings.Contains(err.Error(), "line 4") {
-		t.Fatalf("error should name the offending key's line (4): %v", err)
+	if err == nil || !strings.Contains(err.Error(), "line 5") {
+		t.Fatalf("error should name the offending key's line (5): %v", err)
 	}
 }
 
@@ -458,6 +472,45 @@ func TestRoleControlParse(t *testing.T) {
 			}
 			if !slices.Equal(r.Control, tc.want) {
 				t.Fatalf("control: got %v, want %v", r.Control, tc.want)
+			}
+		})
+	}
+}
+
+// TestToolGrantPredicates pins the three predicates Validate and Start branch
+// on. EveryToolReadWrite is the one shape that resolves to the "every tool"
+// (nil) set, and it is positive on the closed enum: a ["*"] grant whose mode
+// is read-only, absent, retired, or unknown is AllTools but is never
+// every-tool — fail-closed by construction, not by which check runs first.
+func TestToolGrantPredicates(t *testing.T) {
+	cases := []struct {
+		name                        string
+		g                           ToolGrant
+		allTools, readOnly, everyRW bool
+	}{
+		{"star read-write", ToolGrant{Resource: "github", Tools: []string{"*"}, Mode: "read-write"}, true, false, true},
+		{"star read-only", ToolGrant{Resource: "github", Tools: []string{"*"}, Mode: "read-only"}, true, true, false},
+		{"named read-write", ToolGrant{Resource: "github", Tools: []string{"a", "b"}, Mode: "read-write"}, false, false, false},
+		{"named read-only", ToolGrant{Resource: "github", Tools: []string{"a"}, Mode: "read-only"}, false, true, false},
+		{"star with no mode never resolves to every tool", ToolGrant{Resource: "github", Tools: []string{"*"}}, true, false, false},
+		{"star with unknown mode never resolves to every tool", ToolGrant{Resource: "github", Tools: []string{"*"}, Mode: "typo"}, true, false, false},
+		{"star with retired mode all never resolves to every tool", ToolGrant{Resource: "github", Tools: []string{"*"}, Mode: "all"}, true, false, false},
+		{"star not alone is not AllTools", ToolGrant{Resource: "github", Tools: []string{"*", "a"}, Mode: "read-write"}, false, false, false},
+		{"star second is not AllTools", ToolGrant{Resource: "github", Tools: []string{"a", "*"}, Mode: "read-write"}, false, false, false},
+		{"nil tools", ToolGrant{Resource: "github", Mode: "read-write"}, false, false, false},
+		{"empty tools", ToolGrant{Resource: "github", Tools: []string{}, Mode: "read-write"}, false, false, false},
+		{"bare grant", ToolGrant{Resource: "github"}, false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.g.AllTools(); got != tc.allTools {
+				t.Errorf("AllTools = %v, want %v", got, tc.allTools)
+			}
+			if got := tc.g.ReadOnly(); got != tc.readOnly {
+				t.Errorf("ReadOnly = %v, want %v", got, tc.readOnly)
+			}
+			if got := tc.g.EveryToolReadWrite(); got != tc.everyRW {
+				t.Errorf("EveryToolReadWrite = %v, want %v", got, tc.everyRW)
 			}
 		})
 	}

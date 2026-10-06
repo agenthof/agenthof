@@ -70,48 +70,71 @@ Optional free text. Not checked by `apply`.
 
 Optional list of tool grants. Each entry is an object naming a tool resource
 declared under `gateway.yaml`'s `tools` map (see [`tools`](#tools-1) under
-Gateway, below) with these keys:
+Gateway, below) and stating both axes of its scope — which tools, and whether
+they may mutate:
 
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|
 | Resource | `resource` | string | yes | — |
-| Tools | `tools` | list of strings | yes when `mode` is absent; non-empty when present | — |
-| Mode | `mode` | string | no | `""` |
+| Tools | `tools` | list of strings | yes: `["*"]` (every tool) or a non-empty list of tool names | — |
+| Mode | `mode` | string | yes: `read-only` or `read-write` | — |
 
-A grant takes one of four forms:
+Neither axis has a default. A grant takes one of four forms (breadth ×
+read/write):
 
-- `{resource, mode: all}` — every tool the resource exposes;
-- `{resource, mode: read-only}` — the tools listed in that resource's
-  [`read_only_tools`](#tools-1) on the gateway catalog entry;
-- `{resource, tools: [...]}` — exactly the named tools;
-- `{resource, tools: [...], mode: read-only}` — exactly the named tools, and
-  `apply` rejects any of them that is not in the resource's
-  `read_only_tools`.
+```yaml
+tools:
+  - {resource: github, tools: ["*"],             mode: read-write}  # every tool github exposes
+  - {resource: github, tools: ["*"],             mode: read-only}   # every tool in github's read_only_tools
+  - {resource: db,     tools: [query, describe], mode: read-write}  # exactly these two
+  - {resource: wiki,   tools: [search],          mode: read-only}   # exactly search, which must be in wiki's read_only_tools
+```
 
-These shapes are rejected with `bad-tool-grant`: a bare resource id on its
-own (`- ticket-search`), which is no longer a grant — the error names both
-replacements, a `tools` list or `mode: all`; an object with neither `tools`
-nor `mode`; a `tools` list that is empty (or `null`); `mode: all` together
-with `tools`; and any `mode` other than `all` or `read-only`. The file
-loader also rejects an object with any key other than `resource`, `tools`,
-and `mode`, or with an empty `resource`, so a misspelled key can never
-widen a grant. A `mode: read-only` grant on a resource that declares no
+- `tools: ["*"]` is the every-tool marker — the same token as a role's
+  `allowed_groups: ["*"]`. Quote it: `["*"]`. An unquoted `[*]` is YAML alias
+  syntax and is a YAML syntax error, not a grant. `"*"` must be the only
+  entry; `["*", query]` is rejected.
+- `mode: read-write` places no filter on the breadth set; `mode: read-only`
+  intersects it with the resource's [`read_only_tools`](#tools-1) — for
+  `["*"]` that is the whole classification, and a named read-only grant must
+  name only tools that are in it (`apply` rejects any other name).
+
+**How a grant spells its scope, across surfaces.** A widest marker (`["*"]`)
+is offered only where another declared boundary already bounds the set: the
+role's identity provider bounds groups (`allowed_groups: ["*"]` = any
+authenticated invoker), the declared resource bounds tools (`tools: ["*"]` =
+whatever that one resource advertises). Where the marker itself would be the
+only bound — executables (`exec.allow`), control operations (`control`),
+spawn targets (`may_spawn`) — the grant enumerates and there is no wildcard.
+`mode` is a closed read/write axis, not a set, and is always stated.
+
+These shapes are rejected with `bad-tool-grant`, each naming the offending
+line and its remedy: a bare resource id on its own (`- ticket-search`), which
+is no longer a grant; an object with neither `tools` nor `mode` (one message
+names both); an absent, `null`, or empty `tools` list; `"*"` alongside other
+entries; an absent or empty `mode`; any `mode` other than `read-only` or
+`read-write`; and the retired `mode: all` — the error names its replacement,
+`tools: ["*"], mode: read-write` for every tool, or `mode: read-only`. The
+file loader also rejects an object with any key other than `resource`,
+`tools`, and `mode`, or with an empty `resource`, so a misspelled key can
+never widen a grant. A `mode: read-only` grant on a resource that declares no
 `read_only_tools` is also `bad-tool-grant`. Every-tool access is therefore
-always a deliberate, visible `mode: all`, never something a resource id
-grants by omission.
+always a deliberate, visible `tools: ["*"]` with an explicit `mode`, never
+something a resource id grants by omission, and never what a missing `mode`
+means.
 
 `apply` rejects an entry whose resource is not declared in `gateway.yaml`
 with `unknown-tool` ("agent references tool ..., which is not a declared
 gateway tool resource") and an empty tool name with `bad-tool-grant`. A
 resource granted more than once is `bad-tool-grant` ("resource ... is
-granted more than once and at least one of those grants is not an all-tools
-grant; merge them into one grant") unless every grant of it is
-`mode: all`. `apply` does not check tool names against the resource itself;
-a name a grant lists that the resource does not expose fails the step at
-run time instead. The agent reaches its
-granted tools only through Agenthof's inbound MCP proxy for the duration of
-its step — see [`lifecycle-tool.md`](../lifecycle-tool.md) for the runtime
-flow; this reference only covers what `apply` checks.
+granted more than once; a repeat is allowed only when every grant is the
+every-tool read-write grant") unless every grant of it is
+`tools: ["*"], mode: read-write`. `apply` does not check tool names against
+the resource itself; a name a grant lists that the resource does not expose
+fails the step at run time instead. The agent reaches its granted tools only
+through Agenthof's inbound MCP proxy for the duration of its step — see
+[`lifecycle-tool.md`](../lifecycle-tool.md) for the runtime flow; this
+reference only covers what `apply` checks.
 
 ### `output`
 
@@ -261,9 +284,11 @@ execution: fronted
 endpoint: https://legacy.internal/agents/triage
 tools:
   - resource: ticket-search
-    mode: all                            # every tool ticket-search exposes
+    tools: ["*"]
+    mode: read-write                     # every tool ticket-search exposes
   - resource: billing-mcp
-    tools: [get_invoice, list_invoices]  # only these two of billing-mcp
+    tools: [get_invoice, list_invoices]
+    mode: read-write                     # only these two of billing-mcp
 # `model` is not checked. Each entry must name a resource under
 # gateway.yaml's `tools` map (see `ticket-search` and `billing-mcp` in the
 # Gateway examples below), or apply rejects the agent with unknown-tool.
@@ -277,9 +302,10 @@ execution: fronted
 endpoint: https://billing-reader.internal/run
 tools:
   - resource: billing-mcp
-    mode: read-only                     # only billing-mcp's read_only_tools
+    tools: ["*"]
+    mode: read-only                      # only billing-mcp's read_only_tools
 # A second grant of billing-mcp in this list would be bad-tool-grant: a
-# resource may repeat only when every grant of it is mode: all.
+# resource may repeat only when every grant of it is tools: ["*"], mode: read-write.
 ```
 
 ### `may_spawn`
@@ -516,13 +542,13 @@ for the runtime flow):
 | Runtime | `runtime` | string | no | `""` (no trusted runtime) |
 
 `read_only_tools` is the operator's list of the tools on this resource that
-a `mode: read-only` agent grant may use. A tool whose name is not in the
+an agent grant with `mode: read-only` may use (`tools: ["*"]` for all of them, or a named subset). A tool whose name is not in the
 list is treated as mutating. Entries must be non-empty and unique, or
 `apply` rejects the resource with `bad-tool-resource` ("read_only_tools
 entries must be non-empty and unique"). `apply` cannot check the names
 against the upstream, since it makes no network call. At run time a listed
 name the upstream does not expose is skipped with a warning, and a
-`mode: read-only` grant that matches no exposed tool fails the step.
+`tools: ["*"], mode: read-only` grant that matches no exposed tool fails the step.
 
 `runtime` declares that a trusted operator runtime fronts this resource and
 attests first-hand, on every result, what it ran. The only accepted value is

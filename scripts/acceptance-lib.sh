@@ -245,9 +245,11 @@ execution: fronted
 endpoint: unix://$AC_SOCK_DIR/${AC_AGENT_SOCK:-lc.sock}
 tools:
   - resource: obo-upstream
-    mode: all
+    tools: ["*"]
+    mode: read-write
   - resource: stdio-tool
-    mode: all
+    tools: ["*"]
+    mode: read-write
 exec:
   runtime: refexec
   url: $AC_EXEC_URL

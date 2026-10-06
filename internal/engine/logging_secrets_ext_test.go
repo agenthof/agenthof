@@ -339,7 +339,7 @@ func TestOperationalLogCarriesNoSecret(t *testing.T) {
 	toolCfg := func(res config.ToolResource) config.GatewayConfig {
 		return config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}
 	}
-	toolGrant := config.AgentDef{Tools: []config.ToolGrant{{Resource: "up", Mode: "all"}}}
+	toolGrant := config.AgentDef{Tools: []config.ToolGrant{{Resource: "up", Tools: []string{"*"}, Mode: "read-write"}}}
 	basicPair := base64.StdEncoding.EncodeToString([]byte(url.QueryEscape(ccClientID) + ":" + url.QueryEscape(ccSecret)))
 
 	scenarios := []doorScenario{

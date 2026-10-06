@@ -150,13 +150,13 @@ func TestSetEnabledPreservesToolGrantShape(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	src := "name: planner\nendpoint: https://x\ntools:\n  - resource: code-search\n    mode: all\n  - resource: github\n    tools: [list_issues, get_issue]\n"
+	src := "name: planner\nendpoint: https://x\ntools:\n  - resource: code-search\n    tools: [\"*\"]\n    mode: read-write\n  - resource: github\n    tools: [list_issues, get_issue]\n    mode: read-write\n"
 	if err := os.WriteFile(filepath.Join(dir, "planner.yaml"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	want := []config.ToolGrant{
-		{Resource: "code-search", Mode: "all"},
-		{Resource: "github", Tools: []string{"list_issues", "get_issue"}},
+		{Resource: "code-search", Tools: []string{"*"}, Mode: "read-write"},
+		{Resource: "github", Tools: []string{"list_issues", "get_issue"}, Mode: "read-write"},
 	}
 
 	before, errs := config.LoadDir(root)

@@ -54,7 +54,7 @@ func oboTestConfig(grant string) config.Config {
 	}
 	return config.Config{
 		Agents: []config.AgentDef{
-			{Name: "planner", Model: "fast", Endpoint: "https://example.test/run", Tools: []config.ToolGrant{{Resource: grant, Mode: "all"}}},
+			{Name: "planner", Model: "fast", Endpoint: "https://example.test/run", Tools: []config.ToolGrant{{Resource: grant, Tools: []string{"*"}, Mode: "read-write"}}},
 			{Name: "coder", Model: "fast", Endpoint: "https://example.test/run"},
 		},
 		Workflows: []config.WorkflowDef{

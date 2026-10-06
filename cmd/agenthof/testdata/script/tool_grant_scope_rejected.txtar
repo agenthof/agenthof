@@ -1,0 +1,93 @@
+# tools and mode are both required on every tool grant, "*" must be the only
+# tools entry when present, and mode: all is retired. Each shape is rejected
+# at load with bad-tool-grant, the offending line, and its remedy. One agent
+# file per shape: the loader stops at the first error within a file and
+# collects across files, so every rejection below is reported in one apply.
+
+! exec agenthof apply --config config
+stdout 'agents/bare-object\.yaml: bad-tool-grant: line 7: a tool grant needs tools and mode: write \{resource: "echo-tool", tools: \["\*"\], mode: read-write\} for every tool, or list tools and set mode'
+stdout 'agents/mode-all\.yaml: bad-tool-grant: line 8: tool grant for resource "echo-tool": mode: all is retired; write tools: \["\*"\], mode: read-write for every tool, or mode: read-only'
+stdout 'agents/bad-mode\.yaml: bad-tool-grant: line 9: tool grant for resource "echo-tool" has mode "write" \(want read-only or read-write\)'
+stdout 'agents/no-tools\.yaml: bad-tool-grant: line 7: tool grant for resource "echo-tool" has no tools: list the tools it may call, or tools: \["\*"\] for every tool'
+stdout 'agents/star-not-alone\.yaml: bad-tool-grant: line 8: tool grant for resource "echo-tool" lists "\*" alongside other tools; "\*" must be the only entry'
+stdout 'agents/no-mode\.yaml: bad-tool-grant: line 7: tool grant for resource "echo-tool" has no mode: set mode: read-only or read-write'
+! stdout 'registry ok'
+
+-- config/agents/bare-object.yaml --
+name: bare-object
+model: fast
+instruction: use a tool
+output: out
+execution: fronted
+tools:
+  - resource: echo-tool
+-- config/agents/mode-all.yaml --
+name: mode-all
+model: fast
+instruction: use a tool
+output: out
+execution: fronted
+tools:
+  - resource: echo-tool
+    mode: all
+-- config/agents/bad-mode.yaml --
+name: bad-mode
+model: fast
+instruction: use a tool
+output: out
+execution: fronted
+tools:
+  - resource: echo-tool
+    tools: ["*"]
+    mode: write
+-- config/agents/no-tools.yaml --
+name: no-tools
+model: fast
+instruction: use a tool
+output: out
+execution: fronted
+tools:
+  - resource: echo-tool
+    mode: read-write
+-- config/agents/star-not-alone.yaml --
+name: star-not-alone
+model: fast
+instruction: use a tool
+output: out
+execution: fronted
+tools:
+  - resource: echo-tool
+    tools: ["*", echo]
+    mode: read-write
+-- config/agents/no-mode.yaml --
+name: no-mode
+model: fast
+instruction: use a tool
+output: out
+execution: fronted
+tools:
+  - resource: echo-tool
+    tools: [echo]
+-- config/workflows/tool-demo.yaml --
+name: tool-demo
+steps:
+  - name: call
+    agent: no-mode
+-- config/roles/se.yaml --
+name: se
+workflows: [tool-demo]
+allowed_groups: ["*"]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
+tools:
+  echo-tool:
+    kind: mcp
+    url: http://127.0.0.1:0/
+    credential_source: static_env
+    token_env: AGENTHOF_TOOL_TOKEN
+defaults:
+  model: fast
