@@ -73,11 +73,12 @@ The governed core is real and runnable today:
   the ledger it would go to is the damaged one).
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
   reach declared MCP tool resources only through Agenthof, which mirrors a
-  whole resource (written `mode: all` — every-tool access is always an
-  explicit marker, never what a resource id grants by omission), only the
-  tools an agent's grant names, or — with `mode: read-only` — only the tools
-  the operator lists as `read_only_tools` (the upstream's own read-only hint
-  does not decide this), authorizes each call against that per-agent
+  whole resource (written `tools: ["*"], mode: read-write` — every-tool
+  access is always an explicit marker, never what a resource id or a missing
+  `mode` grants by omission), only the tools an agent's grant names, or —
+  with `mode: read-only` — only the tools the operator lists as
+  `read_only_tools` (the upstream's own read-only hint does not decide this),
+  authorizes each call against that per-agent
   allowlist, injects the resource credential (a static bearer, an OAuth
   `client_credentials`-minted token, or — on behalf of the invoking human —
   a per-user token exchanged from their verified OIDC token via RFC 8693)

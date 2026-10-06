@@ -7,7 +7,7 @@ inside, see [`lifecycle.md`](lifecycle.md). For the YAML, see
 a real upstream MCP server, the injected credential, and the rendered
 `tool_call` audit line — see the testscripts
 [`cmd/agenthof/testdata/script/door_tool.txtar`](../cmd/agenthof/testdata/script/door_tool.txtar)
-(a `mode: all` grant) and
+(a `tools: ["*"], mode: read-write` grant) and
 [`cmd/agenthof/testdata/script/door_tool_allowlist.txtar`](../cmd/agenthof/testdata/script/door_tool_allowlist.txtar)
 (a grant restricted to named tools, with the left-out tool refused).
 For a stdio-only MCP server reached through the reference bridge, see
@@ -44,20 +44,22 @@ routes and the model route.
 
 What an agent's `tools:` list changes is **which tools are mirrored onto that
 server**. Each entry is an object naming a tool resource from `gateway.yaml`.
-An object with `mode: all` grants every tool that resource advertises; a
-resource id on its own is not a grant and is rejected at `apply`. An object
-with `tools: [list_issues, get_issue]` grants only the
-named tools of that resource. An object with `mode: read-only` grants only
-the tools the operator lists in that resource's `read_only_tools`; adding a
-`tools` list narrows it further, and every name in it must be one of those
-read-only tools. A tool not in `read_only_tools` is treated as mutating. An entry that names no such
+Every entry states both axes of its scope. `tools: ["*"]` grants every tool
+that resource advertises; `tools: [list_issues, get_issue]` grants only the
+named tools of that resource — a resource id on its own is not a grant and is
+rejected at `apply`. `mode: read-write` leaves that set as it is; `mode:
+read-only` keeps only the tools the operator lists in that resource's
+`read_only_tools` — all of them for `["*"]`, and for a named list every name
+must be one of them. A tool not in `read_only_tools` is treated as mutating.
+Neither axis has a default: a grant missing `tools` or `mode` is rejected at
+`apply`, never widened. An entry that names no such
 resource is rejected at `apply`. An agent that declares no tools still gets
 the MCP server — with an empty tool list, and any `tools/call` it sends
 recorded `refused`, reason `tool is not available to this run`.
 
 Before the step is handed to the agent, Agenthof connects out to each named
 resource as an MCP client, asks it for its tools, and mirrors them onto the
-inbound server — all of them for a `mode: all` entry, only the
+inbound server — all of them for a `tools: ["*"], mode: read-write` entry, only the
 granted ones otherwise; a tool the entry leaves out is treated as if the resource had
 never advertised it. Resources are visited in the order the agent declared
 them, and each id is visited once. Connecting and listing are bounded at 30
@@ -66,7 +68,7 @@ seconds each.
 If any of that fails — the resource is unreachable, it will not list its
 tools, two declared resources advertise a mirrored tool of the same name, or
 an entry's `tools` list names a tool its resource does not advertise (a typo,
-or a tool the resource has since dropped), or a `mode: read-only` entry matches
+or a tool the resource has since dropped), or a `tools: ["*"], mode: read-only` entry matches
 none of the tools the resource advertises — the step fails outright, with
 `step_failed` carrying the fixed reason `tool proxy start failed`, and the
 workflow finishes failed. It does not bounce back to a prior step. The ledger
@@ -89,9 +91,8 @@ ledger and never placed on the delegation binding.
 
 ## What the agent can see
 
-A `mode: all` entry grants **every tool that resource advertises**;
-any other entry grants **only the tools it names or the resource's
-`read_only_tools`**. Either way Agenthof mirrors the
+A `tools: ["*"], mode: read-write` entry grants **every tool that resource advertises**;
+any other entry grants **only the tools it names, intersected with the resource's `read_only_tools` when its mode is `read-only`**. Either way Agenthof mirrors the
 upstream's own tool definitions as they come back, names and schemas
 unchanged. It does not invent tools of its own, and it does not rewrite the
 ones it mirrors.
@@ -398,7 +399,7 @@ not prove is the same limit as every other event; see
 
 | Shipped today | Reserved for later |
 | --- | --- |
-| a grant is `mode: all` (every tool the resource advertises), `mode: read-only` (the resource's `read_only_tools`, as the operator lists them), or a `tools` list (only those names); a resource id on its own is rejected at `apply` | |
+| a grant states `tools` (`["*"]` for every tool the resource advertises, or named tools) and `mode` (`read-write`, or `read-only` — the resource's `read_only_tools`, as the operator lists them); a resource id on its own, or a grant missing either axis, is rejected at `apply` | |
 | an HTTP (streamable) MCP transport, over TCP or a `unix://` socket; a stdio MCP server through the reference bridge (`deploy/refbridge`), which attests first-hand on every call what it ran (`runtime_attestation`) | a bridge that keeps the credential to itself and relays it onto the server's outbound calls; the subprocess's exit on the ledger |
 | `static_env`, `client_credentials`, and — on behalf of the invoker — `token_exchange` credentials, injected outbound; on-behalf-of is impersonation (the upstream sees the human) | delegation with an actor token (the upstream sees the agent acting for the human); re-authentication when the inbound token expires mid-run |
 
