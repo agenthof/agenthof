@@ -25,6 +25,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,11 +47,11 @@ const connectTimeout = 30 * time.Second
 // Gateway implements engine.ToolProxy: for one fronted step it mints a run
 // token, connects to each tool resource the agent's grants name as an MCP
 // client (with a broker-injected credential the agent never sees), mirrors
-// the granted tools — every tool of an all-tools grant, the resource's
-// read_only_tools under mode: read-only, only the named tools of a named
-// grant — onto an inbound MCP server gated by the run token, and forwards
-// calls, appending a tool_call event per call (carrying a trusted runtime's
-// attestation when the resource declares one).
+// the granted tools — every tool of an every-tool read-write grant, the
+// resource's read_only_tools under tools: ["*"] + mode: read-only, only the
+// named tools of a named grant — onto an inbound MCP server gated by the run
+// token, and forwards calls, appending a tool_call event per call (carrying
+// a trusted runtime's attestation when the resource declares one).
 type Gateway struct {
 	tools   map[string]config.ToolResource
 	broker  broker.Broker
@@ -112,13 +113,14 @@ func New(gw config.GatewayConfig, keyRoot string, b broker.Broker, logger *slog.
 }
 
 // allowedTools is what Start derives from the agent's tool grants: resource
-// id → the tool names the agent may see. A PRESENT key with a nil set is a
-// config.ScopeAll grant, mode: all (every tool the resource exposes); an
-// ABSENT key is a resource the agent was not granted at all; a present key
-// with an EMPTY set grants nothing. A read-only grant resolves to the
-// resource's read_only_tools, so it arrives here as an ordinary non-nil set.
-// allows is the only reader, so the present-vs-nil distinction cannot be
-// confused with "not granted".
+// id → the tool names the agent may see. A PRESENT key with a nil set is an
+// every-tool read-write grant (tools: ["*"], mode: read-write — every tool
+// the resource exposes); an ABSENT key is a resource the agent was not
+// granted at all; a present key with an EMPTY set grants nothing. The other
+// three cells of the grant's 2×2 — ["*"] read-only (the resource's
+// read_only_tools), named read-write, named read-only — arrive here as
+// ordinary non-nil sets. allows is the only reader, so the present-vs-nil
+// distinction cannot be confused with "not granted".
 type allowedTools map[string]map[string]struct{}
 
 // allows reports whether tool on resourceID is within the agent's grant.
@@ -128,7 +130,7 @@ func (a allowedTools) allows(resourceID, tool string) bool {
 		return false
 	}
 	if names == nil {
-		return true // all-tools grant: every tool
+		return true // every-tool read-write grant: every tool
 	}
 	_, ok := names[tool]
 	return ok
@@ -172,58 +174,70 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	}
 
 	// Build the per-resource allowlist. Registry validation already rejects
-	// a grant with neither tools nor a mode, a resource granted twice when
-	// either grant limits tools, a mode it does not implement, and mode: all
-	// alongside a tools list — but Start is reachable without the registry,
-	// so it fails closed on all four rather than letting merge order decide
-	// what the agent may see. The no-scope check runs first so a pair of
-	// such grants is reported as what it is, not as a duplicate.
+	// a malformed grant and a resource granted twice when either grant is
+	// not every-tool read-write — but Start is reachable without the
+	// registry, so it fails closed on the same shape rules, in the same
+	// order as UnmarshalYAML and Validate, before the duplicate guard (so a
+	// pair of malformed grants is reported as what it is, not as a
+	// duplicate) and before the effective-set block, which therefore only
+	// ever sees a well-formed grant: tools ["*"] or named, mode read-only or
+	// read-write.
 	allow := allowedTools{}
 	for _, grant := range agent.Tools {
-		if grant.Mode == "" && len(grant.Tools) == 0 {
+		switch {
+		case len(grant.Tools) == 0 && grant.Mode == "":
 			logger.Error("gateway start refused", "reason", "tool grant names no tools and sets no mode", "resource", grant.Resource)
-			return "", "", fmt.Errorf("resource %q grant names no tools and sets no mode; list tools or set mode: all", grant.Resource)
+			return "", "", fmt.Errorf("resource %q grant needs tools and mode: write {resource: %q, tools: [\"*\"], mode: read-write} for every tool, or list tools and set mode", grant.Resource, grant.Resource)
+		case grant.Mode == "all":
+			logger.Error("gateway start refused", "reason", "tool grant uses the retired mode: all", "resource", grant.Resource)
+			return "", "", fmt.Errorf("resource %q grant: mode: all is retired; write tools: [\"*\"], mode: read-write for every tool, or mode: read-only", grant.Resource)
+		case grant.Mode != "" && grant.Mode != "read-only" && grant.Mode != "read-write":
+			logger.Error("gateway start refused", "reason", "tool grant mode not implemented", "resource", grant.Resource)
+			return "", "", fmt.Errorf("resource %q grant has mode %q (want read-only or read-write)", grant.Resource, grant.Mode)
+		case len(grant.Tools) == 0:
+			logger.Error("gateway start refused", "reason", "tool grant names no tools", "resource", grant.Resource)
+			return "", "", fmt.Errorf("resource %q grant has no tools: list the tools it may call, or tools: [\"*\"] for every tool", grant.Resource)
+		case slices.Contains(grant.Tools, "*") && len(grant.Tools) != 1:
+			logger.Error("gateway start refused", "reason", "tool grant lists \"*\" alongside other tools", "resource", grant.Resource)
+			return "", "", fmt.Errorf("resource %q grant lists \"*\" alongside other tools; \"*\" must be the only entry", grant.Resource)
+		case grant.Mode == "":
+			logger.Error("gateway start refused", "reason", "tool grant sets no mode", "resource", grant.Resource)
+			return "", "", fmt.Errorf("resource %q grant has no mode: set mode: read-only or read-write", grant.Resource)
 		}
 		prev, seen := allow[grant.Resource]
-		scope := grant.Scope()
-		if seen && (scope != config.ScopeAll || prev != nil) {
+		if seen && (!grant.EveryToolReadWrite() || prev != nil) {
 			logger.Error("gateway start refused", "reason", "resource granted more than once with a limited grant", "resource", grant.Resource)
-			return "", "", fmt.Errorf("resource %q is granted more than once and at least one grant restricts tools", grant.Resource)
-		}
-		if grant.Mode != "" && grant.Mode != "all" && grant.Mode != "read-only" {
-			logger.Error("gateway start refused", "reason", "tool grant mode not implemented", "resource", grant.Resource)
-			return "", "", fmt.Errorf("resource %q grant has mode %q", grant.Resource, grant.Mode)
-		}
-		if grant.Mode == "all" && len(grant.Tools) > 0 {
-			logger.Error("gateway start refused", "reason", "mode all with a tools list", "resource", grant.Resource)
-			return "", "", fmt.Errorf("resource %q grant sets mode all and a tools list", grant.Resource)
-		}
-		if scope == config.ScopeAll {
-			allow[grant.Resource] = nil // present, nil: every tool
-			continue
+			return "", "", fmt.Errorf(`resource %q is granted more than once; a repeat is allowed only when every grant is the every-tool read-write grant (tools: ["*"], mode: read-write)`, grant.Resource)
 		}
 		res := p.tools[grant.Resource]
-		// A read-only grant that also names tools narrows the operator's
-		// classification; it can never widen it, so a name outside
-		// read_only_tools is refused before the list is trusted.
-		if scope == config.ScopeReadOnly && len(grant.Tools) > 0 {
-			classified := readOnlySet(res)
-			for _, name := range grant.Tools {
-				if _, ok := classified[name]; !ok {
-					logger.Error("gateway start refused", "reason", "tool is not classified read-only", "resource", grant.Resource, "tool", name)
-					return "", "", fmt.Errorf("resource %q tool %q is not classified read-only", grant.Resource, name)
+		// The 2×2 — breadth (["*"] or named) × mode (read-write or
+		// read-only). Branch on AllTools first: "*" is a marker, never a
+		// name to look up or to put in a set.
+		switch {
+		case grant.EveryToolReadWrite():
+			allow[grant.Resource] = nil // present, nil: every tool
+		case grant.AllTools():
+			// ["*"] + read-only: the operator's whole classification.
+			allow[grant.Resource] = readOnlySet(res)
+		default:
+			// A named read-only grant narrows the operator's classification;
+			// it can never widen it, so a name outside read_only_tools is
+			// refused before the list is trusted.
+			if grant.ReadOnly() {
+				classified := readOnlySet(res)
+				for _, name := range grant.Tools {
+					if _, ok := classified[name]; !ok {
+						logger.Error("gateway start refused", "reason", "tool is not classified read-only", "resource", grant.Resource, "tool", name)
+						return "", "", fmt.Errorf("resource %q tool %q is not classified read-only", grant.Resource, name)
+					}
 				}
 			}
+			names := make(map[string]struct{}, len(grant.Tools))
+			for _, name := range grant.Tools {
+				names[name] = struct{}{}
+			}
+			allow[grant.Resource] = names
 		}
-		src := grant.Tools
-		if scope == config.ScopeReadOnly && len(grant.Tools) == 0 {
-			src = res.ReadOnlyTools
-		}
-		names := make(map[string]struct{}, len(src))
-		for _, name := range src {
-			names[name] = struct{}{}
-		}
-		allow[grant.Resource] = names
 	}
 
 	inbound := mcp.NewServer(&mcp.Implementation{Name: "agenthof-tool-proxy", Version: "v0.1.0"}, nil)
@@ -309,11 +323,17 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 		// nothing at all fails, since a fronted agent never reports
 		// ListTools to the operator and an empty tool set would be
 		// indistinguishable from an off-allowlist attempt. A name the GRANT
-		// itself lists (named, or read-only narrowed to specific tools) is
-		// an explicit request, so any one of them missing — a typo, or a
-		// tool the upstream since removed — fails the step loudly.
-		// Declared order makes the reported name deterministic.
-		if grant.Scope() == config.ScopeReadOnly && len(grant.Tools) == 0 {
+		// itself lists (named, read-write or read-only) is an explicit
+		// request, so any one of them missing — a typo, or a tool the
+		// upstream since removed — fails the step loudly. An every-tool
+		// read-write grant names nothing, so there is nothing to check.
+		// Declared order makes the reported name deterministic. The three
+		// cases are spelled out so "*" never reaches the exposed[] lookup.
+		switch {
+		case grant.EveryToolReadWrite():
+			// Every exposed tool was mirrored above.
+		case grant.AllTools():
+			// ["*"] + read-only: the intersection with read_only_tools.
 			matched := 0
 			for _, name := range res.ReadOnlyTools {
 				if exposed[name] {
@@ -327,7 +347,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 				closeSessions()
 				return "", "", fmt.Errorf("resource %q read-only grant matches no exposed tool", id)
 			}
-		} else {
+		default:
 			for _, name := range grant.Tools {
 				if !exposed[name] {
 					logger.Error("gateway start refused", "reason", "allowlisted tool not exposed by upstream", "resource", id, "tool", name)

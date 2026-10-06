@@ -1,11 +1,11 @@
 # A bare tool grant — a resource id on its own — is no longer a grant: apply
-# rejects it at load and names both replacements, so every-tool access is
-# always written out as mode: all.
+# rejects it at load and names the replacement, so every-tool access is
+# always written out as tools: ["*"] with an explicit mode.
 
 ! exec agenthof apply --config config
 stdout 'agents/user\.yaml: bad-tool-grant: line 6: a bare tool grant is no longer accepted'
-stdout '\{resource: "echo-tool", tools: \[\.\.\.\]\}'
-stdout '\{resource: "echo-tool", mode: all\}'
+stdout '\{resource: "echo-tool", tools: \["\*"\], mode: read-write\}'
+stdout 'or list tools and set mode'
 
 -- config/agents/user.yaml --
 name: user

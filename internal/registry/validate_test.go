@@ -218,7 +218,7 @@ func TestValidateExecutionTiers(t *testing.T) {
 	cfg = baseCfg()
 	cfg.Agents[0].Execution = "fronted"
 	cfg.Agents[0].Endpoint = "https://example.com/agent"
-	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "github", Mode: "all"}}
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "github", Tools: []string{"*"}, Mode: "read-write"}}
 	cfg.Gateway.Tools = map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
 	}
@@ -230,7 +230,7 @@ func TestValidateExecutionTiers(t *testing.T) {
 	cfg = baseCfg()
 	cfg.Agents[0].Execution = "contained"
 	cfg.Agents[0].Endpoint = "https://example.com/agent"
-	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "nope", Mode: "all"}}
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "nope", Tools: []string{"*"}, Mode: "read-write"}}
 	if codes(Validate(cfg))["unknown-tool"] != 1 {
 		t.Fatal("unknown-tool must run for every agent, including one marked contained")
 	}
@@ -255,7 +255,7 @@ func TestFrontedAgentDeclaredToolValid(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Agents[0].Execution = "fronted"
 	cfg.Agents[0].Endpoint = "https://x"
-	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "github", Mode: "all"}}
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "github", Tools: []string{"*"}, Mode: "read-write"}}
 	cfg.Gateway.Tools = map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
 	}
@@ -268,16 +268,20 @@ func TestFrontedAgentUndeclaredToolRejected(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Agents[0].Execution = "fronted"
 	cfg.Agents[0].Endpoint = "https://x"
-	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "nope", Mode: "all"}}
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "nope", Tools: []string{"*"}, Mode: "read-write"}}
 	if codes(Validate(cfg))["unknown-tool"] != 1 {
 		t.Fatalf("undeclared tool must be unknown-tool")
 	}
 }
 
 // TestValidateToolGrants covers the grant-level rules: a grant must name a
-// declared resource and non-empty tool names; a resource may be granted more
-// than once only when every grant is ScopeAll (mode: all). Any ScopeReadOnly
-// or ScopeNamed grant makes a second grant of that resource bad-tool-grant.
+// declared resource, both tools and mode, non-empty tool names, "*" alone
+// when present, and a mode in the closed enum (mode: all is retired). A
+// resource may be granted more than once only when every grant of it is
+// every-tool read-write (tools: ["*"], mode: read-write); any other grant
+// makes a second grant of that resource bad-tool-grant. Each malformed
+// grant is reported exactly once — the shape rules continue past it — so a
+// bad mode can never also land in a duplicate bucket.
 func TestValidateToolGrants(t *testing.T) {
 	withGrants := func(grants []config.ToolGrant) config.Config {
 		cfg := baseCfg()
@@ -290,29 +294,36 @@ func TestValidateToolGrants(t *testing.T) {
 		}
 		return cfg
 	}
+	star := []string{"*"}
 	cases := []struct {
 		name   string
 		grants []config.ToolGrant
 		code   string // "" = the agent must validate clean
 	}{
 		{"grant with neither tools nor mode", []config.ToolGrant{{Resource: "github"}}, "bad-tool-grant"},
-		{"restricted grant", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues", "get_issue"}}}, ""},
-		{"mode all duplicates tolerated", []config.ToolGrant{{Resource: "github", Mode: "all"}, {Resource: "github", Mode: "all"}}, ""},
-		{"unknown resource on a restricted grant", []config.ToolGrant{{Resource: "nope", Tools: []string{"x"}}}, "unknown-tool"},
-		{"empty tool name", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues", ""}}}, "bad-tool-grant"},
+		{"named read-write", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues", "get_issue"}, Mode: "read-write"}}, ""},
+		{"every-tool read-write duplicates tolerated", []config.ToolGrant{{Resource: "github", Tools: star, Mode: "read-write"}, {Resource: "github", Tools: star, Mode: "read-write"}}, ""},
+		{"unknown resource on a named grant", []config.ToolGrant{{Resource: "nope", Tools: []string{"x"}, Mode: "read-write"}}, "unknown-tool"},
+		{"empty tool name", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues", ""}, Mode: "read-write"}}, "bad-tool-grant"},
 		{"empty resource", []config.ToolGrant{{Resource: ""}}, "bad-tool-grant"},
-		{"mode all then named duplicate", []config.ToolGrant{{Resource: "github", Mode: "all"}, {Resource: "github", Tools: []string{"x"}}}, "bad-tool-grant"},
-		{"named then mode all duplicate", []config.ToolGrant{{Resource: "github", Tools: []string{"x"}}, {Resource: "github", Mode: "all"}}, "bad-tool-grant"},
-		{"two restricted duplicates", []config.ToolGrant{{Resource: "github", Tools: []string{"x"}}, {Resource: "github", Tools: []string{"y"}}}, "bad-tool-grant"},
-		{"mode all", []config.ToolGrant{{Resource: "github", Mode: "all"}}, ""},
-		{"mode read-only", []config.ToolGrant{{Resource: "github", Mode: "read-only"}}, ""},
-		{"tools plus read-only", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues"}, Mode: "read-only"}}, ""},
-		{"mode all then read-only duplicate", []config.ToolGrant{{Resource: "github", Mode: "all"}, {Resource: "github", Mode: "read-only"}}, "bad-tool-grant"},
-		{"named then read-only duplicate", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues"}}, {Resource: "github", Mode: "read-only"}}, "bad-tool-grant"},
+		{"every-tool then named duplicate", []config.ToolGrant{{Resource: "github", Tools: star, Mode: "read-write"}, {Resource: "github", Tools: []string{"x"}, Mode: "read-write"}}, "bad-tool-grant"},
+		{"named then every-tool duplicate", []config.ToolGrant{{Resource: "github", Tools: []string{"x"}, Mode: "read-write"}, {Resource: "github", Tools: star, Mode: "read-write"}}, "bad-tool-grant"},
+		{"two named duplicates", []config.ToolGrant{{Resource: "github", Tools: []string{"x"}, Mode: "read-write"}, {Resource: "github", Tools: []string{"y"}, Mode: "read-write"}}, "bad-tool-grant"},
+		{"every-tool read-write", []config.ToolGrant{{Resource: "github", Tools: star, Mode: "read-write"}}, ""},
+		{"every read-only tool", []config.ToolGrant{{Resource: "github", Tools: star, Mode: "read-only"}}, ""},
+		{"named read-only", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues"}, Mode: "read-only"}}, ""},
+		{"every-tool then every-read-only duplicate", []config.ToolGrant{{Resource: "github", Tools: star, Mode: "read-write"}, {Resource: "github", Tools: star, Mode: "read-only"}}, "bad-tool-grant"},
+		{"named then every-read-only duplicate", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues"}, Mode: "read-write"}, {Resource: "github", Tools: star, Mode: "read-only"}}, "bad-tool-grant"},
+		{"two every-read-only duplicates", []config.ToolGrant{{Resource: "github", Tools: star, Mode: "read-only"}, {Resource: "github", Tools: star, Mode: "read-only"}}, "bad-tool-grant"},
 		{"mutating tool under read-only", []config.ToolGrant{{Resource: "github", Tools: []string{"delete_repo"}, Mode: "read-only"}}, "bad-tool-grant"},
-		{"bad mode", []config.ToolGrant{{Resource: "github", Mode: "write"}}, "bad-tool-grant"},
-		{"mode all plus tools", []config.ToolGrant{{Resource: "github", Mode: "all", Tools: []string{"list_issues"}}}, "bad-tool-grant"},
-		{"unknown resource read-only", []config.ToolGrant{{Resource: "nope", Mode: "read-only"}}, "unknown-tool"},
+		{"bad mode", []config.ToolGrant{{Resource: "github", Tools: star, Mode: "write"}}, "bad-tool-grant"},
+		{"mode all retired", []config.ToolGrant{{Resource: "github", Mode: "all"}}, "bad-tool-grant"},
+		{"mode all retired even with tools", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues"}, Mode: "all"}}, "bad-tool-grant"},
+		{"mode absent on a named grant", []config.ToolGrant{{Resource: "github", Tools: []string{"list_issues"}}}, "bad-tool-grant"},
+		{"mode absent on a star grant never widens", []config.ToolGrant{{Resource: "github", Tools: star}}, "bad-tool-grant"},
+		{"star not alone", []config.ToolGrant{{Resource: "github", Tools: []string{"*", "list_issues"}, Mode: "read-write"}}, "bad-tool-grant"},
+		{"tools absent with a mode", []config.ToolGrant{{Resource: "github", Mode: "read-write"}}, "bad-tool-grant"},
+		{"unknown resource every read-only", []config.ToolGrant{{Resource: "nope", Tools: star, Mode: "read-only"}}, "unknown-tool"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -363,8 +374,41 @@ func TestValidateRejectsGrantWithoutScope(t *testing.T) {
 			t.Fatalf("resource %q: codes = %v, want one bad-tool-grant per grant and nothing else (errs: %v)", res, c, agentErrs)
 		}
 		for _, e := range agentErrs {
-			if !strings.Contains(e.Msg, "must list tools or set mode (all|read-only)") {
-				t.Fatalf("resource %q: msg = %q, want both remedies named", res, e.Msg)
+			if !strings.Contains(e.Msg, "needs tools and mode") || !strings.Contains(e.Msg, `tools: ["*"], mode: read-write`) {
+				t.Fatalf("resource %q: msg = %q, want the combined remedy naming the every-tool shape", res, e.Msg)
+			}
+		}
+	}
+}
+
+// TestValidateRetiredModeAllIsReportedOnce: the old every-tool spelling is
+// rejected naming its replacement, once, and — like every shape rule — before
+// the resource is looked up, so an unknown resource under mode: all is not
+// also unknown-tool and the grant lands in no duplicate bucket.
+func TestValidateRetiredModeAllIsReportedOnce(t *testing.T) {
+	for _, res := range []string{"github", "nope"} {
+		cfg := baseCfg()
+		cfg.Agents[0].Tools = []config.ToolGrant{{Resource: res, Mode: "all"}, {Resource: res, Tools: []string{"*"}, Mode: "read-write"}}
+		cfg.Gateway.Tools = map[string]config.ToolResource{
+			"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
+		}
+		var agentErrs []ValidationError
+		for _, e := range Validate(cfg) {
+			if e.Entity == "planner" {
+				agentErrs = append(agentErrs, e)
+			}
+		}
+		c := codes(agentErrs)
+		wantUnknown := 0
+		if res == "nope" {
+			wantUnknown = 1 // from the well-formed second grant only
+		}
+		if c["bad-tool-grant"] != 1 || c["unknown-tool"] != wantUnknown || len(agentErrs) != 1+wantUnknown {
+			t.Fatalf("resource %q: codes = %v, want one bad-tool-grant for mode: all and no duplicate (errs: %v)", res, c, agentErrs)
+		}
+		for _, e := range agentErrs {
+			if e.Code == "bad-tool-grant" && (!strings.Contains(e.Msg, "mode: all is retired") || !strings.Contains(e.Msg, `tools: ["*"], mode: read-write`)) {
+				t.Fatalf("resource %q: msg = %q, want the retirement naming its replacement", res, e.Msg)
 			}
 		}
 	}
@@ -372,7 +416,7 @@ func TestValidateRejectsGrantWithoutScope(t *testing.T) {
 
 func TestValidateReadOnlyRequiresClassification(t *testing.T) {
 	cfg := baseCfg()
-	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "github", Mode: "read-only"}}
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "github", Tools: []string{"*"}, Mode: "read-only"}}
 	cfg.Gateway.Tools = map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: "https://mcp/x", CredentialSource: "static_env", TokenEnv: "T"},
 	}
@@ -393,7 +437,7 @@ func TestValidateReadOnlyRequiresClassification(t *testing.T) {
 
 func TestValidateUnknownReadOnlyIsOnlyUnknownTool(t *testing.T) {
 	cfg := baseCfg()
-	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "nope", Mode: "read-only"}}
+	cfg.Agents[0].Tools = []config.ToolGrant{{Resource: "nope", Tools: []string{"*"}, Mode: "read-only"}}
 	var agentErrs []ValidationError
 	for _, e := range Validate(cfg) {
 		if e.Entity == "planner" {

@@ -1296,7 +1296,7 @@ func TestRunWiresToolProxyForFrontedToolAgent(t *testing.T) {
 
 	root := t.TempDir()
 	files := map[string]string{
-		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\ntools:\n  - resource: github\n    mode: all\n",
+		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\ntools:\n  - resource: github\n    tools: [\"*\"]\n    mode: read-write\n",
 		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
 		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
 		"gateway.yaml": "tools:\n  github:\n    kind: mcp\n    url: https://mcp.example.test/\n" +
@@ -1400,7 +1400,7 @@ func TestRunWiresClientCredentialsBrokerForFrontedToolAgent(t *testing.T) {
 
 	root := t.TempDir()
 	files := map[string]string{
-		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\ntools:\n  - resource: github\n    mode: all\n",
+		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\ntools:\n  - resource: github\n    tools: [\"*\"]\n    mode: read-write\n",
 		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
 		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
 		"gateway.yaml": "tools:\n  github:\n    kind: mcp\n    url: https://mcp.example.test/\n" +
@@ -1509,7 +1509,7 @@ func writeOBOSample(t *testing.T, exchangeURL, upstreamURL string) string {
 	t.Cleanup(stub.Close)
 	root := t.TempDir()
 	files := map[string]string{
-		"agents/planner.yaml": "name: planner\nmodel: fast\ninstruction: plan\noutput: plan\nendpoint: " + stub.URL + "\ntools:\n  - resource: crm\n    mode: all\n",
+		"agents/planner.yaml": "name: planner\nmodel: fast\ninstruction: plan\noutput: plan\nendpoint: " + stub.URL + "\ntools:\n  - resource: crm\n    tools: [\"*\"]\n    mode: read-write\n",
 		"workflows/crm.yaml":  "name: crm\nsteps:\n  - name: plan\n    agent: planner\n",
 		"roles/se.yaml":       "name: software-engineer\nworkflows: [crm]\nallowed_groups: [\"*\"]\n",
 		"gateway.yaml": "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\n" +

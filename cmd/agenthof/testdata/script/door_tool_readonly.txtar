@@ -1,4 +1,4 @@
-# mode: read-only mirrors echo (classified) and refuses other.
+# tools: ["*"] + mode: read-only mirrors echo (classified) and refuses other.
 
 env AGENTHOF_TOOL_TOKEN=tool-secret
 
@@ -23,6 +23,7 @@ output: out
 execution: fronted
 tools:
   - resource: echo-tool
+    tools: ["*"]
     mode: read-only
 -- config/workflows/tool-demo.yaml --
 name: tool-demo
