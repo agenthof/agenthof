@@ -7,7 +7,8 @@ env AGENTHOF_OIDC_CLIENT_ID=agenthof
 
 # apply runs as the dev identity: AGENTHOF_TOKEN is set only AFTER it, or
 # resolveInvoker would take the token (dana, groups [engineering]) over
-# --as/--groups and the control-plane gate would refuse the apply.
+# --as/--groups; the first apply bootstraps either way, but the run below
+# must be attributed to the token and the apply to tester.
 exec agenthof apply --config config --as tester --control-log control.jsonl --groups platform-eng
 stdout 'registry ok: 1 agents, 1 workflows, 3 roles'
 env AGENTHOF_TOKEN=$OIDC_TOKEN

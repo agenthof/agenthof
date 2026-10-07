@@ -1,7 +1,7 @@
 # A role whose control: key is present but names no operations is rejected at
 # apply: an empty grant is an operator mistake, not "no permission". The
-# separate, well-formed platform-admin role is what authorizes the applier —
-# without it the broken role's own grant would never reach validation.
+# separate, well-formed platform-admin role keeps the config past the
+# no-apply-floor check, so the broken role's own grant is what is reported.
 
 ! exec agenthof apply --config config --control-log control.jsonl --as ops@example.com --groups platform-eng
 stdout 'roles/empty\.yaml: empty: control is present but names no operations'
