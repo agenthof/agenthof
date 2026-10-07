@@ -523,104 +523,16 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	}
 	_ = c.Close()
 
-	if refused {
-		// Never echo the raw token, nor the go-oidc error text, into the
-		// ledger: it can echo claim values from the (unverified) token
-		// (see resolveInvoker's doc comment) — the recorded reason is a
-		// fixed string; only the printed line below shows verifyErr.
-		_, _ = fmt.Fprintf(out, "registry %s: token authentication failed: %v\n", action, verifyErr)
-		head, err := control.Append(controlLog, control.Event{
-			Action:     action,
-			Agent:      target,
-			Outcome:    "refused",
-			Reason:     &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"},
-			Invoker:    inv,
-			AssertedAs: assertedAs,
-			Witness:    control.CaptureWitness(),
-		})
-		if err != nil {
-			_, _ = fmt.Fprintln(out, err)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-		return 1
-	}
-
-	// Unknown-agent detection is done here, independently, against the
-	// loaded config, rather than by parsing SetEnabled's own error text:
-	// that keeps the refusal's reason code stable regardless of how
-	// SetEnabled happens to word its error. The control chain is
-	// already known writable at this point (step 2 above), so a config
-	// that fails to load at all is now itself a recordable denial —
-	// outcome "error", reason io_error — rather than a silent, unlogged
-	// exit; it is still never conflated with "agent not found", which is
-	// reserved for a config that loaded cleanly and genuinely lacks the
-	// name. LoadDir — not Build — also supplies the fallback roles the
-	// invoker is authorized against below when nothing is installed.
-	cfg, loadErrs := config.LoadDir(cfgDir)
-	if len(loadErrs) > 0 {
-		for _, e := range loadErrs {
-			_, _ = fmt.Fprintln(out, e)
-		}
+	// recordExit appends a terminal control event — a refusal or an error,
+	// never the success path (which carries a config hash and is built inline
+	// below) — and returns the process exit code. The control chain is already
+	// known writable, so the only reason the recorded outcome and the returned
+	// code can disagree is an append that itself fails here.
+	recordExit := func(outcome string, reason *control.Reason) int {
 		head, appendErr := control.Append(controlLog, control.Event{
 			Action:     action,
 			Agent:      target,
-			Outcome:    "error",
-			Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(loadErrs[0])},
-			Invoker:    inv,
-			AssertedAs: assertedAs,
-			Witness:    control.CaptureWitness(),
-		})
-		if appendErr != nil {
-			_, _ = fmt.Fprintln(out, appendErr)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-		return 1
-	}
-
-	// Authorize against the INSTALLED configuration's roles when one is
-	// installed under this control root — what a previous apply approved —
-	// else, nothing installed yet, against the config dir's roles as LoadDir
-	// read them: the bootstrap-era fallback that keeps a fresh system from
-	// deadlocking. Never registry.Build: with the target agent disabled,
-	// Build rejects the config (disabled-agent-ref), which would make a
-	// disabled agent un-re-enableable. --config stays what the kill switch
-	// mutates and where the agent is looked up, whichever roles decided.
-	// Authorization runs before the agent lookup so an unauthorized caller
-	// learns one refusal and cannot probe agent names.
-	roles := cfg.Roles
-	installedRoles, _, installed, instErr := config.InstalledRoles(installedStore(controlLog))
-	if instErr != nil {
-		// A pointer present but unusable: nobody can be authorized — fail
-		// closed, recorded, nothing flipped.
-		_, _ = fmt.Fprintln(out, instErr)
-		head, appendErr := control.Append(controlLog, control.Event{
-			Action:     action,
-			Agent:      target,
-			Outcome:    "error",
-			Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)},
-			Invoker:    inv,
-			AssertedAs: assertedAs,
-			Witness:    control.CaptureWitness(),
-		})
-		if appendErr != nil {
-			_, _ = fmt.Fprintln(out, appendErr)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-		return 1
-	}
-	if installed {
-		roles = installedRoles
-	}
-	if !authz.ControlAllows(roles, inv, action) {
-		reason := control.NotAuthorized(action)
-		_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, reason.Message)
-		head, appendErr := control.Append(controlLog, control.Event{
-			Action:     action,
-			Agent:      target,
-			Outcome:    "refused",
+			Outcome:    outcome,
 			Reason:     reason,
 			Invoker:    inv,
 			AssertedAs: assertedAs,
@@ -634,6 +546,61 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		return 1
 	}
 
+	if refused {
+		// Never echo the raw token, nor the go-oidc error text, into the
+		// ledger: it can echo claim values from the (unverified) token
+		// (see resolveInvoker's doc comment) — the recorded reason is a
+		// fixed string; only the printed line below shows verifyErr.
+		_, _ = fmt.Fprintf(out, "registry %s: token authentication failed: %v\n", action, verifyErr)
+		return recordExit("refused", &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"})
+	}
+
+	// Authorize before loading --config whenever a snapshot is installed: the
+	// invoker is checked against the INSTALLED configuration's roles — what a
+	// previous apply approved — so an unauthorized caller learns one refusal
+	// and never makes this command read --config at all (mirroring the apply
+	// path, which records one refusal and never the config's own parse errors).
+	// Only the bootstrap-era fallback — nothing installed yet — needs
+	// --config's roles to authorize, so that case loads first, below. A
+	// pointer present but unusable means nobody can be authorized: fail closed,
+	// recorded, nothing flipped.
+	installedRoles, _, installed, instErr := config.InstalledRoles(installedStore(controlLog))
+	if instErr != nil {
+		_, _ = fmt.Fprintln(out, instErr)
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)})
+	}
+	if installed && !authz.ControlAllows(installedRoles, inv, action) {
+		reason := control.NotAuthorized(action)
+		_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, reason.Message)
+		return recordExit("refused", reason)
+	}
+
+	// Load --config now: it supplies the unknown-agent check and SetEnabled
+	// below, and — only when nothing is installed — the fallback roles the
+	// invoker is authorized against. Never registry.Build: with the target
+	// agent disabled, Build rejects the config (disabled-agent-ref), which
+	// would make a disabled agent un-re-enableable. The control chain is
+	// already known writable at this point, so a config that fails to load at
+	// all is a recordable denial — outcome "error", reason io_error — for a
+	// caller who got this far (authorized against the installed roles, or on
+	// the bootstrap fallback), never a silent unlogged exit and never
+	// conflated with "agent not found", which is reserved for a config that
+	// loaded cleanly and genuinely lacks the name. --config stays what the
+	// kill switch mutates and where the agent is looked up, whichever roles
+	// decided.
+	cfg, loadErrs := config.LoadDir(cfgDir)
+	if len(loadErrs) > 0 {
+		for _, e := range loadErrs {
+			_, _ = fmt.Fprintln(out, e)
+		}
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(loadErrs[0])})
+	}
+	if !installed && !authz.ControlAllows(cfg.Roles, inv, action) {
+		reason := control.NotAuthorized(action)
+		_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, reason.Message)
+		return recordExit("refused", reason)
+	}
+
 	known := false
 	for _, a := range cfg.Agents {
 		if a.Name == target {
@@ -642,41 +609,13 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		}
 	}
 	if !known {
-		head, appendErr := control.Append(controlLog, control.Event{
-			Action:     action,
-			Agent:      target,
-			Outcome:    "refused",
-			Reason:     &control.Reason{Code: control.CodeAgentNotFound, Message: fmt.Sprintf("agent %s not found", target)},
-			Invoker:    inv,
-			AssertedAs: assertedAs,
-			Witness:    control.CaptureWitness(),
-		})
-		if appendErr != nil {
-			_, _ = fmt.Fprintln(out, appendErr)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-		return 1
+		return recordExit("refused", &control.Reason{Code: control.CodeAgentNotFound, Message: fmt.Sprintf("agent %s not found", target)})
 	}
 
 	enabled := action == "enable"
 	if setErr := registry.SetEnabled(cfgDir, target, enabled); setErr != nil {
 		_, _ = fmt.Fprintln(out, setErr)
-		head, appendErr := control.Append(controlLog, control.Event{
-			Action:     action,
-			Agent:      target,
-			Outcome:    "error",
-			Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(setErr)},
-			Invoker:    inv,
-			AssertedAs: assertedAs,
-			Witness:    control.CaptureWitness(),
-		})
-		if appendErr != nil {
-			_, _ = fmt.Fprintln(out, appendErr)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-		return 1
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(setErr)})
 	}
 	state := "disabled"
 	if enabled {
