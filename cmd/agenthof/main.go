@@ -8,10 +8,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/artifact"
@@ -37,6 +39,7 @@ Usage:
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json]
+  agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--addr-file <path>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--max-concurrent-runs <n>] [--shutdown-timeout <dur>] [--log-level ...] [--log-format ...]  (AGENTHOF_OIDC_ISSUER required)
   agenthof audit <run-id> [--log-dir <dir>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
@@ -74,6 +77,10 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 		return cmdGateway(argv[1:], stdout)
 	case "investigate":
 		return cmdInvestigate(argv[1:], stdout)
+	case "serve":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return cmdServe(ctx, argv[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprint(stderr, usage)
 		return 2
@@ -102,6 +109,27 @@ func loadRegistry(configRoot string, out io.Writer) (config.Config, *registry.Re
 func buildRegistry(configRoot string, out io.Writer) *registry.Registry {
 	_, reg := loadRegistry(configRoot, out)
 	return reg
+}
+
+// resolveRunConfig loads, validates and hashes the config a run executes
+// under — ONE function, shared by `run` and `serve`, so a later policy
+// (run against the installed config rather than the directory) swaps in
+// here. errs holds every load error followed by every validation error,
+// in order; cfg is returned even then so callers can report them. hash is
+// empty on a hash failure: the config already validated, the run proceeds
+// with an empty join key, exactly as before.
+func resolveRunConfig(cfgDir string) (cfg config.Config, reg *registry.Registry, hash string, errs []error) {
+	cfg, loadErrs := config.LoadDir(cfgDir)
+	reg, valErrs := registry.Build(cfg)
+	errs = append(errs, loadErrs...)
+	for _, e := range valErrs {
+		errs = append(errs, e)
+	}
+	if len(errs) > 0 {
+		return cfg, nil, "", errs
+	}
+	hash, _ = config.HashDir(cfgDir)
+	return cfg, reg, hash, nil
 }
 
 // hashConfigDir computes the config directory's join-key hash for
@@ -686,22 +714,12 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, loadErrs := config.LoadDir(*cfgDir)
-	for _, e := range loadErrs {
-		_, _ = fmt.Fprintln(out, e)
-	}
-	reg, valErrs := registry.Build(cfg)
-	for _, e := range valErrs {
+	cfg, reg, h, cfgErrs := resolveRunConfig(*cfgDir)
+	for _, e := range cfgErrs {
 		_, _ = fmt.Fprintln(out, e.Error())
 	}
-	if len(loadErrs) > 0 || len(valErrs) > 0 {
-		var firstErr string
-		if len(loadErrs) > 0 {
-			firstErr = loadErrs[0].Error()
-		} else {
-			firstErr = valErrs[0].Error()
-		}
-		reason := "configuration invalid: " + firstErr
+	if len(cfgErrs) > 0 {
+		reason := "configuration invalid: " + cfgErrs[0].Error()
 		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, reason, nil)
 		if refErr != nil {
 			_, _ = fmt.Fprintln(out, refErr)
@@ -721,9 +739,6 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(out, "run %s refused: %s\n", runID, reason)
 		return 1
 	}
-	// A hash failure here yields an empty join key, not a run failure: the
-	// run's config already validated above, so the run proceeds regardless.
-	h, _ := config.HashDir(*cfgDir)
 	// One broker for the process; one runDeps for this run and every child
 	// it spawns. The verified subject token goes to the gateways and nowhere
 	// else — never to the engine, Binding, or the ledger. The compartment
