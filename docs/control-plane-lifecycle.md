@@ -160,7 +160,14 @@ trace is a second `config applied (bootstrap)` row in the audit trail, which is
 exactly why it is recorded distinctly. That same removal is the deliberate way
 out when an installed configuration locks out its own control (it grants
 `apply` or `repair` only to a group no verified token carries): re-bootstrap,
-and the record shows it.
+and the record shows it. The gate is per control root, not per store: the
+installed snapshot is found beside the `--control-log` in use, so pointing a
+command at a fresh `--control-log` reaches the bootstrap / `--config` fallback
+with no write to any store at all. That grants nothing an operator did not
+already have — `run` never reads the snapshot, so it does not change which
+configuration a run executes, and the kill switch still needs write access to
+the `--config` directory to flip an agent — but it is why the control root, not
+the store directory alone, is the boundary to reason about.
 
 ## 3. Is the change valid?
 
