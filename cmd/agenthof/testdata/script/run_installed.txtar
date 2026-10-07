@@ -1,0 +1,51 @@
+# run executes the INSTALLED configuration beside --control-log: nothing
+# installed is a recorded refusal with the remedy; after apply the directory is
+# irrelevant; the kill switch re-snapshots the installed configuration; apply
+# re-asserts the declared state.
+
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: no configuration installed under installed; run: agenthof apply --config examples/config --control-log control.jsonl'
+stdout 'run r-[0-9a-f]{16} refused: no configuration installed'
+
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
+
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+
+# break the directory: the next run still executes the installed snapshot
+cp examples/config/gateway.yaml gateway.good.yaml
+cp broken-gateway.yaml examples/config/gateway.yaml
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+cp gateway.good.yaml examples/config/gateway.yaml
+
+# the kill switch re-snapshots: the directory is untouched, runs are refused,
+# and the audit readers treat the flip as the install it is
+cp examples/config/agents/coder.yaml coder.before.yaml
+exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'agent coder disabled'
+cmp examples/config/agents/coder.yaml coder.before.yaml
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'depends on agent "coder", which is disabled in the registry'
+stdout 'run r-[0-9a-f]{16} refused: configuration invalid'
+exec agenthof audit control --control-log control.jsonl
+stdout 'seq 2 .*disabled agent coder — dana@example.com \(asserted\)'
+stdout 'installed config: sha256:[0-9a-f]{64} — matches the last recorded install \(disable agent coder\)'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded install \(disable agent coder\)'
+
+# apply from the unchanged directory re-asserts the declared state: agent
+# enabled, recorded as the apply it is
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+exec agenthof audit control --control-log control.jsonl
+stdout 'seq 1 .*config applied \(bootstrap\)'
+stdout 'seq 2 .*disabled agent coder'
+stdout 'seq 3 .*config applied — dana@example.com'
+stdout 'installed config: sha256:[0-9a-f]{64} — matches the last recorded install \(apply\)'
+
+-- broken-gateway.yaml --
+models: {

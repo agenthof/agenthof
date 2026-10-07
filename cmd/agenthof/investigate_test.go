@@ -48,7 +48,7 @@ func TestInvestigateJSONEnvelope(t *testing.T) {
 // TestInvestigateAgentFilterNarrows checks that --agent coder narrows the
 // timeline to coder's events only — a planner event must not appear. The run
 // must succeed (both steps execute) before coder is disabled: a run against
-// an already-disabled coder is refused outright (see TestApplyOKAndFailure)
+// an already-disabled coder is refused outright (see TestApplyThenKillSwitchThenApplyReasserts)
 // and never reaches the step events this test needs.
 func TestInvestigateAgentFilterNarrows(t *testing.T) {
 	root := writeSample(t)

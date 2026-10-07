@@ -48,23 +48,25 @@ func TestApplyFloorErrors(t *testing.T) {
 	}
 }
 
-// pointerFixture writes a control ledger with the given successful-apply
-// hashes (plus one disable record carrying a different hash, which must never
-// count) and a pointer naming current; it returns the ledger path and the
+// fixtureEvent is one successful control record for pointerFixture.
+type fixtureEvent struct {
+	action, agent, hash string
+	bootstrap           bool
+}
+
+// pointerFixture writes a control ledger of successful events and a pointer
+// naming current (empty: no store at all); it returns the ledger path and the
 // verified records.
-func pointerFixture(t *testing.T, applied []string, current string) (string, []ledger.Record) {
+func pointerFixture(t *testing.T, events []fixtureEvent, current string) (string, []ledger.Record) {
 	t.Helper()
 	dir := t.TempDir()
 	controlLog := filepath.Join(dir, "control.jsonl")
 	inv := identity.Static("dana@example.com")
-	for _, h := range applied {
-		if _, err := control.Append(controlLog, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness(), ConfigHash: h}); err != nil {
+	for _, e := range events {
+		if _, err := control.Append(controlLog, control.Event{Action: e.action, Agent: e.agent, Outcome: "success", Invoker: inv,
+			Witness: control.CaptureWitness(), ConfigHash: e.hash, Bootstrap: e.bootstrap}); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if _, err := control.Append(controlLog, control.Event{Action: "disable", Agent: "coder", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness(),
-		ConfigHash: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}); err != nil {
-		t.Fatal(err)
 	}
 	if current != "" {
 		if err := os.MkdirAll(installedStore(controlLog), 0o700); err != nil {
@@ -75,38 +77,67 @@ func pointerFixture(t *testing.T, applied []string, current string) (string, []l
 		}
 	}
 	recs, _, err := ledger.ReadVerify(controlLog, ledger.Locked)
-	if err != nil {
+	// No events means no ledger file was ever written; that is a valid
+	// fixture (an installed pointer with an empty history), so treat a
+	// missing ledger as zero records rather than a fatal.
+	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
 	return controlLog, recs
 }
 
+// TestInstalledPointerLine: the pointer is compared with the LAST event
+// control.Installing accepts — an apply, or a flip not marked bootstrap.
 func TestInstalledPointerLine(t *testing.T) {
 	const a = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const b = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const d = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	const x = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	apply := func(h string) fixtureEvent { return fixtureEvent{action: "apply", hash: h} }
+	disable := func(h string) fixtureEvent { return fixtureEvent{action: "disable", agent: "coder", hash: h} }
+	bootFlip := func(h string) fixtureEvent {
+		return fixtureEvent{action: "enable", agent: "coder", hash: h, bootstrap: true}
+	}
+	mismatchTail := ": the install was not recorded, or its record was lost\n"
 
-	controlLog, recs := pointerFixture(t, []string{a, b}, b+"\n")
-	if line, mismatch := installedPointerLine(controlLog, recs); mismatch || line != "installed config: "+b+" — matches the last recorded apply\n" {
-		t.Fatalf("match case: mismatch=%v line=%q", mismatch, line)
+	cases := []struct {
+		name     string
+		events   []fixtureEvent
+		current  string
+		line     string
+		mismatch bool
+	}{
+		{"last apply matches", []fixtureEvent{apply(a), apply(b)}, b + "\n",
+			"installed config: " + b + " — matches the last recorded install (apply)\n", false},
+		{"older apply does not count", []fixtureEvent{apply(b), apply(a)}, b + "\n",
+			"installed config: " + b + " — does NOT match the last recorded install (" + a + ", apply)" + mismatchTail, true},
+		{"flip install matches", []fixtureEvent{apply(a), disable(d)}, d + "\n",
+			"installed config: " + d + " — matches the last recorded install (disable agent coder)\n", false},
+		{"flip install→record gap", []fixtureEvent{apply(a)}, d + "\n",
+			"installed config: " + d + " — does NOT match the last recorded install (" + a + ", apply)" + mismatchTail, true},
+		{"apply install→record gap after a flip", []fixtureEvent{apply(a), disable(d)}, a + "\n",
+			"installed config: " + a + " — does NOT match the last recorded install (" + d + ", disable agent coder)" + mismatchTail, true},
+		{"bootstrap-era flip never vouches", []fixtureEvent{bootFlip(x)}, x + "\n",
+			"installed config: " + x + " — no install on record" + mismatchTail, true},
+		{"bootstrap-era flip after rm current", []fixtureEvent{apply(a), bootFlip(x)}, x + "\n",
+			"installed config: " + x + " — does NOT match the last recorded install (" + a + ", apply)" + mismatchTail, true},
+		{"idempotent flip", []fixtureEvent{apply(a), disable(d), disable(d)}, d + "\n",
+			"installed config: " + d + " — matches the last recorded install (disable agent coder)\n", false},
+		{"pre-R1.4 flip after an install (upgrade wrinkle: exit 5 until the next apply)", []fixtureEvent{apply(a), disable(x)}, a + "\n",
+			"installed config: " + a + " — does NOT match the last recorded install (" + x + ", disable agent coder)" + mismatchTail, true},
+		{"no events", nil, a + "\n",
+			"installed config: " + a + " — no install on record" + mismatchTail, true},
+		{"no store prints nothing", []fixtureEvent{apply(a)}, "", "", false},
+	}
+	for _, c := range cases {
+		controlLog, recs := pointerFixture(t, c.events, c.current)
+		line, mismatch := installedPointerLine(controlLog, recs)
+		if line != c.line || mismatch != c.mismatch {
+			t.Errorf("%s:\n got  mismatch=%v %q\n want mismatch=%v %q", c.name, mismatch, line, c.mismatch, c.line)
+		}
 	}
 
-	controlLog, recs = pointerFixture(t, []string{b, a}, b+"\n")
-	line, mismatch := installedPointerLine(controlLog, recs)
-	if !mismatch || line != "installed config: "+b+" — does NOT match the last recorded apply ("+a+"): the install was not recorded, or its record was lost\n" {
-		t.Fatalf("older-apply case must compare against the LAST apply: mismatch=%v line=%q", mismatch, line)
-	}
-
-	controlLog, recs = pointerFixture(t, nil, a+"\n")
-	if line, mismatch := installedPointerLine(controlLog, recs); !mismatch || !strings.Contains(line, "no successful apply on record") {
-		t.Fatalf("no-apply case: mismatch=%v line=%q", mismatch, line)
-	}
-
-	controlLog, recs = pointerFixture(t, []string{a}, "")
-	if line, mismatch := installedPointerLine(controlLog, recs); mismatch || line != "" {
-		t.Fatalf("no store: must print nothing: mismatch=%v line=%q", mismatch, line)
-	}
-
-	controlLog, recs = pointerFixture(t, []string{a}, "garbage\n")
+	controlLog, recs := pointerFixture(t, []fixtureEvent{apply(a)}, "garbage\n")
 	if line, mismatch := installedPointerLine(controlLog, recs); !mismatch || !strings.HasPrefix(line, "installed config: ") || !strings.Contains(line, "malformed pointer") {
 		t.Fatalf("malformed pointer: mismatch=%v line=%q", mismatch, line)
 	}

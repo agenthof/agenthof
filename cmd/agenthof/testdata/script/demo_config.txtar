@@ -1,16 +1,25 @@
-# Demo Part 1: apply, kill switch, re-enable — docs/demo.md §1.
+# Demo Part 1: apply, kill switch, re-enable — docs/demo.md §1. The kill
+# switch re-snapshots the INSTALLED configuration: the directory is untouched,
+# runs are refused, and apply from the directory re-asserts the declared state.
 
 exec agenthof apply --config examples/config --groups platform-eng
 stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
 
+cp examples/config/agents/coder.yaml coder.before.yaml
 exec agenthof registry disable coder --config examples/config --groups platform-eng
 stdout 'agent coder disabled'
+cmp examples/config/agents/coder.yaml coder.before.yaml
 
-! exec agenthof apply --config examples/config --groups platform-eng
+! exec agenthof run software-engineer fix-bug --input 'fix the login bug' --as dana@example.com --config examples/config --log-dir logs --artifact-dir artifacts
 stdout 'workflows/fix-bug\.yaml: fix-bug: workflow "fix-bug" depends on agent "coder", which is disabled in the registry'
+stdout 'run r-[0-9a-f]{16} refused: configuration invalid'
 
-exec agenthof registry enable coder --config examples/config --groups platform-eng
-stdout 'agent coder enabled'
+exec agenthof audit control
+stdout 'disabled agent coder'
+stdout 'installed config: sha256:[0-9a-f]{64} — matches the last recorded install \(disable agent coder\)'
 
 exec agenthof apply --config examples/config --groups platform-eng
 stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
+
+exec agenthof run software-engineer fix-bug --input 'fix the login bug' --as dana@example.com --config examples/config --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'

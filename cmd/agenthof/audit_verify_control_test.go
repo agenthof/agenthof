@@ -191,23 +191,19 @@ func TestAuditVerifyControlUnrecordedInstallExitsFive(t *testing.T) {
 	if code != exitInstalledMismatch {
 		t.Fatalf("exit = %d, want %d: %s", code, exitInstalledMismatch, out.String())
 	}
-	if !strings.Contains(out.String(), "control head: seq=1 sha256=") || !strings.Contains(out.String(), "does NOT match the last recorded apply") {
+	if !strings.Contains(out.String(), "control head: seq=1 sha256=") || !strings.Contains(out.String(), "does NOT match the last recorded install (") {
 		t.Fatalf("output: %s", out.String())
 	}
 }
 
-// TestAuditVerifyControlFlipAfterApplyIsNotAMismatch: the kill switch rewrites
-// the config directory and records the directory's new hash; that must never
-// read as an unrecorded install — only apply records are compared.
+// TestAuditVerifyControlFlipAfterApplyIsNotAMismatch: a kill-switch flip
+// installs a new snapshot and records its hash; the pointer then names the
+// flip, the last installing event, and that is not a mismatch.
 func TestAuditVerifyControlFlipAfterApplyIsNotAMismatch(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	root := writeSample(t)
-	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	controlLog := applied(t, root)
 	var buf bytes.Buffer
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
-		t.Fatalf("apply: exit %d\n%s", code, buf.String())
-	}
-	buf.Reset()
 	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
 		t.Fatalf("disable: exit %d\n%s", code, buf.String())
 	}
@@ -215,7 +211,7 @@ func TestAuditVerifyControlFlipAfterApplyIsNotAMismatch(t *testing.T) {
 	if code := cmdAuditVerify([]string{"control", "--control-log", controlLog}, &out); code != 0 {
 		t.Fatalf("exit = %d, want 0: %s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "matches the last recorded apply") {
+	if !strings.Contains(out.String(), "installed config: "+readPointer(t, controlLog)+" — matches the last recorded install (disable agent coder)") {
 		t.Fatalf("output: %s", out.String())
 	}
 }
@@ -240,7 +236,7 @@ func TestAuditVerifyControlTaintPrecedesInstalledMismatch(t *testing.T) {
 	if code := cmdAuditVerify([]string{"control", "--control-log", controlLog}, &out); code != 3 {
 		t.Fatalf("exit = %d, want 3 (taint first): %s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "no successful apply on record") {
+	if !strings.Contains(out.String(), "no install on record") {
 		t.Fatalf("the installed line is still printed: %s", out.String())
 	}
 }

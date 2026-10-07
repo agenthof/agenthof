@@ -342,7 +342,7 @@ func applied(t *testing.T, root string) string {
 	return controlLog
 }
 
-func TestApplyOKAndFailure(t *testing.T) {
+func TestApplyThenKillSwitchThenApplyReasserts(t *testing.T) {
 	root := writeSample(t)
 	// --control-log keeps this test's control ledger inside root rather
 	// than the default relative ".agenthof/control.jsonl" (which would
@@ -355,17 +355,22 @@ func TestApplyOKAndFailure(t *testing.T) {
 	if !strings.Contains(out.String(), "registry ok: 2 agents, 1 workflows, 2 roles") {
 		t.Fatalf("out: %s", out.String())
 	}
-	// break it: disable coder, apply must fail naming fix-bug
+	// the kill switch re-snapshots the installed configuration: a run is
+	// refused naming fix-bug, and apply from the unchanged directory
+	// re-asserts the declared state (agent enabled) — recorded as an apply
 	out.Reset()
 	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("disable: %s", out.String())
 	}
 	out.Reset()
-	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out); code != 1 {
-		t.Fatal("apply must fail with a disabled dependency")
+	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
+		"--config", root, "--control-log", controlLog, "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir()}, &out, io.Discard)
+	if code != 1 || !strings.Contains(out.String(), "fix-bug") || !strings.Contains(out.String(), "disabled") {
+		t.Fatalf("a run must be refused naming the workflow: %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "fix-bug") || !strings.Contains(out.String(), "disabled") {
-		t.Fatalf("kill-switch error must name the workflow: %s", out.String())
+	out.Reset()
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--groups", "platform-eng"}, &out); code != 0 || !strings.Contains(out.String(), "registry ok: 2 agents, 1 workflows, 2 roles") {
+		t.Fatalf("apply must re-assert the directory: %d\n%s", code, out.String())
 	}
 }
 

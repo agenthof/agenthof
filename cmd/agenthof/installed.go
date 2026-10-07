@@ -32,8 +32,10 @@ const msgInstalledNotRecorded = "installed; event NOT recorded"
 const msgNoConfigInstalled = "no configuration installed"
 
 // exitInstalledMismatch is audit verify control's exit code when the
-// installed pointer does not name the last recorded successful apply —
-// checked after the chain (1), taint (3) and --expect-head (4) verdicts.
+// installed pointer does not name the last recorded install — the last
+// event control.Installing accepts: an apply, or a kill-switch flip against
+// an installed snapshot — checked after the chain (1), taint (3) and
+// --expect-head (4) verdicts.
 const exitInstalledMismatch = 5
 
 // applyFloorErrors is the no-apply-floor check: a configuration that grants
@@ -60,11 +62,13 @@ func applyFloorErrors(cfg config.Config) []registry.ValidationError {
 // installedPointerLine renders the audit readers' one-line verdict on the
 // installed pointer: nothing when no store exists (nothing has ever been
 // installed under this control root), otherwise whether the pointer names
-// the LAST successful apply the ledger recorded. Only apply records are
-// compared — a kill-switch flip rewrites the config directory and records
-// the directory's new hash, which legitimately differs from the installed
-// snapshot. mismatch is true for a pointer the ledger cannot vouch for: the
-// install→record gap, a lost tail, or a damaged pointer.
+// the LAST install the ledger recorded — the last event control.Installing
+// accepts, so a kill-switch flip (which installs a re-snapshot) counts and a
+// bootstrap-era flip (which edited the directory and installed nothing) does
+// not. mismatch is true for a pointer the ledger cannot vouch for: the
+// install→record gap, a lost tail, or a damaged pointer. The verdict is
+// pointer-vouched at check time, not history-complete: a later recorded
+// install clears an earlier gap from it.
 func installedPointerLine(controlLog string, records []ledger.Record) (line string, mismatch bool) {
 	hash, installed, err := config.InstalledHash(installedStore(controlLog))
 	if err != nil {
@@ -73,21 +77,30 @@ func installedPointerLine(controlLog string, records []ledger.Record) (line stri
 	if !installed {
 		return "", false
 	}
-	last := ""
+	var last *control.DecodedEvent
 	for _, r := range records {
 		d, derr := control.Decode(r.Raw)
 		if derr != nil {
 			continue
 		}
-		if d.Action == "apply" && d.Outcome == "success" {
-			last = d.ConfigHash
+		if control.Installing(d) {
+			last = &d
 		}
 	}
 	switch {
-	case last == "":
-		return fmt.Sprintf("installed config: %s — no successful apply on record: the install was not recorded, or its record was lost\n", hash), true
-	case last != hash:
-		return fmt.Sprintf("installed config: %s — does NOT match the last recorded apply (%s): the install was not recorded, or its record was lost\n", hash, last), true
+	case last == nil:
+		return fmt.Sprintf("installed config: %s — no install on record: the install was not recorded, or its record was lost\n", hash), true
+	case last.ConfigHash != hash:
+		return fmt.Sprintf("installed config: %s — does NOT match the last recorded install (%s, %s): the install was not recorded, or its record was lost\n", hash, last.ConfigHash, installLabel(*last)), true
 	}
-	return fmt.Sprintf("installed config: %s — matches the last recorded apply\n", hash), false
+	return fmt.Sprintf("installed config: %s — matches the last recorded install (%s)\n", hash, installLabel(*last)), false
+}
+
+// installLabel names an installing event for the audit readers: "apply", or
+// "<disable|enable> agent <name>" for a kill-switch flip.
+func installLabel(d control.DecodedEvent) string {
+	if d.Action == "apply" {
+		return "apply"
+	}
+	return d.Action + " agent " + d.Agent
 }

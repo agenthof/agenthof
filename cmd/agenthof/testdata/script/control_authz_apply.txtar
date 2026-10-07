@@ -28,8 +28,9 @@ grep '"config_hash":"sha256:[0-9a-f]{64}"' control.jsonl
 stdout 'not authorized: no role grants apply to the invoker'
 stdout 'control head: seq=3'
 
-# authorization precedes validation: break the config (an authorized disable),
-# then an unauthorized apply learns one refusal, not the validation error
+# authorization precedes everything: with coder disabled in the installed
+# snapshot, an unauthorized apply learns one refusal and never reaches
+# validation or the store
 exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
 ! exec agenthof apply --config examples/config --control-log control.jsonl --as mallory@example.com --groups finance
 stdout 'not authorized'
@@ -48,4 +49,4 @@ stdout 'config apply refused — mallory@example.com \(asserted\)'
 stdout 'config apply refused — nobody@example.com \(asserted\)'
 stdout 'seq 7 .*config applied — dana@example.com \(asserted\)'
 stdout 'control ledger integrity: verified \(7 events\)'
-stdout 'installed config: sha256:[0-9a-f]{64} — matches the last recorded apply'
+stdout 'installed config: sha256:[0-9a-f]{64} — matches the last recorded install \(apply\)'
