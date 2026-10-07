@@ -1077,6 +1077,11 @@ func cmdAuditVerify(args []string, out io.Writer) int {
 // reported plainly rather than as a generic open error; a torn/broken
 // chain still renders whatever valid prefix ReadVerify recovered,
 // followed by the integrity line naming the failure, and exits nonzero.
+// After the integrity line it reports the installed pointer's standing:
+// whether <dir of --control-log>/installed/current names the last
+// successful apply on record (nothing is printed when nothing was ever
+// installed). That is informational here; audit verify control turns a
+// mismatch into an exit code.
 func cmdAuditControl(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
@@ -1099,6 +1104,8 @@ func cmdAuditControl(args []string, out io.Writer) int {
 		}
 	}
 	_, _ = fmt.Fprint(out, control.Render(records, head, err))
+	line, _ := installedPointerLine(*controlLog, records)
+	_, _ = fmt.Fprint(out, line)
 	if err != nil {
 		// A torn/broken chain, whether or not a valid prefix was
 		// recovered — the rendered output already names the failure, but
@@ -1116,7 +1123,10 @@ func cmdAuditControl(args []string, out io.Writer) int {
 // or any other open/IO failure; 1 for a torn/broken chain; 3 when the
 // chain is tainted (control.IsTainted — a "repair" record was ever
 // appended), which takes precedence over an --expect-head mismatch; 4
-// for an --expect-head mismatch (hash only — count is informational); 0
+// for an --expect-head mismatch (hash only — count is informational);
+// 5 when the installed pointer (<dir of --control-log>/installed/current)
+// does not name the last successful apply on record — an install whose
+// event was never appended, or whose record was lost — checked last; 0
 // otherwise.
 func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit verify control", flag.ContinueOnError)
@@ -1145,6 +1155,8 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
+	line, mismatch := installedPointerLine(*controlLog, records)
+	_, _ = fmt.Fprint(out, line)
 	if tainted, seq := control.IsTainted(records); tainted {
 		_, _ = fmt.Fprintf(out, "control ledger TAINTED: repaired at seq %d\n", seq)
 		return 3
@@ -1152,6 +1164,9 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	if *expectHead != "" && *expectHead != head.Hash {
 		_, _ = fmt.Fprintf(out, "expect-head mismatch: want %s, got %s\n", *expectHead, head.Hash)
 		return 4
+	}
+	if mismatch {
+		return exitInstalledMismatch
 	}
 	return 0
 }

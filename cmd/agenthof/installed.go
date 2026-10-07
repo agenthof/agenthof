@@ -26,6 +26,11 @@ func installedStore(controlLog string) string {
 // audit verify control surface the resulting pointer-vs-ledger mismatch.
 const msgInstalledNotRecorded = "installed; event NOT recorded"
 
+// exitInstalledMismatch is audit verify control's exit code when the
+// installed pointer does not name the last recorded successful apply —
+// checked after the chain (1), taint (3) and --expect-head (4) verdicts.
+const exitInstalledMismatch = 5
+
 // applyFloorErrors is the no-apply-floor check: a configuration that grants
 // apply to no role could be installed and then never be changed again
 // through the control plane, so it is rejected at the apply boundary. It
