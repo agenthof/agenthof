@@ -548,6 +548,36 @@ func TestRegistryFlipAuthorizesAgainstInstalledNotDir(t *testing.T) {
 	}
 }
 
+// TestRegistryFlipInstalledUnauthorizedNeverReadsConfig pins the ordering: once
+// a snapshot is installed, an unauthorized caller is refused against the
+// INSTALLED roles before --config is read at all. A nonexistent --config must
+// therefore record not_authorized (never io_error) and its path must never be
+// printed — the refusal neither depends on nor leaks the config directory.
+func TestRegistryFlipInstalledUnauthorizedNeverReadsConfig(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("bootstrap: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	missing := filepath.Join(t.TempDir(), "gone")
+	if code := cmdRegistry([]string{"disable", "coder", "--config", missing, "--control-log", controlPath, "--as", "mallory@example.com", "--groups", "finance"}, &out); code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), missing) {
+		t.Fatalf("the unread --config path must never be printed:\n%s", out.String())
+	}
+	data, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "not_authorized") || strings.Contains(string(data), "io_error") {
+		t.Fatalf("want not_authorized recorded and no io_error:\n%s", data)
+	}
+}
+
 // TestRegistryFlipMalformedPointerRecordsIOError: a damaged installed pointer
 // fails the kill switch closed — recorded error/io_error, no flip.
 func TestRegistryFlipMalformedPointerRecordsIOError(t *testing.T) {
