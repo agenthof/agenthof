@@ -140,6 +140,46 @@ func TestInstalledRolesFailsClosedOnUnparseableRoleFile(t *testing.T) {
 	}
 }
 
+// TestInstalledRolesFailsClosedOnDamagedSnapshot: a snapshot that is present
+// (the pointer still names it) but has lost its roles — its roles/ directory
+// gone, or the <hex> entry replaced by a file — must fail closed with an error
+// naming the snapshot, NOT read back as an empty role list that silently
+// denies everyone. Every installed snapshot passed the no-apply-floor, so zero
+// roles is always damage.
+func TestInstalledRolesFailsClosedOnDamagedSnapshot(t *testing.T) {
+	t.Run("roles directory gone", func(t *testing.T) {
+		store := filepath.Join(t.TempDir(), "installed")
+		hash := installByHand(t, store, sampleConfig(t))
+		if err := os.RemoveAll(filepath.Join(snapshotDir(store, hash), "roles")); err != nil {
+			t.Fatal(err)
+		}
+		_, got, installed, err := InstalledRoles(store)
+		if err == nil || !installed || got != hash {
+			t.Fatalf("installed=%v hash=%q err=%v; want fail-closed naming the snapshot", installed, got, err)
+		}
+		if !strings.Contains(err.Error(), "installed config "+hash) || !strings.Contains(err.Error(), "no roles") {
+			t.Fatalf("error must name the snapshot and the fault: %v", err)
+		}
+	})
+	t.Run("snapshot entry is a file", func(t *testing.T) {
+		store := filepath.Join(t.TempDir(), "installed")
+		hash := installByHand(t, store, sampleConfig(t))
+		if err := os.RemoveAll(snapshotDir(store, hash)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(snapshotDir(store, hash), []byte("not a dir\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, installed, err := InstalledRoles(store)
+		if err == nil || !installed {
+			t.Fatalf("installed=%v err=%v; want fail-closed", installed, err)
+		}
+		if !strings.Contains(err.Error(), "no roles") {
+			t.Fatalf("error must name the fault: %v", err)
+		}
+	})
+}
+
 func TestInstalledRolesFailsClosedWhenSnapshotMissing(t *testing.T) {
 	store := filepath.Join(t.TempDir(), "installed")
 	hash := installByHand(t, store, sampleConfig(t))
@@ -286,6 +326,35 @@ func TestCommitSnapshotIsIdempotent(t *testing.T) {
 			t.Fatalf("unexpected store entry %q in %v", n, names)
 		}
 	}
+}
+
+// TestCommitSnapshotRefusesCorruptExistingSnapshot: when the <hex>/ directory
+// is already present but corrupt (here, its roles/ was lost), re-applying the
+// identical config must NOT silently flip the pointer onto the damaged dir and
+// report success — it must fail closed, naming the snapshot, leaving the
+// pointer unchanged.
+func TestCommitSnapshotRefusesCorruptExistingSnapshot(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := sampleConfig(t)
+	a := stageAndCommit(t, store, src)
+	if err := os.RemoveAll(filepath.Join(snapshotDir(store, a), "roles")); err != nil {
+		t.Fatal(err)
+	}
+	temp, err := StageSnapshot(store, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = CommitSnapshot(store, temp, a)
+	if err == nil {
+		t.Fatal("committing onto a corrupt existing snapshot must fail closed")
+	}
+	if !strings.Contains(err.Error(), "corrupt") || !strings.Contains(err.Error(), a) {
+		t.Fatalf("error must name the corruption and the snapshot: %v", err)
+	}
+	if hash, _, _ := InstalledHash(store); hash != a {
+		t.Fatalf("pointer changed on a refused commit: %q", hash)
+	}
+	_ = os.RemoveAll(temp)
 }
 
 func TestCommitSnapshotRefusesMalformedHashLeavingPointerUnchanged(t *testing.T) {

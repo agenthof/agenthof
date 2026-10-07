@@ -62,6 +62,16 @@ func InstalledRoles(store string) (roles []RoleDef, hash string, installed bool,
 	if len(errs) > 0 {
 		return nil, hash, true, fmt.Errorf("installed config %s: %w", hash, errs[0])
 	}
+	// A snapshot that parses but yields no roles is damage, not a valid
+	// install: every snapshot an apply installs passed the no-apply-floor, so
+	// it always has at least one role. A lost roles/ subdirectory (or a <hex>
+	// entry that is a file, not a directory) otherwise reads back as an empty
+	// role list and silently denies everyone with a generic message. Fail
+	// closed naming the snapshot, so the caller sees the fault and the escape
+	// hatch, not a mystery lockout.
+	if len(cfg.Roles) == 0 {
+		return nil, hash, true, fmt.Errorf("installed config %s: snapshot has no roles (remove the pointer %q to re-bootstrap)", hash, filepath.Join(store, InstalledPointer))
+	}
 	return cfg.Roles, hash, true, nil
 }
 
@@ -123,6 +133,22 @@ func CommitSnapshot(store, temp, hash string) error {
 	if err := os.Rename(temp, snapshotDir(store, hash)); err != nil {
 		if !errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("installed config: %w", err)
+		}
+		// The snapshot is already present by name. Content-addressing makes
+		// that mean "identical bytes" only if the directory actually holds
+		// them: verify the existing snapshot hashes to its own name before
+		// trusting it and flipping the pointer onto it. A corrupt or
+		// partially-restored <hex>/ (a lost roles/, a bad byte) must not be
+		// silently blessed by a re-apply of the same config. This heals the
+		// re-apply path; it does not make an installed snapshot
+		// tamper-evident — reads of a snapshot are still unverified, which is
+		// a reserved item.
+		existing, herr := HashDir(snapshotDir(store, hash))
+		if herr != nil {
+			return fmt.Errorf("installed config: existing snapshot %s: %w", hash, herr)
+		}
+		if existing != hash {
+			return fmt.Errorf("installed config: existing snapshot %s is corrupt (its bytes hash as %s); remove %s and re-apply", hash, existing, snapshotDir(store, hash))
 		}
 		if err := os.RemoveAll(temp); err != nil {
 			return fmt.Errorf("installed config: %w", err)
