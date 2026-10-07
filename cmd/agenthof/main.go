@@ -652,6 +652,10 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		AssertedAs: assertedAs,
 		Witness:    control.CaptureWitness(),
 		ConfigHash: h,
+		// A flip with nothing installed edits --config and records the
+		// directory's hash, installing nothing: marked so the audit readers
+		// never mistake it for an install (control.Installing).
+		Bootstrap: !installed,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintln(out, "state changed; event NOT recorded")

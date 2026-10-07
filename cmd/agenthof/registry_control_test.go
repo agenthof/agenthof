@@ -608,3 +608,31 @@ func TestRegistryFlipMalformedPointerRecordsIOError(t *testing.T) {
 		}
 	}
 }
+
+// TestRegistryFlipWithNothingInstalledIsMarkedBootstrap: a flip that runs
+// before any apply edits the directory and records the directory's hash,
+// installing nothing; its success event carries bootstrap:true so the audit
+// readers can tell it from a flip that installed what it recorded.
+func TestRegistryFlipWithNothingInstalledIsMarkedBootstrap(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"enable", "coder", "--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("enable: %d\n%s", code, out.String())
+	}
+	data, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"action":"enable"`) || !strings.Contains(string(data), `"bootstrap":true`) {
+		t.Fatalf("the nothing-installed flip must be marked bootstrap:\n%s", data)
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", controlPath}, &out); code != 0 {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "enabled agent coder (nothing installed; directory edited) — dana@example.com (asserted)") {
+		t.Fatalf("audit control must render the bootstrap-era flip distinctly:\n%s", out.String())
+	}
+}
