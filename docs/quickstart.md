@@ -27,6 +27,9 @@ Expected output from `apply`:
     registry ok: 5 agents, 2 workflows, 3 roles
     control head: seq=1 sha256=<hex>
 
+`run` executes the snapshot `apply` installed under the same `--control-log`; if
+you pass `--control-log` to `apply`, pass the same path to `run`.
+
 The `control head` line is the control ledger recording the apply (see the
 control-plane audit below); the `seq` advances with each control action and
 the hash varies.

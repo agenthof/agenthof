@@ -177,8 +177,8 @@ agent coder enabled
 control head: seq=4 sha256=<hex>
 ```
 
-…or re-apply: `apply` re-asserts the declared state — the directory, where
-`coder` is enabled — and records it as an apply:
+Then re-apply (the agent is already enabled; this records the directory's
+declared state as an apply):
 
 ```bash
 ./agenthof apply --as dana@example.com --groups platform-eng --config examples/config

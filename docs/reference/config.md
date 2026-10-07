@@ -865,7 +865,9 @@ applied configuration, named by its `config_hash`, and a one-line pointer file
 `current` (`sha256:<hex>`) naming the installed one. `apply` writes it; the
 control commands read it to decide who may act (see `--config` below); `run`
 reads the installed configuration from `installed/` beside it — this is the
-only way `run` finds what to execute; `audit control` and `audit verify
+only way `run` finds what to execute. `run` finds that snapshot under the same
+`--control-log` you applied to; if you passed `--control-log` to `apply`, pass
+the same path to `run`. `audit control` and `audit verify
 control` report whether it matches the last recorded install (an `apply` or a
 kill-switch flip). Snapshots are never pruned by any command today; removing
 `current` makes the next `apply` a bootstrap — permitted for any identity and
@@ -999,7 +1001,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
-| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install) |
+| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install) |
 | `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set |
 
 `agenthof run` (the installed-configuration refusals; the engine documents the rest):

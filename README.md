@@ -132,7 +132,8 @@ yet, so it is permitted and installs the example config. From then on
 `--groups platform-eng` is what authorizes control changes: the installed
 config's `platform-admin` role grants the control-plane operations to that
 group, and a caller no role grants is refused — and that refusal is recorded.
-`run` executes what `apply` installed — edit the directory, then apply; until
+`run` executes what `apply` installed, from the same `--control-log` (pass the
+same path to both when you pass one) — edit the directory, then apply; until
 something is installed, `run` is refused and names the `apply` to run.
 
 `run` prints the run id it assigned (`run <run-id> finished: succeeded`). Pass
