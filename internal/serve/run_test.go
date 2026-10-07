@@ -289,3 +289,47 @@ func TestRunErrorIsFixedReason(t *testing.T) {
 		t.Fatalf("%+v: an engine error names a path and must not reach the API", st)
 	}
 }
+
+// TestStartRunRejectsCraftedRoleWorkflow: role/workflow are attacker-controlled
+// and land in Binding, which audit.Render prints verbatim; a crafted name
+// (terminal escapes, megabyte padding) must be rejected 400 at the handler,
+// before Prepare, writing nothing — not recorded and later re-emitted at a
+// reader's terminal.
+func TestStartRunRejectsCraftedRoleWorkflow(t *testing.T) {
+	host := &fakeHost{}
+	ts := newTestServer(t, host, fakeAuth{}, 1)
+	cases := map[string]apiclient.RunRequest{
+		"esc in role":    {Role: "se\x1b[2J", Workflow: "fix-bug", Input: "x"},
+		"cr/lf workflow": {Role: "se", Workflow: "fix-bug\r\n", Input: "x"},
+		"over-long role": {Role: strings.Repeat("A", maxNameLen+1), Workflow: "fix-bug", Input: "x"},
+		"empty workflow": {Role: "se", Workflow: "", Input: "x"},
+	}
+	for name, req := range cases {
+		resp, _ := ts.do(t, http.MethodPost, "/v1/runs", goodToken, req)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400", name, resp.StatusCode)
+		}
+	}
+	if host.prepared.Load() != 0 {
+		t.Fatal("a crafted role/workflow must never reach Prepare")
+	}
+	if entries, _ := os.ReadDir(ts.logDir); len(entries) != 0 {
+		t.Fatalf("a rejected name must write nothing: %v", entries)
+	}
+	if _, code := ts.srv.reserve(); code != 0 {
+		t.Fatalf("slot leaked: reserve code %d", code)
+	}
+}
+
+func TestValidName(t *testing.T) {
+	for _, bad := range []string{"", "x\x1b[2J", "line\nbreak", "tab\there", strings.Repeat("A", maxNameLen+1)} {
+		if validName(bad) {
+			t.Errorf("validName(%q) = true, want false", bad)
+		}
+	}
+	for _, ok := range []string{"se", "fix-bug", "software_engineer", strings.Repeat("A", maxNameLen)} {
+		if !validName(ok) {
+			t.Errorf("validName(%q) = false, want true", ok)
+		}
+	}
+}

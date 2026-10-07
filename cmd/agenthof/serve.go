@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/broker"
@@ -107,11 +109,25 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(out, "serving on %s\n", ln.Addr())
 	logger.Info("serve started", "addr", ln.Addr().String(), "max_concurrent_runs", *maxRuns, "shutdown_timeout", shutdownTimeout.String())
 
-	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	// ReadTimeout bounds the whole request read, not just headers: a slot is
+	// reserved before the body is read, so without it an authenticated caller
+	// could hold every slot by trickling (or never sending) a body — with no
+	// ledger trace. The body is <= 1 MiB, so 30s is generous. IdleTimeout
+	// reaps idle keep-alive connections.
+	hs := &http.Server{
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	served := make(chan error, 1)
 	go func() { served <- hs.Serve(ln) }()
 	select {
 	case <-ctx.Done():
+		// The first signal cancelled ctx and begins the drain (up to
+		// --shutdown-timeout). Restore the default disposition so a second
+		// Ctrl-C / SIGTERM terminates immediately instead of being swallowed.
+		signal.Reset(os.Interrupt, syscall.SIGTERM)
 	case err := <-served:
 		_, _ = fmt.Fprintf(out, "serve: %v\n", err)
 		return 1
@@ -138,11 +154,7 @@ func loopbackAddr(addr string) bool {
 	if err != nil {
 		return false
 	}
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return loopbackHost(host)
 }
 
 // runHost is serve.RunHost over this process: the config directory, the

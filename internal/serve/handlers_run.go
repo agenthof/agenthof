@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/engine"
@@ -101,6 +103,23 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, inv identity.
 // maxRunBody caps POST /v1/runs' body: role, workflow and an input.
 const maxRunBody = 1 << 20
 
+// maxNameLen caps a role/workflow name from an untrusted request.
+const maxNameLen = 200
+
+// validName reports whether a role/workflow name is safe to record and
+// render: non-empty, at most maxNameLen runes, every rune printable.
+func validName(s string) bool {
+	if s == "" || utf8.RuneCountInString(s) > maxNameLen {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
 // startRun is POST /v1/runs. Order is the point: the bearer was verified
 // before this ran; a slot is reserved BEFORE the body is read or the
 // config loaded, so an authenticated caller cannot hammer LoadDir outside
@@ -137,8 +156,18 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request, inv identity.I
 		http.Error(w, "malformed request body", http.StatusBadRequest)
 		return
 	}
-	if req.Role == "" || req.Workflow == "" || req.Input == "" {
-		http.Error(w, "role, workflow and input are required", http.StatusBadRequest)
+	// role and workflow are attacker-controlled strings that land in the
+	// run's Binding and are printed verbatim by audit.Render; a crafted name
+	// (terminal escapes, megabyte padding) must never reach the ledger or a
+	// reader's terminal. Registry names are identifiers, so a non-empty,
+	// printable, capped name is the whole contract — reject anything else
+	// here, before Prepare, with no run recorded.
+	if !validName(req.Role) || !validName(req.Workflow) {
+		http.Error(w, "role and workflow must be non-empty printable names", http.StatusBadRequest)
+		return
+	}
+	if req.Input == "" {
+		http.Error(w, "input is required", http.StatusBadRequest)
 		return
 	}
 	origin := originFrom(r, s.cfg.ServerHost)
@@ -172,6 +201,15 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request, inv identity.I
 	go func() {
 		defer release()
 		defer cancel()
+		// A panic in the run (adapter, gateway, supervisor) must not take
+		// the server and every other in-flight run down with it: recover,
+		// record the run failed, and let this goroutine unwind cleanly.
+		defer func() {
+			if rec := recover(); rec != nil {
+				logger.Error("run panicked", "panic", rec)
+				s.runs.finish(id, engine.Result{RunID: id, Status: "failed"}, "run error", time.Now().UTC())
+			}
+		}()
 		res, err := prep.Run(runCtx, id, req.Role, req.Workflow, req.Input, inv, origin)
 		s.runs.finish(id, res, finishReason(s.cfg.LogDir, id, res, err), time.Now().UTC())
 		logger.Info("run finished", "status", res.Status)

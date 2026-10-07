@@ -702,6 +702,9 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(out, "run: --server needs --token or AGENTHOF_TOKEN")
 			return 2
 		}
+		if *as != "" || *groups != "" {
+			_, _ = fmt.Fprintln(stderr, "run: --as/--groups are ignored with --server; the server authenticates your --token")
+		}
 		return runViaServer(base, tok, role, workflow, *input, out)
 	}
 

@@ -123,3 +123,13 @@ mid-step; its ledger then has no final event and reads back as
 - The table of hosted runs is kept for the life of the process.
 - Streaming (`?follow=1`) is not offered; poll `GET /v1/runs/{id}` or
   read `/events`.
+- A run cancelled in the brief window between steps while its gateway is
+  starting is recorded as `failed` (the gateway start failing), not
+  `cancelled` — a narrow residual; the common case (cancel during a step)
+  records `cancelled`.
+- `GET /v1/runs` and `/v1/investigate` read and verify every ledger under
+  the log directory on each call, and are not paginated; both are fine at a
+  single host's scale and are where aggregation/pagination will land later.
+- While the identity provider is unreachable, token verification waits on
+  the discovery timeout and requests serialize behind it; a negative
+  cache / backoff is reserved.
