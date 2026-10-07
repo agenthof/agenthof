@@ -26,6 +26,11 @@ func installedStore(controlLog string) string {
 // audit verify control surface the resulting pointer-vs-ledger mismatch.
 const msgInstalledNotRecorded = "installed; event NOT recorded"
 
+// msgNoConfigInstalled is run's fixed refusal reason — printed, ledgered,
+// and (as serve.ErrNoConfigInstalled) answered 422 — when the control root
+// has nothing installed. No paths: the hint line beside it names them.
+const msgNoConfigInstalled = "no configuration installed"
+
 // exitInstalledMismatch is audit verify control's exit code when the
 // installed pointer does not name the last recorded successful apply —
 // checked after the chain (1), taint (3) and --expect-head (4) verdicts.

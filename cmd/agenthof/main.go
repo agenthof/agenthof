@@ -112,25 +112,35 @@ func buildRegistry(configRoot string, out io.Writer) *registry.Registry {
 	return reg
 }
 
-// resolveRunConfig loads, validates and hashes the config a run executes
-// under — ONE function, shared by `run` and `serve`, so a later policy
-// (run against the installed config rather than the directory) swaps in
-// here. errs holds every load error followed by every validation error,
-// in order; cfg is returned even then so callers can report them. hash is
-// empty on a hash failure: the config already validated, the run proceeds
-// with an empty join key, exactly as before.
-func resolveRunConfig(cfgDir string) (cfg config.Config, reg *registry.Registry, hash string, errs []error) {
-	cfg, loadErrs := config.LoadDir(cfgDir)
-	reg, valErrs := registry.Build(cfg)
+// resolveRunConfig resolves the configuration a run executes under: the
+// INSTALLED snapshot beside controlLog (never the --config directory),
+// loaded in full and validated by registry.Build — ONE function, shared by
+// `run` and `serve`. installed=false means nothing is installed and the
+// caller must refuse; errs holds every load error followed by every
+// validation error, in order (cfg is returned even then so callers can
+// report them). Callers test errs BEFORE installed: a malformed pointer
+// reads back as not-installed-with-an-error and must never invite a
+// bootstrap over a damaged store. hash is the installed pointer's value,
+// verbatim — the hash the installer (apply, or a kill-switch flip) recorded
+// for this snapshot, and the key the audit readers join on; the bytes under
+// it are read unverified (docs/control-plane-lifecycle.md, honest limits).
+// It is never empty when installed and errs is nil. applyFloorErrors is
+// not run here: it is a property of what may be installed, and the snapshot
+// passed it at apply.
+func resolveRunConfig(controlLog string) (cfg config.Config, reg *registry.Registry, hash string, installed bool, errs []error) {
+	cfg, hash, installed, loadErrs := config.LoadInstalled(installedStore(controlLog))
 	errs = append(errs, loadErrs...)
+	if !installed {
+		return cfg, nil, "", false, errs
+	}
+	reg, valErrs := registry.Build(cfg)
 	for _, e := range valErrs {
 		errs = append(errs, e)
 	}
 	if len(errs) > 0 {
-		return cfg, nil, "", errs
+		return cfg, nil, hash, true, errs
 	}
-	hash, _ = config.HashDir(cfgDir)
-	return cfg, reg, hash, nil
+	return cfg, reg, hash, true, nil
 }
 
 // hashConfigDir computes the config directory's join-key hash for
@@ -730,7 +740,6 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	if err := fs.Parse(args[2:]); err != nil {
 		return 2
 	}
-	_ = controlLog // read by resolveRunConfig once run executes the installed configuration
 	if *input == "" {
 		_, _ = fmt.Fprintln(out, "run needs --input")
 		return 2
@@ -779,11 +788,16 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, reg, h, cfgErrs := resolveRunConfig(*cfgDir)
+	cfg, reg, h, installed, cfgErrs := resolveRunConfig(*controlLog)
 	for _, e := range cfgErrs {
 		_, _ = fmt.Fprintln(out, e.Error())
 	}
 	if len(cfgErrs) > 0 {
+		// Checked BEFORE installed: a malformed pointer or a snapshot that
+		// is gone or no longer loads is a damaged install, never "run apply
+		// first". No fallback to --config, no re-bootstrap hint: a run has
+		// no business touching the store; the control-plane remedies are in
+		// docs/control-plane-lifecycle.md.
 		reason := "configuration invalid: " + cfgErrs[0].Error()
 		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, reason, nil)
 		if refErr != nil {
@@ -791,6 +805,20 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 			return 1
 		}
 		_, _ = fmt.Fprintf(out, "run %s refused: configuration invalid\n", runID)
+		return 1
+	}
+	if !installed {
+		// Fail closed, recorded: a fallback to --config would make the
+		// directory the executed configuration exactly when the control
+		// plane has said nothing. The remedy is named with the exact flags.
+		_, _ = fmt.Fprintf(out, "run: %s under %s; run: agenthof apply --config %s --control-log %s\n",
+			msgNoConfigInstalled, installedStore(*controlLog), *cfgDir, *controlLog)
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, msgNoConfigInstalled, nil)
+		if refErr != nil {
+			_, _ = fmt.Fprintln(out, refErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "run %s refused: %s\n", runID, msgNoConfigInstalled)
 		return 1
 	}
 	// The pre-run gate — shared with spawned children, so a child fronting an

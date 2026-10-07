@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/broker"
+	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/obs"
@@ -32,10 +33,10 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 	addr := fs.String("addr", "127.0.0.1:8080", "listen address; a non-loopback address needs --allow-non-loopback")
 	allowNonLoopback := fs.Bool("allow-non-loopback", false, "serve a non-loopback address (put TLS in front; see docs/reference/serve.md)")
 	addrFile := fs.String("addr-file", "", "after binding, write the actual host:port to this file (for a :0 port)")
-	cfgDir := fs.String("config", "./config", "config directory (read per run)")
+	fs.String("config", "./config", "accepted for compatibility; runs execute the installed configuration beside --control-log")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
-	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path (read for audit's config-join and investigate)")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; the installed configuration is read from installed/ beside it, per run, and the ledger itself for audit's config-join and investigate")
 	maxRuns := fs.Int("max-concurrent-runs", 8, "runs in flight at once; further POST /v1/runs answer 429")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 0, "how long a graceful shutdown waits for in-flight runs (default: the config's step timeout)")
 	logLevel := fs.String("log-level", "", "operational log level: debug|info|warn|error (default info; env "+envLogLevel+")")
@@ -65,9 +66,21 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 		return 2
 	}
 	if *shutdownTimeout == 0 {
-		// The config is resolved per run; it is read once here only for
-		// the step timeout the shutdown deadline should cover.
-		cfg, _, _, _ := resolveRunConfig(*cfgDir)
+		// The installed configuration is resolved per run; it is read once
+		// here only for the step timeout the shutdown deadline should cover.
+		// With nothing usable installed the zero GatewayConfig's default
+		// applies, and serve says so once — it starts either way, because
+		// apply is a separate command and every run is refused until one
+		// lands. The timeout is read once: a later apply with a longer
+		// step_timeout does not move this deadline (--shutdown-timeout does).
+		cfg, _, _, installed, errs := resolveRunConfig(*controlLog)
+		switch {
+		case len(errs) > 0:
+			logger.Warn("installed configuration unusable; every run will be refused until apply", "store", installedStore(*controlLog), "err", errs[0].Error())
+			cfg = config.Config{}
+		case !installed:
+			logger.Warn("no configuration installed; every run will be refused until apply", "store", installedStore(*controlLog))
+		}
 		*shutdownTimeout = cfg.Gateway.EffectiveStepTimeout()
 	}
 	clientID := os.Getenv("AGENTHOF_OIDC_CLIENT_ID")
@@ -88,8 +101,7 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(out, "serve: %v\n", err)
 		return 1
 	}
-	host := &runHost{cfgDir: *cfgDir, logDir: *logDir, artifactDir: *artifactDir, logger: logger,
-		broker: newBroker(subjectTokenTypeFromEnv(os.Getenv))}
+	host := &runHost{controlLog: *controlLog, logDir: *logDir, artifactDir: *artifactDir, logger: logger, broker: newBroker(subjectTokenTypeFromEnv(os.Getenv))}
 	srv, err := serve.New(serve.Config{
 		Auth: auth, Host: host, LogDir: *logDir, ControlLog: *controlLog,
 		MaxConcurrentRuns: *maxRuns, ServerHost: ln.Addr().String(), Logger: logger,
@@ -157,20 +169,27 @@ func loopbackAddr(addr string) bool {
 	return loopbackHost(host)
 }
 
-// runHost is serve.RunHost over this process: the config directory, the
-// ledger and artifact locations, one broker for the process, and the
-// supervisor the config names. Prepare is `cmdRun`'s config sequence —
-// resolveRunConfig, then the supervisor — bound to one invoker's token.
+// runHost is serve.RunHost over this process: the control root (whose
+// installed snapshot every run executes), the ledger and artifact
+// locations, one broker for the process, and the supervisor the config
+// names. Prepare is `cmdRun`'s config sequence — resolveRunConfig, then the
+// supervisor — bound to one invoker's token, resolved per run so an apply
+// or a kill-switch flip takes effect on the next run with no restart.
 type runHost struct {
-	cfgDir, logDir, artifactDir string
-	logger                      *slog.Logger
-	broker                      broker.Broker
+	controlLog, logDir, artifactDir string
+	logger                          *slog.Logger
+	broker                          broker.Broker
 }
 
 func (h *runHost) Prepare(_ identity.Invoker, subjectToken string) (serve.Prepared, error) {
-	cfg, reg, hash, errs := resolveRunConfig(h.cfgDir)
+	cfg, reg, hash, installed, errs := resolveRunConfig(h.controlLog)
 	if len(errs) > 0 {
+		// Before the installed flag, as in cmdRun: a damaged install is
+		// "configuration invalid", never "nothing installed".
 		return nil, fmt.Errorf("%w: %s", serve.ErrConfigInvalid, errs[0].Error())
+	}
+	if !installed {
+		return nil, serve.ErrNoConfigInstalled
 	}
 	var sup refspawn.Provisioner
 	if ep := cfg.Gateway.SpawnSupervisor; ep != "" {

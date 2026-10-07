@@ -24,6 +24,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/agenthof/agenthof/internal/broker"
+	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity/oidctest"
 )
@@ -962,21 +963,31 @@ func TestRunStaticRBAC(t *testing.T) {
 	}
 }
 
+// TestRunValidationFailureIsLedgered: an installed configuration that cannot
+// be used — here the pointer names a snapshot directory that is gone — is a
+// recorded refusal "configuration invalid: …" that names the snapshot, with
+// no "run apply first" hint: a damaged store must never invite a bootstrap.
 func TestRunValidationFailureIsLedgered(t *testing.T) {
-	t.Chdir(t.TempDir())
-	t.Setenv("AGENTHOF_TOKEN", "") // a token exported in the ambient shell must not divert this static-path test onto OIDC
+	t.Setenv("AGENTHOF_TOKEN", "")
 	root := writeSample(t)
-	var discard bytes.Buffer
-	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--groups", "platform-eng"}, &discard); code != 0 {
-		t.Fatalf("disable: %d\n%s", code, discard.String())
+	ctl := applied(t, root)
+	hash := readPointer(t, ctl)
+	if err := os.RemoveAll(config.SnapshotDir(installedStore(ctl), hash)); err != nil {
+		t.Fatal(err)
 	}
 	logs := t.TempDir()
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "x", "--as", "dev@x",
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "installed config "+hash+":") {
+		t.Fatalf("the error must name the snapshot: %s", out.String())
+	}
+	if strings.Contains(out.String(), "agenthof apply --config") {
+		t.Fatalf("a damaged store must not print the bootstrap hint: %s", out.String())
 	}
 	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: configuration invalid`).FindStringSubmatch(out.String())
 	if m == nil {
@@ -989,8 +1000,90 @@ func TestRunValidationFailureIsLedgered(t *testing.T) {
 	if len(events) != 1 || events[0].Type != "run_refused" {
 		t.Fatalf("expected single run_refused event, got %+v", events)
 	}
-	if !strings.HasPrefix(events[0].Reason, "configuration invalid:") {
-		t.Fatalf("reason must start with %q: %s", "configuration invalid:", events[0].Reason)
+	if !strings.HasPrefix(events[0].Reason, "configuration invalid: installed config "+hash+":") {
+		t.Fatalf("reason must name the snapshot: %s", events[0].Reason)
+	}
+}
+
+// TestRunRefusesWhenNothingInstalled: branch 1 — a recorded refusal with the
+// fixed reason, and a hint naming --config's value verbatim (run never reads
+// that directory; it is the thing to apply) and --control-log's.
+func TestRunRefusesWhenNothingInstalled(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	cfgDir := "./does-not-exist"
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
+		"--config", cfgDir, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d\n%s", code, out.String())
+	}
+	hint := "run: no configuration installed under " + installedStore(ctl) + "; run: agenthof apply --config " + cfgDir + " --control-log " + ctl + "\n"
+	if !strings.Contains(out.String(), hint) {
+		t.Fatalf("missing hint %q in:\n%s", hint, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: no configuration installed`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+	events, _, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != "run_refused" || events[0].Reason != "no configuration installed" || events[0].ConfigHash != "" {
+		t.Fatalf("ledger = %+v", events)
+	}
+}
+
+// TestRunMalformedPointerIsConfigurationInvalidNotBootstrap: errors are
+// checked before the installed flag, so a malformed pointer is branch 2.
+func TestRunMalformedPointerIsConfigurationInvalidNotBootstrap(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	if err := os.WriteFile(filepath.Join(installedStore(ctl), config.InstalledPointer), []byte("garbage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
+		"--config", root, "--control-log", ctl, "--log-dir", t.TempDir()}, &out, io.Discard)
+	if code != 1 || !strings.Contains(out.String(), "malformed pointer") || !strings.Contains(out.String(), "refused: configuration invalid") {
+		t.Fatalf("code=%d out=%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "no configuration installed") {
+		t.Fatalf("a malformed pointer must never read as nothing installed: %s", out.String())
+	}
+}
+
+// TestRunExecutesTheInstalledSnapshotNotTheDirectory: after apply, breaking
+// the directory changes nothing about the next run, and the run stamps the
+// pointer's hash.
+func TestRunExecutesTheInstalledSnapshotNotTheDirectory(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	want := readPointer(t, ctl)
+	if err := os.WriteFile(filepath.Join(root, "gateway.yaml"), []byte("models: {\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logs := t.TempDir()
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
+		"--config", root, "--control-log", ctl, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+	events, _, err := engine.ReadLog(logs, m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events[0].Type != "workflow_started" || events[0].ConfigHash != want {
+		t.Fatalf("workflow_started must carry the pointer's hash %s: %+v", want, events[0])
 	}
 }
 
