@@ -608,7 +608,7 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		}
 		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(loadErrs[0])})
 	}
-	if !installed && !authz.ControlAllows(cfg.Roles, inv, action) {
+	if !authz.ControlAllows(cfg.Roles, inv, action) {
 		reason := control.NotAuthorized(action)
 		_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, reason.Message)
 		return recordExit("refused", reason)
