@@ -81,15 +81,17 @@ func investigateViaServer(base, token string, q apiclient.InvestigateQuery, json
 		_, _ = fmt.Fprintf(out, "investigate: %v\n", err)
 		return 1
 	}
-	if jsonOut {
-		_, _ = out.Write(doc)
-		return 0
-	}
+	// Decode first even for --json: the exit code comes from the document's
+	// per-source integrity, and --json changes only the rendering.
 	res, err := investigate.DecodeJSON(doc)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "investigate: %v\n", err)
 		return 1
 	}
-	_, _ = fmt.Fprint(out, investigate.RenderText(res))
+	if jsonOut {
+		_, _ = out.Write(doc)
+	} else {
+		_, _ = fmt.Fprint(out, investigate.RenderText(res))
+	}
 	return investigate.ExitCode(res)
 }

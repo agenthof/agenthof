@@ -36,6 +36,10 @@ func fakeServeAPI(t *testing.T) *httptest.Server {
 			w.Header().Set(apiclient.IntegrityHeader, apiclient.IntegrityVerified)
 			_, _ = w.Write([]byte("run r-ok — w (role se)\nstatus: succeeded\n"))
 		case "GET /v1/investigate":
+			if r.URL.Query().Get("run") == "r-torn" {
+				_, _ = w.Write([]byte(`{"v":"investigate/1","query":{"run":"r-torn"},"sources":[{"path":".agenthof/runs/r-torn.jsonl","kind":"run","integrity":"torn","count":2}],"events":[],"integrity":{"ok":false,"issues":[".agenthof/runs/r-torn.jsonl: torn"]}}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"v":"investigate/1","query":{},"sources":[],"events":[],"integrity":{"ok":true,"issues":[]}}`))
 		default:
 			http.NotFound(w, r)
@@ -79,5 +83,15 @@ func TestAuditAndInvestigateServer(t *testing.T) {
 	out.Reset()
 	if code := cmdInvestigate([]string{}, &out); code != 0 || !strings.Contains(out.String(), "investigation timeline: 0 event(s) across 0 source(s)") {
 		t.Fatalf("text mode: code %d out %q", code, out.String())
+	}
+	// --json changes the rendering, never the exit code: a torn source
+	// exits 1 even though the document itself is printed verbatim.
+	out.Reset()
+	if code := cmdInvestigate([]string{"--json", "--run", "r-torn"}, &out); code != 1 || !strings.HasPrefix(out.String(), `{"v":"investigate/1"`) {
+		t.Fatalf("torn --json: code %d out %q", code, out.String())
+	}
+	out.Reset()
+	if code := cmdInvestigate([]string{"--run", "r-torn"}, &out); code != 1 {
+		t.Fatalf("torn text: code %d out %q", code, out.String())
 	}
 }
