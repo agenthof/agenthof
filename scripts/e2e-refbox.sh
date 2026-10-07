@@ -98,7 +98,7 @@ export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE"
 
 "$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups refbox-users
 OUT="$("$WORK/agenthof" run refbox-operator "$WORKFLOW" --input hi \
-	--as ci --groups refbox-users --config "$WORK/config" \
+	--as ci --groups refbox-users --config "$WORK/config" --control-log "$WORK/control.jsonl" \
 	--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts")"
 echo "$OUT"
 echo "$OUT" | grep -q "finished: succeeded" || fail "run did not succeed"

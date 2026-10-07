@@ -77,6 +77,15 @@ The governed core is real and runnable today:
   to make it; the first `apply` on a fresh control root bootstraps, and
   `audit control` says so. A configuration that grants `apply` to nobody is
   rejected rather than installed.
+- **`run` executes the installed configuration** — a run (command line or
+  `serve`) resolves the snapshot the last successful `apply` or kill-switch
+  flip installed beside its control ledger, never the configuration
+  directory, and stamps that snapshot's hash; nothing installed is a recorded
+  refusal that names the `apply` to run. The kill switch re-installs the
+  configuration with the one bit flipped — the directory is untouched, and an
+  `apply` re-asserts what the directory declares. `audit <run-id>` names the
+  install a run executed under, `apply` or flip. The installed bytes are read
+  unverified today; verifying them on read is the next step.
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
   reach declared MCP tool resources only through Agenthof, which mirrors a
   whole resource (written `tools: ["*"], mode: read-write` — every-tool

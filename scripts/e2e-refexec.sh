@@ -98,7 +98,7 @@ export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE"   # the model route is 
 
 run() { # $1 = input; sets OUT, RUNID, AUDIT
 	OUT="$("$WORK/agenthof" run refbox-exec-operator refbox-exec --input "$1" \
-		--as ci --groups refbox-users --config "$WORK/config" \
+		--as ci --groups refbox-users --config "$WORK/config" --control-log "$WORK/control.jsonl" \
 		--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" || true)"
 	echo "$OUT"
 	RUNID="$(echo "$OUT" | sed -n 's/^run \(r-[a-f0-9]*\) finished.*/\1/p')"

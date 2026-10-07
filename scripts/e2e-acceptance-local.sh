@@ -302,7 +302,7 @@ run() { # $1 = workflow; sets OUT, RUNID, AUDIT. Identity is the verified
 	# token, never --as: an on-behalf-of workflow under --as is refused
 	# before the engine, and the children inherit the token's invoker.
 	OUT="$(AGENTHOF_GATEWAY_KEY="$GATEWAY_KEY" "$WORK/agenthof" run acceptance-operator "$1" --input "drive-$NONCE" --token "$TOKEN" \
-		--config "$WORK/config" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" \
+		--config "$WORK/config" --control-log "$WORK/control.jsonl" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" \
 		--log-level debug 2>>"$WORK/agenthof.err" || true)"
 	OUTS+=("$OUT")
 	echo "$OUT"

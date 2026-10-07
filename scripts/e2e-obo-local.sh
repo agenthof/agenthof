@@ -216,7 +216,7 @@ run() { # $1 = workflow, $2 = input, rest = identity flags; sets OUT, RUNID, AUD
 	local wf="$1" input="$2"
 	shift 2
 	OUT="$("$WORK/agenthof" run obo-operator "$wf" --input "$input" "$@" \
-		--config "$WORK/config" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" \
+		--config "$WORK/config" --control-log "$WORK/control.jsonl" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" \
 		--log-level debug 2>>"$WORK/agenthof.err" || true)"
 	OUTS+=("$OUT")
 	echo "$OUT"

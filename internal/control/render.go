@@ -69,9 +69,15 @@ func label(rec record) string {
 // flipLabel renders an enable/disable record: "<pastTense> agent <x>" on
 // success, or "<verb> agent <x> <outcome>" otherwise (e.g. "disable agent
 // coder refused") — the action never appears to have completed when it
-// was refused or errored.
+// was refused or errored. A successful flip marked Bootstrap ran while
+// nothing was installed: it edited the configuration directory and installed
+// nothing, and says so — not "(bootstrap)", which on an apply means the
+// opposite (that apply installed the first snapshot).
 func flipLabel(verb, pastTense string, rec record) string {
 	if rec.Outcome == "success" {
+		if rec.Bootstrap {
+			return fmt.Sprintf("%s agent %s (nothing installed; directory edited)", pastTense, rec.Agent)
+		}
 		return fmt.Sprintf("%s agent %s", pastTense, rec.Agent)
 	}
 	return fmt.Sprintf("%s agent %s %s", verb, rec.Agent, rec.Outcome)

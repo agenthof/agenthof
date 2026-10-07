@@ -228,7 +228,7 @@ case "$S_CAP" in *"$S_NO_IMAGE"*) fail "the two provision refusals share a recor
 
 run() { # $1 = input; sets OUT, RUNID, AUDIT
 	OUT="$("$WORK/agenthof" run lead lead-wf --input "$1" \
-		--as ci --groups refbox-users --config "$WORK/config" \
+		--as ci --groups refbox-users --config "$WORK/config" --control-log "$WORK/control.jsonl" \
 		--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" --log-level debug 2>>"$WORK/agenthof.err" || true)"
 	echo "$OUT"
 	RUNID="$(echo "$OUT" | sed -n 's/^run \(r-[a-f0-9]*\) finished.*/\1/p')"
@@ -366,7 +366,7 @@ echo "exec path: a child's first-hand exec works on the child's volume, invisibl
 #    the image its agent maps to, exactly two mounts (the child's volume at
 #    /work and the child's socket dir), never the exec dir, no network, and
 #    no way to reach the child's refexec socket.
-"$WORK/agenthof" run lead lead-wf --input "spawn:worker/pair-wf:only:reader:sleep:20" --as ci --groups refbox-users --config "$WORK/config" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" >"$WORK/alive.out" 2>>"$WORK/agenthof.err" &
+"$WORK/agenthof" run lead lead-wf --input "spawn:worker/pair-wf:only:reader:sleep:20" --as ci --groups refbox-users --config "$WORK/config" --control-log "$WORK/control.jsonl" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" >"$WORK/alive.out" 2>>"$WORK/agenthof.err" &
 ALIVE=$!
 for i in $(seq 1 60); do
 	READER="$(podman ps --format '{{.Names}}' --filter 'name=^agenthof-spawn-.*-reader$' | head -1)"

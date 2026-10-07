@@ -59,9 +59,9 @@ stdout 'seq 4 .*config applied — mallory@example.com \(asserted\)'
 stdout 'seq 6 .*config rejected — dana@example.com \(asserted\)'
 stdout 'seq 7 .*config applied \(bootstrap\) — nobody@example.com \(asserted\)'
 stdout 'control ledger integrity: verified \(7 events\)'
-stdout 'installed config: sha256:[0-9a-f]{64} — matches the last recorded apply'
+stdout 'installed config: sha256:[0-9a-f]{64} — matches the last recorded install \(apply\)'
 exec agenthof audit verify control --control-log control.jsonl
-stdout 'matches the last recorded apply'
+stdout 'matches the last recorded install \(apply\)'
 
 -- a/agents/planner.yaml --
 name: planner

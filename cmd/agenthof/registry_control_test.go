@@ -5,13 +5,17 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
+	"github.com/agenthof/agenthof/internal/ledger"
 )
 
 // TestRegistryFlipSuccessRecordsControlEvent covers the happy path of
@@ -606,5 +610,360 @@ func TestRegistryFlipMalformedPointerRecordsIOError(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("control log missing %q:\n%s", want, data)
 		}
+	}
+}
+
+// TestRegistryFlipWithNothingInstalledIsMarkedBootstrap: a flip that runs
+// before any apply edits the directory and records the directory's hash,
+// installing nothing; its success event carries bootstrap:true so the audit
+// readers can tell it from a flip that installed what it recorded.
+func TestRegistryFlipWithNothingInstalledIsMarkedBootstrap(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"enable", "coder", "--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("enable: %d\n%s", code, out.String())
+	}
+	data, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"action":"enable"`) || !strings.Contains(string(data), `"bootstrap":true`) {
+		t.Fatalf("the nothing-installed flip must be marked bootstrap:\n%s", data)
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", controlPath}, &out); code != 0 {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "enabled agent coder (nothing installed; directory edited) — dana@example.com (asserted)") {
+		t.Fatalf("audit control must render the bootstrap-era flip distinctly:\n%s", out.String())
+	}
+}
+
+// lastControlEvent decodes the last record of a control ledger.
+func lastControlEvent(t *testing.T, controlLog string) control.DecodedEvent {
+	t.Helper()
+	recs, _, err := ledger.ReadVerify(controlLog, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := control.Decode(recs[len(recs)-1].Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// runFixBug runs software-engineer/fix-bug against ctl and returns the exit
+// code and output.
+func runFixBug(t *testing.T, root, ctl string) (int, string) {
+	t.Helper()
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
+		"--config", root, "--control-log", ctl, "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir()}, &out, io.Discard)
+	return code, out.String()
+}
+
+// TestRegistryFlipInstalledReSnapshotsAndRunsFollow: with something
+// installed, disable stages a copy of the installed snapshot, flips the bit
+// on the copy and installs it — the directory is untouched, the event
+// carries the new pointer, runs are refused (disabled-agent-ref, the whole
+// configuration), the audit readers do not false-alarm, enable installs a
+// third snapshot and runs succeed again, and a repeated flip is idempotent.
+func TestRegistryFlipInstalledReSnapshotsAndRunsFollow(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	applyHash := readPointer(t, ctl)
+	coderPath := filepath.Join(root, "agents", "coder.yaml")
+	dirBefore, err := os.ReadFile(coderPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flip := func(action string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if code := cmdRegistry([]string{action, "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 || !strings.Contains(out.String(), "agent coder "+action+"d") {
+			t.Fatalf("%s: %d\n%s", action, code, out.String())
+		}
+		return out.String()
+	}
+
+	flip("disable")
+	disableHash := readPointer(t, ctl)
+	if disableHash == applyHash {
+		t.Fatal("disable must install a new snapshot")
+	}
+	if dirAfter, _ := os.ReadFile(coderPath); !bytes.Equal(dirBefore, dirAfter) {
+		t.Fatal("the configuration directory must not be touched once something is installed")
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "disable" || e.Outcome != "success" || e.ConfigHash != disableHash || e.Bootstrap {
+		t.Fatalf("event must carry the new pointer and no bootstrap marker: %+v", e)
+	}
+	cfg, _, _, errs := config.LoadInstalled(installedStore(ctl))
+	if len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	for _, a := range cfg.Agents {
+		if a.Name == "coder" && a.IsEnabled() {
+			t.Fatal("the installed snapshot must say disabled")
+		}
+	}
+	if code, out := runFixBug(t, root, ctl); code != 1 || !strings.Contains(out, "disabled in the registry") || !strings.Contains(out, "refused: configuration invalid") {
+		t.Fatalf("a run must be refused configuration invalid: %d\n%s", code, out)
+	}
+	var out bytes.Buffer
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "matches the last recorded install (disable agent coder)") {
+		t.Fatalf("verify must not false-alarm after a flip: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "matches the last recorded install (disable agent coder)") {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
+
+	// Idempotent: flip-written bytes re-marshal identically → same hash,
+	// a second success event.
+	flip("disable")
+	if readPointer(t, ctl) != disableHash {
+		t.Fatal("a repeated disable must re-point to the same snapshot")
+	}
+	if e := lastControlEvent(t, ctl); e.Seq != 3 || e.ConfigHash != disableHash {
+		t.Fatalf("second disable must record the same hash as seq 3: %+v", e)
+	}
+
+	flip("enable")
+	enableHash := readPointer(t, ctl)
+	if enableHash == disableHash || enableHash == applyHash {
+		t.Fatalf("enable re-marshals the file: a third hash, not the apply's back (apply=%s disable=%s enable=%s)", applyHash, disableHash, enableHash)
+	}
+	if code, out := runFixBug(t, root, ctl); code != 0 {
+		t.Fatalf("run after enable: %d\n%s", code, out)
+	}
+	out.Reset()
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "matches the last recorded install (enable agent coder)") {
+		t.Fatalf("%d\n%s", code, out.String())
+	}
+}
+
+// TestRegistryFlipInstalledUnknownAgentLeavesPointer: the lookup is in the
+// installed snapshot, not --config — an agent added to the directory but
+// not applied is agent_not_found, and nothing moves.
+func TestRegistryFlipInstalledUnknownAgentLeavesPointer(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	before := readPointer(t, ctl)
+	if err := os.WriteFile(filepath.Join(root, "agents", "newbie.yaml"), []byte("name: newbie\nmodel: fast\ninstruction: x\noutput: y\nendpoint: http://127.0.0.1:1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "newbie", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeAgentNotFound {
+		t.Fatalf("want refused/agent_not_found: %+v", e)
+	}
+	if readPointer(t, ctl) != before {
+		t.Fatal("pointer must not move")
+	}
+}
+
+// TestRegistryFlipInstalledHashFailureLeavesPointer: the hash now precedes
+// the state change, so a hash failure is a recorded error with the pointer
+// untouched — not "state changed; event NOT recorded".
+func TestRegistryFlipInstalledHashFailureLeavesPointer(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	before := readPointer(t, ctl)
+	orig := hashConfigDir
+	hashConfigDir = func(string) (string, error) { return "", errors.New("forced hash failure") }
+	t.Cleanup(func() { hashConfigDir = orig })
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "state changed") || strings.Contains(out.String(), "agent coder disabled") {
+		t.Fatalf("nothing changed, so nothing may say so:\n%s", out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError {
+		t.Fatalf("want error/io_error: %+v", e)
+	}
+	if readPointer(t, ctl) != before {
+		t.Fatal("pointer must not move")
+	}
+	entries, _ := os.ReadDir(installedStore(ctl))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".staging-") {
+			t.Fatalf("the staged copy must be removed: %s", e.Name())
+		}
+	}
+}
+
+// TestRegistryFlipInstalledUnwritableStoreRecordsIOError:
+// a store the process cannot write to stages nothing, changes nothing, and
+// records error/io_error.
+func TestRegistryFlipInstalledUnwritableStoreRecordsIOError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory modes are not enforced")
+	}
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	before := readPointer(t, ctl)
+	store := installedStore(ctl)
+	if err := os.Chmod(store, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(store, 0o700) })
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError {
+		t.Fatalf("want error/io_error: %+v", e)
+	}
+	if strings.Contains(out.String(), "state changed") {
+		t.Fatalf("nothing changed:\n%s", out.String())
+	}
+	if readPointer(t, ctl) != before {
+		t.Fatal("pointer must not move")
+	}
+}
+
+// TestRegistryFlipInstalledCrashHookShowsAsUnrecordedInstall: the crash hook
+// after the commit and before the append leaves the pointer moved with no
+// event; audit verify control exits 5 with the new wording.
+func TestRegistryFlipInstalledCrashHookShowsAsUnrecordedInstall(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	applyHash := readPointer(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_state_before_append")
+	var out bytes.Buffer
+	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if code == 0 || !strings.Contains(out.String(), "state changed; event NOT recorded") {
+		t.Fatalf("code=%d\n%s", code, out.String())
+	}
+	moved := readPointer(t, ctl)
+	if moved == applyHash {
+		t.Fatal("the pointer must have moved before the simulated crash")
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "apply" {
+		t.Fatalf("no flip event may be recorded: %+v", e)
+	}
+	out.Reset()
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != exitInstalledMismatch {
+		t.Fatalf("exit %d, want %d\n%s", code, exitInstalledMismatch, out.String())
+	}
+	want := "installed config: " + moved + " — does NOT match the last recorded install (" + applyHash + ", apply): the install was not recorded, or its record was lost\n"
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("want %q in:\n%s", want, out.String())
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), want) {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
+}
+
+// TestApplyAfterDisableReEnables is the documentation's proof of the
+// declared-state model: apply from the unchanged directory re-asserts it —
+// agent enabled, pointer back on the apply's hash, recorded as an apply —
+// and the control ledger shows apply, disable, apply in order.
+func TestApplyAfterDisableReEnables(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	applyHash := readPointer(t, ctl)
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("disable: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 || !strings.Contains(out.String(), "registry ok: 2 agents, 1 workflows, 2 roles") {
+		t.Fatalf("apply must re-assert the directory: %d\n%s", code, out.String())
+	}
+	if readPointer(t, ctl) != applyHash {
+		t.Fatal("the pointer must be back on the apply's hash")
+	}
+	if code, out := runFixBug(t, root, ctl); code != 0 {
+		t.Fatalf("run after re-apply: %d\n%s", code, out)
+	}
+	recs, _, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actions []string
+	for _, r := range recs {
+		d, _ := control.Decode(r.Raw)
+		actions = append(actions, d.Action+"/"+d.Outcome)
+	}
+	if strings.Join(actions, " ") != "apply/success disable/success apply/success" {
+		t.Fatalf("ledger order: %v", actions)
+	}
+}
+
+// TestAuditVerifyControlBootstrapFlipDoesNotVouchForUnrecordedApply is the
+// end-to-end blocker scenario: a flip with nothing installed records the
+// directory's hash X (marked bootstrap); an apply of that unchanged
+// directory installs X but its record is lost. The flip's hash equals the
+// pointer and must NOT vouch for it: exit 5, "no install on record".
+func TestAuditVerifyControlBootstrapFlipDoesNotVouchForUnrecordedApply(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"enable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("enable: %d\n%s", code, out.String())
+	}
+	flipHash := lastControlEvent(t, ctl).ConfigHash
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "enabled agent coder (nothing installed; directory edited)") {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_install_before_append")
+	out.Reset()
+	_ = cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if readPointer(t, ctl) != flipHash {
+		t.Fatalf("fixture: the apply of the flipped directory must install the flip's hash (%s vs %s)", readPointer(t, ctl), flipHash)
+	}
+	out.Reset()
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != exitInstalledMismatch {
+		t.Fatalf("exit %d, want %d\n%s", code, exitInstalledMismatch, out.String())
+	}
+	if !strings.Contains(out.String(), "installed config: "+flipHash+" — no install on record: the install was not recorded, or its record was lost") {
+		t.Fatalf("output: %s", out.String())
+	}
+	// A clean apply of the same directory records it: vouched for now.
+	out.Reset()
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("apply: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "matches the last recorded install (apply)") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+
+	// A run under X joins to the apply (form 1), never to the flip.
+	logs := t.TempDir()
+	out.Reset()
+	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
+		"--config", root, "--control-log", ctl, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+	out.Reset()
+	if code := cmdAudit([]string{m[1], "--log-dir", logs, "--control-log", ctl}, &out); code != 0 {
+		t.Fatalf("audit: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "config "+flipHash+" — applied by dana@example.com (asserted)") || strings.Contains(out.String(), "kill switch") {
+		t.Fatalf("the join must name the apply, never the bootstrap-era flip:\n%s", out.String())
 	}
 }

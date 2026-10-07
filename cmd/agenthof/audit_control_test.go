@@ -104,7 +104,7 @@ func TestAuditControlCleanExitsZero(t *testing.T) {
 }
 
 // TestAuditControlShowsInstalledMatch: after an apply, audit control reports
-// that the installed pointer names the last recorded apply.
+// that the installed pointer names the last recorded install.
 func TestAuditControlShowsInstalledMatch(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	root := writeSample(t)
@@ -120,14 +120,14 @@ func TestAuditControlShowsInstalledMatch(t *testing.T) {
 	if !strings.Contains(out.String(), "config applied (bootstrap) — dana@example.com (asserted)") {
 		t.Fatalf("bootstrap label missing: %s", out.String())
 	}
-	if !strings.HasSuffix(out.String(), "installed config: sha256:"+strings.TrimPrefix(readPointer(t, controlLog), "sha256:")+" — matches the last recorded apply\n") {
+	if !strings.HasSuffix(out.String(), "installed config: sha256:"+strings.TrimPrefix(readPointer(t, controlLog), "sha256:")+" — matches the last recorded install (apply)\n") {
 		t.Fatalf("installed line must follow the integrity line: %s", out.String())
 	}
 }
 
 // TestAuditControlFlagsUnrecordedInstall: an install whose success append
 // never landed (the crash hook) is visible — the pointer does not match the
-// last recorded apply — and audit control still exits 0 (it renders).
+// last recorded install — and audit control still exits 0 (it renders).
 func TestAuditControlFlagsUnrecordedInstall(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	root := writeSample(t)
@@ -150,7 +150,7 @@ func TestAuditControlFlagsUnrecordedInstall(t *testing.T) {
 	if code := cmdAuditControl([]string{"--control-log", controlLog}, &out); code != 0 {
 		t.Fatalf("exit = %d: %s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "does NOT match the last recorded apply") {
+	if !strings.Contains(out.String(), "does NOT match the last recorded install (") {
 		t.Fatalf("mismatch not flagged: %s", out.String())
 	}
 }

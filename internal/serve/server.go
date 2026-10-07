@@ -28,12 +28,13 @@ type Authenticator interface {
 }
 
 // RunHost is what serve needs from the process hosting it. Prepare
-// resolves the config for one run — load, validate, hash — exactly as
-// `agenthof run` does, bound to the invoker's verified token for
-// on-behalf-of exchange. It is the one place a later policy (run against
-// the installed config rather than the directory) swaps in. A load or
-// validation failure wraps ErrConfigInvalid; anything else is the host's
-// own failure.
+// resolves the configuration for one run — the INSTALLED snapshot beside
+// the control ledger, loaded in full and validated — exactly as `agenthof
+// run` does, bound to the invoker's verified token for on-behalf-of
+// exchange. It is read per run, so an apply or a kill-switch flip takes
+// effect on the next run with no restart. A load or validation failure
+// wraps ErrConfigInvalid; nothing installed is ErrNoConfigInstalled;
+// anything else is the host's own failure.
 type RunHost interface {
 	Prepare(inv identity.Invoker, subjectToken string) (Prepared, error)
 }
@@ -53,6 +54,11 @@ type Prepared interface {
 // the run is refused (recorded, 422) with "configuration invalid: <first
 // error>", the same text the CLI ledgers.
 var ErrConfigInvalid = errors.New("configuration invalid")
+
+// ErrNoConfigInstalled marks a Prepare that found nothing installed under
+// the control root: the run is refused (recorded, 422) with the fixed
+// reason "no configuration installed", the same text the CLI ledgers.
+var ErrNoConfigInstalled = errors.New("no configuration installed")
 
 // Config is everything a Server needs. MaxConcurrentRuns is required —
 // there is no unbounded default.

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agenthof/agenthof/internal/config"
 )
 
 func TestLoopbackAddr(t *testing.T) {
@@ -89,18 +91,57 @@ func TestServeWritesAddrFileAnswersHealthzAndStopsOnContext(t *testing.T) {
 	}
 }
 
-func TestResolveRunConfigReportsErrorsInLoadThenValidateOrder(t *testing.T) {
+// TestResolveRunConfigReadsTheInstalledSnapshot pins the swap: the run
+// configuration is the installed snapshot beside the control log, the hash
+// is the pointer's value verbatim, the --config directory is irrelevant once
+// something is installed, and errors are reported before the installed flag
+// so a malformed pointer never reads as "run apply first".
+func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
 	root := writeSample(t)
-	cfg, reg, hash, errs := resolveRunConfig(root)
-	if len(errs) != 0 || reg == nil || hash == "" || len(cfg.Agents) == 0 {
-		t.Fatalf("errs=%v reg=%v hash=%q", errs, reg, hash)
+
+	empty := filepath.Join(t.TempDir(), "control.jsonl")
+	if _, reg, hash, installed, errs := resolveRunConfig(empty); installed || reg != nil || hash != "" || len(errs) != 0 {
+		t.Fatalf("nothing installed: installed=%v reg=%v hash=%q errs=%v", installed, reg, hash, errs)
 	}
-	bad := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bad, "gateway.yaml"), []byte("models: {\n"), 0o644); err != nil {
+
+	ctl := applied(t, root)
+	cfg, reg, hash, installed, errs := resolveRunConfig(ctl)
+	if !installed || len(errs) != 0 || reg == nil || len(cfg.Agents) != 2 {
+		t.Fatalf("installed: installed=%v reg=%v errs=%v", installed, reg, errs)
+	}
+	if hash != readPointer(t, ctl) {
+		t.Fatalf("hash must be the pointer verbatim: %q vs %q", hash, readPointer(t, ctl))
+	}
+
+	// The directory is not what runs: break it and nothing changes.
+	if err := os.WriteFile(filepath.Join(root, "gateway.yaml"), []byte("models: {\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, reg, _, errs = resolveRunConfig(bad)
-	if reg != nil || len(errs) == 0 {
-		t.Fatalf("a broken config must yield errors and no registry: errs=%v", errs)
+	if _, reg, again, _, errs := resolveRunConfig(ctl); reg == nil || again != hash || len(errs) != 0 {
+		t.Fatalf("a broken directory must not affect the installed resolution: hash=%q errs=%v", again, errs)
+	}
+
+	// The snapshot is read unverified (honest limit): a workflow-referenced
+	// agent disabled in place under installed/<hex>/ is a validation error.
+	store := installedStore(ctl)
+	coder := filepath.Join(config.SnapshotDir(store, hash), "agents", "coder.yaml")
+	data, err := os.ReadFile(coder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coder, append(data, []byte("enabled: false\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, reg, _, installed, errs := resolveRunConfig(ctl); reg != nil || !installed || len(errs) == 0 || !strings.Contains(errs[0].Error(), "disabled in the registry") {
+		t.Fatalf("disabled-agent-ref must surface: reg=%v installed=%v errs=%v", reg, installed, errs)
+	}
+
+	// A malformed pointer: errors first, installed=false.
+	if err := os.WriteFile(filepath.Join(store, config.InstalledPointer), []byte("garbage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, reg, hash, installed, errs := resolveRunConfig(ctl); reg != nil || installed || hash != "" || len(errs) != 1 || !strings.Contains(errs[0].Error(), "malformed pointer") {
+		t.Fatalf("malformed pointer: reg=%v installed=%v hash=%q errs=%v", reg, installed, hash, errs)
 	}
 }

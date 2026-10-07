@@ -58,7 +58,7 @@ the same loopback URL.
 
 ## Part 1: CONFIG Moment — Registry Management & Kill Switches
 
-Demonstrates how roles, workflows, and agents are defined in YAML and validated on apply; and how the kill switch prevents invalid configurations from running.
+Demonstrates how roles, workflows, and agents are defined in YAML and validated on apply; and how the kill switch takes a configuration out of service without touching the files on disk.
 
 ### 1.1 Apply and verify the registry
 
@@ -118,7 +118,7 @@ control head: seq=2 sha256=<hex>
 
 Configuration changes are validated immediately; no stale configs can propagate.
 
-### 1.3 Test the kill switch: disable an agent and watch apply fail
+### 1.3 Test the kill switch: disable an agent and watch runs refuse
 
 Disable the coder agent:
 
@@ -133,18 +133,37 @@ agent coder disabled
 control head: seq=3 sha256=<hex>
 ```
 
-Now try to apply:
+Now try to run:
 
 ```bash
-./agenthof apply --as dana@example.com --groups platform-eng --config examples/config
+./agenthof run software-engineer fix-bug --input "fix the login bug" --as dana@example.com --config examples/config
 ```
 
 Expected output:
 ```
 workflows/fix-bug.yaml: fix-bug: workflow "fix-bug" depends on agent "coder", which is disabled in the registry
+run <run-id> refused: configuration invalid
 ```
 
-The registry refuses to load because fix-bug depends on coder, which is now disabled. The error names the broken workflow immediately. The rejected apply is itself recorded in the control ledger (outcome `rejected`, with the hash of the rejected config) — denials are audit events too.
+The run executes the **installed** configuration — the snapshot the kill
+switch just re-installed with `coder` disabled — so it is refused before
+anything starts, naming the broken workflow; the refusal is itself a recorded
+run. Note that disabling an agent takes every workflow that references it —
+and, today, every other workflow in the configuration — out of service until
+it is re-enabled or applied around.
+
+See who flipped it, and what is installed now:
+
+```bash
+./agenthof audit control
+```
+
+Expected output (abbreviated):
+```
+  seq 3  <ts>  disabled agent coder — dana@example.com (asserted)
+control ledger integrity: verified (3 events)
+installed config: sha256:<hex> — matches the last recorded install (disable agent coder)
+```
 
 Re-enable the agent:
 
@@ -155,10 +174,11 @@ Re-enable the agent:
 Expected output:
 ```
 agent coder enabled
-control head: seq=5 sha256=<hex>
+control head: seq=4 sha256=<hex>
 ```
 
-Verify the registry is healthy again:
+Then re-apply (the agent is already enabled; this records the directory's
+declared state as an apply):
 
 ```bash
 ./agenthof apply --as dana@example.com --groups platform-eng --config examples/config
@@ -167,15 +187,13 @@ Verify the registry is healthy again:
 Expected output:
 ```
 registry ok: 5 agents, 2 workflows, 3 roles
-control head: seq=6 sha256=<hex>
+control head: seq=5 sha256=<hex>
 ```
 
 > **Note — this walkthrough modifies `examples/config`.** The `reviewer.yaml`
-> edit in 1.2 is a deliberate change, and `registry disable`/`enable` rewrites
-> `coder.yaml`'s YAML formatting even when it flips the state back — so
-> `git status` will show changes under `examples/config` afterward. That's
-> expected and harmless; reset the tree with `git checkout examples/config` when
-> you're done.
+> edit in 1.2 is a deliberate change, so `git status` will show it under
+> `examples/config` afterward. That's expected and harmless; reset the tree
+> with `git checkout examples/config` when you're done.
 
 ### 1.4 Read the control ledger: who changed what, and when
 
@@ -188,15 +206,14 @@ chained. Read the control-plane audit trail:
 
 Expected output (abbreviated):
 ```
-control ledger — 6 events
+control ledger — 5 events
 
   seq 1  <ts>  config applied — dana@example.com (asserted)
   seq 2  <ts>  config applied — dana@example.com (asserted)
   seq 3  <ts>  disabled agent coder — dana@example.com (asserted)
-  seq 4  <ts>  config rejected — dana@example.com (asserted)
-  seq 5  <ts>  enabled agent coder — dana@example.com (asserted)
-  seq 6  <ts>  config applied — dana@example.com (asserted)
-control ledger integrity: verified (6 events)
+  seq 4  <ts>  enabled agent coder — dana@example.com (asserted)
+  seq 5  <ts>  config applied — dana@example.com (asserted)
+control ledger integrity: verified (5 events)
 ```
 
 Verify the control chain, and pin it against a head you recorded off the
@@ -544,9 +561,11 @@ a source that exists) · `3` tainted only (a repair is on record) · `2` usage.
 ./agenthof audit r-<healthy>
 ```
 
-The last line names the `apply` that put the config the run executed under:
+The last line names the install the run executed under — the `apply`, or the
+kill-switch flip, that put it in place:
 ```
 config sha256:<hex> — applied by dana@example.com (asserted) at <ts>
+config sha256:<hex> — installed by dana@example.com (asserted) at <ts> (kill switch: disabled agent coder)
 ```
 
 If the control log is missing or damaged, this degrades to `control ledger

@@ -73,9 +73,10 @@ func TestResolveLogConfigRejectsUnknownValues(t *testing.T) {
 func TestRunRejectsInvalidLogLevelToStdout(t *testing.T) {
 	t.Chdir(t.TempDir())
 	root := writeSample(t)
+	ctl := applied(t, root)
 	var out, errBuf bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
-		"--config", root, "--log-dir", t.TempDir(), "--log-level", "loud"}, &out, &errBuf)
+		"--config", root, "--control-log", ctl, "--log-dir", t.TempDir(), "--log-level", "loud"}, &out, &errBuf)
 	if code != 2 {
 		t.Fatalf("code = %d, want 2 (usage error)\n%s", code, out.String())
 	}
@@ -92,9 +93,10 @@ func TestRunLogsToStderrNotStdout(t *testing.T) {
 	t.Setenv(envLogLevel, "")
 	t.Setenv(envLogFormat, "")
 	root := writeSample(t)
+	ctl := applied(t, root)
 	var out, errBuf bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
-		"--config", root, "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir(),
+		"--config", root, "--control-log", ctl, "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir(),
 		"--log-level", "debug", "--log-format", "json"}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s\n%s", code, out.String(), errBuf.String())
@@ -128,8 +130,9 @@ func TestRunFlagOverridesEnvLogLevel(t *testing.T) {
 	t.Setenv(envLogLevel, "debug")
 	t.Setenv(envLogFormat, "")
 	root := writeSample(t)
+	ctl := applied(t, root)
 	base := []string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
-		"--config", root, "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir()}
+		"--config", root, "--control-log", ctl, "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir()}
 
 	var out, errBuf bytes.Buffer
 	if code := cmdRun(append(append([]string{}, base...), "--log-level", "error"), &out, &errBuf); code != 0 {

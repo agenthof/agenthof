@@ -54,7 +54,7 @@ AGENTHOF_GATEWAY_KEY="$GATEWAY_KEY" "$AF" apply --config "$CFG" --control-log "$
 say "agenthof run acceptance-operator acceptance --input 'ship the feature' --token \$TOKEN"
 OUT="$(AGENTHOF_GATEWAY_KEY="$GATEWAY_KEY" "$AF" run acceptance-operator acceptance \
 	--input "ship the feature" --token "$TOKEN" \
-	--config "$CFG" --log-dir "$LOGS" --artifact-dir "$ART" 2>>"$WORK/agenthof.err" || true)"
+	--config "$CFG" --control-log "$CTL" --log-dir "$LOGS" --artifact-dir "$ART" 2>>"$WORK/agenthof.err" || true)"
 echo "$OUT"
 RUN="$(sed -E -n 's/^run (r-[a-f0-9]+) .*/\1/p' <<<"$OUT" | head -1)"
 grep -q "finished: succeeded" <<<"$OUT" || {

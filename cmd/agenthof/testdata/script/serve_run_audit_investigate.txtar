@@ -5,16 +5,19 @@
 env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER
 env AGENTHOF_OIDC_CLIENT_ID=agenthof
 
-# apply runs as the dev identity: AGENTHOF_TOKEN is set only AFTER it, or
-# resolveInvoker would take the token (dana, groups [engineering]) over
-# --as/--groups; the first apply bootstraps either way, but the run below
-# must be attributed to the token and the apply to tester.
+# serve starts with nothing installed and refuses every run until an apply
+# lands; the client authenticates with --token here because AGENTHOF_TOKEN is
+# set only AFTER the apply below (resolveInvoker would take the token — dana,
+# groups [engineering] — over --as/--groups, and the apply must be tester's).
+exec agenthof serve --addr 127.0.0.1:0 --addr-file addr.txt --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl --max-concurrent-runs 2 &
+waitaddr addr.txt
+! exec agenthof run se plan-only --input hello --server $SERVER --token $OIDC_TOKEN
+stdout 'run r-[0-9a-f]{16} refused: no configuration installed'
+
+# the apply is picked up by the next POST — no restart
 exec agenthof apply --config config --as tester --control-log control.jsonl --groups platform-eng
 stdout 'registry ok: 1 agents, 1 workflows, 3 roles'
 env AGENTHOF_TOKEN=$OIDC_TOKEN
-
-exec agenthof serve --addr 127.0.0.1:0 --addr-file addr.txt --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl --max-concurrent-runs 2 &
-waitaddr addr.txt
 
 # a run over the API prints exactly what a local run prints
 exec agenthof run se plan-only --input hello --server $SERVER

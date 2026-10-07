@@ -43,8 +43,9 @@ type Witness struct {
 }
 
 // Event is a control/1 record. Callers set Action, Agent, Outcome, Reason,
-// Invoker, AssertedAs, Witness, ConfigHash, Bootstrap (apply only), and
-// (repair only) FragmentLen/FragmentSHA. V, and the seq/time/prev/log_id
+// Invoker, AssertedAs, Witness, ConfigHash, Bootstrap (apply and
+// enable/disable), and (repair only) FragmentLen/FragmentSHA. V, and the
+// seq/time/prev/log_id
 // fields on the wire, are set by Append; callers never set them.
 type Event struct {
 	V          string           `json:"v,omitempty"`
@@ -56,10 +57,14 @@ type Event struct {
 	AssertedAs string           `json:"asserted_as,omitempty"`
 	Witness    Witness          `json:"witness"`
 	ConfigHash string           `json:"config_hash,omitempty"`
-	// Bootstrap marks a successful apply that was permitted because nothing
-	// was installed under its control root (the first apply, or the first
-	// after an operator removed the installed pointer). Additive: absent on
-	// every other record, and omitted from the wire when false.
+	// Bootstrap marks a successful apply or kill-switch flip that ran while
+	// nothing was installed under its control root. An apply so marked
+	// installed the first snapshot (or the first after an operator removed
+	// the installed pointer); a flip so marked edited the configuration
+	// directory, recorded that directory's hash, and installed nothing — the
+	// audit readers exclude it from "what is installed" (see Installing).
+	// Additive: absent on every other record, omitted from the wire when
+	// false.
 	Bootstrap   bool   `json:"bootstrap,omitempty"`
 	FragmentLen int    `json:"fragment_len,omitempty"`
 	FragmentSHA string `json:"fragment_sha256,omitempty"`

@@ -112,25 +112,35 @@ func buildRegistry(configRoot string, out io.Writer) *registry.Registry {
 	return reg
 }
 
-// resolveRunConfig loads, validates and hashes the config a run executes
-// under — ONE function, shared by `run` and `serve`, so a later policy
-// (run against the installed config rather than the directory) swaps in
-// here. errs holds every load error followed by every validation error,
-// in order; cfg is returned even then so callers can report them. hash is
-// empty on a hash failure: the config already validated, the run proceeds
-// with an empty join key, exactly as before.
-func resolveRunConfig(cfgDir string) (cfg config.Config, reg *registry.Registry, hash string, errs []error) {
-	cfg, loadErrs := config.LoadDir(cfgDir)
-	reg, valErrs := registry.Build(cfg)
+// resolveRunConfig resolves the configuration a run executes under: the
+// INSTALLED snapshot beside controlLog (never the --config directory),
+// loaded in full and validated by registry.Build — ONE function, shared by
+// `run` and `serve`. installed=false means nothing is installed and the
+// caller must refuse; errs holds every load error followed by every
+// validation error, in order (cfg is returned even then so callers can
+// report them). Callers test errs BEFORE installed: a malformed pointer
+// reads back as not-installed-with-an-error and must never invite a
+// bootstrap over a damaged store. hash is the installed pointer's value,
+// verbatim — the hash the installer (apply, or a kill-switch flip) recorded
+// for this snapshot, and the key the audit readers join on; the bytes under
+// it are read unverified (docs/control-plane-lifecycle.md, honest limits).
+// It is never empty when installed and errs is nil. applyFloorErrors is
+// not run here: it is a property of what may be installed, and the snapshot
+// passed it at apply.
+func resolveRunConfig(controlLog string) (cfg config.Config, reg *registry.Registry, hash string, installed bool, errs []error) {
+	cfg, hash, installed, loadErrs := config.LoadInstalled(installedStore(controlLog))
 	errs = append(errs, loadErrs...)
+	if !installed {
+		return cfg, nil, "", false, errs
+	}
+	reg, valErrs := registry.Build(cfg)
 	for _, e := range valErrs {
 		errs = append(errs, e)
 	}
 	if len(errs) > 0 {
-		return cfg, nil, "", errs
+		return cfg, nil, hash, true, errs
 	}
-	hash, _ = config.HashDir(cfgDir)
-	return cfg, reg, hash, nil
+	return cfg, reg, hash, true, nil
 }
 
 // hashConfigDir computes the config directory's join-key hash for
@@ -452,7 +462,7 @@ func cmdRegistry(args []string, out io.Writer) int {
 		target, rest = rest[0], rest[1:]
 	}
 	fs := flag.NewFlagSet("registry", flag.ContinueOnError)
-	cfgDir := fs.String("config", "./config", "config directory")
+	cfgDir := fs.String("config", "./config", "configuration directory; list builds and lists it; enable|disable use it to look up and flip the agent only while nothing is installed (afterwards the installed snapshot is flipped and re-installed)")
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path (enable/disable only)")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
@@ -497,12 +507,15 @@ func truncateErr(err error) string {
 }
 
 // cmdRegistryFlip implements the audited write path for `registry
-// enable|disable` (spec §3.4). Every branch that can write a control
-// event does so before returning, once the control chain itself is
-// known writable; the only unrecorded exit is a control ledger that
-// itself cannot be opened (step 2 below) or a final append that fails
-// AFTER the agent's enabled bit already changed (the documented
-// residual risk).
+// enable|disable`. Every branch that can write a control event does so
+// before returning, once the control chain itself is known writable; the
+// only unrecorded exits are a control ledger that cannot be opened and a
+// final append that fails AFTER the state already changed (the documented
+// residual window). With something installed the flip is a re-snapshot of
+// the installed configuration (flipInstalled); with nothing installed it is
+// the bootstrap-era path below — the directory is the only configuration
+// there is, so the bit is flipped there and the first apply installs the
+// directory as flipped — marked Bootstrap on its record.
 func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token string, out io.Writer) int {
 	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(as, groups, token)
 	if usageErr {
@@ -564,7 +577,7 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	// --config's roles to authorize, so that case loads first, below. A
 	// pointer present but unusable means nobody can be authorized: fail closed,
 	// recorded, nothing flipped.
-	installedRoles, _, installed, instErr := config.InstalledRoles(installedStore(controlLog))
+	installedRoles, installedHash, installed, instErr := config.InstalledRoles(installedStore(controlLog))
 	if instErr != nil {
 		_, _ = fmt.Fprintln(out, instErr)
 		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)})
@@ -574,20 +587,20 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, reason.Message)
 		return recordExit("refused", reason)
 	}
+	if installed {
+		return flipInstalled(action, target, installedStore(controlLog), installedHash, controlLog, inv, assertedAs, recordExit, out)
+	}
 
-	// Load --config now: it supplies the unknown-agent check and SetEnabled
-	// below, and — only when nothing is installed — the fallback roles the
-	// invoker is authorized against. Never registry.Build: with the target
-	// agent disabled, Build rejects the config (disabled-agent-ref), which
-	// would make a disabled agent un-re-enableable. The control chain is
-	// already known writable at this point, so a config that fails to load at
-	// all is a recordable denial — outcome "error", reason io_error — for a
-	// caller who got this far (authorized against the installed roles, or on
-	// the bootstrap fallback), never a silent unlogged exit and never
+	// Nothing installed: load --config. It supplies the fallback roles the
+	// invoker is authorized against, the unknown-agent check and SetEnabled
+	// below. Never registry.Build: with the target agent disabled, Build
+	// rejects the config (disabled-agent-ref), which would make a disabled
+	// agent un-re-enableable. The control chain is already known writable,
+	// so a config that fails to load at all is a recordable denial —
+	// outcome "error", reason io_error — never a silent exit and never
 	// conflated with "agent not found", which is reserved for a config that
-	// loaded cleanly and genuinely lacks the name. --config stays what the
-	// kill switch mutates and where the agent is looked up, whichever roles
-	// decided.
+	// loaded cleanly and genuinely lacks the name. The directory is what
+	// this path mutates: the first apply will install it as flipped.
 	cfg, loadErrs := config.LoadDir(cfgDir)
 	if len(loadErrs) > 0 {
 		for _, e := range loadErrs {
@@ -595,7 +608,7 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		}
 		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(loadErrs[0])})
 	}
-	if !installed && !authz.ControlAllows(cfg.Roles, inv, action) {
+	if !authz.ControlAllows(cfg.Roles, inv, action) {
 		reason := control.NotAuthorized(action)
 		_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, reason.Message)
 		return recordExit("refused", reason)
@@ -641,6 +654,112 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	// exercisable by a test too.
 	h, hashErr := hashConfigDir(cfgDir)
 	if hashErr != nil {
+		_, _ = fmt.Fprintln(out, "state changed; event NOT recorded")
+		return 1
+	}
+	head, err := control.Append(controlLog, control.Event{
+		Action:     action,
+		Agent:      target,
+		Outcome:    "success",
+		Invoker:    inv,
+		AssertedAs: assertedAs,
+		Witness:    control.CaptureWitness(),
+		ConfigHash: h,
+		// This path runs only while nothing is installed: the record is
+		// marked so the audit readers never mistake the directory's hash for
+		// an install (control.Installing).
+		Bootstrap: true,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintln(out, "state changed; event NOT recorded")
+		return 1
+	}
+	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+	return 0
+}
+
+// flipInstalled is the kill switch against an installed snapshot (every
+// flip once something is installed): stage a copy of the installed snapshot
+// under the store, flip the one bit on the copy, hash the copy, and install
+// it through the same store functions apply uses. The configuration
+// directory is not touched — after a flip, --config and the installed
+// snapshot disagree until the next apply re-asserts the directory (the
+// declared-state model, docs/control-plane-lifecycle.md). Every failure
+// before the commit changes nothing and is recorded; the hash precedes the
+// state change, so a hash failure is a plain recorded error. After the
+// commit the pointer has moved and only the success append remains: a
+// failure there prints "state changed; event NOT recorded", and audit
+// control / audit verify control flag the pointer-vs-ledger mismatch.
+// Disabling an already-disabled agent whose snapshot a flip wrote yields the
+// same bytes → the same hash → CommitSnapshot's identical-snapshot branch
+// re-points; the first flip on apply-written bytes always yields a new hash
+// (SetEnabled re-marshals the file).
+func flipInstalled(action, target, store, hash, controlLog string, inv identity.Invoker, assertedAs string,
+	recordExit func(outcome string, reason *control.Reason) int, out io.Writer) int {
+	temp, stageErr := config.StageSnapshot(store, config.SnapshotDir(store, hash))
+	if stageErr != nil {
+		_, _ = fmt.Fprintln(out, stageErr)
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(stageErr)})
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.RemoveAll(temp)
+		}
+	}()
+
+	// Lenient load, never registry.Build (see cmdRegistryFlip). A snapshot
+	// that loaded at apply and no longer does is damage: recorded io_error.
+	cfg, loadErrs := config.LoadDir(temp)
+	if len(loadErrs) > 0 {
+		for _, e := range loadErrs {
+			_, _ = fmt.Fprintln(out, e)
+		}
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(loadErrs[0])})
+	}
+	// The lookup is in the INSTALLED snapshot: an agent whose file exists in
+	// the directory but was never applied is not installed, so there is
+	// nothing to flip.
+	known := false
+	for _, a := range cfg.Agents {
+		if a.Name == target {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return recordExit("refused", &control.Reason{Code: control.CodeAgentNotFound, Message: fmt.Sprintf("agent %s not found", target)})
+	}
+
+	enabled := action == "enable"
+	if setErr := registry.SetEnabled(temp, target, enabled); setErr != nil {
+		_, _ = fmt.Fprintln(out, setErr)
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(setErr)})
+	}
+	// Through the hashConfigDir seam, so a hash failure is exercisable by a
+	// test; it precedes the commit, so it leaves the pointer untouched.
+	h, hashErr := hashConfigDir(temp)
+	if hashErr != nil {
+		_, _ = fmt.Fprintln(out, hashErr)
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(hashErr)})
+	}
+	if err := config.CommitSnapshot(store, temp, h); err != nil {
+		// CommitSnapshot leaves the pointer exactly as it was on any error.
+		_, _ = fmt.Fprintln(out, err)
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(err)})
+	}
+	committed = true
+	state := "disabled"
+	if enabled {
+		state = "enabled"
+	}
+	_, _ = fmt.Fprintf(out, "agent %s %s\n", target, state)
+
+	// Test-only crash hook: the process dies after the pointer moved but
+	// before the success append — the residual window, exercisable by a
+	// test instead of an unreproducible race (the bootstrap path has the
+	// same hook after its SetEnabled).
+	if os.Getenv("AGENTHOF_TEST_CRASH_AT") == "after_state_before_append" {
 		_, _ = fmt.Fprintln(out, "state changed; event NOT recorded")
 		return 1
 	}
@@ -711,7 +830,8 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
 	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	server := fs.String("server", "", "run over an agenthof serve API at this base URL (env AGENTHOF_SERVER); needs --token/AGENTHOF_TOKEN")
-	cfgDir := fs.String("config", "./config", "config directory")
+	cfgDir := fs.String("config", "./config", "configuration directory you apply from; run executes the INSTALLED configuration (see --control-log), not this directory")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; the installed configuration is read from installed/ beside it")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
 	// Accepted for forward-compat: the tool proxy always binds 127.0.0.1:0
@@ -773,11 +893,16 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, reg, h, cfgErrs := resolveRunConfig(*cfgDir)
+	cfg, reg, h, installed, cfgErrs := resolveRunConfig(*controlLog)
 	for _, e := range cfgErrs {
 		_, _ = fmt.Fprintln(out, e.Error())
 	}
 	if len(cfgErrs) > 0 {
+		// Checked BEFORE installed: a malformed pointer or a snapshot that
+		// is gone or no longer loads is a damaged install, never "run apply
+		// first". No fallback to --config, no re-bootstrap hint: a run has
+		// no business touching the store; the control-plane remedies are in
+		// docs/control-plane-lifecycle.md.
 		reason := "configuration invalid: " + cfgErrs[0].Error()
 		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, reason, nil)
 		if refErr != nil {
@@ -785,6 +910,20 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 			return 1
 		}
 		_, _ = fmt.Fprintf(out, "run %s refused: configuration invalid\n", runID)
+		return 1
+	}
+	if !installed {
+		// Fail closed, recorded: a fallback to --config would make the
+		// directory the executed configuration exactly when the control
+		// plane has said nothing. The remedy is named with the exact flags.
+		_, _ = fmt.Fprintf(out, "run: %s under %s; run: agenthof apply --config %s --control-log %s\n",
+			msgNoConfigInstalled, installedStore(*controlLog), *cfgDir, *controlLog)
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, msgNoConfigInstalled, nil)
+		if refErr != nil {
+			_, _ = fmt.Fprintln(out, refErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "run %s refused: %s\n", runID, msgNoConfigInstalled)
 		return 1
 	}
 	// The pre-run gate — shared with spawned children, so a child fronting an
@@ -1017,10 +1156,11 @@ func cmdAuditVerify(args []string, out io.Writer) int {
 // chain still renders whatever valid prefix ReadVerify recovered,
 // followed by the integrity line naming the failure, and exits nonzero.
 // After the integrity line it reports the installed pointer's standing:
-// whether <dir of --control-log>/installed/current names the last
-// successful apply on record (nothing is printed when nothing was ever
-// installed). That is informational here; audit verify control turns a
-// mismatch into an exit code.
+// whether <dir of --control-log>/installed/current names the last recorded
+// install — the last successful apply or kill-switch flip on record
+// (nothing is printed when nothing was ever installed). That is
+// informational here; audit verify control turns a mismatch into an exit
+// code.
 func cmdAuditControl(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
@@ -1064,9 +1204,9 @@ func cmdAuditControl(args []string, out io.Writer) int {
 // appended), which takes precedence over an --expect-head mismatch; 4
 // for an --expect-head mismatch (hash only — count is informational);
 // 5 when the installed pointer (<dir of --control-log>/installed/current)
-// does not name the last successful apply on record — an install whose
-// event was never appended, or whose record was lost — checked last; 0
-// otherwise.
+// does not name the last recorded install (the last successful apply or
+// kill-switch flip — control.Installing) — an install whose event was never
+// appended, or whose record was lost — checked last; 0 otherwise.
 func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit verify control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")

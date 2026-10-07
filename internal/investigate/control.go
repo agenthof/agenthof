@@ -56,51 +56,51 @@ func LoadControl(path string) (events []control.DecodedEvent, verdict string, ok
 	return events, verdict, true
 }
 
-// ConfigJoin implements spec §2: the join line for a run whose
-// workflow_started carries runHash at runStart. verdict is LoadControl's
-// verdict.
+// ConfigJoin renders the join line for a run whose workflow_started carries
+// runHash at runStart; verdict is LoadControl's. The run's install is the
+// LAST installing event (control.Installing: a successful apply, or a
+// successful kill-switch flip against an installed snapshot) in ledger
+// order whose hash equals the run's and whose time is not after the run's
+// start — events is in seq order, so the last qualifying event is the latest
+// install with no clock comparison. Five forms, verbatim in
+// docs/reference/config.md: applied by (an apply); installed by … (kill
+// switch: …) (a flip); no install on record at the run's start (the hash
+// matches only later installs — the install→record gap re-installed later,
+// or clock skew — known but not vouched for at run time); no install on
+// record; control ledger unavailable.
 func ConfigJoin(events []control.DecodedEvent, verdict string, runHash string, runStart time.Time) string {
 	switch verdict {
 	case "missing", "torn", "broken", "error":
 		return fmt.Sprintf("config %s — control ledger unavailable", runHash)
 	}
 
-	var latest *control.DecodedEvent
-	nonApplyFlip := false
+	var install *control.DecodedEvent
+	later := false
 	for i := range events {
 		e := &events[i]
-		if e.ConfigHash != runHash {
+		if e.ConfigHash != runHash || !control.Installing(*e) {
 			continue
 		}
-		if e.Action == "apply" && e.Outcome == "success" && !e.Time.After(runStart) {
-			// events is in ledger seq order (monotonically increasing
-			// append time), so the last qualifying event in iteration
-			// order is the latest one — no need to compare Time here,
-			// which would add a clock dependency the chain itself
-			// doesn't have.
-			latest = e
+		if e.Time.After(runStart) {
+			later = true
 			continue
 		}
-		if e.Action != "apply" {
-			// A non-apply event (enable/disable, ...) with a matching
-			// hash: regardless of its own outcome/time, it earns the
-			// "matches a later enable/disable, not an apply" wording
-			// below. A later or failed *apply* with a matching hash is
-			// deliberately NOT routed here — spec §2's middle case is
-			// specifically the non-apply flip; a later/failed apply
-			// correctly falls through to the plain "no successful apply
-			// on record" branch instead (there genuinely is no
-			// successful apply on record at/before the run).
-			nonApplyFlip = true
-		}
+		install = e
 	}
 
-	if latest != nil {
+	switch {
+	case install == nil && later:
+		return fmt.Sprintf("config %s — no install on record at the run's start (matches a later apply or kill-switch flip)", runHash)
+	case install == nil:
+		return fmt.Sprintf("config %s — no install on record", runHash)
+	case install.Action == "apply":
 		return fmt.Sprintf("config %s — applied by %s (%s) at %s",
-			runHash, latest.Invoker.Subject, latest.Invoker.Method, latest.Time.Format(time.RFC3339))
+			runHash, install.Invoker.Subject, install.Invoker.Method, install.Time.Format(time.RFC3339))
 	}
-	if nonApplyFlip {
-		return fmt.Sprintf("config %s — no successful apply on record (matches a later enable/disable, not an apply)", runHash)
+	state := "disabled"
+	if install.Action == "enable" {
+		state = "enabled"
 	}
-	return fmt.Sprintf("config %s — no successful apply on record", runHash)
+	return fmt.Sprintf("config %s — installed by %s (%s) at %s (kill switch: %s agent %s)",
+		runHash, install.Invoker.Subject, install.Invoker.Method, install.Time.Format(time.RFC3339), state, install.Agent)
 }

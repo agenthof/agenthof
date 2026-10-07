@@ -160,3 +160,25 @@ func TestControlRenderBootstrapLabel(t *testing.T) {
 		t.Fatalf("ordinary apply label changed:\n%s", out)
 	}
 }
+
+// TestControlRenderBootstrapFlipLabel: a kill-switch flip that ran while
+// nothing was installed edited the configuration directory and installed
+// nothing; its label says so, and is NOT "(bootstrap)", which for an apply
+// means the opposite (it installed the first snapshot).
+func TestControlRenderBootstrapFlipLabel(t *testing.T) {
+	flip := ledger.Record{Raw: []byte(`{"v":"control/1","seq":1,"time":"2026-10-07T10:01:00Z",` +
+		`"action":"enable","agent":"coder","outcome":"success",` +
+		`"invoker":{"subject":"dana@example.com","issuer":"local","method":"asserted"},` +
+		`"witness":{"os_user":"dana","hostname":"host"},"config_hash":"sha256:abc","bootstrap":true,"prev":""}`)}
+	recs := []ledger.Record{flip, rec(2, "disable", "coder", "success", "dana@example.com", "asserted")}
+	out := control.Render(recs, ledger.Head{Hash: "deadbeef", Count: 2}, nil)
+	if !strings.Contains(out, "seq 1  2026-10-07 10:01:00  enabled agent coder (nothing installed; directory edited) — dana@example.com (asserted)") {
+		t.Fatalf("missing bootstrap-era flip label:\n%s", out)
+	}
+	if !strings.Contains(out, "seq 2  2026-09-21 10:02:00  disabled agent coder — dana@example.com (asserted)") {
+		t.Fatalf("ordinary flip label changed:\n%s", out)
+	}
+	if strings.Contains(out, "agent coder (bootstrap)") {
+		t.Fatalf("a flip must never render as (bootstrap):\n%s", out)
+	}
+}

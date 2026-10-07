@@ -19,7 +19,7 @@ Three commands write to the control plane:
 
 ```
 agenthof apply --config ./config --as dana@example.com --groups platform-eng                   # adopt a configuration
-agenthof registry disable coder --config ./config --as dana@example.com --groups platform-eng  # the kill switch
+agenthof registry disable coder --config ./config --as dana@example.com --groups platform-eng  # the kill switch: re-installs the configuration with coder disabled
 agenthof registry enable  coder --config ./config --as dana@example.com --groups platform-eng  # …and back on
 agenthof audit repair control --config ./config --as dana@example.com --groups platform-eng    # repair a torn ledger tail
 ```
@@ -110,14 +110,23 @@ the directory on disk — is what every later control action authorizes against:
   their own group `control: [apply]` in the very change they are applying,
   because the decision is made before the change is even read. Once the
   change passes and is installed, *its* roles govern the next apply.
-- **`registry enable|disable`** and **`audit repair control`** — the installed
-  roles as well. `--config` remains what the kill switch mutates and where the
-  agent is looked up; it is read for authorization only while nothing is
-  installed yet.
+- **`registry enable|disable`** — the installed roles as well. With something
+  installed the flip does not edit `--config`: it stages a copy of the
+  installed snapshot, flips the one bit on the copy, and installs the copy — a
+  new snapshot, a new `config_hash` on its record. `--config` is read only
+  while nothing is installed yet (the bootstrap-era fallback), where it is the
+  only configuration there is: the bit is flipped there, the record is marked
+  `bootstrap`, and the first `apply` installs the directory as flipped.
+  **`audit repair control`** — the installed roles; `--config` only while
+  nothing is installed.
 - **Bootstrap.** A fresh control root has nothing installed, so there is nothing
   to authorize against: the **first apply is permitted**, whoever asks, and is
   recorded with a `bootstrap` marker (`audit control` shows it as `config
-  applied (bootstrap)`). Until that first apply, the kill switch and repair fall
+  applied (bootstrap)`; a kill-switch flip run in this same pre-install window
+  shows instead as `enabled agent coder (nothing installed; directory edited)`
+  — it edited the configuration directory and installed nothing, so an apply
+  marked bootstrap installed the first snapshot but a flip so marked did not).
+  Until that first apply, the kill switch and repair fall
   back to the roles in `--config`, so a fresh system is never locked out. An
   existing control root that already has recorded applies but no installed
   snapshot — the first apply after this behavior arrives — is treated the same
@@ -128,8 +137,9 @@ the directory on disk — is what every later control action authorizes against:
 
 The authorizing roles are read from the snapshot without validation — roles
 only — so an installed configuration written under older rules still decides
-who may change it. Only the control plane reads the snapshot today: `run` still
-reads the configuration directory.
+who may change it. The control plane reads the snapshot's roles to authorize;
+`run` and `serve` read the whole snapshot to execute — the data plane now runs
+the installed configuration too, not the `--config` directory.
 
 A refused `apply`, `enable`, or `disable` is recorded like every other
 turned-away attempt — outcome `refused`, reason `not_authorized`, a fixed
@@ -144,9 +154,17 @@ can edit the configuration directory can edit `control:` too, so this gate is
 a *recorded default-deny decision* on the invoker's identity — meaningful
 under `--token`, where the groups are verified; self-asserted under `--as
 --groups` — not a wall against someone who already holds write access to the
-files. `apply` installs for *authorization*, not yet for `run`: `run` still reads the
-configuration directory, so a refused `apply` changes nothing *and* does not
-yet stop anyone from running against the un-applied directory. What the gate
+files. `run` executes the installed snapshot and stamps the pointer's hash
+**without re-hashing the bytes under it**: the snapshot is read unverified, so
+whoever can write `.agenthof/installed/` can edit a snapshot in place and make
+runs execute bytes whose recorded `config_hash` claims otherwise — the same
+writer can edit the ledger, so this adds no new trust boundary, but it is the
+sharpest limit here; verifying the snapshot on read is the named next step. The
+kill switch is a break-glass override of the **installed** configuration and is
+temporary by design (see below). A `run` executes a snapshot that either the
+old or the new install put in place, whole — the pointer is renamed atomically
+— so an `apply` racing a served run is safe; a flip racing an `apply` is two
+writers, last pointer wins, both recorded. What the gate
 buys now is that an unauthorized change attempt yields a `refused` row instead
 of a silent change — and that a change cannot smuggle in its own permission.
 The proposed configuration is read once: it is copied into the store first,
@@ -164,10 +182,8 @@ and the record shows it. The gate is per control root, not per store: the
 installed snapshot is found beside the `--control-log` in use, so pointing a
 command at a fresh `--control-log` reaches the bootstrap / `--config` fallback
 with no write to any store at all. That grants nothing an operator did not
-already have — `run` never reads the snapshot, so it does not change which
-configuration a run executes, and the kill switch still needs write access to
-the `--config` directory to flip an agent — but it is why the control root, not
-the store directory alone, is the boundary to reason about.
+already have, but it is why the control root, not the store directory alone, is
+the boundary to reason about.
 
 ## 3. Is the change valid?
 
@@ -179,7 +195,9 @@ What "valid" means depends on the action:
   hash of the config that was rejected, so you can see exactly *what* was turned
   away. It also checks that at least one role grants `apply` (`no-apply-floor`).
   A configuration that passes is installed — see §2.
-- **`registry enable|disable`** checks that the named agent exists; an unknown
+- **`registry enable|disable`** checks that the named agent exists — looked up
+  in the installed snapshot once something is installed, so an agent added to
+  the directory but not yet applied is `agent_not_found`; an unknown
   agent is recorded as `refused` (reason `agent_not_found`) — `rejected` means a
   change was evaluated and turned down, while `refused` means the actor or target
   wasn't admitted in the first place (the invoker was authorized first — see §2;
@@ -188,6 +206,36 @@ What "valid" means depends on the action:
 
 Either way the outcome is written down. A turned-away change is a governed event,
 not an error swallowed at the door.
+
+## The kill switch under an installed configuration
+
+> The kill switch is a break-glass override of the **installed** configuration.
+> It does not edit your configuration directory. The declared state — the
+> directory, usually under version control — is what `apply` installs; an
+> `apply` after a `disable` re-asserts the declared state, agent enabled, and
+> is recorded as the apply it is. To make a disable permanent, set `enabled:
+> false` in the agent's file and apply it; to see the override's history,
+> `audit control` shows the flip and the apply that superseded it, each
+> attributed.
+
+The sequence is short. A `disable coder` re-installs the configuration with
+`coder` disabled; a `run` of any workflow is then refused `configuration
+invalid: … workflow "fix-bug" depends on agent "coder", which is disabled in
+the registry`, recorded as a refused run; `audit control` shows who flipped it;
+and `apply` re-asserts the directory (or `enable` flips the bit back).
+
+The realistic hazard is not an operator who forgets but a **scheduled or
+pipeline `apply`** — a configuration directory under version control, applied
+by CI or a cron on every merge or tick — which reverts an emergency `disable`
+on its next run with nothing more than a `config applied` line in the control
+ledger, minutes after the responder flipped the switch. Two correct responses:
+make the disable declared (`enabled: false` committed and applied), or pause
+the pipeline.
+
+Disabling an agent takes every workflow that references it — and, today, every
+other workflow in the configuration — out of service until it is re-enabled or
+applied around: a kill switch that stops everything is fail-closed; the cost is
+availability, not containment.
 
 ## 4. Record it on the chain
 
@@ -217,9 +265,16 @@ event NOT recorded` — the one case where state changed with no event to show f
 it. An `apply` has the same shape: once its snapshot is installed and the
 pointer switched, a recording append that then fails prints `installed; event
 NOT recorded` and exits non-zero. `audit control` and `audit verify control`
-compare the installed pointer with the last recorded successful apply and say
-when the two disagree (`verify control` exits 5), so an unrecorded install is
+compare the installed pointer with the last recorded **install** — the last
+successful `apply` or kill-switch flip on record — and say when the two
+disagree (`verify control` exits 5), so an unrecorded install is
 visible rather than silent. Both are surfaced loudly; neither is glossed over.
+
+**Upgrading.** A control root written before this behavior whose last successful
+control event is a kill-switch flip reports `audit verify control` exit 5 until
+the next `apply` (the flip recorded a directory hash that was never installed),
+and its earlier bootstrap-era flips carry no marker; run `apply` once after
+upgrading.
 
 ## 5. Return the head
 
@@ -257,12 +312,13 @@ are the point, and they are documented rather than glossed over (Article I/III).
 ## The config_hash bridge to runs
 
 The `config_hash` on an `apply` record is the seam that ties the control plane
-back to the data plane. A run stamps the hash of the configuration it executed
-under; a control `apply` stamps the hash of the configuration it adopted. Because
-both carry the same key:
+back to the data plane. A run stamps the installed snapshot's hash, as the
+installer recorded it; a control `apply` stamps the hash of the configuration it
+adopted. Because both carry the same key:
 
-- `agenthof audit <run-id>` prints a **config-join** line naming the `apply` that
-  put the config a given run ran under — who applied it, how, and when.
+- `agenthof audit <run-id>` prints a **config-join** line naming the install —
+  the `apply`, or the kill-switch flip — that put the config a given run ran
+  under — who applied it, how, and when.
 - `agenthof investigate` merges control actions and runs into one time-ordered
   timeline, so "someone disabled `coder`, then this run refused" reads as a
   single story. See [`reference/config.md`](reference/config.md) for the flags,
@@ -273,7 +329,8 @@ both carry the same key:
 | Shipped today | Reserved for later |
 |---|---|
 | `apply`, `registry enable/disable`, `audit repair control` | policy-as-config approval workflows |
-| default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; `run` executing the installed configuration; pruning and tamper-evidence of the snapshot store |
+| default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; pruning and tamper-evidence of the snapshot store |
+| `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs | verify-on-read of the installed snapshot; a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
 | hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts | external anchoring / write-once sink for the ledger |
 | three identities per action (invoker / asserted_as / witness) | agent-to-IdP federation for the invoker's authority |
 | `--expect-head` off-machine head check | continuous/remote attestation of the head |

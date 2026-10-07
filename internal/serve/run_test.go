@@ -133,6 +133,22 @@ func TestStartRunConfigInvalidIs422WithFixedBodyAndFullLedgerReason(t *testing.T
 	}
 }
 
+// TestStartRunNoConfigInstalledIs422WithFixedReason: a Prepare that finds
+// nothing installed is a recorded refusal with the same fixed reason the
+// CLI ledgers, so a served refusal and a CLI refusal differ only by origin.
+func TestStartRunNoConfigInstalledIs422WithFixedReason(t *testing.T) {
+	ts := newTestServer(t, &fakeHost{prepErr: ErrNoConfigInstalled}, fakeAuth{}, 1)
+	resp, body := ts.do(t, http.MethodPost, "/v1/runs", goodToken, runReq)
+	acc := decode[apiclient.RunAccepted](t, body)
+	if resp.StatusCode != http.StatusUnprocessableEntity || acc.Status != apiclient.StatusRefused || acc.Reason != "no configuration installed" {
+		t.Fatalf("%d %+v", resp.StatusCode, acc)
+	}
+	events, _, _ := engine.ReadLog(ts.logDir, acc.RunID)
+	if len(events) != 1 || events[0].Type != "run_refused" || events[0].Reason != "no configuration installed" {
+		t.Fatalf("ledger = %+v", events)
+	}
+}
+
 func TestStartRunBadBodies(t *testing.T) {
 	host := &fakeHost{}
 	ts := newTestServer(t, host, fakeAuth{}, 1)

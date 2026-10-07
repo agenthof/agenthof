@@ -21,11 +21,15 @@ stdout 'not authorized'
 ! stdout 'not found'
 ! grep 'agent_not_found' control.jsonl
 
-# authorized disable; apply now rejects the config; authorized enable still works
+# authorized disable re-snapshots the installed configuration; a run is now
+# refused; apply from the directory re-asserts it (agent enabled); enable works
 exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
 stdout 'agent coder disabled'
-! exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
 stdout 'depends on agent "coder", which is disabled'
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
+
 exec agenthof registry enable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
 stdout 'agent coder enabled'
 
@@ -37,8 +41,8 @@ stdout 'enabled agent coder — dana@example.com \(asserted\)'
 
 # the installed roles decide, not the directory: granting finance control in
 # the directory WITHOUT applying it changes nothing for the kill switch
-# (coder.yaml was rewritten by the successful flips above, so compare against
-# a fresh copy, not coder.before.yaml)
+# (the directory is untouched by the installed-path flips above; the copy
+# taken here is what the refused flip must leave unchanged)
 cp examples/config/agents/coder.yaml coder.enabled.yaml
 cp finance-admin.yaml examples/config/roles/finance-admin.yaml
 ! exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as mallory@example.com --groups finance

@@ -25,7 +25,7 @@ func TestAuditRunConfigJoinShowsApply(t *testing.T) {
 	}
 	out.Reset()
 
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--control-log", controlLog, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
 	m := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())
@@ -62,7 +62,7 @@ func TestAuditRunConfigJoinNoRegressionWhenControlMissing(t *testing.T) {
 	}
 	out.Reset()
 
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--control-log", controlLog, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
 	m := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())
