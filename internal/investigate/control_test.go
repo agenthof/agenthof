@@ -39,86 +39,107 @@ func TestConfigJoinMissingLog(t *testing.T) {
 	}
 }
 
-func TestConfigJoinNoApplyOnRecord(t *testing.T) {
+// joinFixture appends events to a fresh control ledger and loads it.
+func joinFixture(t *testing.T, events ...control.Event) []control.DecodedEvent {
+	t.Helper()
 	p := filepath.Join(t.TempDir(), "c.jsonl")
 	inv := identity.Static("dana@example.com")
-	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success", Invoker: inv,
-		Witness: control.CaptureWitness(), ConfigHash: "sha256:other"}); err != nil {
-		t.Fatalf("append: %v", err)
+	for _, e := range events {
+		e.Invoker = inv
+		e.Witness = control.CaptureWitness()
+		if _, err := control.Append(p, e); err != nil {
+			t.Fatalf("append: %v", err)
+		}
 	}
 	ev, verdict, ok := LoadControl(p)
 	if !ok || verdict != "verified" {
 		t.Fatalf("verdict=%q ok=%v", verdict, ok)
 	}
-	line := ConfigJoin(ev, verdict, "sha256:aaa", time.Now())
-	if !strings.Contains(line, "no successful apply on record") || strings.Contains(line, "matches a later") {
+	return ev
+}
+
+func TestConfigJoinNoInstallOnRecord(t *testing.T) {
+	ev := joinFixture(t, control.Event{Action: "apply", Outcome: "success", ConfigHash: "sha256:other"})
+	if line := ConfigJoin(ev, "verified", "sha256:aaa", time.Now()); line != "config sha256:aaa — no install on record" {
 		t.Fatalf("line=%q", line)
 	}
 }
 
-func TestConfigJoinFlipOnly(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "c.jsonl")
-	inv := identity.Static("dana@example.com")
-	if _, err := control.Append(p, control.Event{Action: "disable", Outcome: "success", Invoker: inv,
-		Witness: control.CaptureWitness(), ConfigHash: "sha256:aaa"}); err != nil {
-		t.Fatalf("append: %v", err)
+// TestConfigJoinFlipInstall: a run after a disable executes the flip's
+// snapshot; the join names the flip as the install (form 2), with no apply
+// row for that hash at all.
+func TestConfigJoinFlipInstall(t *testing.T) {
+	ev := joinFixture(t,
+		control.Event{Action: "apply", Outcome: "success", ConfigHash: "sha256:aaa"},
+		control.Event{Action: "disable", Agent: "coder", Outcome: "success", ConfigHash: "sha256:ddd"})
+	line := ConfigJoin(ev, "verified", "sha256:ddd", time.Now())
+	want := "config sha256:ddd — installed by dana@example.com (asserted) at " + ev[1].Time.Format(time.RFC3339) + " (kill switch: disabled agent coder)"
+	if line != want {
+		t.Fatalf("line=%q\nwant=%q", line, want)
 	}
-	ev, verdict, ok := LoadControl(p)
-	if !ok || verdict != "verified" {
-		t.Fatalf("verdict=%q ok=%v", verdict, ok)
-	}
-	line := ConfigJoin(ev, verdict, "sha256:aaa", time.Now())
-	if !strings.Contains(line, "no successful apply on record (matches a later enable/disable, not an apply)") {
+	ev = joinFixture(t,
+		control.Event{Action: "apply", Outcome: "success", ConfigHash: "sha256:aaa"},
+		control.Event{Action: "disable", Agent: "coder", Outcome: "success", ConfigHash: "sha256:ddd"},
+		control.Event{Action: "enable", Agent: "coder", Outcome: "success", ConfigHash: "sha256:eee"})
+	if line := ConfigJoin(ev, "verified", "sha256:eee", time.Now()); !strings.HasSuffix(line, "(kill switch: enabled agent coder)") || !strings.Contains(line, "installed by dana@example.com (asserted)") {
 		t.Fatalf("line=%q", line)
 	}
 }
 
-func TestConfigJoinApplyAfterRunStartExcluded(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "c.jsonl")
-	inv := identity.Static("dana@example.com")
+// TestConfigJoinLastInstallWins: two applies of the same bytes — the later
+// one is named (ledger order, no clock comparison).
+func TestConfigJoinLastInstallWins(t *testing.T) {
+	ev := joinFixture(t,
+		control.Event{Action: "apply", Outcome: "success", ConfigHash: "sha256:aaa"},
+		control.Event{Action: "apply", Outcome: "success", ConfigHash: "sha256:aaa"})
+	line := ConfigJoin(ev, "verified", "sha256:aaa", time.Now())
+	if !strings.Contains(line, "applied by dana@example.com (asserted) at "+ev[1].Time.Format(time.RFC3339)) {
+		t.Fatalf("line=%q", line)
+	}
+}
+
+// TestConfigJoinBootstrapFlipIsNotAnInstall: a bootstrap-era flip X then a
+// clean apply of the unchanged directory (hash X): the join names the apply
+// (form 1), never the flip.
+func TestConfigJoinBootstrapFlipIsNotAnInstall(t *testing.T) {
+	ev := joinFixture(t,
+		control.Event{Action: "enable", Agent: "coder", Outcome: "success", ConfigHash: "sha256:xxx", Bootstrap: true},
+		control.Event{Action: "apply", Outcome: "success", ConfigHash: "sha256:xxx", Bootstrap: true})
+	line := ConfigJoin(ev, "verified", "sha256:xxx", time.Now())
+	if !strings.HasPrefix(line, "config sha256:xxx — applied by") || strings.Contains(line, "kill switch") {
+		t.Fatalf("line=%q", line)
+	}
+	// The flip alone vouches for nothing.
+	ev = joinFixture(t, control.Event{Action: "enable", Agent: "coder", Outcome: "success", ConfigHash: "sha256:xxx", Bootstrap: true})
+	if line := ConfigJoin(ev, "verified", "sha256:xxx", time.Now()); line != "config sha256:xxx — no install on record" {
+		t.Fatalf("line=%q", line)
+	}
+}
+
+// TestConfigJoinLaterOnlyIsForm3: the hash matches only installing events
+// AFTER the run started — a later apply, or a later flip — and the reader
+// is told the hash is known but not vouched for at run time.
+func TestConfigJoinLaterOnlyIsForm3(t *testing.T) {
 	runStart := time.Now()
-	// Apply happens strictly after runStart: must not count as the join.
 	time.Sleep(2 * time.Millisecond)
-	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success", Invoker: inv,
-		Witness: control.CaptureWitness(), ConfigHash: "sha256:aaa"}); err != nil {
-		t.Fatalf("append: %v", err)
+	const want = "config sha256:aaa — no install on record at the run's start (matches a later apply or kill-switch flip)"
+	ev := joinFixture(t, control.Event{Action: "apply", Outcome: "success", ConfigHash: "sha256:aaa"})
+	if line := ConfigJoin(ev, "verified", "sha256:aaa", runStart); line != want {
+		t.Fatalf("later apply: line=%q", line)
 	}
-	ev, verdict, ok := LoadControl(p)
-	if !ok || verdict != "verified" {
-		t.Fatalf("verdict=%q ok=%v", verdict, ok)
-	}
-	line := ConfigJoin(ev, verdict, "sha256:aaa", runStart)
-	// A later-successful apply is still an apply, not an enable/disable
-	// flip: it must fall through to the plain branch-3 wording, not the
-	// "matches a later enable/disable, not an apply" branch-2 wording.
-	want := "config sha256:aaa — no successful apply on record"
-	if line != want {
-		t.Fatalf("line=%q want=%q", line, want)
-	}
-	if strings.Contains(line, "enable/disable") {
-		t.Fatalf("line=%q must not mention enable/disable for a later apply", line)
+	ev = joinFixture(t, control.Event{Action: "disable", Agent: "coder", Outcome: "success", ConfigHash: "sha256:aaa"})
+	if line := ConfigJoin(ev, "verified", "sha256:aaa", runStart); line != want {
+		t.Fatalf("later flip: line=%q", line)
 	}
 }
 
-func TestConfigJoinFailedApply(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "c.jsonl")
-	inv := identity.Static("dana@example.com")
-	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "failed",
-		Reason:  &control.Reason{Code: control.CodeValidationFailed, Message: "bad config"},
-		Invoker: inv, Witness: control.CaptureWitness(), ConfigHash: "sha256:aaa"}); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	ev, verdict, ok := LoadControl(p)
-	if !ok || verdict != "verified" {
-		t.Fatalf("verdict=%q ok=%v", verdict, ok)
-	}
-	line := ConfigJoin(ev, verdict, "sha256:aaa", time.Now())
-	want := "config sha256:aaa — no successful apply on record"
-	if line != want {
-		t.Fatalf("line=%q want=%q", line, want)
-	}
-	if strings.Contains(line, "enable/disable") {
-		t.Fatalf("line=%q must not mention enable/disable for a failed apply", line)
+// TestConfigJoinFailedApplyIsNotAnInstall: a non-success apply with the
+// run's hash installs nothing — form 4.
+func TestConfigJoinFailedApplyIsNotAnInstall(t *testing.T) {
+	ev := joinFixture(t, control.Event{Action: "apply", Outcome: "rejected",
+		Reason: &control.Reason{Code: control.CodeValidationFailed, Message: "bad config"}, ConfigHash: "sha256:aaa"})
+	if line := ConfigJoin(ev, "verified", "sha256:aaa", time.Now()); line != "config sha256:aaa — no install on record" {
+		t.Fatalf("line=%q", line)
 	}
 }
 

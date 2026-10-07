@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -944,5 +945,25 @@ func TestAuditVerifyControlBootstrapFlipDoesNotVouchForUnrecordedApply(t *testin
 	out.Reset()
 	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "matches the last recorded install (apply)") {
 		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+
+	// A run under X joins to the apply (form 1), never to the flip.
+	logs := t.TempDir()
+	out.Reset()
+	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
+		"--config", root, "--control-log", ctl, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("out: %s", out.String())
+	}
+	out.Reset()
+	if code := cmdAudit([]string{m[1], "--log-dir", logs, "--control-log", ctl}, &out); code != 0 {
+		t.Fatalf("audit: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "config "+flipHash+" — applied by dana@example.com (asserted)") || strings.Contains(out.String(), "kill switch") {
+		t.Fatalf("the join must name the apply, never the bootstrap-era flip:\n%s", out.String())
 	}
 }
