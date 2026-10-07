@@ -81,7 +81,7 @@ func (s *Server) listRuns(w http.ResponseWriter, _ *http.Request, _ identity.Inv
 // cancelRun cancels a hosted, running run's context; the engine records
 // cancelled at or after the current step. 404 for a run not hosted here
 // (an on-disk run has nothing to cancel), 409 for one already over.
-func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, _ identity.Invoker, _ string) {
+func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, inv identity.Invoker, _ string) {
 	id, ok := runID(w, r)
 	if !ok {
 		return
@@ -93,7 +93,7 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, _ identity.In
 	case !running:
 		http.Error(w, "run is not running", http.StatusConflict)
 	default:
-		s.logger.Info("run cancel requested", "run", id)
+		s.logger.Info("run cancel requested", "run", id, "invoker", inv.Subject)
 		writeJSON(w, http.StatusAccepted, st.wire())
 	}
 }

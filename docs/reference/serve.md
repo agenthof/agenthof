@@ -47,7 +47,7 @@ All bodies are JSON except `/audit`, which is plain text.
 | `GET /v1/runs/{id}/audit` | Exactly what `agenthof audit <id>` prints, rendered by the server — including the line that names the `apply` that put the run's config in place, which needs the control ledger the server has. The verdict also travels in the `Agenthof-Integrity` header so `audit --server` can exit as the local command does. |
 | `GET /v1/runs` | `{runs: [{run_id, status}]}` — hosted runs and every run log on disk. |
 | `GET /v1/investigate?since&until&invoker&agent&outcome&run&config_hash` | The `investigate/1` document over both ledgers; `since`/`until` are RFC3339. |
-| `POST /v1/runs/{id}/cancel` | Cancels a run this process is hosting; `202`. The engine records `cancelled` at or after the current step. A run this process does not host is `404` (there is nothing to cancel), one that is already over is `409`. |
+| `POST /v1/runs/{id}/cancel` | Cancels a run this process is hosting; `202`. **Any** authenticated invoker may cancel a run this process is hosting, not only the one who started it. The engine records `cancelled` at or after the current step. A run this process does not host is `404` (there is nothing to cancel), one that is already over is `409`. |
 | `GET /healthz` | Liveness, unauthenticated, `ok`. Nothing else. |
 
 Run ids are validated before anything touches the filesystem.

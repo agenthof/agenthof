@@ -227,7 +227,10 @@ func (d *runDeps) Spawn(ctx context.Context, childRole, childWorkflow, input str
 func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input string, parent engine.Binding, mountedDir string) (rungateway.SpawnResult, error) {
 	logger := d.logger.With("parent_run", parent.RunID, "child_role", childRole, "child_workflow", childWorkflow)
 	if reason, refused := preRunRefusal(d.cfg, d.reg, childWorkflow, parent.Invoker); refused {
-		id, err := engine.Refuse(d.logDir, childRole, childWorkflow, parent.Invoker, reason, &parent)
+		// Through options, not Refuse: a child refused here is still a run
+		// of this tree, so its refusal carries the root's origin like every
+		// other run under it.
+		id, err := engine.RecordRefused(d.options(&parent), parent.Invoker, childRole, childWorkflow, reason)
 		return rungateway.SpawnResult{ChildRunID: id, Status: "refused", Reason: reason}, err
 	}
 	wf, ok := d.reg.Workflow(childWorkflow)

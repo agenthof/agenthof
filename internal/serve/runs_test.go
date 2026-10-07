@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,6 +139,15 @@ func TestCancelAHostedRunReadsItsTerminalReasonBack(t *testing.T) {
 	}
 	if st := decode[apiclient.RunStatus](t, body); st.Status != apiclient.StatusRunning {
 		t.Fatalf("the accepted body reports the run as it still is: %+v", st)
+	}
+	// Who cancelled is operator-visible: the accepted cancel names the
+	// verified subject, and never the bearer it arrived with.
+	logs := ts.logs.String()
+	if !strings.Contains(logs, "run cancel requested") || !strings.Contains(logs, "invoker="+testInvoker.Subject) {
+		t.Fatalf("the cancel log must name the invoker, got:\n%s", logs)
+	}
+	if strings.Contains(logs, goodToken) {
+		t.Fatal("no log line may carry the bearer token")
 	}
 	// The run's context is already over, so the held step returns at once
 	// and the engine writes a cancelled workflow_finished.

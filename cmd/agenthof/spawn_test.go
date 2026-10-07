@@ -424,6 +424,32 @@ func TestSpawnPreRunRefusalProvisionsNothing(t *testing.T) {
 	}
 }
 
+// A child refused at the pre-run gate never reaches the engine, so its
+// refusal is recorded by the spawner — and it must still carry the root
+// request's origin, which is what every other run in a served tree does.
+func TestSpawnPreRunRefusalRecordsTheRootsOrigin(t *testing.T) {
+	cfg := oboTestConfig("obo")
+	cfg.Agents[0].MaySpawn = []config.SpawnTarget{{Role: "se", Workflow: "with-planner"}}
+	cfg.Gateway.Spawn = config.SpawnPolicy{MaxDepth: 2, MaxParallel: 2, MaxTotalSpawns: 4}
+	cfg.Gateway.SpawnSupervisor = "unix:///run/agenthof-spawn/refspawn.sock"
+	dir := t.TempDir()
+	deps := buildDeps(t, cfg, dir, nil) // the gate returns before the supervisor is ever consulted
+	deps.origin = &engine.Origin{Via: "api", RemoteAddr: "10.0.0.7:4321", UserAgent: "agenthof-cli/test", ServerHost: "127.0.0.1:8080"}
+	parent := engine.Binding{Invoker: identity.Static("dev@x"), Role: "se", Workflow: "coder-only", RunID: "r-parent"}
+	res, err := deps.Spawn(context.Background(), "se", "with-planner", "x", parent)
+	if err != nil || res.Status != "refused" || res.Reason != oboRefusalReason || res.ChildRunID == "" {
+		t.Fatalf("res=%+v err=%v, want the fixed OBO refusal with a child run id", res, err)
+	}
+	events, _, err := engine.ReadLog(dir+"/runs", res.ChildRunID)
+	if err != nil || len(events) != 1 || events[0].Type != "run_refused" {
+		t.Fatalf("child events = %+v (%v)", events, err)
+	}
+	got := events[0].Origin
+	if got == nil || *got != *deps.origin {
+		t.Fatalf("run_refused origin = %+v, want the root request's origin %+v", got, deps.origin)
+	}
+}
+
 func TestSpawnPlacementViolationIsRefused(t *testing.T) {
 	dir := shortDir(t)
 	childDir := filepath.Join(dir, "r-x")
