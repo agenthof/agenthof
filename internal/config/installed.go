@@ -64,3 +64,92 @@ func InstalledRoles(store string) (roles []RoleDef, hash string, installed bool,
 	}
 	return cfg.Roles, hash, true, nil
 }
+
+// StageSnapshot copies the configuration at src into a fresh temporary
+// directory under store and returns that directory. The copy is by the
+// configFiles enumeration — exactly the files LoadDir reads and HashDir
+// hashes, at the same relative paths — so HashDir(copy) == HashDir(src) by
+// construction, and a nested store, a README, or a yaml in an unknown
+// subdirectory is never snapshotted. It is one read of the bytes: the caller
+// validates, hashes, and installs the copy, never the live directory, so what
+// is recorded is what was checked. On any failure the temp is removed and
+// nothing under store changes; an unreadable source file errors as
+// "<rel>: <cause>", the same shape LoadDir reports.
+func StageSnapshot(store, src string) (temp string, err error) {
+	files, err := configFiles(src)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		return "", fmt.Errorf("installed config: %w", err)
+	}
+	temp, err = os.MkdirTemp(store, ".staging-*")
+	if err != nil {
+		return "", fmt.Errorf("installed config: %w", err)
+	}
+	for _, rel := range files {
+		data, err := os.ReadFile(filepath.Join(src, filepath.FromSlash(rel)))
+		if err != nil {
+			_ = os.RemoveAll(temp)
+			return "", fmt.Errorf("%s: %w", rel, err)
+		}
+		dst := filepath.Join(temp, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			_ = os.RemoveAll(temp)
+			return "", fmt.Errorf("installed config: %w", err)
+		}
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			_ = os.RemoveAll(temp)
+			return "", fmt.Errorf("installed config: %w", err)
+		}
+	}
+	return temp, nil
+}
+
+// CommitSnapshot installs the staged copy at temp as the snapshot named by
+// hash (which the caller computed over temp) and flips the pointer to it.
+// The snapshot directory is content-addressed, so a rename that finds it
+// already present (EEXIST or ENOTEMPTY — both satisfy errors.Is(err,
+// fs.ErrExist)) means identical bytes are installed already; the temp is
+// then simply discarded. The pointer is written to a sibling temp file,
+// fsync'd, renamed over InstalledPointer, and the store directory is fsync'd
+// — the same durability order the ledger uses. Invariant: an error return
+// leaves the pointer exactly as it was; a snapshot directory left behind by
+// a failure after the rename is inert (a prune is reserved).
+func CommitSnapshot(store, temp, hash string) error {
+	if !installedHashRE.MatchString(hash) {
+		return fmt.Errorf("installed config: refusing to install under malformed hash %q", hash)
+	}
+	if err := os.Rename(temp, snapshotDir(store, hash)); err != nil {
+		if !errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("installed config: %w", err)
+		}
+		if err := os.RemoveAll(temp); err != nil {
+			return fmt.Errorf("installed config: %w", err)
+		}
+	}
+	f, err := os.CreateTemp(store, ".current-*")
+	if err != nil {
+		return fmt.Errorf("installed config: %w", err)
+	}
+	tmpPath := f.Name()
+	_, werr := f.WriteString(hash + "\n")
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(tmpPath, filepath.Join(store, InstalledPointer))
+	}
+	if werr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("installed config: %w", werr)
+	}
+	if d, derr := os.Open(store); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}

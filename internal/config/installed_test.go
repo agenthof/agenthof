@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,4 +150,157 @@ func TestInstalledRolesFailsClosedWhenSnapshotMissing(t *testing.T) {
 	if err == nil || !installed {
 		t.Fatalf("a pointer naming a missing snapshot must fail closed: installed=%v err=%v", installed, err)
 	}
+}
+
+// stageAndCommit is the real install, as cmdApply performs it: stage src
+// into store, hash the staged copy, commit. It returns the hash.
+func stageAndCommit(t *testing.T, store, src string) string {
+	t.Helper()
+	temp, err := StageSnapshot(store, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := HashDir(temp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CommitSnapshot(store, temp, h); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// storeEntries lists the store's top-level names (snapshot dirs, the pointer,
+// and any leftover temp files a bug would leave behind).
+func storeEntries(t *testing.T, store string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// TestStageSnapshotCopiesOnlyEnumeratedFiles: the copy is by configFiles
+// enumeration, so HashDir(copy) == HashDir(src) by construction, and stray
+// files — a README, a nested installed/ store, a yaml in an unknown subdir —
+// are neither copied nor hashed.
+func TestStageSnapshotCopiesOnlyEnumeratedFiles(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := sampleConfig(t)
+	writeCfg(t, src, "README.md", "not config\n")
+	writeCfg(t, src, "installed/current", "sha256:0000000000000000000000000000000000000000000000000000000000000000\n")
+	writeCfg(t, src, "agents/nested/deep.yaml", "name: deep\n")
+	writeCfg(t, src, "extras/x.yaml", "name: x\n")
+	temp, err := StageSnapshot(store, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(filepath.Base(temp), ".staging-") || filepath.Dir(temp) != store {
+		t.Fatalf("temp must be a .staging-* dir directly under the store: %s", temp)
+	}
+	want, _ := HashDir(src)
+	got, err := HashDir(temp)
+	if err != nil || got != want {
+		t.Fatalf("HashDir(copy)=%q err=%v, want %q", got, err, want)
+	}
+	for _, stray := range []string{"README.md", "installed", "agents/nested", "extras"} {
+		if _, err := os.Stat(filepath.Join(temp, stray)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("%s must not be snapshotted (err=%v)", stray, err)
+		}
+	}
+	for _, rel := range []string{"agents/planner.yaml", "workflows/plan-only.yaml", "roles/ops.yaml", "roles/se.yaml", "gateway.yaml"} {
+		if _, err := os.Stat(filepath.Join(temp, rel)); err != nil {
+			t.Fatalf("%s missing from the copy: %v", rel, err)
+		}
+	}
+}
+
+func TestStageSnapshotUnreadableSourceLeavesNoTemp(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	if _, err := StageSnapshot(store, filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Fatal("a missing source dir must fail")
+	}
+	if ents, _ := os.ReadDir(store); len(ents) != 0 {
+		t.Fatalf("no temp may remain after a failed stage: %v", ents)
+	}
+}
+
+// TestStageThenAbandonNeverBecomesCurrent: a staged copy that is never
+// committed (validation failed, or the process died) is inert — the pointer
+// is untouched and nothing is installed.
+func TestStageThenAbandonNeverBecomesCurrent(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	if _, err := StageSnapshot(store, sampleConfig(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, installed, err := InstalledHash(store); installed || err != nil {
+		t.Fatalf("installed=%v err=%v; want nothing installed", installed, err)
+	}
+}
+
+func TestCommitSnapshotFlipsPointerAndKeepsOldSnapshot(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := sampleConfig(t)
+	a := stageAndCommit(t, store, src)
+	raw, err := os.ReadFile(filepath.Join(store, InstalledPointer))
+	if err != nil || string(raw) != a+"\n" {
+		t.Fatalf("pointer=%q err=%v, want %q", raw, err, a+"\n")
+	}
+	writeCfg(t, src, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	b := stageAndCommit(t, store, src)
+	if a == b {
+		t.Fatal("fixture: the edit must change the hash")
+	}
+	hash, installed, err := InstalledHash(store)
+	if err != nil || !installed || hash != b {
+		t.Fatalf("after the second commit: hash=%q installed=%v err=%v, want %q", hash, installed, err, b)
+	}
+	for _, h := range []string{a, b} {
+		if _, err := os.Stat(filepath.Join(snapshotDir(store, h), "roles", "ops.yaml")); err != nil {
+			t.Fatalf("snapshot %s must be kept intact: %v", h, err)
+		}
+	}
+}
+
+// TestCommitSnapshotIsIdempotent: content-addressed, so re-installing the
+// same bytes is a no-op — one snapshot dir, the same pointer, and no
+// .staging-* or .current-* leftovers.
+func TestCommitSnapshotIsIdempotent(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := sampleConfig(t)
+	a := stageAndCommit(t, store, src)
+	if again := stageAndCommit(t, store, src); again != a {
+		t.Fatalf("hash drifted: %q vs %q", again, a)
+	}
+	names := storeEntries(t, store)
+	if len(names) != 2 {
+		t.Fatalf("want exactly the snapshot dir and the pointer, got %v", names)
+	}
+	for _, n := range names {
+		if n != InstalledPointer && n != strings.TrimPrefix(a, "sha256:") {
+			t.Fatalf("unexpected store entry %q in %v", n, names)
+		}
+	}
+}
+
+func TestCommitSnapshotRefusesMalformedHashLeavingPointerUnchanged(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := sampleConfig(t)
+	a := stageAndCommit(t, store, src)
+	temp, err := StageSnapshot(store, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CommitSnapshot(store, temp, "not-a-hash"); err == nil {
+		t.Fatal("a malformed hash must be refused")
+	}
+	if hash, _, _ := InstalledHash(store); hash != a {
+		t.Fatalf("pointer changed on a refused commit: %q", hash)
+	}
+	_ = os.RemoveAll(temp)
 }
