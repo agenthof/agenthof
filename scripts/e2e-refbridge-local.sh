@@ -253,7 +253,7 @@ grep -q 'tool resource "stdio-tool-rot": token_endpoint must be set and https (o
 # 1. Static credential, env-at-spawn: echo, the credential fingerprint, and a
 #    clean environment (allowlist + DEMO_TOKEN; LEAKED_SECRET absent).
 OUT="$("$WORK/agenthof" run bridge-operator bridge-demo --input "call echo hello-$NONCE; call credential; call environment" \
-	--as ci --groups bridge-users --config "$WORK/config" \
+	--as ci --groups bridge-users --config "$WORK/config" --control-log "$WORK/control.jsonl" \
 	--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts")"
 echo "$OUT"
 echo "$OUT" | grep -q "finished: succeeded" || fail "bridge-demo did not succeed"
@@ -282,7 +282,7 @@ echo "static: fingerprint, clean environment, three tool_call lines — ok"
 # 2. Rotating credential, respawn-on-rotation, inside ONE step: the second
 #    call, after the broker re-minted, reaches a child holding the NEW token.
 OUT2="$("$WORK/agenthof" run bridge-operator bridge-rotation --input "call credential; sleep 10; call credential" \
-	--as ci --groups bridge-users --config "$WORK/config" \
+	--as ci --groups bridge-users --config "$WORK/config" --control-log "$WORK/control.jsonl" \
 	--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts")"
 echo "$OUT2"
 echo "$OUT2" | grep -q "finished: succeeded" || fail "bridge-rotation did not succeed"

@@ -231,7 +231,7 @@ exec:
 
 run() { # $1 = workflow, $2 = input; sets OUT, RUNID, AUDIT
 	OUT="$("$WORK/agenthof" run exec-operator "$1" --input "$2" \
-		--as ci --groups exec-users --config "$WORK/config" \
+		--as ci --groups exec-users --config "$WORK/config" --control-log "$WORK/control.jsonl" \
 		--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" || true)"
 	OUTS+=("$OUT")
 	echo "$OUT"

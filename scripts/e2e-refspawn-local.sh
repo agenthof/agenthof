@@ -445,8 +445,13 @@ echo "apply: cycle rejected, acyclic accepted, missing caps and missing supervis
 
 OUTS=()
 run() { # $1 = config dir, $2 = role, $3 = workflow, $4 = input; sets OUT, RUNID, AUDIT
+	# A run executes the INSTALLED configuration, so install $1 first: the
+	# harness runs five config dirs on one control root. A re-apply of the
+	# same bytes is idempotent (same hash, re-pointed, one more success row).
+	"$WORK/agenthof" apply --config "$1" --control-log "$WORK/control.jsonl" --as ci --groups devs >/dev/null \
+		|| fail "apply of $1 failed before the run"
 	OUT="$("$WORK/agenthof" run "$2" "$3" --input "$4" --as dana@example.com --groups devs \
-		--config "$1" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" \
+		--config "$1" --control-log "$WORK/control.jsonl" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" \
 		--log-level debug 2>>"$WORK/agenthof.err" || true)"
 	OUTS+=("$OUT")
 	echo "$OUT"

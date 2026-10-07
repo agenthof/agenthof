@@ -365,7 +365,7 @@ echo "apply: the combined config is valid — ok"
 # --as is refused before the engine, and the children inherit the token's invoker.
 start_run() {
 	AGENTHOF_GATEWAY_KEY="$GATEWAY_KEY" "$WORK/agenthof" run acceptance-operator "$1" --input "drive-$NONCE" --token "$TOKEN" \
-		--config "$WORK/config" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" \
+		--config "$WORK/config" --control-log "$WORK/control.jsonl" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" \
 		--log-level debug >"$WORK/$1.out" 2>>"$WORK/agenthof.err" &
 	RUN_PID=$!
 }
