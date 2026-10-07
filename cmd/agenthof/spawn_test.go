@@ -849,3 +849,14 @@ func TestRunSpawnWithDeadSupervisorIsRefusedAndNotCounted(t *testing.T) {
 func agentrtExecutor(timeout time.Duration) agentrt.AdapterExecutor {
 	return agentrt.AdapterExecutor{Timeout: timeout}
 }
+
+func TestRunDepsOptionsCarryOriginToChildren(t *testing.T) {
+	o := &engine.Origin{Via: "api"}
+	d := &runDeps{origin: o}
+	if got := d.options(&engine.Binding{RunID: "r-parent"}).Origin; got != o {
+		t.Fatalf("a child's options must carry the root's origin, got %+v", got)
+	}
+	if got := (&runDeps{}).options(nil).Origin; got != nil {
+		t.Fatalf("a CLI run has no origin, got %+v", got)
+	}
+}

@@ -93,8 +93,12 @@ type Event struct {
 	RuntimeAttestation *RuntimeAttestation `json:"runtime_attestation,omitempty"`
 	Actor              string              `json:"actor,omitempty"`     // reserved: delegation — the acting agent
 	Principal          string              `json:"principal,omitempty"` // reserved: delegation — the initiating human/system
-	Binding            Binding             `json:"binding"`
-	Prev               string              `json:"prev"`
+	// Origin is set by workflow_started and run_refused when the run arrived
+	// over the API: the request channel's provenance (never a witness;
+	// forwarded_for is unverified). Absent on every CLI run.
+	Origin  *Origin `json:"origin,omitempty"`
+	Binding Binding `json:"binding"`
+	Prev    string  `json:"prev"`
 }
 
 func NewRunID() string {

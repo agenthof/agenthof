@@ -61,6 +61,12 @@ type Options struct {
 	// — a Spawner provisioning a child's compartments — mints it with
 	// NewRunID and passes it here. Empty means mint one.
 	RunID string
+	// Origin, when set, is the request channel the run arrived on (an API
+	// call). Run sanitizes it and stamps it on workflow_started and
+	// run_refused only. Nil — every CLI run — leaves those events exactly
+	// as before. A spawned child inherits its root's Origin through the
+	// caller's options.
+	Origin *Origin
 }
 
 const defaultMaxBounces = 2
@@ -77,6 +83,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	if opts.ArtifactDir == "" {
 		opts.ArtifactDir = ".agenthof/artifacts"
 	}
+	opts.Origin = opts.Origin.sanitized()
 	runID := opts.RunID
 	if runID == "" {
 		runID = NewRunID()
@@ -115,7 +122,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	refuse := func(reason string) (Result, error) {
 		refusalErr := fmt.Errorf("%s", reason)
 		logger.Warn("run refused", "reason", reason)
-		emit(Event{Type: "run_refused", Reason: reason})
+		emit(Event{Type: "run_refused", Reason: reason, Origin: opts.Origin})
 		if logErr != nil {
 			logger.Error("ledger write failed", "err", logErr)
 			return Result{RunID: runID, Status: "refused"}, errors.Join(refusalErr, fmt.Errorf("%w: %w", ErrLedgerWrite, logErr))
@@ -139,7 +146,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 			role, strings.Join(ro.AllowedGroups, ", ")))
 	}
 
-	emit(Event{Type: "workflow_started", ConfigHash: opts.ConfigHash})
+	emit(Event{Type: "workflow_started", ConfigHash: opts.ConfigHash, Origin: opts.Origin})
 	logger.Debug("run started", "steps", len(wf.Steps))
 	var gw ToolProxy
 	if opts.NewGateway != nil {
