@@ -279,11 +279,12 @@ that itself cannot be written — torn or broken — where the refusal is loud
 known-good chain left to safely record it against; for the same reason a
 refused ledger repair is printed, never recorded. A second, narrower
 exception exists on
-`enable`/`disable`: if the enabled bit is flipped but computing the fresh
-hash or appending the event then fails, the command prints "state changed;
-event NOT recorded" and exits nonzero — the one case where the registry's
-state and the control log can disagree, and it is treated as an incident
-to investigate by hand, not a bug the ledger papers over.
+`enable`/`disable`: if the enabled bit is flipped but appending the event
+then fails (or, before anything is installed, hashing the edited directory
+fails), the command prints "state changed; event NOT recorded" and exits
+nonzero — the one case where the registry's state and the control log can
+disagree, and it is treated as an incident to investigate by hand, not a
+bug the ledger papers over.
 
 A torn control log — the tail of an interrupted write — is recovered with
 `agenthof audit repair control`. The damaged bytes are moved, verbatim, to
