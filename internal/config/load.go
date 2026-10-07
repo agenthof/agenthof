@@ -49,6 +49,15 @@ func configFiles(root string) ([]string, error) {
 }
 
 func LoadDir(root string) (Config, []error) {
+	return loadFiles(root, func(string) bool { return true })
+}
+
+// loadFiles is LoadDir over the subset of configFiles(root) that keep admits
+// (by slash-relative path): files keep rejects are neither read nor parsed.
+// LoadDir keeps everything; InstalledRoles keeps roles/ only, so a snapshot
+// whose agent or gateway files no longer parse under this binary still
+// yields the roles authorization needs.
+func loadFiles(root string, keep func(rel string) bool) (Config, []error) {
 	var cfg Config
 	var errs []error
 	files, err := configFiles(root)
@@ -56,6 +65,9 @@ func LoadDir(root string) (Config, []error) {
 		return cfg, []error{err}
 	}
 	for _, rel := range files {
+		if !keep(rel) {
+			continue
+		}
 		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", rel, err))
