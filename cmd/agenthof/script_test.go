@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/agenthof/agenthof/internal/identity/oidctest"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rogpeppe/go-internal/testscript"
 )
@@ -80,6 +82,15 @@ func TestScript(t *testing.T) {
 	mcpSrv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil))
 	t.Cleanup(mcpSrv.Close)
 	execSock := refexecStub(t)
+	// Hermetic OIDC issuer for serve_*.txtar: the URL and a minted token
+	// travel under non-AGENTHOF_ names (Setup blanks the real ones) and a
+	// script opts in with `env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER`.
+	oidcKey := oidctest.NewKey(t)
+	oidcSrv := oidctest.NewServer(t, oidcKey)
+	oidcToken := oidctest.MintToken(t, oidcKey, map[string]any{
+		"iss": oidcSrv.URL, "aud": "agenthof", "exp": time.Now().Add(time.Hour).Unix(),
+		"sub": "u-123", "email": "dana@example.com", "groups": []string{"engineering"},
+	})
 	testscript.Run(t, testscript.Params{
 		Dir: filepath.Join("testdata", "script"),
 		Setup: func(e *testscript.Env) error {
@@ -89,6 +100,13 @@ func TestScript(t *testing.T) {
 			e.Setenv("AGENTHOF_OIDC_CLIENT_ID", "")
 			e.Setenv("AGENTHOF_LOG_LEVEL", "")
 			e.Setenv("AGENTHOF_LOG_FORMAT", "")
+			// New reroute/auth knobs this increment adds: blank them like the
+			// others, or a developer's exported AGENTHOF_SERVER would send
+			// every script's `run` to a remote.
+			e.Setenv("AGENTHOF_SERVER", "")
+			e.Setenv("AGENTHOF_OIDC_AUDIENCE", "")
+			e.Setenv("OIDC_ISSUER", oidcSrv.URL)
+			e.Setenv("OIDC_TOKEN", oidcToken)
 			if err := copyDir(filepath.Join("..", "..", "examples", "config"),
 				filepath.Join(e.WorkDir, "examples", "config")); err != nil {
 				return err
@@ -137,6 +155,23 @@ func TestScript(t *testing.T) {
 					id = id[:len(id)-len(ext)]
 				}
 				ts.Setenv("RUNID", id)
+			},
+			// waitaddr <addr-file>: waits (bounded) for `serve --addr-file`
+			// to write its host:port and exports http://host:port as $SERVER.
+			"waitaddr": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 1 {
+					ts.Fatalf("usage: waitaddr <addr-file>")
+				}
+				path := ts.MkAbs(args[0])
+				deadline := time.Now().Add(10 * time.Second)
+				for time.Now().Before(deadline) {
+					if b, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(b)) != "" {
+						ts.Setenv("SERVER", "http://"+strings.TrimSpace(string(b)))
+						return
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+				ts.Fatalf("serve never wrote %s", args[0])
 			},
 		},
 	})

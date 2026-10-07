@@ -1,0 +1,90 @@
+# serve hosts a governed run over the API, authenticated per call by the
+# invoker's OIDC token; the on-disk ledger is the same record the API
+# serves back, rendered byte-for-byte the same by audit either way.
+
+env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER
+env AGENTHOF_OIDC_CLIENT_ID=agenthof
+
+# apply runs as the dev identity: AGENTHOF_TOKEN is set only AFTER it, or
+# resolveInvoker would take the token (dana, groups [engineering]) over
+# --as/--groups and the control-plane gate would refuse the apply.
+exec agenthof apply --config config --as tester --control-log control.jsonl --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 3 roles'
+env AGENTHOF_TOKEN=$OIDC_TOKEN
+
+exec agenthof serve --addr 127.0.0.1:0 --addr-file addr.txt --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl --max-concurrent-runs 2 &
+waitaddr addr.txt
+
+# a run over the API prints exactly what a local run prints
+exec agenthof run se plan-only --input hello --server $SERVER
+stdout 'run r-[0-9a-f]{16} finished: succeeded'
+lastrun logs
+
+# the ledger on disk carries the API's provenance, stamped on workflow_started
+grep '"type":"workflow_started".*"origin":{"via":"api"' logs/$RUNID.jsonl
+grep '"method":"oidc"' logs/$RUNID.jsonl
+
+# audit rendered locally and audit rendered by the server are the same bytes,
+# config-join line included
+exec agenthof audit $RUNID --log-dir logs --control-log control.jsonl
+stdout 'status: succeeded'
+stdout 'invoked by dana@example.com \(oidc'
+stdout 'ledger integrity: verified'
+cp stdout local-audit.txt
+exec agenthof audit $RUNID --server $SERVER
+cmp stdout local-audit.txt
+
+# investigate/1 from the server is the local document
+exec agenthof investigate --log-dir logs --control-log control.jsonl --json
+cp stdout local-investigate.json
+exec agenthof investigate --server $SERVER --json
+cmp stdout local-investigate.json
+exec agenthof investigate --run $RUNID --server $SERVER
+stdout $RUNID
+stdout 'workflow_finished'
+
+# an authenticated invoker outside the role's groups is refused synchronously —
+# the same reason the local path prints — and the refusal is a recorded run
+! exec agenthof run locked plan-only --input hello --server $SERVER
+stdout 'run r-[0-9a-f]{16} refused: role "locked" requires membership in one of its allowed groups \(finance\)'
+lastrun logs
+grep '"type":"run_refused".*"origin":{"via":"api"' logs/$RUNID.jsonl
+exec agenthof audit $RUNID --server $SERVER
+stdout 'status: refused'
+stdout 'run refused — role "locked"'
+
+# no token: refused at the door, nothing written
+env AGENTHOF_TOKEN=
+! exec agenthof run se plan-only --input hello --server $SERVER
+stdout 'run: --server needs --token or AGENTHOF_TOKEN'
+! exec agenthof run se plan-only --input hello --server $SERVER --token not-a-token
+stdout 'run: server rejected the token'
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: [engineering]
+-- config/roles/locked.yaml --
+name: locked
+workflows: [plan-only]
+allowed_groups: [finance]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

@@ -67,6 +67,11 @@ type runDeps struct {
 	// sup provisions a spawned child's isolated set; nil means no supervisor
 	// is configured and every spawn is refused (fail-closed).
 	sup refspawn.Provisioner
+	// origin is the request channel the ROOT run arrived on, when it came
+	// over the API; nil for a CLI run. Every run in this tree — the root and
+	// each spawned child — stamps it, because a child's provenance is its
+	// root's request.
+	origin *engine.Origin
 }
 
 func newRunDeps(cfg config.Config, reg *registry.Registry, b broker.Broker, logger *slog.Logger, logDir, artifactDir, configHash, subjectToken string, sup refspawn.Provisioner) *runDeps {
@@ -82,7 +87,7 @@ func (d *runDeps) executor() agentrt.AdapterExecutor {
 // options builds the engine options for one run; parent is nil for a root.
 func (d *runDeps) options(parent *engine.Binding) engine.Options {
 	return engine.Options{LogDir: d.logDir, ArtifactDir: d.artifactDir, ConfigHash: d.configHash,
-		StepTimeout: d.stepTimeout, NewGateway: d.newGateway, Logger: d.logger, Parent: parent}
+		StepTimeout: d.stepTimeout, NewGateway: d.newGateway, Logger: d.logger, Parent: parent, Origin: d.origin}
 }
 
 // newGateway is the root run's gateway factory. Each run gets its own
@@ -222,7 +227,10 @@ func (d *runDeps) Spawn(ctx context.Context, childRole, childWorkflow, input str
 func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input string, parent engine.Binding, mountedDir string) (rungateway.SpawnResult, error) {
 	logger := d.logger.With("parent_run", parent.RunID, "child_role", childRole, "child_workflow", childWorkflow)
 	if reason, refused := preRunRefusal(d.cfg, d.reg, childWorkflow, parent.Invoker); refused {
-		id, err := engine.Refuse(d.logDir, childRole, childWorkflow, parent.Invoker, reason, &parent)
+		// Through options, not Refuse: a child refused here is still a run
+		// of this tree, so its refusal carries the root's origin like every
+		// other run under it.
+		id, err := engine.RecordRefused(d.options(&parent), parent.Invoker, childRole, childWorkflow, reason)
 		return rungateway.SpawnResult{ChildRunID: id, Status: "refused", Reason: reason}, err
 	}
 	wf, ok := d.reg.Workflow(childWorkflow)

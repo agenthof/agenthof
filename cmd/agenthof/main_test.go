@@ -3,11 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +25,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity/oidctest"
 )
 
 func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
@@ -383,7 +381,7 @@ func TestRunAndAuditEndToEnd(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -415,7 +413,7 @@ func TestAuditCorruptedFirstLineReportsIntegrityFailureAndExitsNonZero(t *testin
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -866,71 +864,15 @@ func TestGatewayProvisionEndToEnd(t *testing.T) {
 
 // --- OIDC wiring, ledgered validation refusals, and mux dispatch ---
 
-// cmdTestOIDCServer spins up an httptest server serving OIDC discovery and
-// JWKS documents backed by the given RSA key. Mirrors the recipe in
-// internal/identity/oidc_test.go (kept separate so cmd/agenthof does not
-// need to export test helpers from internal/identity).
+// cmdTestOIDCServer and cmdMintToken delegate to the exported oidctest
+// package — one hermetic issuer for every test suite. The names stay so
+// the call sites read as before.
 func cmdTestOIDCServer(t *testing.T, key *rsa.PrivateKey) *httptest.Server {
-	t.Helper()
-
-	mux := http.NewServeMux()
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-
-	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                                srv.URL,
-			"jwks_uri":                              srv.URL + "/keys",
-			"authorization_endpoint":                srv.URL + "/auth",
-			"token_endpoint":                        srv.URL + "/token",
-			"response_types_supported":              []string{"id_token"},
-			"subject_types_supported":               []string{"public"},
-			"id_token_signing_alg_values_supported": []string{"RS256"},
-		})
-	})
-
-	mux.HandleFunc("/keys", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		n := base64.RawURLEncoding.EncodeToString(key.N.Bytes())
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"keys": []map[string]any{
-				{
-					"kty": "RSA",
-					"kid": "test",
-					"alg": "RS256",
-					"use": "sig",
-					"n":   n,
-					"e":   "AQAB",
-				},
-			},
-		})
-	})
-
-	return srv
+	return oidctest.NewServer(t, key)
 }
 
-// cmdMintToken hand-builds an RS256-signed JWT from the given claims.
 func cmdMintToken(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {
-	t.Helper()
-
-	header := map[string]any{"alg": "RS256", "kid": "test", "typ": "JWT"}
-	headerJSON, err := json.Marshal(header)
-	if err != nil {
-		t.Fatalf("marshal header: %v", err)
-	}
-	claimsJSON, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatalf("marshal claims: %v", err)
-	}
-
-	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
-	digest := sha256.Sum256([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
-	if err != nil {
-		t.Fatalf("sign: %v", err)
-	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
+	return oidctest.MintToken(t, key, claims)
 }
 
 func TestRunTokenRequiresIssuerEnv(t *testing.T) {
@@ -977,7 +919,7 @@ func TestRunStaticRBAC(t *testing.T) {
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("expected refusal for wrong group: code=%d out=%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out must contain run id: %s", out.String())
 	}
@@ -1006,7 +948,7 @@ func TestRunValidationFailureIsLedgered(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused: configuration invalid`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: configuration invalid`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out must contain run id and refusal message: %s", out.String())
 	}
@@ -1052,7 +994,7 @@ func TestRunOIDCHappyPathEndToEnd(t *testing.T) {
 	if strings.Contains(out.String(), token) {
 		t.Fatalf("output must not echo the raw token: %s", out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -1120,7 +1062,7 @@ func TestRunBadTokenIsRejectedWithoutEcho(t *testing.T) {
 	// with a genuinely verified "oidc" invoker, and with a fixed reason
 	// string rather than the raw go-oidc error text (which can echo claim
 	// values).
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused: token verification failed`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: token verification failed`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("expected a ledgered refusal with a run id: %s", out.String())
 	}
@@ -1173,7 +1115,7 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -1254,7 +1196,7 @@ func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -1326,7 +1268,7 @@ func TestRunWiresToolProxyForFrontedToolAgent(t *testing.T) {
 		t.Fatalf("expected the step to fail via the tool proxy, got: %s", out.String())
 	}
 
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: failed`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: failed`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -1435,7 +1377,7 @@ func TestRunWiresClientCredentialsBrokerForFrontedToolAgent(t *testing.T) {
 		t.Fatalf("expected the step to fail via the tool proxy, got: %s", out.String())
 	}
 
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: failed`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: failed`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -1550,7 +1492,7 @@ func TestRunOBOResourceRefusesAssertedInvoker(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused: obo requires a verified invoker token`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: obo requires a verified invoker token`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out must carry the run id and the fixed OBO reason: %s", out.String())
 	}
@@ -1629,7 +1571,7 @@ func TestRunOBOEndToEndInProcess(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}

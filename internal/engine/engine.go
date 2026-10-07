@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/artifact"
-	"github.com/agenthof/agenthof/internal/authz"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/obs"
@@ -61,6 +59,12 @@ type Options struct {
 	// — a Spawner provisioning a child's compartments — mints it with
 	// NewRunID and passes it here. Empty means mint one.
 	RunID string
+	// Origin, when set, is the request channel the run arrived on (an API
+	// call). Run sanitizes it and stamps it on workflow_started and
+	// run_refused only. Nil — every CLI run — leaves those events exactly
+	// as before. A spawned child inherits its root's Origin through the
+	// caller's options.
+	Origin *Origin
 }
 
 const defaultMaxBounces = 2
@@ -77,6 +81,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	if opts.ArtifactDir == "" {
 		opts.ArtifactDir = ".agenthof/artifacts"
 	}
+	opts.Origin = opts.Origin.sanitized()
 	runID := opts.RunID
 	if runID == "" {
 		runID = NewRunID()
@@ -115,31 +120,19 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	refuse := func(reason string) (Result, error) {
 		refusalErr := fmt.Errorf("%s", reason)
 		logger.Warn("run refused", "reason", reason)
-		emit(Event{Type: "run_refused", Reason: reason})
+		emit(Event{Type: "run_refused", Reason: reason, Origin: opts.Origin})
 		if logErr != nil {
 			logger.Error("ledger write failed", "err", logErr)
 			return Result{RunID: runID, Status: "refused"}, errors.Join(refusalErr, fmt.Errorf("%w: %w", ErrLedgerWrite, logErr))
 		}
 		return Result{RunID: runID, Status: "refused"}, refusalErr
 	}
-	ro, ok := reg.Role(role)
-	if !ok {
-		return refuse(fmt.Sprintf("role %q is not in the registry", role))
+	if reason, ok := Admit(reg, role, workflow, inv); !ok {
+		return refuse(reason)
 	}
-	wf, ok := reg.Workflow(workflow)
-	if !ok {
-		return refuse(fmt.Sprintf("workflow %q is not in the registry", workflow))
-	}
-	if !reg.RoleOwnsWorkflow(role, workflow) {
-		return refuse(fmt.Sprintf("role %q does not own workflow %q", role, workflow))
-	}
-	if !authz.GroupsAllow(inv.Groups, ro.AllowedGroups) {
-		return refuse(fmt.Sprintf(
-			"role %q requires membership in one of its allowed groups (%s); the invoker's groups don't qualify",
-			role, strings.Join(ro.AllowedGroups, ", ")))
-	}
+	wf, _ := reg.Workflow(workflow) // Admit just confirmed it exists
 
-	emit(Event{Type: "workflow_started", ConfigHash: opts.ConfigHash})
+	emit(Event{Type: "workflow_started", ConfigHash: opts.ConfigHash, Origin: opts.Origin})
 	logger.Debug("run started", "steps", len(wf.Steps))
 	var gw ToolProxy
 	if opts.NewGateway != nil {
@@ -257,6 +250,19 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		// goes to the ledger only — it may quote an adapter response.
 		logger.Warn("step failed", "step", step.Name, "agent", agent.Name)
 		emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: res.Reason, Execution: execTier})
+		// A step that failed because the RUN was cancelled is not a step to
+		// bounce from: the run is over, and its honest outcome is cancelled,
+		// not failed-with-a-transport-error. The discriminator is the run's
+		// own context, never stepCtx — a StepTimeout expires stepCtx while
+		// the run is live, and that stays a genuine fail-back below.
+		if ctx.Err() != nil {
+			logger.Warn("run cancelled", "class", "context", "step", step.Name)
+			emit(Event{Type: "workflow_finished", Status: "cancelled", Reason: "run cancelled"})
+			if logErr != nil {
+				return ledgerFailed()
+			}
+			return Result{RunID: runID, Status: "cancelled"}, nil
+		}
 		target := step.OnFailure
 		if target == "" && i > 0 {
 			target = wf.Steps[i-1].Name

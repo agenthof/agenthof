@@ -84,6 +84,36 @@ downstream. If a token fails verification, the run never starts: it is recorded
 as a refusal and stops. (The token itself is verified and then discarded; it is
 never stored and never written to the ledger.)
 
+### Over the network: `agenthof serve`
+
+The same run can be started by a program instead of a person at a
+terminal. `agenthof serve` is a long-lived process that accepts
+`POST /v1/runs {role, workflow, input}` and hosts the run exactly as `run`
+would — same engine, same gateway, same doors, same ledger. Two things
+differ, and both are about *who* and *where from*:
+
+- **Every call carries the human's token.** There is no `--as` over the
+  network and no service account in the middle: the server verifies the
+  bearer on each request against the configured identity provider, and
+  the verified identity is the invoker on every event, as with
+  `run --token`. A missing or bad token is answered `401` and *nothing is
+  written* — a network caller must not be able to fill the log directory.
+- **The ledger records where the request came from.** A served run's
+  `workflow_started` (or `run_refused`) carries an `origin`: `via: api`,
+  the remote address, the user agent, the server's own address, and any
+  `X-Forwarded-For`, copied as received. This is provenance, not a second
+  witness: the token is the *who*, `origin` is the *way in*, and
+  `forwarded_for` is unverified by construction.
+
+The decision "are you allowed?" (section 2) is made *before* the server
+answers: a refused run comes back as `403` with the recorded reason, and
+has a ledger like any other. An accepted run comes back `202` with its
+id; the ledger is the progress view — `GET /v1/runs/{id}` for status,
+`/events` for the chain (with an honest `in_flight` while a record is
+mid-write), `/audit` for the same text `audit` prints. The command line
+is a client of all this too: `run`, `audit` and `investigate` take
+`--server`. See [`reference/serve.md`](reference/serve.md).
+
 ## 2. Are you allowed? (the registry gate)
 
 Before anything runs, the engine asks the **registry** a series of yes/no
@@ -362,6 +392,11 @@ When the last step succeeds, the engine writes `workflow_finished { succeeded }`
 and the run is done. The whole story — who asked, what ran, what each step
 touched — now lives in the run's ledger.
 
+A run that is cancelled — over the API, or because the hosting server is
+shutting down — finishes with `workflow_finished { cancelled }` at or
+after the step that was running; it is never recorded as a failure it
+did not have.
+
 ## The record (the life of a ledger event)
 
 Every event above is one line in the run's append-only ledger, and every event
@@ -426,6 +461,7 @@ flag and exit-code reference.
 | hash-chained ledger + `audit` / `audit verify` | enforced capabilities beyond the tool allowlist (the proxy allowlists which tools an agent may reach; it does not otherwise constrain what the agent's own code does) |
 | RBAC by group; linear workflow + fail-back | multi-resource / cross-repo scope |
 | cross-run + control incident timeline (`investigate`) + config-join on `audit <run-id>` | DAG workflows |
+| `agenthof serve`: runs over an authenticated API, every call attributed to the token's human; `origin` provenance on the run ledger; `/events`, server-rendered `/audit`, `investigate` over the API; `run`/`audit`/`investigate --server` | config changes over the API; streaming events; a finer read permission; token refresh for long runs; a client-certificate corroborator for `origin` |
 | | SIEM / multi-org investigation at scale |
 
 Only shipped behavior is a guarantee.

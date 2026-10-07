@@ -15,7 +15,7 @@ import (
 
 func TestRunIDShape(t *testing.T) {
 	a, b := NewRunID(), NewRunID()
-	if !strings.HasPrefix(a, "r-") || len(a) != 10 {
+	if !strings.HasPrefix(a, "r-") || len(a) != 18 {
 		t.Fatalf("shape: %q", a)
 	}
 	if a == b {
