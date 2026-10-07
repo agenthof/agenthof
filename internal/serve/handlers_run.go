@@ -1,13 +1,17 @@
 package serve
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/apiclient"
+	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 )
 
@@ -94,7 +98,131 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, _ identity.In
 	}
 }
 
-// startRun is replaced by the next task: POST /v1/runs.
-func (s *Server) startRun(w http.ResponseWriter, _ *http.Request, _ identity.Invoker, _ string) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+// maxRunBody caps POST /v1/runs' body: role, workflow and an input.
+const maxRunBody = 1 << 20
+
+// startRun is POST /v1/runs. Order is the point: the bearer was verified
+// before this ran; a slot is reserved BEFORE the body is read or the
+// config loaded, so an authenticated caller cannot hammer LoadDir outside
+// the cap; then the config resolves, the host's gate and engine.Admit
+// decide synchronously (a refusal is recorded and answered 403/422 here,
+// not after a 202), and only then is a run id minted and the engine
+// started — in a goroutine, under the SERVER's context, so the client
+// hanging up never cancels the run.
+func (s *Server) startRun(w http.ResponseWriter, r *http.Request, inv identity.Invoker, token string) {
+	release, code := s.reserve()
+	if code != 0 {
+		if code == http.StatusTooManyRequests {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "too many concurrent runs", code)
+			return
+		}
+		http.Error(w, "server is shutting down", code)
+		return
+	}
+	started := false
+	defer func() {
+		if !started {
+			release()
+		}
+	}()
+
+	var req apiclient.RunRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRunBody)).Decode(&req); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "malformed request body", http.StatusBadRequest)
+		return
+	}
+	if req.Role == "" || req.Workflow == "" || req.Input == "" {
+		http.Error(w, "role, workflow and input are required", http.StatusBadRequest)
+		return
+	}
+	origin := originFrom(r, s.cfg.ServerHost)
+
+	prep, err := s.cfg.Host.Prepare(inv, token)
+	if err != nil {
+		if errors.Is(err, ErrConfigInvalid) {
+			s.refuse(w, inv, req, origin, err.Error(), "configuration invalid", http.StatusUnprocessableEntity)
+			return
+		}
+		s.logger.Error("run preparation failed", "err", err)
+		http.Error(w, "run could not be prepared", http.StatusInternalServerError)
+		return
+	}
+	if reason, ok := prep.Admit(req.Role, req.Workflow, inv); !ok {
+		s.refuse(w, inv, req, origin, reason, reason, http.StatusForbidden)
+		return
+	}
+
+	runCtx, cancel := context.WithCancel(s.base)
+	id, err := s.runs.mint(s.cfg.LogDir, cancel, time.Now().UTC())
+	if err != nil {
+		cancel()
+		s.logger.Error("run id mint failed", "err", err)
+		http.Error(w, "could not mint a run id", http.StatusInternalServerError)
+		return
+	}
+	started = true
+	logger := s.logger.With("run", id, "role", req.Role, "workflow", req.Workflow)
+	logger.Info("run accepted", "invoker", inv.Subject)
+	go func() {
+		defer release()
+		defer cancel()
+		res, err := prep.Run(runCtx, id, req.Role, req.Workflow, req.Input, inv, origin)
+		s.runs.finish(id, res, finishReason(s.cfg.LogDir, id, res, err), time.Now().UTC())
+		logger.Info("run finished", "status", res.Status)
+	}()
+	w.Header().Set("Location", "/v1/runs/"+id)
+	writeJSON(w, http.StatusAccepted, apiclient.RunAccepted{RunID: id, Status: apiclient.StatusRunning})
+}
+
+// refuse records an authenticated invoker's policy refusal — the same
+// run_refused event the CLI writes, plus origin — and answers with the
+// reason the client prints. ledgerReason and bodyReason differ only for an
+// invalid config: the ledger keeps the first error, the body the fixed
+// "configuration invalid" the CLI prints.
+func (s *Server) refuse(w http.ResponseWriter, inv identity.Invoker, req apiclient.RunRequest, origin *engine.Origin, ledgerReason, bodyReason string, code int) {
+	id, err := engine.RecordRefused(engine.Options{LogDir: s.cfg.LogDir, Origin: origin}, inv, req.Role, req.Workflow, ledgerReason)
+	if err != nil {
+		s.logger.Error("refusal record failed", "err", err)
+		http.Error(w, "refusal could not be recorded", http.StatusInternalServerError)
+		return
+	}
+	s.logger.Warn("run refused", "run", id, "role", req.Role, "workflow", req.Workflow, "reason", ledgerReason)
+	writeJSON(w, code, apiclient.RunAccepted{RunID: id, Status: apiclient.StatusRefused, Reason: bodyReason})
+}
+
+// originFrom is the request channel's account of itself. Every field is
+// capped and stripped by the engine before it is written; forwarded_for is
+// recorded verbatim and is unverified.
+func originFrom(r *http.Request, serverHost string) *engine.Origin {
+	return &engine.Origin{
+		Via:          "api",
+		RemoteAddr:   r.RemoteAddr,
+		ForwardedFor: r.Header.Get("X-Forwarded-For"),
+		UserAgent:    r.UserAgent(),
+		ServerHost:   serverHost,
+	}
+}
+
+// finishReason is what the status view says about a finished run. A
+// recorded refusal's reason is the engine's own; an engine error carries a
+// path and is replaced by a fixed word; a lost exclusive create (another
+// process wrote this id first) is named; everything else reads the reason
+// back from the ledger the run wrote.
+func finishReason(logDir, id string, res engine.Result, err error) string {
+	switch {
+	case err == nil:
+		return terminalReason(logDir, id)
+	case res.Status == apiclient.StatusRefused && !errors.Is(err, engine.ErrLedgerWrite):
+		return err.Error()
+	case errors.Is(err, engine.ErrRunExists):
+		return "run id collision"
+	default:
+		return "run error"
+	}
 }
