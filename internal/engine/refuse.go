@@ -23,29 +23,45 @@ var ErrStepConfig = errors.New("step configuration error")
 // "refused, and the record itself failed" checks errors.Is(err, ErrLedgerWrite).
 var ErrLedgerWrite = errors.New("ledger write failed")
 
-// Refuse records a run refusal that happens before (or independent of) a
-// call to Run — for example a caller that pre-checks authorization and never
-// starts a workflow at all. It opens a fresh log under logDir, writes exactly
-// one run_refused event carrying the binding, and closes the log. parent,
-// when non-nil, links the refused run under a spawning parent exactly as Run
-// would (nil for a root). It returns the new run's ID so the refusal can be
-// looked up and audited like any other run.
-func Refuse(logDir, role, workflow string, inv identity.Invoker, reason string, parent *Binding) (string, error) {
-	runID := NewRunID()
-	log, err := OpenLog(logDir, runID)
+// RecordRefused records a run refusal decided before Run — a caller that
+// ran Admit (or its own pre-run gate) and never starts a workflow. It opens
+// a fresh log under opts.LogDir (under opts.RunID when set, else a fresh
+// id), writes exactly one run_refused event — the same event Run's own
+// refusal writes: the binding, linked under opts.Parent when set, and
+// opts.Origin sanitized — and closes the log. It returns the run id so the
+// refusal can be looked up and audited like any other run. opts.LogDir
+// defaults as Run's does.
+func RecordRefused(opts Options, inv identity.Invoker, role, workflow, reason string) (string, error) {
+	if opts.LogDir == "" {
+		opts.LogDir = ".agenthof/runs"
+	}
+	runID := opts.RunID
+	if runID == "" {
+		runID = NewRunID()
+	}
+	log, err := OpenLog(opts.LogDir, runID)
 	if err != nil {
 		return runID, err
 	}
 	defer func() { _ = log.Close() }()
-	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}.linkedTo(parent)
+	bind := Binding{Invoker: inv, Role: role, Workflow: workflow, RunID: runID}.linkedTo(opts.Parent)
 	e := Event{
 		Time:    time.Now().UTC(),
 		Type:    "run_refused",
 		Reason:  reason,
+		Origin:  opts.Origin.sanitized(),
 		Binding: bind,
 	}
 	if err := log.Append(e); err != nil {
 		return runID, err
 	}
 	return runID, nil
+}
+
+// Refuse is RecordRefused for a caller that has only a log directory and a
+// parent: a root (nil parent) or a spawned child refused before the engine
+// started, with no Origin. Kept for those callers; the bytes it writes are
+// unchanged.
+func Refuse(logDir, role, workflow string, inv identity.Invoker, reason string, parent *Binding) (string, error) {
+	return RecordRefused(Options{LogDir: logDir, Parent: parent}, inv, role, workflow, reason)
 }

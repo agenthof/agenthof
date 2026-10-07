@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/artifact"
-	"github.com/agenthof/agenthof/internal/authz"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/obs"
@@ -129,22 +127,10 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		}
 		return Result{RunID: runID, Status: "refused"}, refusalErr
 	}
-	ro, ok := reg.Role(role)
-	if !ok {
-		return refuse(fmt.Sprintf("role %q is not in the registry", role))
+	if reason, ok := Admit(reg, role, workflow, inv); !ok {
+		return refuse(reason)
 	}
-	wf, ok := reg.Workflow(workflow)
-	if !ok {
-		return refuse(fmt.Sprintf("workflow %q is not in the registry", workflow))
-	}
-	if !reg.RoleOwnsWorkflow(role, workflow) {
-		return refuse(fmt.Sprintf("role %q does not own workflow %q", role, workflow))
-	}
-	if !authz.GroupsAllow(inv.Groups, ro.AllowedGroups) {
-		return refuse(fmt.Sprintf(
-			"role %q requires membership in one of its allowed groups (%s); the invoker's groups don't qualify",
-			role, strings.Join(ro.AllowedGroups, ", ")))
-	}
+	wf, _ := reg.Workflow(workflow) // Admit just confirmed it exists
 
 	emit(Event{Type: "workflow_started", ConfigHash: opts.ConfigHash, Origin: opts.Origin})
 	logger.Debug("run started", "steps", len(wf.Steps))
