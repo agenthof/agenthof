@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/identity"
+	"github.com/agenthof/agenthof/internal/ledger"
 )
 
 // readFirstJSON reads the first line of the JSONL file at p and decodes it
@@ -130,5 +132,49 @@ func TestAppendPopulatedReasonRoundTrips(t *testing.T) {
 	}
 	if reason["message"] != "agent coder not found" {
 		t.Fatalf("reason.message = %v, want %q", reason["message"], "agent coder not found")
+	}
+}
+
+// TestAppendBootstrapRoundTrips: the additive bootstrap marker is written on
+// the wire only when set, and reads back through Decode.
+func TestAppendBootstrapRoundTrips(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.jsonl")
+	inv := identity.Static("dana@example.com")
+	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success",
+		Invoker: inv, Witness: control.CaptureWitness(), ConfigHash: "sha256:abc", Bootstrap: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success",
+		Invoker: inv, Witness: control.CaptureWitness(), ConfigHash: "sha256:def"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 records, got %d:\n%s", len(lines), raw)
+	}
+	if !strings.Contains(lines[0], `"bootstrap":true`) {
+		t.Fatalf("first record must carry bootstrap:true: %s", lines[0])
+	}
+	if strings.Contains(lines[1], `"bootstrap"`) {
+		t.Fatalf("an ordinary apply must omit the bootstrap field entirely: %s", lines[1])
+	}
+	recs, _, verr := ledger.ReadVerify(p, ledger.Locked)
+	if verr != nil {
+		t.Fatal(verr)
+	}
+	d0, err := control.Decode(recs[0].Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d1, err := control.Decode(recs[1].Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d0.Bootstrap || d1.Bootstrap {
+		t.Fatalf("decoded bootstrap: first=%v second=%v, want true/false", d0.Bootstrap, d1.Bootstrap)
 	}
 }

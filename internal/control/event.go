@@ -43,21 +43,26 @@ type Witness struct {
 }
 
 // Event is a control/1 record. Callers set Action, Agent, Outcome, Reason,
-// Invoker, AssertedAs, Witness, ConfigHash, and (repair only) FragmentLen/
-// FragmentSHA. V, and the seq/time/prev/log_id fields on the wire, are set
-// by Append; callers never set them.
+// Invoker, AssertedAs, Witness, ConfigHash, Bootstrap (apply only), and
+// (repair only) FragmentLen/FragmentSHA. V, and the seq/time/prev/log_id
+// fields on the wire, are set by Append; callers never set them.
 type Event struct {
-	V           string           `json:"v,omitempty"`
-	Action      string           `json:"action"`
-	Agent       string           `json:"agent,omitempty"`
-	Outcome     string           `json:"outcome"`
-	Reason      *Reason          `json:"reason,omitempty"`
-	Invoker     identity.Invoker `json:"invoker"`
-	AssertedAs  string           `json:"asserted_as,omitempty"`
-	Witness     Witness          `json:"witness"`
-	ConfigHash  string           `json:"config_hash,omitempty"`
-	FragmentLen int              `json:"fragment_len,omitempty"`
-	FragmentSHA string           `json:"fragment_sha256,omitempty"`
+	V          string           `json:"v,omitempty"`
+	Action     string           `json:"action"`
+	Agent      string           `json:"agent,omitempty"`
+	Outcome    string           `json:"outcome"`
+	Reason     *Reason          `json:"reason,omitempty"`
+	Invoker    identity.Invoker `json:"invoker"`
+	AssertedAs string           `json:"asserted_as,omitempty"`
+	Witness    Witness          `json:"witness"`
+	ConfigHash string           `json:"config_hash,omitempty"`
+	// Bootstrap marks a successful apply that was permitted because nothing
+	// was installed under its control root (the first apply, or the first
+	// after an operator removed the installed pointer). Additive: absent on
+	// every other record, and omitted from the wire when false.
+	Bootstrap   bool   `json:"bootstrap,omitempty"`
+	FragmentLen int    `json:"fragment_len,omitempty"`
+	FragmentSHA string `json:"fragment_sha256,omitempty"`
 }
 
 // CaptureWitness captures the local OS user (preferring $USER, falling

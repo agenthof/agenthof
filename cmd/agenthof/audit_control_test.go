@@ -102,3 +102,74 @@ func TestAuditControlCleanExitsZero(t *testing.T) {
 		}
 	}
 }
+
+// TestAuditControlShowsInstalledMatch: after an apply, audit control reports
+// that the installed pointer names the last recorded apply.
+func TestAuditControlShowsInstalledMatch(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	var buf bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
+		t.Fatalf("apply: exit %d\n%s", code, buf.String())
+	}
+	var out bytes.Buffer
+	if code := cmdAuditControl([]string{"--control-log", controlLog}, &out); code != 0 {
+		t.Fatalf("exit = %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "config applied (bootstrap) — dana@example.com (asserted)") {
+		t.Fatalf("bootstrap label missing: %s", out.String())
+	}
+	if !strings.HasSuffix(out.String(), "installed config: sha256:"+strings.TrimPrefix(readPointer(t, controlLog), "sha256:")+" — matches the last recorded apply\n") {
+		t.Fatalf("installed line must follow the integrity line: %s", out.String())
+	}
+}
+
+// TestAuditControlFlagsUnrecordedInstall: an install whose success append
+// never landed (the crash hook) is visible — the pointer does not match the
+// last recorded apply — and audit control still exits 0 (it renders).
+func TestAuditControlFlagsUnrecordedInstall(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	args := []string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}
+	var buf bytes.Buffer
+	if code := cmdApply(args, &buf); code != 0 {
+		t.Fatalf("apply: exit %d\n%s", code, buf.String())
+	}
+	if err := os.WriteFile(filepath.Join(root, "agents", "planner.yaml"), []byte("name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_install_before_append")
+	buf.Reset()
+	if code := cmdApply(args, &buf); code == 0 {
+		t.Fatalf("crash hook must exit nonzero: %s", buf.String())
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	var out bytes.Buffer
+	if code := cmdAuditControl([]string{"--control-log", controlLog}, &out); code != 0 {
+		t.Fatalf("exit = %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "does NOT match the last recorded apply") {
+		t.Fatalf("mismatch not flagged: %s", out.String())
+	}
+}
+
+// TestAuditControlNoStoreNoLine: a control root where nothing was ever
+// installed (only a refused flip on record) prints no installed line.
+func TestAuditControlNoStoreNoLine(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	var buf bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlLog, "--as", "mallory@example.com", "--groups", "finance"}, &buf); code != 1 {
+		t.Fatalf("disable: exit %d\n%s", code, buf.String())
+	}
+	var out bytes.Buffer
+	if code := cmdAuditControl([]string{"--control-log", controlLog}, &out); code != 0 {
+		t.Fatalf("exit = %d: %s", code, out.String())
+	}
+	if strings.Contains(out.String(), "installed config:") {
+		t.Fatalf("no store, no line: %s", out.String())
+	}
+}

@@ -1,0 +1,137 @@
+# Authorization reads the INSTALLED configuration, never the one being applied.
+# A fresh control root bootstraps; afterwards the proposed configuration cannot
+# grant its own applier anything; an authorized apply flips the pointer; an
+# identical re-apply installs nothing new; a configuration that grants apply to
+# nobody is rejected; and removing the pointer is the recorded escape hatch.
+
+# bootstrap: permitted whoever asks, installs a snapshot, recorded as such
+exec agenthof apply --config a --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
+stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
+grep '"bootstrap":true' control.jsonl
+exists installed/current
+cp installed/current current.a
+
+# the self-grant hole is closed: the installed config grants finance nothing, so
+# applying a config that WOULD grant finance control is refused against the
+# installed roles — recorded with the proposed hash, nothing installed
+! exec agenthof apply --config b --control-log control.jsonl --as mallory@example.com --groups finance
+stdout 'apply: not authorized: no role grants apply to the invoker'
+! stdout 'registry ok'
+stdout 'control head: seq=2'
+grep '"outcome":"refused"' control.jsonl
+cmp installed/current current.a
+
+# an invoker the installed config grants apply installs b; the pointer flips
+exec agenthof apply --config b --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok'
+stdout 'control head: seq=3'
+! cmp installed/current current.a
+
+# now finance is what the INSTALLED config grants: mallory may apply a again
+exec agenthof apply --config a --control-log control.jsonl --as mallory@example.com --groups finance
+stdout 'registry ok'
+cmp installed/current current.a
+
+# identical re-apply: a no-op snapshot, still recorded, pointer unchanged
+exec agenthof apply --config a --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'control head: seq=5'
+cmp installed/current current.a
+
+# lockout guard: a config that grants apply to no role is rejected
+! exec agenthof apply --config c --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'roles: \(config\): no role grants apply'
+! stdout 'registry ok'
+stdout 'control head: seq=6'
+grep '"outcome":"rejected"' control.jsonl
+cmp installed/current current.a
+
+# the escape hatch, recorded: removing the pointer makes the next apply a
+# bootstrap again, for any identity — and the audit trail shows it distinctly
+rm installed/current
+exec agenthof apply --config b --control-log control.jsonl --as nobody@example.com
+stdout 'registry ok'
+stdout 'control head: seq=7'
+exec agenthof audit control --control-log control.jsonl
+stdout 'seq 1 .*config applied \(bootstrap\) — dana@example.com \(asserted\)'
+stdout 'seq 3 .*config applied — dana@example.com \(asserted\)'
+stdout 'seq 4 .*config applied — mallory@example.com \(asserted\)'
+stdout 'seq 6 .*config rejected — dana@example.com \(asserted\)'
+stdout 'seq 7 .*config applied \(bootstrap\) — nobody@example.com \(asserted\)'
+stdout 'control ledger integrity: verified \(7 events\)'
+stdout 'installed config: sha256:[0-9a-f]{64} — matches the last recorded apply'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded apply'
+
+-- a/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- a/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- a/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- a/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+-- a/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
+-- b/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- b/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- b/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- b/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [finance]
+control: [apply, enable, disable, repair]
+-- b/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
+-- c/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- c/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- c/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- c/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [enable, disable, repair]
+-- c/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

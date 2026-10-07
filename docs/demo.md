@@ -86,7 +86,9 @@ includes:
   (`control: [apply, enable, disable, repair]`) to the `platform-eng` group —
   which is why every `apply` and kill-switch command in this demo passes
   `--groups platform-eng`. A caller no role grants is refused, and the refusal
-  is recorded.
+  is recorded. (This very first `apply` is a bootstrap — nothing is installed
+  yet, so it is permitted and recorded as such; every control command after it
+  is authorized against what that apply installed.)
 
 ### 1.2 Edit an agent instruction and re-apply
 

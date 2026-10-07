@@ -1,7 +1,7 @@
-# The kill switch is authorized default-deny against the config dir's roles,
-# read without validation: an unauthorized flip is refused and recorded, the
-# agent's state untouched, the agent list unprobed; and an agent that has been
-# disabled — which validation would reject — can still be re-enabled.
+# The kill switch is authorized default-deny against the INSTALLED configuration's
+# roles (the --config dir's only until something is installed): an unauthorized flip is
+# refused and recorded, the agent's state untouched, the agent list unprobed; and an
+# agent that has been disabled — which validation would reject — can still be re-enabled.
 
 exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
 cp examples/config/agents/coder.yaml coder.before.yaml
@@ -34,3 +34,18 @@ stdout 'disable agent coder refused — mallory@example.com \(asserted\)'
 stdout 'disable agent ghost refused — mallory@example.com \(asserted\)'
 stdout 'disabled agent coder — dana@example.com \(asserted\)'
 stdout 'enabled agent coder — dana@example.com \(asserted\)'
+
+# the installed roles decide, not the directory: granting finance control in
+# the directory WITHOUT applying it changes nothing for the kill switch
+# (coder.yaml was rewritten by the successful flips above, so compare against
+# a fresh copy, not coder.before.yaml)
+cp examples/config/agents/coder.yaml coder.enabled.yaml
+cp finance-admin.yaml examples/config/roles/finance-admin.yaml
+! exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as mallory@example.com --groups finance
+stdout 'not authorized'
+cmp examples/config/agents/coder.yaml coder.enabled.yaml
+
+-- finance-admin.yaml --
+name: finance-admin
+allowed_groups: [finance]
+control: [disable]

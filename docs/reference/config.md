@@ -855,13 +855,31 @@ by name (`control.jsonl` and anything containing `.torn-`) — a control log
 saved under a different name inside `--log-dir` has no such protection and
 can be pruned like any other aged `.jsonl` file.
 
+The **installed-configuration store** lives beside it: `<dir>/installed/`
+(default `.agenthof/installed/`), holding one immutable snapshot directory per
+applied configuration, named by its `config_hash`, and a one-line pointer file
+`current` (`sha256:<hex>`) naming the installed one. `apply` writes it; the
+control commands read it to decide who may act (see `--config` below);
+`audit control` and `audit verify control` report whether it matches the last
+recorded apply. Snapshots are never pruned by any command today; removing
+`current` makes the next `apply` a bootstrap — permitted for any identity and
+recorded as such.
+
 ### `--config`
 
-`apply` and `registry enable|disable` take it already; `audit repair control`
-takes it too (default `./config`) because the roles in it decide who may
-repair. Repair reads the directory without validating it; a directory that
-cannot be read means nobody can be authorized, and the command prints
-`refusing to repair` and exits 1 without touching the ledger.
+`apply` validates and installs it; `registry enable|disable` mutates it (the
+kill switch rewrites the agent's file there) and looks the agent up in it;
+`audit repair control` takes it too (default `./config`). For **authorization**
+none of the three reads it once a configuration is installed: the roles that
+decide who may `apply`, `enable`, `disable`, or `repair` are the installed
+snapshot's (`--control-log`'s `installed/current`), read without validation,
+roles only. Only while nothing is installed yet — a fresh control root — do
+`enable|disable` and `repair` fall back to the roles in `--config`, read
+without validating; a directory that cannot be read then means nobody can be
+authorized, and repair prints `refusing to repair` and exits 1 without touching
+the ledger. `apply` on a fresh control root is a **bootstrap**: permitted for
+any invoker, installed, and recorded with `bootstrap: true`. A configuration
+that grants `apply` to no role is rejected at apply (`no-apply-floor`).
 
 ### `--as`, `--groups`, `--token`
 
@@ -869,7 +887,8 @@ The same invoker-identity flags `agenthof run` takes. `--as` asserts an
 invoker identity (default: the OS user); `--groups` is a comma-separated
 list recorded alongside it — self-asserted, not verified — and the groups
 these commands authorize against: `apply`, `registry enable|disable`, and
-`audit repair control` each require that some role name one of the invoker's
+`audit repair control` each require that some role **of the installed
+configuration** (before any apply: of `--config`) name one of the invoker's
 groups in `allowed_groups` **and** list that operation in its
 [`control`](#control) grant (`allowed_groups: ["*"]` never qualifies). A
 caller no role grants is refused: `apply` and `registry enable|disable`
@@ -969,14 +988,14 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
-| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed but the config hash or the append that would record it then failed — printed as `state changed; event NOT recorded`, the one case where the registry changed with no event to show for it |
+| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed but the config hash or the append that would record it then failed — printed as `state changed; event NOT recorded`, the one case where the registry changed with no event to show for it; or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded apply) |
 | `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set |
 
 `agenthof audit control`:
 
 | Exit | Meaning |
 |---|---|
-| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code |
+| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code — and, when something is installed, a trailing `installed config:` line saying whether the pointer matches the last recorded successful apply (informational here; see `verify control`) |
 | `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain — a torn or broken chain still renders whatever valid prefix was recovered, with the failure named in the trailing integrity line |
 | `2` | Usage error |
 
@@ -987,7 +1006,8 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain |
 | `3` | The chain is tainted — a `repair` event has ever been appended to it (checked, and reported, before `--expect-head` is) |
 | `4` | `--expect-head` was given and does not match the verified head |
-| `0` | None of the above — the chain is clean and, if given, `--expect-head` matched |
+| `5` | The installed pointer (`installed/current` beside the log) does not name the last recorded successful apply — an install whose event was never appended, or whose record was lost; checked last, after `3` and `4` |
+| `0` | None of the above — the chain is clean, `--expect-head` (if given) matched, and the installed pointer (if any) matches |
 | `2` | Usage error |
 
 `agenthof audit repair control`:
@@ -995,7 +1015,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | A torn tail was repaired: the damaged bytes were moved to a `<log>.torn-<timestamp>` fragment, the live log truncated to its last valid record, and a `repair` event appended — the ledger is now tainted |
-| `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; no role grants `repair` to the invoker, or `--config` cannot be read (both printed, never recorded); or another IO error. None of these write a control event, since the ledger being repaired may itself be the file in question |
+| `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; no role grants `repair` to the invoker, the installed pointer cannot be read, or — nothing installed — `--config` cannot be read (all printed, never recorded); or another IO error. None of these write a control event, since the ledger being repaired may itself be the file in question |
 | `2` | Usage error |
 
 `agenthof investigate`:

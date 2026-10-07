@@ -56,7 +56,11 @@ func TestAuditVerifyControlExpectHeadMatchExitsZero(t *testing.T) {
 	if idx == -1 {
 		t.Fatalf("missing control head line: %s", line)
 	}
-	hash := strings.TrimSpace(line[idx+len(prefix):])
+	rest := line[idx+len(prefix):]
+	if nl := strings.IndexByte(rest, '\n'); nl != -1 {
+		rest = rest[:nl]
+	}
+	hash := strings.TrimSpace(rest)
 
 	var out bytes.Buffer
 	code := cmdAuditVerify([]string{"control", "--control-log", controlLog, "--expect-head", hash}, &out)
@@ -160,5 +164,83 @@ func TestAuditVerifyControlTaintedExitsThree(t *testing.T) {
 	code = cmdAuditVerify([]string{"control", "--control-log", controlLog, "--expect-head", "deadbeef"}, &out)
 	if code != 3 {
 		t.Fatalf("exit = %d, want 3 (taint precedes expect-head mismatch): %s", code, out.String())
+	}
+}
+
+// TestAuditVerifyControlUnrecordedInstallExitsFive: the installed pointer
+// not matching the last recorded apply is its own, lowest-precedence exit
+// code, printed after the head line.
+func TestAuditVerifyControlUnrecordedInstallExitsFive(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	args := []string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}
+	var buf bytes.Buffer
+	if code := cmdApply(args, &buf); code != 0 {
+		t.Fatalf("apply: exit %d\n%s", code, buf.String())
+	}
+	if err := os.WriteFile(filepath.Join(root, "agents", "planner.yaml"), []byte("name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_install_before_append")
+	buf.Reset()
+	_ = cmdApply(args, &buf)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	var out bytes.Buffer
+	code := cmdAuditVerify([]string{"control", "--control-log", controlLog}, &out)
+	if code != exitInstalledMismatch {
+		t.Fatalf("exit = %d, want %d: %s", code, exitInstalledMismatch, out.String())
+	}
+	if !strings.Contains(out.String(), "control head: seq=1 sha256=") || !strings.Contains(out.String(), "does NOT match the last recorded apply") {
+		t.Fatalf("output: %s", out.String())
+	}
+}
+
+// TestAuditVerifyControlFlipAfterApplyIsNotAMismatch: the kill switch rewrites
+// the config directory and records the directory's new hash; that must never
+// read as an unrecorded install — only apply records are compared.
+func TestAuditVerifyControlFlipAfterApplyIsNotAMismatch(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	var buf bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
+		t.Fatalf("apply: exit %d\n%s", code, buf.String())
+	}
+	buf.Reset()
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
+		t.Fatalf("disable: exit %d\n%s", code, buf.String())
+	}
+	var out bytes.Buffer
+	if code := cmdAuditVerify([]string{"control", "--control-log", controlLog}, &out); code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "matches the last recorded apply") {
+		t.Fatalf("output: %s", out.String())
+	}
+}
+
+// TestAuditVerifyControlTaintPrecedesInstalledMismatch: the installed
+// verdict is the lowest-precedence check — a tainted chain still exits 3.
+func TestAuditVerifyControlTaintPrecedesInstalledMismatch(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	inv := identity.Static("dana@example.com")
+	if _, err := control.Append(controlLog, control.Event{Action: "repair", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness(), FragmentLen: 1, FragmentSHA: "ab"}); err != nil {
+		t.Fatal(err)
+	}
+	store := installedStore(controlLog)
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "current"), []byte("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := cmdAuditVerify([]string{"control", "--control-log", controlLog}, &out); code != 3 {
+		t.Fatalf("exit = %d, want 3 (taint first): %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "no successful apply on record") {
+		t.Fatalf("the installed line is still printed: %s", out.String())
 	}
 }

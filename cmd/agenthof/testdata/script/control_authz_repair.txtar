@@ -1,6 +1,8 @@
-# Ledger repair is authorized default-deny against the config dir's roles. A
-# refused repair is printed, not recorded — the only ledger to record it in
-# is the damaged one — and leaves the torn file exactly as it was.
+# Ledger repair is authorized default-deny against the INSTALLED
+# configuration's roles — what the last apply approved; --config is read for
+# authorization only while nothing is installed. A refused repair is printed,
+# not recorded — the only ledger to record it in is the damaged one — and
+# leaves the torn file exactly as it was.
 
 exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
 exec sh -c 'printf ''{"v":"control/1","seq":2,"partial'' >> control.jsonl'
@@ -15,14 +17,15 @@ cmp control.jsonl torn.before.jsonl
 ! exec sh -c 'ls control.jsonl.torn-* 2>/dev/null'
 ! exec agenthof audit verify control --control-log control.jsonl
 
-# a config whose roles cannot be read: fail closed, same way
-! exec agenthof audit repair control --control-log control.jsonl --config nowhere --as ops@example.com --groups platform-eng
+# nothing installed under a different control root: --config is the fallback,
+# and one whose roles cannot be read fails closed before the ledger is looked at
+! exec agenthof audit repair control --control-log fresh/control.jsonl --config nowhere --as ops@example.com --groups platform-eng
 stdout 'refusing to repair'
-! exec sh -c 'ls control.jsonl.torn-* 2>/dev/null'
-cmp control.jsonl torn.before.jsonl
+! exists fresh/control.jsonl
 
-# authorized: repaired and tainted
-exec agenthof audit repair control --control-log control.jsonl --config examples/config --as ops@example.com --groups platform-eng
+# authorized by the installed roles — the --config dir no longer decides, so
+# an unreadable one does not stop the repair: repaired and tainted
+exec agenthof audit repair control --control-log control.jsonl --config nowhere --as ops@example.com --groups platform-eng
 stdout 'control ledger tainted'
 exec sh -c 'ls control.jsonl.torn-*'
 ! exec agenthof audit verify control --control-log control.jsonl

@@ -513,3 +513,98 @@ func TestRegistryEnableAfterDisableIsAuthorizedWithoutValidation(t *testing.T) {
 		t.Fatalf("enable after disable must succeed: %d\n%s", code, out.String())
 	}
 }
+
+// TestRegistryFlipAuthorizesAgainstInstalledNotDir: once a configuration is
+// installed, the kill switch reads ITS roles — granting finance control in
+// the directory without applying it changes nothing; platform-eng, which the
+// installed config grants, still flips. --config stays the mutation target.
+func TestRegistryFlipAuthorizesAgainstInstalledNotDir(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("bootstrap: %d\n%s", code, out.String())
+	}
+	if err := os.WriteFile(filepath.Join(root, "roles", "ops.yaml"), []byte("name: platform-admin\nallowed_groups: [finance]\ncontrol: [apply, enable, disable, repair]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath, "--as", "mallory@example.com", "--groups", "finance"}, &out); code != 1 ||
+		!strings.Contains(out.String(), "registry disable: not authorized: no role grants disable to the invoker") {
+		t.Fatalf("finance must be refused against the installed roles: %d\n%s", code, out.String())
+	}
+	agentData, err := os.ReadFile(filepath.Join(root, "agents", "coder.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(agentData), "enabled: false") {
+		t.Fatal("agent must not be flipped by a caller the installed config does not grant")
+	}
+	out.Reset()
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 ||
+		!strings.Contains(out.String(), "agent coder disabled") {
+		t.Fatalf("platform-eng (installed grant) must still flip: %d\n%s", code, out.String())
+	}
+}
+
+// TestRegistryFlipInstalledUnauthorizedNeverReadsConfig pins the ordering: once
+// a snapshot is installed, an unauthorized caller is refused against the
+// INSTALLED roles before --config is read at all. A nonexistent --config must
+// therefore record not_authorized (never io_error) and its path must never be
+// printed — the refusal neither depends on nor leaks the config directory.
+func TestRegistryFlipInstalledUnauthorizedNeverReadsConfig(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("bootstrap: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	missing := filepath.Join(t.TempDir(), "gone")
+	if code := cmdRegistry([]string{"disable", "coder", "--config", missing, "--control-log", controlPath, "--as", "mallory@example.com", "--groups", "finance"}, &out); code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), missing) {
+		t.Fatalf("the unread --config path must never be printed:\n%s", out.String())
+	}
+	data, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "not_authorized") || strings.Contains(string(data), "io_error") {
+		t.Fatalf("want not_authorized recorded and no io_error:\n%s", data)
+	}
+}
+
+// TestRegistryFlipMalformedPointerRecordsIOError: a damaged installed pointer
+// fails the kill switch closed — recorded error/io_error, no flip.
+func TestRegistryFlipMalformedPointerRecordsIOError(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+	store := installedStore(controlPath)
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, config.InstalledPointer), []byte("garbage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", controlPath, "--groups", "platform-eng"}, &out); code != 1 {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "agent coder disabled") {
+		t.Fatal("must not flip")
+	}
+	data, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"action":"disable"`, `"outcome":"error"`, `"io_error"`, "malformed pointer"} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("control log missing %q:\n%s", want, data)
+		}
+	}
+}
