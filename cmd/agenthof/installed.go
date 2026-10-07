@@ -20,6 +20,12 @@ func installedStore(controlLog string) string {
 	return filepath.Join(filepath.Dir(controlLog), "installed")
 }
 
+// msgInstalledNotRecorded is apply's analogue of the kill switch's "state
+// changed; event NOT recorded": the snapshot is installed and the pointer
+// flipped, but the success event could not be appended. audit control and
+// audit verify control surface the resulting pointer-vs-ledger mismatch.
+const msgInstalledNotRecorded = "installed; event NOT recorded"
+
 // applyFloorErrors is the no-apply-floor check: a configuration that grants
 // apply to no role could be installed and then never be changed again
 // through the control plane, so it is rejected at the apply boundary. It
