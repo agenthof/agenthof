@@ -383,7 +383,7 @@ func TestRunAndAuditEndToEnd(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -415,7 +415,7 @@ func TestAuditCorruptedFirstLineReportsIntegrityFailureAndExitsNonZero(t *testin
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -977,7 +977,7 @@ func TestRunStaticRBAC(t *testing.T) {
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("expected refusal for wrong group: code=%d out=%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out must contain run id: %s", out.String())
 	}
@@ -1006,7 +1006,7 @@ func TestRunValidationFailureIsLedgered(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused: configuration invalid`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: configuration invalid`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out must contain run id and refusal message: %s", out.String())
 	}
@@ -1052,7 +1052,7 @@ func TestRunOIDCHappyPathEndToEnd(t *testing.T) {
 	if strings.Contains(out.String(), token) {
 		t.Fatalf("output must not echo the raw token: %s", out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -1120,7 +1120,7 @@ func TestRunBadTokenIsRejectedWithoutEcho(t *testing.T) {
 	// with a genuinely verified "oidc" invoker, and with a fixed reason
 	// string rather than the raw go-oidc error text (which can echo claim
 	// values).
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused: token verification failed`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: token verification failed`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("expected a ledgered refusal with a run id: %s", out.String())
 	}
@@ -1173,7 +1173,7 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -1254,7 +1254,7 @@ func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -1326,7 +1326,7 @@ func TestRunWiresToolProxyForFrontedToolAgent(t *testing.T) {
 		t.Fatalf("expected the step to fail via the tool proxy, got: %s", out.String())
 	}
 
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: failed`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: failed`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -1435,7 +1435,7 @@ func TestRunWiresClientCredentialsBrokerForFrontedToolAgent(t *testing.T) {
 		t.Fatalf("expected the step to fail via the tool proxy, got: %s", out.String())
 	}
 
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: failed`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: failed`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}
@@ -1550,7 +1550,7 @@ func TestRunOBOResourceRefusesAssertedInvoker(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) refused: obo requires a verified invoker token`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: obo requires a verified invoker token`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out must carry the run id and the fixed OBO reason: %s", out.String())
 	}
@@ -1629,7 +1629,7 @@ func TestRunOBOEndToEndInProcess(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
-	m := regexp.MustCompile(`run (r-[0-9a-f]{8}) finished: succeeded`).FindStringSubmatch(out.String())
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) finished: succeeded`).FindStringSubmatch(out.String())
 	if m == nil {
 		t.Fatalf("out: %s", out.String())
 	}

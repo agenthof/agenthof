@@ -202,6 +202,35 @@ func Open(path string, mode LockMode) (*Chain, error) {
 	}, nil
 }
 
+// Create creates the ledger at path exclusively — the file must not exist
+// — and returns an empty Chain on it. It is the fresh-ledger counterpart
+// of Open, which is create-or-resume: a caller that owns a brand-new
+// ledger (a run's log) uses Create so two writers given the same name can
+// never both see an empty file and both write genesis. An existing file
+// fails with an error satisfying errors.Is(err, fs.ErrExist). Open is
+// untouched: the control ledger reopens its file on every write.
+func Create(path string, mode LockMode) (*Chain, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if d, derr := os.Open(dir); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	if mode == Locked {
+		if lerr := flockRetry(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lerr != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("ledger: create %s: %w", path, lerr)
+		}
+	}
+	return &Chain{f: f, mode: mode}, nil
+}
+
 // Prev returns the current chain head hash ("" for an empty chain).
 func (c *Chain) Prev() string { return c.prevHash }
 

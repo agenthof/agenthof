@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sync"
 	"time"
@@ -101,35 +102,43 @@ type Event struct {
 	Prev    string  `json:"prev"`
 }
 
+// NewRunID mints an opaque run id: "r-" plus 16 hex characters (8 random
+// bytes). Ids are matched as literal strings everywhere; nothing depends on
+// their length.
 func NewRunID() string {
-	b := make([]byte, 4)
+	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		panic(err) // crypto/rand failing means the host is broken
 	}
 	return "r-" + hex.EncodeToString(b)
 }
 
+// ErrRunExists marks an OpenLog failure because a log for that run id is
+// already on disk: another writer — this process or another — got there
+// first. A caller that mints ids checks errors.Is(err, ErrRunExists) and
+// fails closed rather than chaining onto the other run's log.
+var ErrRunExists = errors.New("run log already exists")
+
 type Log struct {
 	mu sync.Mutex
 	c  *ledger.Chain
 }
 
-// OpenLog creates the run's log file and opens it for writing. Because
-// ledger.Open resumes an existing file's chain rather than rejecting it,
-// OpenLog itself refuses a run ID whose file already has events — without
-// this guard, a colliding run ID would silently chain a second run's
-// events onto the first run's log, and audit would misattribute them.
-// A Log is opened exactly once per fresh run file; run logs are Unlocked
-// because each has one writer process. Concurrent in-process appenders
-// (e.g. the engine and the run gateway) are serialized by Log.mu.
+// OpenLog creates the run's log file — exclusively, so a run id that
+// already has a file on disk fails with ErrRunExists instead of resuming
+// it — and opens it for writing. Without the exclusive create, two writers
+// given the same id would both see an empty file, both write genesis, and
+// leave one run's events chained onto the other's, which audit would then
+// misattribute. A Log is opened exactly once per fresh run file; run logs
+// are Unlocked because each has one writer process. Concurrent in-process
+// appenders (the engine and the run gateway) are serialized by Log.mu.
 func OpenLog(dir, runID string) (*Log, error) {
-	c, err := ledger.Open(filepath.Join(dir, runID+".jsonl"), ledger.Unlocked)
+	c, err := ledger.Create(filepath.Join(dir, runID+".jsonl"), ledger.Unlocked)
 	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("run %s: %w", runID, ErrRunExists)
+		}
 		return nil, err
-	}
-	if c.Count() != 0 {
-		_ = c.Close()
-		return nil, fmt.Errorf("run %s: log already exists", runID)
 	}
 	return &Log{c: c}, nil
 }
