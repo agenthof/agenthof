@@ -27,7 +27,7 @@ func installByHand(t *testing.T, store, src string) string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		writeCfg(t, snapshotDir(store, h), rel, string(data))
+		writeCfg(t, SnapshotDir(store, h), rel, string(data))
 	}
 	if err := os.MkdirAll(store, 0o700); err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestInstalledRolesFailsClosedOnDamagedSnapshot(t *testing.T) {
 	t.Run("roles directory gone", func(t *testing.T) {
 		store := filepath.Join(t.TempDir(), "installed")
 		hash := installByHand(t, store, sampleConfig(t))
-		if err := os.RemoveAll(filepath.Join(snapshotDir(store, hash), "roles")); err != nil {
+		if err := os.RemoveAll(filepath.Join(SnapshotDir(store, hash), "roles")); err != nil {
 			t.Fatal(err)
 		}
 		_, got, installed, err := InstalledRoles(store)
@@ -164,10 +164,10 @@ func TestInstalledRolesFailsClosedOnDamagedSnapshot(t *testing.T) {
 	t.Run("snapshot entry is a file", func(t *testing.T) {
 		store := filepath.Join(t.TempDir(), "installed")
 		hash := installByHand(t, store, sampleConfig(t))
-		if err := os.RemoveAll(snapshotDir(store, hash)); err != nil {
+		if err := os.RemoveAll(SnapshotDir(store, hash)); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(snapshotDir(store, hash), []byte("not a dir\n"), 0o600); err != nil {
+		if err := os.WriteFile(SnapshotDir(store, hash), []byte("not a dir\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		_, _, installed, err := InstalledRoles(store)
@@ -183,7 +183,7 @@ func TestInstalledRolesFailsClosedOnDamagedSnapshot(t *testing.T) {
 func TestInstalledRolesFailsClosedWhenSnapshotMissing(t *testing.T) {
 	store := filepath.Join(t.TempDir(), "installed")
 	hash := installByHand(t, store, sampleConfig(t))
-	if err := os.RemoveAll(snapshotDir(store, hash)); err != nil {
+	if err := os.RemoveAll(SnapshotDir(store, hash)); err != nil {
 		t.Fatal(err)
 	}
 	_, _, installed, err := InstalledRoles(store)
@@ -301,7 +301,7 @@ func TestCommitSnapshotFlipsPointerAndKeepsOldSnapshot(t *testing.T) {
 		t.Fatalf("after the second commit: hash=%q installed=%v err=%v, want %q", hash, installed, err, b)
 	}
 	for _, h := range []string{a, b} {
-		if _, err := os.Stat(filepath.Join(snapshotDir(store, h), "roles", "ops.yaml")); err != nil {
+		if _, err := os.Stat(filepath.Join(SnapshotDir(store, h), "roles", "ops.yaml")); err != nil {
 			t.Fatalf("snapshot %s must be kept intact: %v", h, err)
 		}
 	}
@@ -337,7 +337,7 @@ func TestCommitSnapshotRefusesCorruptExistingSnapshot(t *testing.T) {
 	store := filepath.Join(t.TempDir(), "installed")
 	src := sampleConfig(t)
 	a := stageAndCommit(t, store, src)
-	if err := os.RemoveAll(filepath.Join(snapshotDir(store, a), "roles")); err != nil {
+	if err := os.RemoveAll(filepath.Join(SnapshotDir(store, a), "roles")); err != nil {
 		t.Fatal(err)
 	}
 	temp, err := StageSnapshot(store, src)
@@ -372,4 +372,105 @@ func TestCommitSnapshotRefusesMalformedHashLeavingPointerUnchanged(t *testing.T)
 		t.Fatalf("pointer changed on a refused commit: %q", hash)
 	}
 	_ = os.RemoveAll(temp)
+}
+
+func TestLoadInstalledRoundTripsTheWholeSnapshot(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := sampleConfig(t)
+	want := installByHand(t, store, src)
+	cfg, hash, installed, errs := LoadInstalled(store)
+	if len(errs) != 0 || !installed {
+		t.Fatalf("installed=%v errs=%v", installed, errs)
+	}
+	if hash != want {
+		t.Fatalf("hash must be the pointer's value verbatim: got %q want %q", hash, want)
+	}
+	if len(cfg.Agents) != 1 || len(cfg.Workflows) != 1 || len(cfg.Roles) != 2 || len(cfg.Gateway.Models) != 1 {
+		t.Fatalf("every file LoadDir reads must be present: %+v", cfg)
+	}
+}
+
+func TestLoadInstalledAbsentPointerMeansNotInstalled(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed") // does not exist
+	cfg, hash, installed, errs := LoadInstalled(store)
+	if installed || hash != "" || len(errs) != 0 || len(cfg.Roles) != 0 {
+		t.Fatalf("got installed=%v hash=%q errs=%v", installed, hash, errs)
+	}
+}
+
+func TestLoadInstalledMalformedPointerIsOneError(t *testing.T) {
+	store := t.TempDir()
+	if err := os.WriteFile(filepath.Join(store, InstalledPointer), []byte("garbage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, hash, installed, errs := LoadInstalled(store)
+	if installed || hash != "" || len(errs) != 1 || !strings.Contains(errs[0].Error(), "malformed pointer") {
+		t.Fatalf("got installed=%v hash=%q errs=%v", installed, hash, errs)
+	}
+}
+
+func TestLoadInstalledMissingSnapshotNamesTheHash(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	hash := installByHand(t, store, sampleConfig(t))
+	if err := os.RemoveAll(SnapshotDir(store, hash)); err != nil {
+		t.Fatal(err)
+	}
+	_, got, installed, errs := LoadInstalled(store)
+	if !installed || got != hash || len(errs) != 1 {
+		t.Fatalf("a present pointer naming a missing snapshot is installed-with-an-error: installed=%v hash=%q errs=%v", installed, got, errs)
+	}
+	if !strings.Contains(errs[0].Error(), "installed config "+hash+":") {
+		t.Fatalf("the error must name the snapshot: %v", errs[0])
+	}
+}
+
+// TestLoadInstalledReportsEveryFileErrorWhileRolesStillRead: the full read
+// fails closed on a file that no longer parses — naming the snapshot on every
+// error — whereas the roles-only read (InstalledRoles) on the same snapshot
+// still yields roles, so authorization survives a loader change.
+func TestLoadInstalledReportsEveryFileErrorWhileRolesStillRead(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := sampleConfig(t)
+	writeCfg(t, src, "agents/stale.yaml", "name: stale\nmodel: fast\ninstruction: x\noutput: y\ntools:\n  - gh\n")
+	writeCfg(t, src, "gateway.yaml", "models: [not-a-map\n")
+	_, want := LoadDir(src)
+	if len(want) == 0 {
+		t.Fatal("fixture must fail LoadDir, or this test proves nothing")
+	}
+	hash := installByHand(t, store, src)
+	_, got, installed, errs := LoadInstalled(store)
+	if !installed || got != hash || len(errs) != len(want) {
+		t.Fatalf("want every LoadDir error (%d): installed=%v hash=%q errs=%v", len(want), installed, got, errs)
+	}
+	for _, e := range errs {
+		if !strings.HasPrefix(e.Error(), "installed config "+hash+": ") {
+			t.Fatalf("every error must name the snapshot: %v", e)
+		}
+	}
+	if roles, _, _, err := InstalledRoles(store); err != nil || len(roles) != 2 {
+		t.Fatalf("the roles-only read must still work: roles=%d err=%v", len(roles), err)
+	}
+}
+
+// TestLoadInstalledFailsClosedOnSnapshotWithNoRoles: a <hex>/ that exists but
+// has lost its files loads as an empty configuration with no error from the
+// file walk; that is damage, not a valid install (every installed snapshot
+// passed no-apply-floor, so it has at least one role). Fail closed naming the
+// snapshot rather than hand the engine an empty registry.
+func TestLoadInstalledFailsClosedOnSnapshotWithNoRoles(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	hash := installByHand(t, store, sampleConfig(t))
+	if err := os.RemoveAll(filepath.Join(SnapshotDir(store, hash), "roles")); err != nil {
+		t.Fatal(err)
+	}
+	_, _, installed, errs := LoadInstalled(store)
+	if !installed || len(errs) != 1 || errs[0].Error() != "installed config "+hash+": snapshot has no roles" {
+		t.Fatalf("installed=%v errs=%v", installed, errs)
+	}
+}
+
+func TestSnapshotDirStripsTheTypedPrefix(t *testing.T) {
+	if got := SnapshotDir("/s", "sha256:abc"); got != filepath.Join("/s", "abc") {
+		t.Fatalf("got %q", got)
+	}
 }

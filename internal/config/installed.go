@@ -41,9 +41,11 @@ func InstalledHash(store string) (hash string, installed bool, err error) {
 	return hash, true, nil
 }
 
-// snapshotDir is where the snapshot named by hash lives: the bare hex digest.
-// The "sha256:" prefix is the pointer's typed form, not a directory name.
-func snapshotDir(store, hash string) string {
+// SnapshotDir is where the snapshot named by hash lives under store: the bare
+// hex digest. The "sha256:" prefix is the pointer's typed form, not a
+// directory name. Exported for the kill switch, which stages a copy of the
+// installed snapshot; everything else in this package uses it internally.
+func SnapshotDir(store, hash string) string {
 	return filepath.Join(store, strings.TrimPrefix(hash, "sha256:"))
 }
 
@@ -58,7 +60,7 @@ func InstalledRoles(store string) (roles []RoleDef, hash string, installed bool,
 	if err != nil || !installed {
 		return nil, "", installed, err
 	}
-	cfg, errs := loadFiles(snapshotDir(store, hash), func(rel string) bool { return path.Dir(rel) == "roles" })
+	cfg, errs := loadFiles(SnapshotDir(store, hash), func(rel string) bool { return path.Dir(rel) == "roles" })
 	if len(errs) > 0 {
 		return nil, hash, true, fmt.Errorf("installed config %s: %w", hash, errs[0])
 	}
@@ -73,6 +75,37 @@ func InstalledRoles(store string) (roles []RoleDef, hash string, installed bool,
 		return nil, hash, true, fmt.Errorf("installed config %s: snapshot has no roles (remove the pointer %q to re-bootstrap)", hash, filepath.Join(store, InstalledPointer))
 	}
 	return cfg.Roles, hash, true, nil
+}
+
+// LoadInstalled reads the WHOLE installed snapshot — every file LoadDir would
+// read — for execution. installed=false with no errors means nothing is
+// installed (the pointer is absent). A pointer that is present but cannot be
+// honored (malformed: installed=false WITH an error — callers must test errs
+// before installed), or a snapshot that is gone or no longer loads, is an
+// error: fail closed. Every load error is returned, each naming the snapshot,
+// because a run's refusal prints them all. A snapshot that loads but holds no
+// roles is damage, not a valid install (every installed snapshot passed the
+// no-apply-floor), and fails closed the same way. hash is the pointer's value,
+// verbatim — never a re-hash of the directory — and the bytes under it are
+// read unverified (docs/control-plane-lifecycle.md, honest limits). It does
+// not Build: internal/registry imports this package, so validation is the
+// caller's (resolveRunConfig in cmd/agenthof).
+func LoadInstalled(store string) (cfg Config, hash string, installed bool, errs []error) {
+	hash, installed, err := InstalledHash(store)
+	if err != nil {
+		return Config{}, "", false, []error{err}
+	}
+	if !installed {
+		return Config{}, "", false, nil
+	}
+	cfg, loadErrs := loadFiles(SnapshotDir(store, hash), func(string) bool { return true })
+	for _, e := range loadErrs {
+		errs = append(errs, fmt.Errorf("installed config %s: %w", hash, e))
+	}
+	if len(errs) == 0 && len(cfg.Roles) == 0 {
+		errs = append(errs, fmt.Errorf("installed config %s: snapshot has no roles", hash))
+	}
+	return cfg, hash, true, errs
 }
 
 // StageSnapshot copies the configuration at src into a fresh temporary
@@ -130,7 +163,7 @@ func CommitSnapshot(store, temp, hash string) error {
 	if !installedHashRE.MatchString(hash) {
 		return fmt.Errorf("installed config: refusing to install under malformed hash %q", hash)
 	}
-	if err := os.Rename(temp, snapshotDir(store, hash)); err != nil {
+	if err := os.Rename(temp, SnapshotDir(store, hash)); err != nil {
 		if !errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("installed config: %w", err)
 		}
@@ -143,12 +176,12 @@ func CommitSnapshot(store, temp, hash string) error {
 		// re-apply path; it does not make an installed snapshot
 		// tamper-evident — reads of a snapshot are still unverified, which is
 		// a reserved item.
-		existing, herr := HashDir(snapshotDir(store, hash))
+		existing, herr := HashDir(SnapshotDir(store, hash))
 		if herr != nil {
 			return fmt.Errorf("installed config: existing snapshot %s: %w", hash, herr)
 		}
 		if existing != hash {
-			return fmt.Errorf("installed config: existing snapshot %s is corrupt (its bytes hash as %s); remove %s and re-apply", hash, existing, snapshotDir(store, hash))
+			return fmt.Errorf("installed config: existing snapshot %s is corrupt (its bytes hash as %s); remove %s and re-apply", hash, existing, SnapshotDir(store, hash))
 		}
 		if err := os.RemoveAll(temp); err != nil {
 			return fmt.Errorf("installed config: %w", err)
