@@ -71,6 +71,12 @@ The governed core is real and runnable today:
   nothing by omission — and a caller no role grants is refused and the
   refusal recorded (a refused ledger repair is printed, not recorded, since
   the ledger it would go to is the damaged one).
+  Those decisions are made against the **installed** configuration — the
+  snapshot the last successful `apply` put in place — never against the
+  change being proposed, so a change cannot grant its own applier the right
+  to make it; the first `apply` on a fresh control root bootstraps, and
+  `audit control` says so. A configuration that grants `apply` to nobody is
+  rejected rather than installed.
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
   reach declared MCP tool resources only through Agenthof, which mirrors a
   whole resource (written `tools: ["*"], mode: read-write` — every-tool
