@@ -31,11 +31,12 @@ The `control head` line is the control ledger recording the apply (see the
 control-plane audit below); the `seq` advances with each control action and
 the hash varies.
 
-The `--groups platform-eng` is the authorization:
-`examples/config/roles/platform-admin.yaml` grants `apply`, `enable`,
-`disable`, and `repair` to that group and owns no workflows. Drop the flag and
-the apply is refused — recorded as `refused`/`not_authorized`, with the hash of
-the config you tried to apply.
+The first `apply` bootstraps — nothing is installed yet, so it is permitted and
+installs `examples/config`. After that, `--groups platform-eng` is the
+authorization: the installed config's `platform-admin` role grants `apply`,
+`enable`, `disable`, and `repair` to that group and owns no workflows. Drop the
+flag on a later apply and it is refused — recorded as `refused`/`not_authorized`,
+with the hash of the config you tried to apply.
 
 `run` prints the run id it assigned (`run <run-id> finished: succeeded`).
 Pass that id to `audit`. With the echo agent, each of the three steps

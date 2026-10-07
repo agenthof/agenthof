@@ -127,7 +127,9 @@ attributed to `--as` (or your OS user if omitted):
     registry ok: 5 agents, 2 workflows, 3 roles
     control head: seq=1 sha256=<hex>
 
-The `--groups platform-eng` flag is what authorizes the apply: the example
+The first `apply` on a fresh checkout is a *bootstrap*: nothing is installed
+yet, so it is permitted and installs the example config. From then on
+`--groups platform-eng` is what authorizes control changes: the installed
 config's `platform-admin` role grants the control-plane operations to that
 group, and a caller no role grants is refused — and that refusal is recorded.
 

@@ -43,7 +43,7 @@ a record you can later verify**.
       │ yes                                           *repair: printed, not recorded (see below)
       ▼
   3. Is the change valid?  validate  ──►  no ──►  rejected / refused  (recorded, then stop)
-      │ yes
+      │ yes   (apply: the validated copy is installed as the current snapshot)
       ▼
   4. Record it            open the Locked ledger, append a control/1 event:
       │                     { action, outcome, invoker, witness, config_hash, seq, prev }
@@ -97,16 +97,39 @@ allowed_groups: [platform-eng]
 control: [apply, enable, disable, repair]
 ```
 
-What each command authorizes against:
+What each command authorizes against — the **installed** configuration:
 
-- **`apply`** — the roles of the configuration being applied. The first apply
-  therefore authorizes itself: an operator grants their own group `control:
-  [apply]` in the config they apply. Forget, and the apply is refused — and
-  nothing changes.
-- **`registry enable|disable`** and **`audit repair control`** — the roles in
-  `--config`, read as they are on disk, without validation. That matters for
-  the kill switch: once an agent is disabled the configuration no longer
-  validates, and re-enabling it must still be possible.
+`apply` does more than validate. A configuration that passes is **installed**:
+copied, file by file, into a content-addressed snapshot under
+`.agenthof/installed/<hash>/` (beside the control ledger), and a one-line
+pointer, `.agenthof/installed/current`, is switched to it. That snapshot — not
+the directory on disk — is what every later control action authorizes against:
+
+- **`apply`** — the roles of the configuration **already installed**. The
+  configuration being applied cannot authorize itself: a caller cannot grant
+  their own group `control: [apply]` in the very change they are applying,
+  because the decision is made before the change is even read. Once the
+  change passes and is installed, *its* roles govern the next apply.
+- **`registry enable|disable`** and **`audit repair control`** — the installed
+  roles as well. `--config` remains what the kill switch mutates and where the
+  agent is looked up; it is read for authorization only while nothing is
+  installed yet.
+- **Bootstrap.** A fresh control root has nothing installed, so there is nothing
+  to authorize against: the **first apply is permitted**, whoever asks, and is
+  recorded with a `bootstrap` marker (`audit control` shows it as `config
+  applied (bootstrap)`). Until that first apply, the kill switch and repair fall
+  back to the roles in `--config`, so a fresh system is never locked out. An
+  existing control root that already has recorded applies but no installed
+  snapshot — the first apply after this behavior arrives — is treated the same
+  way: that apply bootstraps, whoever asks, and installs the snapshot the root
+  then authorizes against.
+- **The floor.** A configuration that grants `apply` to no role is rejected
+  (`no-apply-floor`): installed, it could never be changed again.
+
+The authorizing roles are read from the snapshot without validation — roles
+only — so an installed configuration written under older rules still decides
+who may change it. Only the control plane reads the snapshot today: `run` still
+reads the configuration directory.
 
 A refused `apply`, `enable`, or `disable` is recorded like every other
 turned-away attempt — outcome `refused`, reason `not_authorized`, a fixed
@@ -121,19 +144,23 @@ can edit the configuration directory can edit `control:` too, so this gate is
 a *recorded default-deny decision* on the invoker's identity — meaningful
 under `--token`, where the groups are verified; self-asserted under `--as
 --groups` — not a wall against someone who already holds write access to the
-files. Today `run` reads its configuration directly, so a refused `apply`
-changes nothing *and* does not yet stop anyone from running against the
-un-applied directory. What the gate buys now is that an unauthorized change
-attempt yields a `refused` row instead of a silent change, and the same
-decision is where a future service — whose callers have no filesystem — can
-enforce it for real. The roles are also read once to make the decision and the
-recorded configuration hash is computed by a second read, so a concurrent edit
-between the two could make the recorded hash differ from what was authorized;
-a future `apply --if-head` closes that window. One more edge to know: a
-configuration that grants
-`repair` to nobody is a valid configuration; if its ledger then tears, repair
-is refused for everyone until the role file is edited — in CLI mode, the
-filesystem is the way out.
+files. `apply` installs for *authorization*, not yet for `run`: `run` still reads the
+configuration directory, so a refused `apply` changes nothing *and* does not
+yet stop anyone from running against the un-applied directory. What the gate
+buys now is that an unauthorized change attempt yields a `refused` row instead
+of a silent change — and that a change cannot smuggle in its own permission.
+The proposed configuration is read once: it is copied into the store first,
+and the copy is what is validated, hashed, and installed, so the recorded hash
+is the hash of exactly what was checked. Two applies racing on one machine are
+not serialized against each other — the last pointer written wins (single-
+operator use; a compare-and-swap arrives with the API). And the store is a
+logic gate, not a vault: whoever can write `.agenthof/installed/` can remove
+`current`, and the next apply is a bootstrap again for any identity — the only
+trace is a second `config applied (bootstrap)` row in the audit trail, which is
+exactly why it is recorded distinctly. That same removal is the deliberate way
+out when an installed configuration locks out its own control (it grants
+`apply` or `repair` only to a group no verified token carries): re-bootstrap,
+and the record shows it.
 
 ## 3. Is the change valid?
 
@@ -143,7 +170,8 @@ What "valid" means depends on the action:
   agents, gateway) before adopting it. A configuration that fails validation is
   recorded as **`rejected`** (reason `validation_failed`) — together with the
   hash of the config that was rejected, so you can see exactly *what* was turned
-  away.
+  away. It also checks that at least one role grants `apply` (`no-apply-floor`).
+  A configuration that passes is installed — see §2.
 - **`registry enable|disable`** checks that the named agent exists; an unknown
   agent is recorded as `refused` (reason `agent_not_found`) — `rejected` means a
   change was evaluated and turned down, while `refused` means the actor or target
@@ -173,13 +201,18 @@ witness, config_hash, seq, prev, … }`. The `outcome` is one of `success`,
 `rejected`, `refused`, or `error`, and **all four are recorded** — the ledger is
 a log of *attempts*, not only of successes.
 
-**Honest limits.** There are two narrow cases the ledger names rather than
+**Honest limits.** There are three narrow cases the ledger names rather than
 hides. If the ledger is already **torn or broken** when a command runs, the
 command records nothing new, exits non-zero, and tells you to run `audit repair
 control` first — a damaged chain is not appended to. And a `registry`
 flip that lands but whose recording append then fails prints `state changed;
 event NOT recorded` — the one case where state changed with no event to show for
-it. Both are surfaced loudly; neither is glossed over.
+it. An `apply` has the same shape: once its snapshot is installed and the
+pointer switched, a recording append that then fails prints `installed; event
+NOT recorded` and exits non-zero. `audit control` and `audit verify control`
+compare the installed pointer with the last recorded successful apply and say
+when the two disagree (`verify control` exits 5), so an unrecorded install is
+visible rather than silent. Both are surfaced loudly; neither is glossed over.
 
 ## 5. Return the head
 
@@ -233,7 +266,7 @@ both carry the same key:
 | Shipped today | Reserved for later |
 |---|---|
 | `apply`, `registry enable/disable`, `audit repair control` | policy-as-config approval workflows |
-| default-deny authorization of every control action against `control:` grants; refusals recorded (repair: printed) | per-object ownership; authorizing against the last *applied* configuration |
+| default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; `run` executing the installed configuration; pruning and tamper-evidence of the snapshot store |
 | hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts | external anchoring / write-once sink for the ledger |
 | three identities per action (invoker / asserted_as / witness) | agent-to-IdP federation for the invoker's authority |
 | `--expect-head` off-machine head check | continuous/remote attestation of the head |
