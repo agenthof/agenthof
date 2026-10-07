@@ -1,6 +1,9 @@
 # Demo Part 2.1: run fix-bug with an asserted identity, audit shows the
 # invoker, integrity line, and artifact shas — docs/demo.md §2.1.
 
+exec agenthof apply --config examples/config --groups platform-eng
+stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
+
 exec agenthof run software-engineer fix-bug --input 'fix the login bug' --as dana@example.com --config examples/config --log-dir logs --artifact-dir artifacts
 stdout 'finished: succeeded'
 

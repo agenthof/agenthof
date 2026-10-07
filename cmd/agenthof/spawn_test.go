@@ -626,6 +626,7 @@ func writeSpawnSample(t *testing.T) (string, *fakeSupervisor) {
 		"roles/lead.yaml":         "name: lead-role\nworkflows: [lead-wf]\nallowed_groups: [\"*\"]\n",
 		"roles/worker.yaml":       "name: worker\nworkflows: [child-wf, exec-wf]\nallowed_groups: [\"*\"]\n",
 		"roles/locked.yaml":       "name: locked\nworkflows: [locked-wf]\nallowed_groups: [nobody]\n",
+		"roles/ops.yaml":          "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply]\n",
 		"gateway.yaml":            "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\nrefbox_socket_dir: " + shortDir(t) + "\nspawn:\n  max_depth: 2\n  max_parallel: 2\n  max_total_spawns: 4\nspawn_supervisor: " + fake.url() + "\n",
 	}
 	for rel, content := range files {
@@ -657,9 +658,10 @@ func rootSocketDir(t *testing.T, root string) string {
 func runLead(t *testing.T, root, input string) (string, string, []engine.Event) {
 	t.Helper()
 	logDir := filepath.Join(root, "runs")
+	ctl := applied(t, root)
 	var out bytes.Buffer
 	code := cmdRun([]string{"lead-role", "lead-wf", "--input", input, "--as", "dana@example.com", "--groups", "eng",
-		"--config", root, "--log-dir", logDir, "--artifact-dir", filepath.Join(root, "arts")}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logDir, "--artifact-dir", filepath.Join(root, "arts")}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run exited %d:\n%s", code, out.String())
 	}

@@ -25,7 +25,7 @@ func TestInvestigateJSONEnvelope(t *testing.T) {
 	}
 	out.Reset()
 	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
-		"--config", root, "--log-dir", logs,
+		"--config", root, "--control-log", ctl, "--log-dir", logs,
 		"--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -61,7 +61,7 @@ func TestInvestigateAgentFilterNarrows(t *testing.T) {
 	}
 	out.Reset()
 	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
-		"--config", root, "--log-dir", logs,
+		"--config", root, "--control-log", ctl, "--log-dir", logs,
 		"--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -92,8 +92,12 @@ func TestInvestigateRunFilterShowsRefusal(t *testing.T) {
 	ctl := filepath.Join(t.TempDir(), "control.jsonl")
 	var out bytes.Buffer
 
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("apply: %d\n%s", code, out.String())
+	}
+	out.Reset()
 	code := cmdRun([]string{"ghost", "fix-bug", "--input", "x", "--as", "dev@x",
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("expected a refused run, code=%d out=%s", code, out.String())
 	}
@@ -122,8 +126,12 @@ func TestInvestigateOutcomeFilterShowsRefusal(t *testing.T) {
 	ctl := filepath.Join(t.TempDir(), "control.jsonl")
 	var out bytes.Buffer
 
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("apply: %d\n%s", code, out.String())
+	}
+	out.Reset()
 	code := cmdRun([]string{"ghost", "fix-bug", "--input", "x", "--as", "dev@x",
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("expected a refused run, code=%d out=%s", code, out.String())
 	}
@@ -147,8 +155,12 @@ func TestInvestigateCorruptedRunLogExitsNonZero(t *testing.T) {
 	ctl := filepath.Join(t.TempDir(), "control.jsonl")
 	var out bytes.Buffer
 
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("apply: %d\n%s", code, out.String())
+	}
+	out.Reset()
 	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
-		"--config", root, "--log-dir", logs,
+		"--config", root, "--control-log", ctl, "--log-dir", logs,
 		"--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}

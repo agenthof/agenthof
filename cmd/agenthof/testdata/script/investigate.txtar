@@ -3,7 +3,7 @@
 exec agenthof apply --config config --as tester --control-log control.jsonl --groups platform-eng
 stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
 
-exec agenthof run se plan-only --input hello --as tester --config config --log-dir logs --artifact-dir artifacts
+exec agenthof run se plan-only --input hello --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
 stdout 'finished: succeeded'
 lastrun logs
 

@@ -6,7 +6,7 @@ exec agenthof apply --config config --control-log control.jsonl --as ops@example
 stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
 
 # the control-only role owns no workflow, so a run under it is refused
-! exec agenthof run platform-admin plan-only --input hello --as ops@example.com --groups platform-eng --config config --log-dir logs --artifact-dir artifacts
+! exec agenthof run platform-admin plan-only --input hello --as ops@example.com --groups platform-eng --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
 stdout 'does not own workflow "plan-only"'
 
 -- config/agents/planner.yaml --

@@ -715,7 +715,8 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
 	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	server := fs.String("server", "", "run over an agenthof serve API at this base URL (env AGENTHOF_SERVER); needs --token/AGENTHOF_TOKEN")
-	cfgDir := fs.String("config", "./config", "config directory")
+	cfgDir := fs.String("config", "./config", "configuration directory you apply from; run executes the INSTALLED configuration (see --control-log), not this directory")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; the installed configuration is read from installed/ beside it")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
 	// Accepted for forward-compat: the tool proxy always binds 127.0.0.1:0
@@ -729,6 +730,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	if err := fs.Parse(args[2:]); err != nil {
 		return 2
 	}
+	_ = controlLog // read by resolveRunConfig once run executes the installed configuration
 	if *input == "" {
 		_, _ = fmt.Fprintln(out, "run needs --input")
 		return 2

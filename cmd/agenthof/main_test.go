@@ -323,6 +323,24 @@ func writeSample(t *testing.T) string {
 	return root
 }
 
+// applied installs root under a fresh control root and returns that control
+// log's path. run executes only the installed configuration, so every test
+// that runs must apply first and pass this path as --control-log. Call it
+// AFTER the last config file the test writes and BEFORE any t.Setenv of
+// AGENTHOF_TOKEN (resolveInvoker takes the env token over --as). The first
+// apply on a fresh control root bootstraps, so no grant is needed; the
+// platform-eng group is asserted anyway for configs that carry
+// writeSample's platform-admin role.
+func applied(t *testing.T, root string) string {
+	t.Helper()
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("apply %s: exit %d\n%s", root, code, out.String())
+	}
+	return controlLog
+}
+
 func TestApplyOKAndFailure(t *testing.T) {
 	root := writeSample(t)
 	// --control-log keeps this test's control ledger inside root rather
@@ -375,9 +393,10 @@ func TestRunAndAuditEndToEnd(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
+	ctl := applied(t, root)
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--as", "dana@example.com",
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -407,9 +426,10 @@ func TestAuditCorruptedFirstLineReportsIntegrityFailureAndExitsNonZero(t *testin
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
+	ctl := applied(t, root)
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--as", "dana@example.com",
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -455,7 +475,8 @@ func TestAuditVerifyCleanAndExpectHead(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
+	ctl := applied(t, root)
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -483,7 +504,8 @@ func TestAuditTornExitsOne(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
+	ctl := applied(t, root)
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -519,7 +541,8 @@ func TestAuditDeletedTailPassesButExpectHeadFails(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
-	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
+	ctl := applied(t, root)
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", logs, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
 		t.Fatalf("run: %s", out.String())
 	}
 	id := regexp.MustCompile(`run (r-[0-9a-f]+) finished`).FindStringSubmatch(out.String())[1]
@@ -568,8 +591,9 @@ func TestRunFailBackOffline(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
+	ctl := applied(t, root)
 	code := cmdRun([]string{"software-engineer", "fix-bug",
-		"--input", "do it FAIL:coder", "--as", "dev@x", "--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--input", "do it FAIL:coder", "--as", "dev@x", "--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	_ = code // coder always fails on this input; bounces exhaust; run fails honestly
 	if !strings.Contains(out.String(), "finished: failed") {
 		t.Fatalf("out: %s", out.String())
@@ -580,10 +604,14 @@ func TestRunRefusedUnknownRole(t *testing.T) {
 	t.Chdir(t.TempDir())
 	root := writeSample(t)
 	var out bytes.Buffer
+	ctl := applied(t, root)
 	code := cmdRun([]string{"ghost", "fix-bug", "--input", "x", "--as", "dev@x",
-		"--config", root, "--log-dir", t.TempDir()}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", t.TempDir()}, &out, io.Discard)
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("code=%d out=%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "no configuration installed") {
+		t.Fatalf("the refusal must be the registry gate's, not a missing install: %s", out.String())
 	}
 }
 
@@ -879,10 +907,11 @@ func TestRunTokenRequiresIssuerEnv(t *testing.T) {
 	t.Chdir(t.TempDir())
 	root := writeSample(t)
 	t.Setenv("AGENTHOF_OIDC_ISSUER", "")
+	ctl := applied(t, root)
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "x", "--token", "some-raw-jwt-value",
-		"--config", root, "--log-dir", t.TempDir()}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", t.TempDir()}, &out, io.Discard)
 	if code != 2 {
 		t.Fatalf("expected exit 2, got %d\n%s", code, out.String())
 	}
@@ -903,11 +932,12 @@ func TestRunStaticRBAC(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := t.TempDir()
+	ctl := applied(t, root)
 
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--as", "dana@example.com", "--groups", "finance",
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run with allowed group: %d\n%s", code, out.String())
 	}
@@ -915,7 +945,7 @@ func TestRunStaticRBAC(t *testing.T) {
 	out.Reset()
 	code = cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--as", "dana@example.com", "--groups", "engineering",
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code == 0 || !strings.Contains(out.String(), "refused") {
 		t.Fatalf("expected refusal for wrong group: code=%d out=%s", code, out.String())
 	}
@@ -967,6 +997,7 @@ func TestRunValidationFailureIsLedgered(t *testing.T) {
 func TestRunOIDCHappyPathEndToEnd(t *testing.T) {
 	t.Chdir(t.TempDir())
 	root := writeSample(t)
+	ctl := applied(t, root)
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -987,7 +1018,7 @@ func TestRunOIDCHappyPathEndToEnd(t *testing.T) {
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--token", token,
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1018,6 +1049,7 @@ func TestRunOIDCHappyPathEndToEnd(t *testing.T) {
 func TestRunBadTokenIsRejectedWithoutEcho(t *testing.T) {
 	t.Chdir(t.TempDir())
 	root := writeSample(t)
+	ctl := applied(t, root)
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -1046,7 +1078,7 @@ func TestRunBadTokenIsRejectedWithoutEcho(t *testing.T) {
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "fix-bug",
 		"--input", "fix the login bug", "--token", badToken,
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code == 0 {
 		t.Fatalf("expected non-zero exit for a bad token, got 0:\n%s", out.String())
 	}
@@ -1098,6 +1130,7 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\n",
 		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
 		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
+		"roles/ops.yaml":        "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply]\n",
 	}
 	for rel, content := range files {
 		p := filepath.Join(root, rel)
@@ -1109,9 +1142,10 @@ func TestRunFrontedAgentEndToEnd(t *testing.T) {
 		}
 	}
 	logs := t.TempDir()
+	ctl := applied(t, root)
 	var out bytes.Buffer
 	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1179,6 +1213,7 @@ func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 			"\n  timeout: 30s\n  allow:\n    - exe: go\n      args_prefix: [test]\n",
 		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
 		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
+		"roles/ops.yaml":        "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply]\n",
 	}
 	for rel, content := range files {
 		p := filepath.Join(root, rel)
@@ -1190,9 +1225,10 @@ func TestRunStartsListenerForFrontedExecWithoutTools(t *testing.T) {
 		}
 	}
 	logs := t.TempDir()
+	ctl := applied(t, root)
 	var out bytes.Buffer
 	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1241,6 +1277,7 @@ func TestRunWiresToolProxyForFrontedToolAgent(t *testing.T) {
 		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\ntools:\n  - resource: github\n    tools: [\"*\"]\n    mode: read-write\n",
 		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
 		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
+		"roles/ops.yaml":        "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply]\n",
 		"gateway.yaml": "tools:\n  github:\n    kind: mcp\n    url: https://mcp.example.test/\n" +
 			"    credential_source: static_env\n    token_env: AGENTHOF_TEST_UNSET_TOOL_TOKEN\n",
 	}
@@ -1258,9 +1295,10 @@ func TestRunWiresToolProxyForFrontedToolAgent(t *testing.T) {
 	t.Setenv("AGENTHOF_TEST_UNSET_TOOL_TOKEN", "")
 
 	logs := t.TempDir()
+	ctl := applied(t, root)
 	var out bytes.Buffer
 	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
-		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:0"}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:0"}, &out, io.Discard)
 	if code != 1 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1345,6 +1383,7 @@ func TestRunWiresClientCredentialsBrokerForFrontedToolAgent(t *testing.T) {
 		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\ntools:\n  - resource: github\n    tools: [\"*\"]\n    mode: read-write\n",
 		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
 		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
+		"roles/ops.yaml":        "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply]\n",
 		"gateway.yaml": "tools:\n  github:\n    kind: mcp\n    url: https://mcp.example.test/\n" +
 			"    credential_source: static_env\n    grant_type: client_credentials\n" +
 			"    client_auth: client_secret_basic\n    issuer: https://issuer.example.test/\n" +
@@ -1367,9 +1406,10 @@ func TestRunWiresClientCredentialsBrokerForFrontedToolAgent(t *testing.T) {
 	t.Setenv("AGENTHOF_TEST_UNSET_CLIENT_SECRET", "")
 
 	logs := t.TempDir()
+	ctl := applied(t, root)
 	var out bytes.Buffer
 	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
-		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:0"}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:0"}, &out, io.Discard)
 	if code != 1 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1419,6 +1459,7 @@ func TestRunToolProxyAddrFlagParsesButIsUnused(t *testing.T) {
 		"agents/helper.yaml":    "name: helper\nexecution: fronted\nendpoint: " + stub.URL + "\ninstruction: help\noutput: result\n",
 		"workflows/single.yaml": "name: single\nsteps:\n  - name: step1\n    agent: helper\n",
 		"roles/fr.yaml":         "name: fronted-role\nworkflows: [single]\nallowed_groups: [\"*\"]\n",
+		"roles/ops.yaml":        "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply]\n",
 	}
 	for rel, content := range files {
 		p := filepath.Join(root, rel)
@@ -1430,9 +1471,10 @@ func TestRunToolProxyAddrFlagParsesButIsUnused(t *testing.T) {
 		}
 	}
 	logs := t.TempDir()
+	ctl := applied(t, root)
 	var out bytes.Buffer
 	code := cmdRun([]string{"fronted-role", "single", "--input", "go", "--as", "dev@x",
-		"--config", root, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:9999"}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs, "--tool-proxy-addr", "127.0.0.1:9999"}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
@@ -1454,6 +1496,7 @@ func writeOBOSample(t *testing.T, exchangeURL, upstreamURL string) string {
 		"agents/planner.yaml": "name: planner\nmodel: fast\ninstruction: plan\noutput: plan\nendpoint: " + stub.URL + "\ntools:\n  - resource: crm\n    tools: [\"*\"]\n    mode: read-write\n",
 		"workflows/crm.yaml":  "name: crm\nsteps:\n  - name: plan\n    agent: planner\n",
 		"roles/se.yaml":       "name: software-engineer\nworkflows: [crm]\nallowed_groups: [\"*\"]\n",
+		"roles/ops.yaml":      "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply]\n",
 		"gateway.yaml": "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\n" +
 			"tools:\n  crm:\n    kind: mcp\n    url: " + upstreamURL + "\n    credential_source: static_env\n    grant_type: token_exchange\n" +
 			"    client_auth: client_secret_basic\n    token_endpoint: " + exchangeURL + "\n    audience: https://crm.example\n" +
@@ -1486,9 +1529,10 @@ func TestRunOBOResourceRefusesAssertedInvoker(t *testing.T) {
 	defer exchange.Close()
 	root := writeOBOSample(t, exchange.URL, "http://127.0.0.1:9/mcp")
 	logs := t.TempDir()
+	ctl := applied(t, root)
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "crm", "--input", "tool:whoami", "--as", "dana@example.com", "--groups", "eng",
-		"--config", root, "--log-dir", logs}, &out, io.Discard)
+		"--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d\n%s", code, out.String())
 	}
@@ -1565,9 +1609,10 @@ func TestRunOBOEndToEndInProcess(t *testing.T) {
 
 	cfg := writeOBOSample(t, exchange.URL, up.URL)
 	logs := t.TempDir()
+	ctl := applied(t, cfg)
 	var out bytes.Buffer
 	code := cmdRun([]string{"software-engineer", "crm", "--input", "tool:whoami", "--token", subject,
-		"--config", cfg, "--log-dir", logs}, &out, io.Discard)
+		"--config", cfg, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("run: %d\n%s", code, out.String())
 	}
