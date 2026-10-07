@@ -13,6 +13,9 @@ agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--addr-file <path
                [--log-level debug|info|warn|error] [--log-format text|json]
 ```
 
+`--config` is accepted for compatibility and read by nothing: runs execute the
+installed configuration beside `--control-log`.
+
 `AGENTHOF_OIDC_ISSUER` is required (and `AGENTHOF_OIDC_CLIENT_ID`,
 default `agenthof`; optionally `AGENTHOF_OIDC_AUDIENCE`). There is no
 `--as` over the network: every call is authenticated with a real token.
@@ -41,9 +44,9 @@ All bodies are JSON except `/audit`, which is plain text.
 
 | Method and path | What it does |
 |---|---|
-| `POST /v1/runs` `{"role","workflow","input"}` | Starts a run. Answers `202` `{run_id, status:"running"}` with a `Location` header, or a **recorded refusal**: `403` `{run_id, status:"refused", reason}` when the role, workflow, ownership or groups say no (the same reasons `run` prints), `422` when the config directory does not validate. A refusal is a run: it has an id and a ledger. A body missing a field is `400` and a body over 1 MiB is `413`, neither of them a run. `429` with `Retry-After` when `--max-concurrent-runs` are in flight; `503` while shutting down. |
+| `POST /v1/runs` `{"role","workflow","input"}` | Starts a run. Answers `202` `{run_id, status:"running"}` with a `Location` header, or a **recorded refusal**: `403` `{run_id, status:"refused", reason}` when the role, workflow, ownership or groups say no (the same reasons `run` prints), `422` when nothing is installed under the control root (`reason: no configuration installed`) or the installed configuration does not validate. A refusal is a run: it has an id and a ledger. A body missing a field is `400` and a body over 1 MiB is `413`, neither of them a run. `429` with `Retry-After` when `--max-concurrent-runs` are in flight; `503` while shutting down. |
 | `GET /v1/runs/{id}` | `{run_id, status, reason, started, finished, output_sha, output_preview}`. `status` is `running`, `succeeded`, `failed`, `refused`, `cancelled`, or `incomplete` (a ledger with no final event — the process ended before the run did). `reason` is the recorded reason for a refused, failed or cancelled run. Runs this process did not start are read from their ledger on disk. |
-| `GET /v1/runs/{id}/events` | The run's ledger: `{events, head, integrity, broken_line}`. `integrity` is `verified`, `torn`, `broken` (with the 1-based `broken_line`), or `in_flight` — a record caught mid-write on a run still running here, which the next read will see whole. The verified prefix is always returned. |
+| `GET /v1/runs/{id}/events` | The run's ledger: `{events, head, integrity, broken_line}`. `integrity` is `verified`, `torn`, `broken` (with the 1-based `broken_line`), or `in_flight` — a record caught mid-write on a run that is still running here, which the next read will see whole. The verified prefix is always returned. |
 | `GET /v1/runs/{id}/audit` | Exactly what `agenthof audit <id>` prints, rendered by the server — including the line that names the `apply` that put the run's config in place, which needs the control ledger the server has. The verdict also travels in the `Agenthof-Integrity` header so `audit --server` can exit as the local command does. |
 | `GET /v1/runs` | `{runs: [{run_id, status}]}` — hosted runs and every run log on disk. |
 | `GET /v1/investigate?since&until&invoker&agent&outcome&run&config_hash` | The `investigate/1` document over both ledgers; `since`/`until` are RFC3339. |
@@ -106,8 +109,12 @@ mid-step; its ledger then has no final event and reads back as
 
 ## Honest limits
 
-- The config directory is read per run; `apply` validates it but does
-  not install it, so a served run executes whatever the directory holds.
+- The installed configuration is read per run: an `apply` or kill-switch
+  flip takes effect on the next run, with no restart; with nothing installed
+  every run is refused (422) until an `apply` lands — `serve` starts
+  regardless. The shutdown deadline's default is read once at startup, so a
+  server started with nothing installed keeps the default step timeout as its
+  drain deadline after a later apply; `--shutdown-timeout` sets it explicitly.
 - The invoker's token is also the subject token for on-behalf-of tool
   calls; a run longer than the token's lifetime can fail such a call
   mid-run. There is no refresh.

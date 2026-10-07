@@ -125,8 +125,12 @@ questions, in order:
 4. Do the role's `allowed_groups` admit the invoker — either the public
    marker `"*"`, or one of the invoker's actual groups?
 
-The config must also be valid — `apply`-style validation runs first, and
-invalid config is itself a refusal. Any "no" produces a single **`run_refused`**
+The config must also be valid — `apply`-style validation runs first — and it is
+the **installed** configuration that is validated and executed: the run resolves
+the snapshot beside its control ledger (`--control-log`), never the `--config`
+directory, and stamps that snapshot's hash on `workflow_started`; with nothing
+installed the run is refused, recorded, and told which `apply` to run. Invalid
+config is itself a refusal. Any "no" produces a single **`run_refused`**
 event and the run stops. Refusals are audit events, not silent exits: a denial
 is as visible in the ledger as a success.
 
@@ -428,7 +432,8 @@ step started/succeeded/failed, any bounces, and how the run finished. That is
 the full loop — *who asked → what ran → what it touched → whether the record can
 be trusted* — with no cross-referencing required. When the run's
 `workflow_started` carries a config hash, `audit <run-id>` also prints one
-more line naming the control-plane `apply` that put that config in place (or
+more line naming the control-plane install — the `apply` or kill-switch flip —
+that put that config in place (or
 saying plainly that none is on record, or that the control ledger isn't
 available right now) — see
 [`reference/config.md`](reference/config.md#control-plane-cli) for the exact

@@ -52,7 +52,11 @@ Optional, free text. Not checked by `apply`.
 Optional bool. Per the comment on `AgentDef.Enabled`, `enabled: null` (i.e.
 the key is omitted, or set to `null`) means **enabled** — `nil` means `true`.
 A workflow step whose agent resolves to a disabled agent fails `apply` with
-`disabled-agent-ref`.
+`disabled-agent-ref`; a kill-switch `disable` installs that state anyway (it is
+the one way a disabled, referenced agent is ever installed), after which every
+run on that configuration is refused `configuration invalid` until the agent is
+re-enabled or the directory re-applied — today the whole configuration, not
+only the workflows that reference it.
 
 ### `model`
 
@@ -859,17 +863,24 @@ The **installed-configuration store** lives beside it: `<dir>/installed/`
 (default `.agenthof/installed/`), holding one immutable snapshot directory per
 applied configuration, named by its `config_hash`, and a one-line pointer file
 `current` (`sha256:<hex>`) naming the installed one. `apply` writes it; the
-control commands read it to decide who may act (see `--config` below);
-`audit control` and `audit verify control` report whether it matches the last
-recorded apply. Snapshots are never pruned by any command today; removing
+control commands read it to decide who may act (see `--config` below); `run`
+reads the installed configuration from `installed/` beside it — this is the
+only way `run` finds what to execute; `audit control` and `audit verify
+control` report whether it matches the last recorded install (an `apply` or a
+kill-switch flip). Snapshots are never pruned by any command today; removing
 `current` makes the next `apply` a bootstrap — permitted for any identity and
 recorded as such.
 
 ### `--config`
 
-`apply` validates and installs it; `registry enable|disable` mutates it (the
-kill switch rewrites the agent's file there) and looks the agent up in it;
-`audit repair control` takes it too (default `./config`). For **authorization**
+`apply` validates and installs it. `run` accepts it but executes the installed
+configuration; the value appears only in the hint `run` prints when nothing is
+installed. `registry enable|disable` uses it to look up and flip the agent only
+while nothing is installed (afterwards the installed snapshot is flipped and
+re-installed; the directory is untouched). `serve` accepts it for compatibility
+and reads it for nothing. `registry list` still builds and lists `--config` —
+it shows the directory, not what is installed. `audit repair control` takes it
+too (default `./config`). For **authorization**
 none of the three reads it once a configuration is installed: the roles that
 decide who may `apply`, `enable`, `disable`, or `repair` are the installed
 snapshot's (`--control-log`'s `installed/current`), read without validation,
@@ -988,14 +999,20 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
-| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed but the config hash or the append that would record it then failed — printed as `state changed; event NOT recorded`, the one case where the registry changed with no event to show for it; or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded apply) |
+| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install) |
 | `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set |
+
+`agenthof run` (the installed-configuration refusals; the engine documents the rest):
+
+| Exit | Meaning |
+|---|---|
+| `1` | A recorded refusal: `no configuration installed` (nothing is installed under `--control-log`'s root; the hint names the `apply` to run), or `configuration invalid: …` (the installed configuration fails validation — or the store itself is damaged: a malformed pointer, a missing snapshot — the label is generic, the text names the cause), or the registry gate's own reasons |
 
 `agenthof audit control`:
 
 | Exit | Meaning |
 |---|---|
-| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code — and, when something is installed, a trailing `installed config:` line saying whether the pointer matches the last recorded successful apply (informational here; see `verify control`) |
+| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code — and, when something is installed, a trailing `installed config:` line saying whether the pointer matches the last recorded install — the last successful `apply` or kill-switch flip (informational here; see `verify control`) |
 | `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain — a torn or broken chain still renders whatever valid prefix was recovered, with the failure named in the trailing integrity line |
 | `2` | Usage error |
 
@@ -1006,7 +1023,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain |
 | `3` | The chain is tainted — a `repair` event has ever been appended to it (checked, and reported, before `--expect-head` is) |
 | `4` | `--expect-head` was given and does not match the verified head |
-| `5` | The installed pointer (`installed/current` beside the log) does not name the last recorded successful apply — an install whose event was never appended, or whose record was lost; checked last, after `3` and `4` |
+| `5` | The installed pointer (`installed/current` beside the log) does not name the last recorded install (the last successful `apply` or kill-switch flip) — an install whose event was never appended or whose record was lost, or a damaged store (a malformed pointer, or a snapshot that is gone); checked last, after `3` and `4` |
 | `0` | None of the above — the chain is clean, `--expect-head` (if given) matched, and the installed pointer (if any) matches |
 | `2` | Usage error |
 
@@ -1099,17 +1116,19 @@ Field notes:
 
 `agenthof audit <run-id>` prints a config-join line right after the run's own
 timeline, for a run whose `workflow_started` event carries a `config_hash`:
-it names the control-plane `apply` that put that exact config in place,
-drawn from `--control-log` (default `.agenthof/control.jsonl`). Four forms,
-verbatim:
+it names the install — the `apply` or kill-switch flip — that put that exact
+config in place, drawn from `--control-log` (default
+`.agenthof/control.jsonl`). Five forms, verbatim:
 
-- A matching, successful `apply` at or before the run started:
+- A matching install at or before the run started — a successful `apply`:
   `config sha256:<hash> — applied by <subject> (<method>) at <RFC3339 time>`
-- The hash instead matches a later `enable`/`disable` rather than any
-  `apply`: `config sha256:<hash> — no successful apply on record (matches a
-  later enable/disable, not an apply)`
-- No control event at all matches the hash:
-  `config sha256:<hash> — no successful apply on record`
+- …or a successful kill-switch flip against an installed snapshot:
+  `config sha256:<hash> — installed by <subject> (<method>) at <RFC3339 time> (kill switch: <enabled|disabled> agent <name>)`
+- The hash matches only a later install — the install→record gap re-installed
+  later, or clock skew — none at or before the run's start:
+  `config sha256:<hash> — no install on record at the run's start (matches a later apply or kill-switch flip)`
+- No install on record matches the hash at all:
+  `config sha256:<hash> — no install on record`
 - The control log is missing, torn, broken, or otherwise unreadable:
   `config sha256:<hash> — control ledger unavailable`
 

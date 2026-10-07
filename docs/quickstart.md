@@ -57,12 +57,17 @@ and [`docs/demo.md`](demo.md) for the AUDIT and GOVERNANCE walkthroughs.
 Try the kill switch:
 
     ./agenthof registry disable coder --as you@example.com --groups platform-eng --config examples/config
-    ./agenthof apply --as you@example.com --groups platform-eng --config examples/config   # fails, naming every dependent workflow
+    ./agenthof run software-engineer fix-bug --input "fix the login bug" --as you@example.com --config examples/config   # refused: fix-bug depends on coder, which is disabled
 
-The disable is itself recorded in the control ledger, attributed to `--as`.
-(`disable`/`enable` also rewrites `coder.yaml`'s YAML formatting, so `git status`
-will show `examples/config` changed afterward — reset with `git checkout
-examples/config`.) See who flipped the kill switch and when:
+The disable is recorded in the control ledger, attributed to `--as`, and it
+changes the **installed** configuration, not `examples/config` on disk — so
+`git status` stays clean. `run` executes the installed configuration, which is
+why the run is refused (`configuration invalid`, naming every workflow the
+disabled agent breaks — today that takes the whole configuration out of
+service until it is re-enabled). To put it back, either re-enable, or apply
+the directory again: `apply` re-asserts what the directory declares — agent
+enabled — and is recorded as the apply it is. See who flipped the kill switch
+and when:
 
     ./agenthof audit control
 
