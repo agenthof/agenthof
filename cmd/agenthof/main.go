@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/audit"
 	"github.com/agenthof/agenthof/internal/authz"
@@ -38,16 +39,16 @@ Usage:
   agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
-  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json]
+  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
   agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--addr-file <path>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--max-concurrent-runs <n>] [--shutdown-timeout <dur>] [--log-level ...] [--log-format ...]  (AGENTHOF_OIDC_ISSUER required)
-  agenthof audit <run-id> [--log-dir <dir>]
+  agenthof audit <run-id> [--log-dir <dir>] [--server <url>] [--token <jwt>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
   agenthof gateway provision --config <dir> [--admin-base <url>]  (provisions a per-role model key for the reserved model gateway; no run consumes it)
-  agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>]
+  agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>] [--server <url>] [--token <jwt>]
 `
 
 func main() {
@@ -664,6 +665,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
 	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	server := fs.String("server", "", "run over an agenthof serve API at this base URL (env AGENTHOF_SERVER); needs --token/AGENTHOF_TOKEN")
 	cfgDir := fs.String("config", "./config", "config directory")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
@@ -693,6 +695,15 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	// on stdout below is the Info-level signal already.
 	logger := obs.New(stderr, level, format)
 	logger.Debug("run invoked", "role", role, "workflow", workflow)
+
+	if base := serverBase(*server); base != "" {
+		tok := serverToken(*token)
+		if tok == "" {
+			_, _ = fmt.Fprintln(out, "run: --server needs --token or AGENTHOF_TOKEN")
+			return 2
+		}
+		return runViaServer(base, tok, role, workflow, *input, out)
+	}
 
 	r := resolveInvokerForRun(*as, *groups, *token)
 	inv, refused, usageErr, verifyErr := r.inv, r.refused, r.usageErr, r.verifyErr
@@ -864,9 +875,14 @@ func cmdAudit(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	server := fs.String("server", "", "read the audit from an agenthof serve API at this base URL (env AGENTHOF_SERVER)")
+	token := fs.String("token", "", "bearer for --server (env AGENTHOF_TOKEN)")
 	fs.SetOutput(out)
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
+	}
+	if base := serverBase(*server); base != "" {
+		return auditViaServer(base, serverToken(*token), runID, out)
 	}
 	events, head, err := engine.ReadLog(*logDir, runID)
 	if err != nil {
@@ -1287,6 +1303,8 @@ func cmdInvestigate(args []string, out io.Writer) int {
 	jsonOut := fs.Bool("json", false, "render as the investigate/1 JSON contract instead of text")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	server := fs.String("server", "", "investigate against an agenthof serve API at this base URL (env AGENTHOF_SERVER)")
+	token := fs.String("token", "", "bearer for --server (env AGENTHOF_TOKEN)")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1314,6 +1332,17 @@ func cmdInvestigate(args []string, out io.Writer) int {
 			return 2
 		}
 		f.Until = &t
+	}
+
+	if base := serverBase(*server); base != "" {
+		q := apiclient.InvestigateQuery{Invoker: f.Invoker, Agent: f.Agent, Outcome: f.Outcome, Run: f.Run, ConfigHash: f.ConfigHash}
+		if f.Since != nil {
+			q.Since = f.Since.Format(time.RFC3339)
+		}
+		if f.Until != nil {
+			q.Until = f.Until.Format(time.RFC3339)
+		}
+		return investigateViaServer(base, serverToken(*token), q, *jsonOut, out)
 	}
 
 	res, err := investigate.Timeline(*logDir, *controlLog, f)
