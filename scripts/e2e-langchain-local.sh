@@ -128,11 +128,11 @@ go build -o "$WORK/agenthof" ./cmd/agenthof
 # ignores its value; without one the route does not resolve and the door 502s.
 export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE"
 
-"$WORK/agenthof" apply --config "$WORK/config" --as ci --groups lc-users
+"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups lc-users
 
 # 1. The governed call succeeds and the artifact is the nonce'd reply.
 OUT="$("$WORK/agenthof" run lc-operator lc-smoke --input "say hi" \
-	--as ci --groups lc-users --config "$WORK/config" \
+	--as ci --groups lc-users --config "$WORK/config" --control-log "$WORK/control.jsonl" \
 	--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts")"
 echo "$OUT"
 echo "$OUT" | grep -q "finished: succeeded" || fail "run did not succeed"
@@ -162,7 +162,7 @@ EOF
 # 3. A wrong logical model is refused by the real door (403) and never
 #    reaches the provider; the agent reports a clean failed step.
 OUT2="$("$WORK/agenthof" run lc-operator lc-bad-smoke --input "say hi" \
-	--as ci --groups lc-users --config "$WORK/config" \
+	--as ci --groups lc-users --config "$WORK/config" --control-log "$WORK/control.jsonl" \
 	--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" || true)"
 echo "$OUT2"
 echo "$OUT2" | grep -q "finished: failed" || fail "wrong-model run did not fail"
