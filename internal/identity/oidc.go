@@ -35,7 +35,8 @@ func (o OIDC) httpClient() *http.Client {
 
 // Authenticate verifies rawToken as an OIDC token issued by o.IssuerURL for
 // o.ClientID — or, when o.Audience is set, for either o.ClientID or
-// o.Audience — returning the resulting Invoker.
+// o.Audience — returning the resulting Invoker. Discovery runs on every
+// call; a long-lived process uses CachedOIDC instead.
 func (o OIDC) Authenticate(ctx context.Context, rawToken string) (Invoker, error) {
 	clientCtx := oidc.ClientContext(ctx, o.httpClient())
 
@@ -43,8 +44,15 @@ func (o OIDC) Authenticate(ctx context.Context, rawToken string) (Invoker, error
 	if err != nil {
 		return Invoker{}, fmt.Errorf("oidc discovery: %w", err)
 	}
+	return o.verify(clientCtx, provider, rawToken)
+}
 
+// verify checks rawToken against provider's keys and o's audience rule and
+// builds the Invoker. It is the half of Authenticate that is per-token;
+// the provider is the per-issuer half.
+func (o OIDC) verify(clientCtx context.Context, provider *oidc.Provider, rawToken string) (Invoker, error) {
 	var idToken *oidc.IDToken
+	var err error
 	if o.Audience == "" {
 		idToken, err = provider.Verifier(&oidc.Config{ClientID: o.ClientID}).Verify(clientCtx, rawToken)
 		if err != nil {
