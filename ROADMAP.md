@@ -115,6 +115,15 @@ The governed core is real and runnable today:
   removes them in order when the child is over. With no supervisor a child
   is refused, never run beside its parent. Agenthof itself still runs
   nothing.
+- **Served runs and a read API** — `agenthof serve` hosts concurrent
+  governed runs behind an HTTP API where every call carries the human's
+  own OIDC token: start a run, poll it, read its ledger with an honest
+  integrity verdict, fetch the same audit text the CLI prints, and run
+  `investigate` across both ledgers. A served run records where the
+  request came from (`origin`) as provenance beside the verified
+  identity. `run`, `audit` and `investigate` take `--server`, so the CLI
+  is a client of the same API. Config still changes only through
+  `apply`, locally.
 
 ## Next
 
@@ -124,6 +133,9 @@ The governed core is real and runnable today:
   model providers, sit with this.
 - **More harness adapters** — first-class support for registering and governing
   agents built on other runtimes and frameworks, not just an HTTP endpoint.
+- **Config changes over the API** — `apply` through `serve`, with a
+  compare-and-swap on the config hash so two writers cannot race, and
+  the control-plane authorization applied at the API.
 
 ## Later
 
