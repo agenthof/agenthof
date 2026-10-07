@@ -250,6 +250,19 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		// goes to the ledger only — it may quote an adapter response.
 		logger.Warn("step failed", "step", step.Name, "agent", agent.Name)
 		emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: res.Reason, Execution: execTier})
+		// A step that failed because the RUN was cancelled is not a step to
+		// bounce from: the run is over, and its honest outcome is cancelled,
+		// not failed-with-a-transport-error. The discriminator is the run's
+		// own context, never stepCtx — a StepTimeout expires stepCtx while
+		// the run is live, and that stays a genuine fail-back below.
+		if ctx.Err() != nil {
+			logger.Warn("run cancelled", "class", "context", "step", step.Name)
+			emit(Event{Type: "workflow_finished", Status: "cancelled", Reason: "run cancelled"})
+			if logErr != nil {
+				return ledgerFailed()
+			}
+			return Result{RunID: runID, Status: "cancelled"}, nil
+		}
 		target := step.OnFailure
 		if target == "" && i > 0 {
 			target = wf.Steps[i-1].Name
