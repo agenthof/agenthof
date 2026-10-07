@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agenthof/agenthof/internal/config"
 )
 
 // TestAuditRepairControlTornTailSucceeds covers the happy path (spec
@@ -365,5 +367,72 @@ func TestAuditRepairControlDefaultConfigDir(t *testing.T) {
 	var out bytes.Buffer
 	if code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--as", "ops@example.com", "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("repair with the default ./config: %d\n%s", code, out.String())
+	}
+}
+
+// tearTail appends an incomplete record to an existing control log.
+func tearTail(t *testing.T, controlPath string) {
+	t.Helper()
+	f, err := os.OpenFile(controlPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"v":"control/1","seq":2,"prev":""`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAuditRepairControlAuthorizesAgainstInstalled: with a configuration
+// installed, repair authorizes against ITS roles — an unreadable --config no
+// longer matters (platform-eng repairs), and a caller the installed config
+// grants nothing is refused even if the directory now says otherwise.
+func TestAuditRepairControlAuthorizesAgainstInstalled(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", controlPath, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("bootstrap: %d\n%s", code, out.String())
+	}
+	tearTail(t, controlPath)
+	if err := os.WriteFile(filepath.Join(root, "roles", "ops.yaml"), []byte("name: platform-admin\nallowed_groups: [finance]\ncontrol: [apply, enable, disable, repair]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", root, "--as", "mallory@example.com", "--groups", "finance"}, &out); code != 1 ||
+		!strings.Contains(out.String(), "audit repair control: not authorized: no role grants repair to the invoker") {
+		t.Fatalf("finance must be refused against the installed roles: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", "/nonexistent-agenthof-config-root", "--as", "ops@example.com", "--groups", "platform-eng"}, &out); code != 0 ||
+		!strings.Contains(out.String(), "control ledger tainted") {
+		t.Fatalf("platform-eng must repair from the installed roles regardless of --config: %d\n%s", code, out.String())
+	}
+}
+
+// TestAuditRepairControlMalformedPointerFailsClosed: a damaged installed
+// pointer means nobody can be authorized — printed, exit 1, ledger untouched.
+func TestAuditRepairControlMalformedPointerFailsClosed(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	controlPath, torn := tornLedger(t)
+	store := installedStore(controlPath)
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, config.InstalledPointer), []byte("garbage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := cmdAuditRepairControl([]string{"control", "--control-log", controlPath, "--config", root, "--as", "ops@example.com", "--groups", "platform-eng"}, &out); code != 1 ||
+		!strings.Contains(out.String(), "cannot read the installed configuration under "+store+"; refusing to repair") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	after, _ := os.ReadFile(controlPath)
+	if string(after) != string(torn) {
+		t.Fatalf("ledger must be untouched; got:\n%s", after)
 	}
 }

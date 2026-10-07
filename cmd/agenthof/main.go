@@ -555,8 +555,8 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	// outcome "error", reason io_error — rather than a silent, unlogged
 	// exit; it is still never conflated with "agent not found", which is
 	// reserved for a config that loaded cleanly and genuinely lacks the
-	// name. LoadDir — not Build — also supplies the roles the invoker is
-	// authorized against below.
+	// name. LoadDir — not Build — also supplies the fallback roles the
+	// invoker is authorized against below when nothing is installed.
 	cfg, loadErrs := config.LoadDir(cfgDir)
 	if len(loadErrs) > 0 {
 		for _, e := range loadErrs {
@@ -579,12 +579,42 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		return 1
 	}
 
-	// Authorize against the config dir's roles as LoadDir read them — never
-	// registry.Build: with the target agent disabled, Build rejects the
-	// config (disabled-agent-ref), which would make a disabled agent
-	// un-re-enableable. Authorization runs before the agent lookup so an
-	// unauthorized caller learns one refusal and cannot probe agent names.
-	if !authz.ControlAllows(cfg.Roles, inv, action) {
+	// Authorize against the INSTALLED configuration's roles when one is
+	// installed under this control root — what a previous apply approved —
+	// else, nothing installed yet, against the config dir's roles as LoadDir
+	// read them: the bootstrap-era fallback that keeps a fresh system from
+	// deadlocking. Never registry.Build: with the target agent disabled,
+	// Build rejects the config (disabled-agent-ref), which would make a
+	// disabled agent un-re-enableable. --config stays what the kill switch
+	// mutates and where the agent is looked up, whichever roles decided.
+	// Authorization runs before the agent lookup so an unauthorized caller
+	// learns one refusal and cannot probe agent names.
+	roles := cfg.Roles
+	installedRoles, _, installed, instErr := config.InstalledRoles(installedStore(controlLog))
+	if instErr != nil {
+		// A pointer present but unusable: nobody can be authorized — fail
+		// closed, recorded, nothing flipped.
+		_, _ = fmt.Fprintln(out, instErr)
+		head, appendErr := control.Append(controlLog, control.Event{
+			Action:     action,
+			Agent:      target,
+			Outcome:    "error",
+			Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)},
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return 1
+	}
+	if installed {
+		roles = installedRoles
+	}
+	if !authz.ControlAllows(roles, inv, action) {
 		reason := control.NotAuthorized(action)
 		_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, reason.Message)
 		head, appendErr := control.Append(controlLog, control.Event{
@@ -1129,8 +1159,9 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 // cmdAuditRepairControl implements `audit repair control [--control-log
 // <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]`
 // (spec §3.6): it resolves the repairing operator's identity exactly as
-// apply/registry do and authorizes that invoker against the config's
-// roles (authz.ControlAllows, "repair"); a refusal — like an
+// apply/registry do and authorizes that invoker against the installed
+// configuration's roles — or, when nothing is installed yet, the --config
+// dir's — (authz.ControlAllows, "repair"); a refusal — like an
 // authentication refusal and like roles that cannot be read — is printed
 // and exits nonzero WITHOUT writing any control event, because the ledger
 // here may be exactly the torn file being repaired. Only an authorized
@@ -1153,7 +1184,7 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	}
 	fs := flag.NewFlagSet("audit repair control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
-	cfgDir := fs.String("config", "./config", "config directory; its roles decide who may repair")
+	cfgDir := fs.String("config", "./config", "config directory; its roles decide who may repair only until a configuration is installed")
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
 	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
@@ -1177,22 +1208,34 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 		return 1
 	}
 
-	// Authorize against the config dir's roles, read without validation
-	// (the ledger may be the torn one, so the config is the only input).
-	// Nothing in this stretch appends: a refusal — or a config whose roles
-	// cannot be read — is printed and exits nonzero, fail-closed, because
-	// the one ledger to record it in is the damaged one. The check runs
-	// before the ledger is even looked at, so a refused caller learns
-	// nothing about it.
-	cfg, loadErrs := config.LoadDir(*cfgDir)
-	if len(loadErrs) > 0 {
-		for _, e := range loadErrs {
-			_, _ = fmt.Fprintln(out, e)
-		}
-		_, _ = fmt.Fprintf(out, "audit repair control: cannot read the configuration at %s; refusing to repair\n", *cfgDir)
+	// Authorize against the installed configuration's roles when one is
+	// installed under this control root; else fall back to --config's roles,
+	// read without validation (the ledger may be the torn one, so the config
+	// is the only other input). Nothing in this stretch appends: a refusal —
+	// or roles that cannot be read, installed or not — is printed and exits
+	// nonzero, fail-closed, because the one ledger to record it in is the
+	// damaged one. The check runs before the ledger is even looked at, so a
+	// refused caller learns nothing about it.
+	store := installedStore(*controlLog)
+	roles, _, installed, instErr := config.InstalledRoles(store)
+	if instErr != nil {
+		_, _ = fmt.Fprintln(out, instErr)
+		_, _ = fmt.Fprintf(out, "audit repair control: cannot read the installed configuration under %s; refusing to repair (remove %s to re-bootstrap)\n",
+			store, filepath.Join(store, config.InstalledPointer))
 		return 1
 	}
-	if !authz.ControlAllows(cfg.Roles, inv, "repair") {
+	if !installed {
+		cfg, loadErrs := config.LoadDir(*cfgDir)
+		if len(loadErrs) > 0 {
+			for _, e := range loadErrs {
+				_, _ = fmt.Fprintln(out, e)
+			}
+			_, _ = fmt.Fprintf(out, "audit repair control: cannot read the configuration at %s; refusing to repair\n", *cfgDir)
+			return 1
+		}
+		roles = cfg.Roles
+	}
+	if !authz.ControlAllows(roles, inv, "repair") {
 		_, _ = fmt.Fprintf(out, "audit repair control: %s\n", control.NotAuthorized("repair").Message)
 		return 1
 	}
