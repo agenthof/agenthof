@@ -801,7 +801,7 @@ func TestRegistryFlipInstalledHashFailureLeavesPointer(t *testing.T) {
 	}
 }
 
-// TestRegistryFlipInstalledUnwritableStoreRecordsIOError (Review Focus 2):
+// TestRegistryFlipInstalledUnwritableStoreRecordsIOError:
 // a store the process cannot write to stages nothing, changes nothing, and
 // records error/io_error.
 func TestRegistryFlipInstalledUnwritableStoreRecordsIOError(t *testing.T) {

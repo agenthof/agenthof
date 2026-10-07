@@ -123,7 +123,7 @@ func TestInstalledPointerLine(t *testing.T) {
 			"installed config: " + x + " — does NOT match the last recorded install (" + a + ", apply)" + mismatchTail, true},
 		{"idempotent flip", []fixtureEvent{apply(a), disable(d), disable(d)}, d + "\n",
 			"installed config: " + d + " — matches the last recorded install (disable agent coder)\n", false},
-		{"pre-R1.4 flip after an install (upgrade wrinkle: exit 5 until the next apply)", []fixtureEvent{apply(a), disable(x)}, a + "\n",
+		{"flip recorded before flips installed snapshots (upgrade wrinkle: exit 5 until the next apply)", []fixtureEvent{apply(a), disable(x)}, a + "\n",
 			"installed config: " + a + " — does NOT match the last recorded install (" + x + ", disable agent coder)" + mismatchTail, true},
 		{"no events", nil, a + "\n",
 			"installed config: " + a + " — no install on record" + mismatchTail, true},

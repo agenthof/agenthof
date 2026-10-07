@@ -168,7 +168,7 @@ func TestAuditVerifyControlTaintedExitsThree(t *testing.T) {
 }
 
 // TestAuditVerifyControlUnrecordedInstallExitsFive: the installed pointer
-// not matching the last recorded apply is its own, lowest-precedence exit
+// not matching the last recorded install is its own, lowest-precedence exit
 // code, printed after the head line.
 func TestAuditVerifyControlUnrecordedInstallExitsFive(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
