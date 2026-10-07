@@ -178,6 +178,12 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request, inv identity.I
 			s.refuse(w, inv, req, origin, err.Error(), "configuration invalid", http.StatusUnprocessableEntity)
 			return
 		}
+		if errors.Is(err, ErrNoConfigInstalled) {
+			// The configuration is the problem, not the caller: 422 like
+			// "configuration invalid", after auth and the slot reservation.
+			s.refuse(w, inv, req, origin, ErrNoConfigInstalled.Error(), ErrNoConfigInstalled.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		s.logger.Error("run preparation failed", "err", err)
 		http.Error(w, "run could not be prepared", http.StatusInternalServerError)
 		return
