@@ -2,84 +2,26 @@ package identity
 
 import (
 	"context"
-	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agenthof/agenthof/internal/identity/oidctest"
 )
 
-// testOIDCServer spins up an httptest server that serves OIDC discovery and
-// JWKS documents backed by the given RSA key, and returns the server plus a
-// helper to mint hand-built RS256 JWTs signed by that key.
+// testOIDCServer and mintToken delegate to the exported oidctest package
+// so the other test suites (cmd/agenthof, internal/serve) mint the same
+// tokens; the names stay so the call sites below read as before.
 func testOIDCServer(t *testing.T, key *rsa.PrivateKey) *httptest.Server {
-	t.Helper()
-
-	mux := http.NewServeMux()
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-
-	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                                srv.URL,
-			"jwks_uri":                              srv.URL + "/keys",
-			"authorization_endpoint":                srv.URL + "/auth",
-			"token_endpoint":                        srv.URL + "/token",
-			"response_types_supported":              []string{"id_token"},
-			"subject_types_supported":               []string{"public"},
-			"id_token_signing_alg_values_supported": []string{"RS256"},
-		})
-	})
-
-	mux.HandleFunc("/keys", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		n := base64.RawURLEncoding.EncodeToString(key.N.Bytes())
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"keys": []map[string]any{
-				{
-					"kty": "RSA",
-					"kid": "test",
-					"alg": "RS256",
-					"use": "sig",
-					"n":   n,
-					"e":   "AQAB",
-				},
-			},
-		})
-	})
-
-	return srv
+	return oidctest.NewServer(t, key)
 }
 
-// mintToken hand-builds an RS256-signed JWT from the given claims.
 func mintToken(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {
-	t.Helper()
-
-	header := map[string]any{"alg": "RS256", "kid": "test", "typ": "JWT"}
-	headerJSON, err := json.Marshal(header)
-	if err != nil {
-		t.Fatalf("marshal header: %v", err)
-	}
-	claimsJSON, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatalf("marshal claims: %v", err)
-	}
-
-	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
-	digest := sha256.Sum256([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
-	if err != nil {
-		t.Fatalf("sign: %v", err)
-	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
+	return oidctest.MintToken(t, key, claims)
 }
 
 func TestOIDCAuthenticate(t *testing.T) {

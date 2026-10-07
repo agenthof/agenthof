@@ -3,11 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +25,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity/oidctest"
 )
 
 func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
@@ -866,71 +864,15 @@ func TestGatewayProvisionEndToEnd(t *testing.T) {
 
 // --- OIDC wiring, ledgered validation refusals, and mux dispatch ---
 
-// cmdTestOIDCServer spins up an httptest server serving OIDC discovery and
-// JWKS documents backed by the given RSA key. Mirrors the recipe in
-// internal/identity/oidc_test.go (kept separate so cmd/agenthof does not
-// need to export test helpers from internal/identity).
+// cmdTestOIDCServer and cmdMintToken delegate to the exported oidctest
+// package — one hermetic issuer for every test suite. The names stay so
+// the call sites read as before.
 func cmdTestOIDCServer(t *testing.T, key *rsa.PrivateKey) *httptest.Server {
-	t.Helper()
-
-	mux := http.NewServeMux()
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-
-	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                                srv.URL,
-			"jwks_uri":                              srv.URL + "/keys",
-			"authorization_endpoint":                srv.URL + "/auth",
-			"token_endpoint":                        srv.URL + "/token",
-			"response_types_supported":              []string{"id_token"},
-			"subject_types_supported":               []string{"public"},
-			"id_token_signing_alg_values_supported": []string{"RS256"},
-		})
-	})
-
-	mux.HandleFunc("/keys", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		n := base64.RawURLEncoding.EncodeToString(key.N.Bytes())
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"keys": []map[string]any{
-				{
-					"kty": "RSA",
-					"kid": "test",
-					"alg": "RS256",
-					"use": "sig",
-					"n":   n,
-					"e":   "AQAB",
-				},
-			},
-		})
-	})
-
-	return srv
+	return oidctest.NewServer(t, key)
 }
 
-// cmdMintToken hand-builds an RS256-signed JWT from the given claims.
 func cmdMintToken(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {
-	t.Helper()
-
-	header := map[string]any{"alg": "RS256", "kid": "test", "typ": "JWT"}
-	headerJSON, err := json.Marshal(header)
-	if err != nil {
-		t.Fatalf("marshal header: %v", err)
-	}
-	claimsJSON, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatalf("marshal claims: %v", err)
-	}
-
-	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
-	digest := sha256.Sum256([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
-	if err != nil {
-		t.Fatalf("sign: %v", err)
-	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
+	return oidctest.MintToken(t, key, claims)
 }
 
 func TestRunTokenRequiresIssuerEnv(t *testing.T) {
