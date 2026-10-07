@@ -142,3 +142,21 @@ func TestIsTainted(t *testing.T) {
 		t.Fatalf("IsTainted = %v, %d; want true, 2", ok, seq)
 	}
 }
+
+// TestControlRenderBootstrapLabel: a bootstrap apply renders distinctly, so a
+// second bootstrap (someone removed the installed pointer) is visible in the
+// audit trail; an ordinary apply keeps its plain label.
+func TestControlRenderBootstrapLabel(t *testing.T) {
+	boot := ledger.Record{Raw: []byte(`{"v":"control/1","seq":1,"time":"2026-10-07T10:01:00Z",` +
+		`"action":"apply","outcome":"success",` +
+		`"invoker":{"subject":"dana@example.com","issuer":"local","method":"asserted"},` +
+		`"witness":{"os_user":"dana","hostname":"host"},"config_hash":"sha256:abc","bootstrap":true,"prev":""}`)}
+	recs := []ledger.Record{boot, rec(2, "apply", "", "success", "dana@example.com", "asserted")}
+	out := control.Render(recs, ledger.Head{Hash: "deadbeef", Count: 2}, nil)
+	if !strings.Contains(out, "seq 1  2026-10-07 10:01:00  config applied (bootstrap) — dana@example.com (asserted)") {
+		t.Fatalf("missing bootstrap label:\n%s", out)
+	}
+	if !strings.Contains(out, "seq 2  2026-09-21 10:02:00  config applied — dana@example.com (asserted)") {
+		t.Fatalf("ordinary apply label changed:\n%s", out)
+	}
+}

@@ -25,6 +25,7 @@ type DecodedEvent struct {
 	AssertedAs  string           `json:"asserted_as,omitempty"`
 	Witness     Witness          `json:"witness"`
 	ConfigHash  string           `json:"config_hash,omitempty"`
+	Bootstrap   bool             `json:"bootstrap,omitempty"`
 	FragmentLen int              `json:"fragment_len,omitempty"`
 	FragmentSHA string           `json:"fragment_sha256,omitempty"`
 }

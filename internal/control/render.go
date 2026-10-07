@@ -38,6 +38,12 @@ func label(rec record) string {
 	case "apply":
 		switch rec.Outcome {
 		case "success":
+			if rec.Bootstrap {
+				// Permitted because nothing was installed — the first apply,
+				// or a re-bootstrap after the installed pointer was removed;
+				// a reader must be able to tell the two kinds apart.
+				return "config applied (bootstrap)"
+			}
 			return "config applied"
 		case "rejected":
 			return "config rejected"
