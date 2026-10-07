@@ -1,0 +1,182 @@
+// Package serve hosts governed runs behind an authenticated HTTP API:
+// every request except GET /healthz carries a bearer verified per call;
+// a run executes in a goroutine under the server's own context (a client
+// hanging up never cancels a run); and the two ledgers are read back over
+// the same API. It is a control surface over the existing doors — no new
+// door, no new containment claim.
+package serve
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"sync"
+
+	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity"
+	"github.com/agenthof/agenthof/internal/obs"
+)
+
+// Authenticator verifies one bearer per call. identity.CachedOIDC is the
+// production implementation.
+type Authenticator interface {
+	Authenticate(ctx context.Context, rawToken string) (identity.Invoker, error)
+}
+
+// RunHost is what serve needs from the process hosting it. Prepare
+// resolves the config for one run — load, validate, hash — exactly as
+// `agenthof run` does, bound to the invoker's verified token for
+// on-behalf-of exchange. It is the one place a later policy (run against
+// the installed config rather than the directory) swaps in. A load or
+// validation failure wraps ErrConfigInvalid; anything else is the host's
+// own failure.
+type RunHost interface {
+	Prepare(inv identity.Invoker, subjectToken string) (Prepared, error)
+}
+
+// Prepared is one run's resolved config and dependencies.
+type Prepared interface {
+	// Admit is the pre-run gate: the host's own checks (an on-behalf-of
+	// workflow needs a verified token) and then engine.Admit. It returns
+	// the reason to record and false on refusal.
+	Admit(role, workflow string, inv identity.Invoker) (reason string, ok bool)
+	// Run executes the run under runID with origin stamped, blocking until
+	// it is over. ctx is the run's context: cancel it to cancel the run.
+	Run(ctx context.Context, runID, role, workflow, input string, inv identity.Invoker, origin *engine.Origin) (engine.Result, error)
+}
+
+// ErrConfigInvalid marks a Prepare failure that is the configuration's:
+// the run is refused (recorded, 422) with "configuration invalid: <first
+// error>", the same text the CLI ledgers.
+var ErrConfigInvalid = errors.New("configuration invalid")
+
+// Config is everything a Server needs. MaxConcurrentRuns is required —
+// there is no unbounded default.
+type Config struct {
+	Auth       Authenticator
+	Host       RunHost
+	LogDir     string
+	ControlLog string
+	// MaxConcurrentRuns caps runs in flight; a POST beyond it answers 429.
+	MaxConcurrentRuns int
+	// ServerHost is the host:port the server answers on, recorded as
+	// Origin.ServerHost on every run it starts.
+	ServerHost string
+	Logger     *slog.Logger
+}
+
+// Server is the API over one log directory and one control ledger.
+type Server struct {
+	cfg    Config
+	logger *slog.Logger
+	// base is the context every run derives from — never a request's.
+	base   context.Context
+	cancel context.CancelFunc
+	runs   *runTable
+	slots  chan struct{}
+	mux    *http.ServeMux
+
+	// lifecycle orders reserve() against Shutdown: a run either starts
+	// before the drain (and is cancelled with the rest) or sees it.
+	lifecycle sync.RWMutex
+	draining  bool
+	wg        sync.WaitGroup
+}
+
+// New validates cfg and builds the server; call Handler to serve it.
+func New(cfg Config) (*Server, error) {
+	if cfg.Auth == nil || cfg.Host == nil {
+		return nil, errors.New("serve: Auth and Host are required")
+	}
+	if cfg.LogDir == "" {
+		return nil, errors.New("serve: LogDir is required")
+	}
+	if cfg.MaxConcurrentRuns <= 0 {
+		return nil, errors.New("serve: MaxConcurrentRuns must be positive; there is no unbounded default")
+	}
+	base, cancel := context.WithCancel(context.Background())
+	s := &Server{
+		cfg: cfg, logger: obs.OrDiscard(cfg.Logger), base: base, cancel: cancel,
+		runs: newRunTable(), slots: make(chan struct{}, cfg.MaxConcurrentRuns), mux: http.NewServeMux(),
+	}
+	s.routes()
+	return s, nil
+}
+
+func (s *Server) routes() {
+	s.mux.HandleFunc("GET /healthz", s.healthz)
+	s.mux.HandleFunc("POST /v1/runs", s.authed(s.startRun))
+	s.mux.HandleFunc("GET /v1/runs", s.authed(s.listRuns))
+	s.mux.HandleFunc("GET /v1/runs/{id}", s.authed(s.getRun))
+	s.mux.HandleFunc("GET /v1/runs/{id}/events", s.authed(s.getEvents))
+	s.mux.HandleFunc("GET /v1/runs/{id}/audit", s.authed(s.getAudit))
+	s.mux.HandleFunc("POST /v1/runs/{id}/cancel", s.authed(s.cancelRun))
+	s.mux.HandleFunc("GET /v1/investigate", s.authed(s.investigate))
+}
+
+// Handler is the server's HTTP handler.
+func (s *Server) Handler() http.Handler { return s.mux }
+
+// healthz is the one unauthenticated route: liveness, and nothing else —
+// no version, no counts, no paths.
+func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, "ok\n")
+}
+
+// reserve takes a run slot and registers the run with the WaitGroup, or
+// says why not: 503 while draining, 429 when every slot is held. The
+// returned release gives both back; it is safe to call once from whichever
+// path ends the run — a failed POST or the finished goroutine.
+func (s *Server) reserve() (release func(), code int) {
+	s.lifecycle.RLock()
+	defer s.lifecycle.RUnlock()
+	if s.draining {
+		return nil, http.StatusServiceUnavailable
+	}
+	select {
+	case s.slots <- struct{}{}:
+	default:
+		return nil, http.StatusTooManyRequests
+	}
+	s.wg.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			<-s.slots
+			s.wg.Done()
+		})
+	}, 0
+}
+
+// Shutdown stops accepting runs (POST /v1/runs answers 503), keeps serving
+// reads, cancels every in-flight run, and waits for them until ctx ends.
+// A deadline shorter than the step timeout can return while a step is
+// still finishing; the caller decides what that is worth.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.lifecycle.Lock()
+	s.draining = true
+	s.lifecycle.Unlock()
+	s.cancel()
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("serve: shutdown deadline passed with runs still in flight: %w", ctx.Err())
+	}
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
