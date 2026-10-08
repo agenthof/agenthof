@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
@@ -107,20 +109,61 @@ func engineRun(t *testing.T, logDir string, exec engine.StepExecutor) func(ctx c
 	}
 }
 
+// fakeConfigHost records every Apply call and answers with result; when
+// block is non-nil, Apply waits on it first (to hold an apply in flight).
+type fakeConfigHost struct {
+	mu     sync.Mutex
+	calls  []fakeApplyCall
+	result apiclient.ApplyResult
+	block  chan struct{}
+}
+
+type fakeApplyCall struct {
+	inv   identity.Invoker
+	files map[string][]byte
+	pre   apiclient.Precondition
+	via   *engine.Origin
+}
+
+func (h *fakeConfigHost) Apply(inv identity.Invoker, files map[string][]byte, pre apiclient.Precondition, via *engine.Origin) apiclient.ApplyResult {
+	h.mu.Lock()
+	h.calls = append(h.calls, fakeApplyCall{inv: inv, files: files, pre: pre, via: via})
+	res := h.result
+	h.mu.Unlock()
+	if h.block != nil {
+		<-h.block
+	}
+	return res
+}
+
+func (h *fakeConfigHost) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.calls)
+}
+
+func (h *fakeConfigHost) last() fakeApplyCall {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.calls[len(h.calls)-1]
+}
+
 type testServer struct {
 	srv    *Server
 	http   *httptest.Server
 	logDir string
 	logs   *bytes.Buffer
 	host   *fakeHost
+	config *fakeConfigHost
 }
 
 func newTestServer(t *testing.T, host *fakeHost, auth Authenticator, maxRuns int) *testServer {
 	t.Helper()
 	logDir := filepath.Join(t.TempDir(), "runs")
 	logs := &bytes.Buffer{}
+	cfgHost := &fakeConfigHost{}
 	srv, err := New(Config{
-		Auth: auth, Host: host, LogDir: logDir, ControlLog: filepath.Join(filepath.Dir(logDir), "control.jsonl"),
+		Auth: auth, Host: host, Config: cfgHost, LogDir: logDir, ControlLog: filepath.Join(filepath.Dir(logDir), "control.jsonl"),
 		MaxConcurrentRuns: maxRuns, ServerHost: "127.0.0.1:0", Logger: obs.New(logs, slog.LevelDebug, obs.FormatText),
 	})
 	if err != nil {
@@ -128,7 +171,7 @@ func newTestServer(t *testing.T, host *fakeHost, auth Authenticator, maxRuns int
 	}
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
-	return &testServer{srv: srv, http: hs, logDir: logDir, logs: logs, host: host}
+	return &testServer{srv: srv, http: hs, logDir: logDir, logs: logs, host: host, config: cfgHost}
 }
 
 // do sends one request with the bearer (empty = no Authorization header)
