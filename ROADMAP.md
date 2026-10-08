@@ -153,11 +153,11 @@ The governed core is real and runnable today:
   model providers, sit with this.
 - **More harness adapters** — first-class support for registering and governing
   agents built on other runtimes and frameworks, not just an HTTP endpoint.
-- **Every control-plane action authorized and recorded** — bring the last
-  operator actions that still bypass it — provisioning a role's model-gateway
-  key, pruning run ledgers — under the same default-deny `control:`
-  authorization, and record each, so no control action is unauthorized or
-  unlogged.
+- **Every control-plane action over the API** — provisioning a role's
+  model-gateway key and pruning run ledgers are authorized and recorded from
+  the command line today; the same two operations over the API, under the same
+  default-deny `control:` authorization, and a structured record of what a
+  prune removed, are still to come.
 - **Signed, verifiable configuration snapshots** — the installed-config
   snapshot gains an operator signature and a tamper-evident pointer, is
   verified against that signature when a run reads it (today the bytes are
