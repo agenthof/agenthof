@@ -61,6 +61,55 @@ func TestConfigHostBootstrapIsOptIn(t *testing.T) {
 	}
 }
 
+// TestApplyRejectedReasonCleanedOnlyOverAPI pins the Origin-scoped reason
+// sanitization: a multi-line yaml error (whose text is "yaml: unmarshal
+// errors:\n  line …") is recorded RAW by a CLI apply — the newline kept,
+// byte-identical to what the local command recorded before the API path
+// existed — and cleaned to one printable line by an API apply, where the
+// proposer is any authorized token-holder. A single fixture exercises both so
+// the two paths cannot drift.
+func TestApplyRejectedReasonCleanedOnlyOverAPI(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	// model is a scalar string; a list is a yaml TypeError on unmarshal, whose
+	// Error() is multi-line.
+	badAgent := []byte("name: coder\nmodel: [a, b]\ninstruction: x\noutput: y\nendpoint: http://127.0.0.1:1\n")
+
+	// CLI leg: a fresh root bootstraps the apply (permitted), then rejects on
+	// the load error; the recorded reason keeps the newline.
+	cliDir := writeSample(t)
+	if err := os.WriteFile(filepath.Join(cliDir, "agents", "coder.yaml"), badAgent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliCtl := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", cliDir, "--control-log", cliCtl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 {
+		t.Fatalf("a yaml type error must be rejected: exit %d\n%s", code, out.String())
+	}
+	cliReason := controlEvents(t, cliCtl)[0].Reason.Message
+	if !strings.Contains(cliReason, "\n") {
+		t.Fatalf("a CLI apply must record the raw multi-line reason (newline kept): %q", cliReason)
+	}
+
+	// API leg: the same files as a bundle; the recorded reason is cleaned to one
+	// printable line, still naming the fault.
+	h, apiCtl, _ := newConfigHost(t, true)
+	bundle, err := config.ReadBundle(cliDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := h.Apply(apiInvoker, bundle, apiclient.Precondition{ExpectNone: true}, apiVia())
+	if res.Status != apiclient.ApplyRejected {
+		t.Fatalf("%+v", res)
+	}
+	apiReason := controlEvents(t, apiCtl)[0].Reason.Message
+	if strings.ContainsAny(apiReason, "\x1b\n") {
+		t.Fatalf("an API apply must record a cleaned one-line reason: %q", apiReason)
+	}
+	if !strings.Contains(apiReason, "cannot unmarshal") {
+		t.Fatalf("the cleaned reason must still name the fault: %q", apiReason)
+	}
+}
+
 func TestConfigHostMapsEveryOutcome(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	h, ctl, logs := newConfigHost(t, true)
