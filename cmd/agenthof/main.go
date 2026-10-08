@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -46,7 +47,7 @@ Usage:
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
-  agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
+  agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]  (mints a per-role model key at the reserved model gateway for the installed roles; recorded in the control ledger; no run consumes it)
   agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>] [--server <url>] [--token <jwt>]
 `
@@ -1348,11 +1349,31 @@ func cmdRuns(args []string, out io.Writer) int {
 	}
 }
 
+// msgPrunedNotRecorded is printed when run logs and artifacts were removed
+// but the success event could not be appended.
+const msgPrunedNotRecorded = "runs pruned; event NOT recorded"
+
+// cmdRunsPrune is `runs prune`: remove run logs and artifact bodies older
+// than --older-than, authorized against the installed roles and recorded in
+// the control ledger with a one-line summary of what it removed. Order: the
+// --older-than usage checks first (exit 2, before identity and before the
+// ledger is touched); the invoker; ledger writable (busy or damaged,
+// unrecorded); a refused token (recorded); the installed read (error
+// recorded); nothing installed (refusal recorded — prune reads no directory,
+// so there are no roles to fall back to); authorize (refusal recorded); the
+// run sweep (error recorded, nothing deleted); the artifact sweep (error
+// recorded with the runs already removed in its detail); success recorded
+// with the printed line as its detail. No record ever carries a
+// config_hash: prune installs nothing and reads no configuration.
 func cmdRunsPrune(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("runs prune", flag.ContinueOnError)
 	olderThan := fs.String("older-than", "", "prune runs older than this duration (e.g. 720h or 180d)")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; the installed configuration is read from installed/ beside it")
+	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
+	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1366,44 +1387,123 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, "--older-than must be a positive duration")
 		return 2
 	}
-
-	runsPruned, err := pruneRuns(*logDir, dur)
-	if err != nil {
-		_, _ = fmt.Fprintln(out, err)
+	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
+	if usageErr {
+		_, _ = fmt.Fprintln(out, "runs prune: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
+	}
+	if !controlLedgerWritable("runs prune", *controlLog, out) {
 		return 1
 	}
 
-	// Constitution Art. III keeps artifact bodies out of the append-only
-	// ledger precisely so they can be pruned independently; do that here
-	// too, rather than leaving retention half-enforced. A missing
-	// artifact-dir is not an error (no run has written one yet) — mirror the
-	// missing-log-dir case
-	// instead of having artifact.NewStore create it just to prune nothing.
+	record := func(outcome string, reason *control.Reason, detail string, code int) int {
+		head, appendErr := control.Append(*controlLog, control.Event{
+			Action:     "prune",
+			Outcome:    outcome,
+			Reason:     reason,
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+			Detail:     detail,
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			if outcome == "success" {
+				_, _ = fmt.Fprintln(out, msgPrunedNotRecorded)
+			}
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return code
+	}
+	ioError := func(err error, detail string) int {
+		_, _ = fmt.Fprintln(out, err)
+		return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(err)}, detail, 1)
+	}
+
+	if refused {
+		_, _ = fmt.Fprintf(out, "runs prune: token authentication failed: %v\n", verifyErr)
+		return record("refused", &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"}, "", 1)
+	}
+	store := installedStore(*controlLog)
+	installedRoles, _, installed, instErr := config.InstalledRoles(store)
+	if instErr != nil {
+		return ioError(instErr, "")
+	}
+	if !installed {
+		_, _ = fmt.Fprintf(out, "runs prune: %s\n", msgNothingInstalled)
+		_, _ = fmt.Fprintf(out, "%s under %s; run: agenthof apply --config <dir> --control-log %s\n", msgNoConfigInstalled, store, *controlLog)
+		return record("refused", &control.Reason{Code: control.CodeNotAuthorized, Message: msgNothingInstalled}, "", 1)
+	}
+	if !authz.ControlAllows(installedRoles, inv, "prune") {
+		reason := control.NotAuthorized("prune")
+		_, _ = fmt.Fprintf(out, "runs prune: %s\n", reason.Message)
+		return record("refused", reason, "", 1)
+	}
+
+	runsPruned, err := pruneRuns(*logDir, dur, *controlLog)
+	if err != nil {
+		// pruneRuns errors only before its delete loop: nothing was removed.
+		return ioError(err, "")
+	}
+	// The printed line and the recorded detail are one format string, so
+	// they cannot disagree; <olderThan> is the flag's own text.
+	summary := func(artifacts int) string {
+		return fmt.Sprintf("pruned %d run(s) and %d artifact(s) older than %s", runsPruned, artifacts, *olderThan)
+	}
+
+	// Artifact bodies live outside the append-only ledger precisely so they
+	// can be pruned independently; do that here too, rather than leaving
+	// retention half-enforced. A missing artifact-dir is not an error (no
+	// run has written one yet) — mirror the missing-log-dir case instead of
+	// creating it just to prune nothing. An error here comes after the run
+	// sweep, so the record says what was already removed.
 	artifactsPruned := 0
 	if _, statErr := os.Stat(*artifactDir); statErr == nil {
-		store, err := artifact.NewStore(*artifactDir)
+		artifacts, err := artifact.NewStore(*artifactDir)
 		if err != nil {
-			_, _ = fmt.Fprintln(out, err)
-			return 1
+			return ioError(err, summary(0))
 		}
-		artifactsPruned, err = store.Prune(dur)
+		artifactsPruned, err = artifacts.Prune(dur)
 		if err != nil {
-			_, _ = fmt.Fprintln(out, err)
-			return 1
+			return ioError(err, summary(0))
 		}
 	} else if !os.IsNotExist(statErr) {
-		_, _ = fmt.Fprintln(out, statErr)
-		return 1
+		return ioError(statErr, summary(0))
 	}
 
-	_, _ = fmt.Fprintf(out, "pruned %d run(s) and %d artifact(s) older than %s\n", runsPruned, artifactsPruned, *olderThan)
-	return 0
+	line := summary(artifactsPruned)
+	_, _ = fmt.Fprintln(out, line)
+	return record("success", nil, line, 0)
 }
+
+// statControlLog is pruneRuns' stat of the control ledger. It is a var so a
+// test can make the identity check fail between the ledger-writable
+// precheck and the sweep — through the filesystem alone the same path was
+// just opened successfully.
+var statControlLog = os.Stat
 
 // pruneRuns removes run log files under logDir whose modification time is
 // older than dur. A missing logDir is not an error — nothing has run yet —
-// and prunes 0.
-func pruneRuns(logDir string, dur time.Duration) (int, error) {
+// and prunes 0. The control ledger is never a run log: by name
+// (control.jsonl and the <control-log>.torn-* repair fragments, wherever
+// --log-dir points), and by identity — the exact file controlLog names,
+// whatever it is called inside logDir, compared with os.SameFile over
+// follow-stats on BOTH sides, so a symlink in either direction and a hard
+// link all compare equal (DirEntry.Info is an lstat: it would describe a
+// symlink, not the ledger, and the sweep would remove the link and the
+// final append would re-create a fresh genesis chain). A controlLog that
+// cannot be stat'd is a hard error before anything is read or removed: a
+// guard that cannot establish the ledger's identity must not delete. A
+// per-entry stat failure (vanished, or a dangling link) skips that entry —
+// it is not a resolvable run log and cannot be the ledger, whose own stat
+// succeeded. investigate.Timeline and serve's run listing carry the same
+// skips.
+func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error) {
+	ctlInfo, err := statControlLog(controlLog)
+	if err != nil {
+		return 0, fmt.Errorf("control log %s: %w", controlLog, err)
+	}
 	cutoff := time.Now().Add(-dur)
 	entries, err := os.ReadDir(logDir)
 	if err != nil {
@@ -1414,11 +1514,6 @@ func pruneRuns(logDir string, dur time.Duration) (int, error) {
 	}
 	pruned := 0
 	for _, entry := range entries {
-		// The control ledger and its "<control-log>.torn-*" repair
-		// fragments (internal/control/log.go's writeTornFragment) must
-		// never be deleted here, even if --log-dir is misconfigured to
-		// point at the ledger's own directory instead of the default
-		// .agenthof/runs (spec §3.1).
 		if entry.Name() == "control.jsonl" || strings.Contains(entry.Name(), ".torn-") {
 			continue
 		}
@@ -1426,6 +1521,13 @@ func pruneRuns(logDir string, dur time.Duration) (int, error) {
 			continue
 		}
 		path := filepath.Join(logDir, entry.Name())
+		target, serr := os.Stat(path)
+		if serr != nil {
+			continue
+		}
+		if os.SameFile(target, ctlInfo) {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
@@ -1440,12 +1542,18 @@ func pruneRuns(logDir string, dur time.Duration) (int, error) {
 }
 
 // parseRetentionDuration parses a Go duration string, plus a "d" suffix
-// meaning days (e.g. "180d" = 180*24h).
+// meaning days (e.g. "180d" = 180*24h). A day count outside the duration's
+// range is rejected rather than wrapped: a wrapped value can come out
+// positive and set a cutoff nowhere near what was asked.
 func parseRetentionDuration(s string) (time.Duration, error) {
 	if before, ok := strings.CutSuffix(s, "d"); ok {
 		n, err := strconv.Atoi(before)
 		if err != nil {
 			return 0, fmt.Errorf("not a valid day count: %s", s)
+		}
+		const maxDays = int(math.MaxInt64 / (24 * time.Hour))
+		if n > maxDays || n < -maxDays {
+			return 0, fmt.Errorf("day count out of range: %s", s)
 		}
 		return time.Duration(n) * 24 * time.Hour, nil
 	}

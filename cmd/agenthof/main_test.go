@@ -6,8 +6,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +30,7 @@ import (
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity/oidctest"
+	"github.com/agenthof/agenthof/internal/ledger"
 )
 
 func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
@@ -622,26 +625,72 @@ func TestRunRefusedUnknownRole(t *testing.T) {
 	}
 }
 
-func TestRunsPruneDeletesOldRuns(t *testing.T) {
-	dir := t.TempDir()
-	oldPath := filepath.Join(dir, "r-old.jsonl")
-	newPath := filepath.Join(dir, "r-new.jsonl")
-	if err := os.WriteFile(oldPath, []byte("{}\n"), 0o644); err != nil {
+// pruneArgs is a runs prune invocation by the platform-eng group against ctl.
+func pruneArgs(ctl string, extra ...string) []string {
+	return append([]string{"prune", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, extra...)
+}
+
+// appliedAt is applied with the control log at a path the test chooses —
+// for the self-victim layouts, where the ledger must sit inside --log-dir.
+func appliedAt(t *testing.T, root, ctl string) {
+	t.Helper()
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("apply %s at %s: exit %d\n%s", root, ctl, code, out.String())
+	}
+}
+
+// controlLogID reads the genesis record's log_id — the chain's identity,
+// which a fresh genesis (the self-victim wound) would replace.
+func controlLogID(t *testing.T, ctl string) string {
+	t.Helper()
+	recs, _, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("read %s: %v (%d records)", ctl, err, len(recs))
+	}
+	var genesis struct {
+		LogID string `json:"log_id"`
+	}
+	if err := json.Unmarshal(recs[0].Raw, &genesis); err != nil || genesis.LogID == "" {
+		t.Fatalf("genesis log_id: %v %q", err, genesis.LogID)
+	}
+	return genesis.LogID
+}
+
+// agedRun writes a run-log-shaped file under logDir with an mtime 200 days
+// in the past and returns its path.
+func agedRun(t *testing.T, logDir, name string) string {
+	t.Helper()
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(newPath, []byte("{}\n"), 0o644); err != nil {
+	p := filepath.Join(logDir, name)
+	if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-200 * 24 * time.Hour)
-	if err := os.Chtimes(oldPath, old, old); err != nil {
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestRunsPruneDeletesOldRuns(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	oldPath := agedRun(t, dir, "r-old.jsonl")
+	newPath := filepath.Join(dir, "r-new.jsonl")
+	if err := os.WriteFile(newPath, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", dir}, &out)
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out)
 	if code != 0 {
 		t.Fatalf("prune: %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+	const line = "pruned 1 run(s) and 0 artifact(s) older than 180d"
+	if !strings.Contains(out.String(), line+"\n") || !strings.Contains(out.String(), "control head: seq=2 sha256=") {
 		t.Fatalf("out: %s", out.String())
 	}
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
@@ -650,12 +699,21 @@ func TestRunsPruneDeletesOldRuns(t *testing.T) {
 	if _, err := os.Stat(newPath); err != nil {
 		t.Fatalf("new run should remain: %v", err)
 	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "prune" || e.Outcome != "success" || e.Detail != line || e.ConfigHash != "" || e.Agent != "" || e.Invoker.Subject != "dana@example.com" {
+		t.Fatalf("want success with detail == the printed line and no hash: %+v", e)
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "runs pruned ("+line+") — dana@example.com (asserted)") {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
 }
 
 func TestRunsPruneAlsoPrunesArtifactStore(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
 	logDir := t.TempDir()
 	artifactDir := t.TempDir()
-
 	oldArtifact := filepath.Join(artifactDir, "deadbeef")
 	newArtifact := filepath.Join(artifactDir, "cafef00d")
 	if err := os.WriteFile(oldArtifact, []byte("stale body"), 0o600); err != nil {
@@ -668,14 +726,10 @@ func TestRunsPruneAlsoPrunesArtifactStore(t *testing.T) {
 	if err := os.Chtimes(oldArtifact, old, old); err != nil {
 		t.Fatal(err)
 	}
-
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", logDir, "--artifact-dir", artifactDir}, &out)
-	if code != 0 {
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logDir, "--artifact-dir", artifactDir), &out)
+	if code != 0 || !strings.Contains(out.String(), "pruned 0 run(s) and 1 artifact(s)") {
 		t.Fatalf("prune: %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "pruned 0 run(s) and 1 artifact(s)") {
-		t.Fatalf("out: %s", out.String())
 	}
 	if _, err := os.Stat(oldArtifact); !os.IsNotExist(err) {
 		t.Fatalf("old artifact should be gone, err=%v", err)
@@ -683,25 +737,28 @@ func TestRunsPruneAlsoPrunesArtifactStore(t *testing.T) {
 	if _, err := os.Stat(newArtifact); err != nil {
 		t.Fatalf("new artifact should remain: %v", err)
 	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "success" || e.Detail != "pruned 0 run(s) and 1 artifact(s) older than 180d" {
+		t.Fatalf("%+v", e)
+	}
 }
 
 func TestRunsPruneMissingArtifactDirIsNotAnError(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
 	logDir := t.TempDir()
 	artifactDir := filepath.Join(t.TempDir(), "does-not-exist")
-
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", logDir, "--artifact-dir", artifactDir}, &out)
-	if code != 0 {
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logDir, "--artifact-dir", artifactDir), &out)
+	if code != 0 || !strings.Contains(out.String(), "pruned 0 run(s) and 0 artifact(s)") {
 		t.Fatalf("prune: %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "pruned 0 run(s) and 0 artifact(s)") {
-		t.Fatalf("out: %s", out.String())
 	}
 	if _, err := os.Stat(artifactDir); !os.IsNotExist(err) {
 		t.Fatalf("a missing artifact-dir must not be created just to find nothing to prune: %v", err)
 	}
 }
 
+// TestRunsPruneGarbageDuration stays flag-free on purpose: the usage check
+// precedes identity and the ledger, so it needs no installed configuration.
 func TestRunsPruneGarbageDuration(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
@@ -712,17 +769,17 @@ func TestRunsPruneGarbageDuration(t *testing.T) {
 }
 
 func TestRunsPruneMissingLogDir(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", dir}, &out)
-	if code != 0 {
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out)
+	if code != 0 || !strings.Contains(out.String(), "pruned 0 run(s) and 0 artifact(s)") {
 		t.Fatalf("expected exit 0 for missing log dir, got %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "pruned 0 run(s) and 0 artifact(s)") {
-		t.Fatalf("out: %s", out.String())
 	}
 }
 
+// TestRunsPruneNonPositiveDuration stays flag-free: see TestRunsPruneGarbageDuration.
 func TestRunsPruneNonPositiveDuration(t *testing.T) {
 	// A non-positive duration would push the cutoff into the future,
 	// deleting every run file. Guard against it instead.
@@ -736,11 +793,8 @@ func TestRunsPruneNonPositiveDuration(t *testing.T) {
 			}
 			var out bytes.Buffer
 			code := cmdRuns([]string{"prune", "--older-than", olderThan, "--log-dir", dir}, &out)
-			if code != 2 {
+			if code != 2 || !strings.Contains(out.String(), "--older-than must be a positive duration") {
 				t.Fatalf("expected exit 2 for %q, got %d\n%s", olderThan, code, out.String())
-			}
-			if !strings.Contains(out.String(), "--older-than must be a positive duration") {
-				t.Fatalf("out for %q: %s", olderThan, out.String())
 			}
 			if _, err := os.Stat(path); err != nil {
 				t.Fatalf("run file should be untouched for %q: %v", olderThan, err)
@@ -749,105 +803,372 @@ func TestRunsPruneNonPositiveDuration(t *testing.T) {
 	}
 }
 
+// TestRunsPruneUsageErrorsTouchNoLedger: a bad --older-than — garbage,
+// non-positive, or a day count that would overflow the duration and wrap
+// to a positive value — exits 2 before identity and before the ledger is
+// opened, so no control log is created and no run file is touched.
+func TestRunsPruneUsageErrorsTouchNoLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	for _, olderThan := range []string{"abc", "0d", "-3h", "99999999999d", "9223372036854775807d"} {
+		t.Run(olderThan, func(t *testing.T) {
+			dir := t.TempDir()
+			aged := agedRun(t, dir, "r-old.jsonl")
+			ctl := filepath.Join(t.TempDir(), "control.jsonl")
+			var out bytes.Buffer
+			code := cmdRuns(pruneArgs(ctl, "--older-than", olderThan, "--log-dir", dir), &out)
+			if code != 2 {
+				t.Fatalf("exit %d for %q\n%s", code, olderThan, out.String())
+			}
+			if _, err := os.Stat(ctl); !os.IsNotExist(err) {
+				t.Fatalf("a usage fault must not create the control ledger: %v", err)
+			}
+			if _, err := os.Stat(aged); err != nil {
+				t.Fatalf("nothing may be deleted on a usage fault: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunsPruneLogDirIsRegularFile(t *testing.T) {
-	dir := t.TempDir()
-	notADir := filepath.Join(dir, "not-a-dir")
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	notADir := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", notADir}, &out)
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", notADir), &out)
 	if code != 1 {
 		t.Fatalf("expected exit 1 when --log-dir is a regular file, got %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "prune" || e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.Detail != "" {
+		t.Fatalf("want error/io_error with no detail (nothing was deleted): %+v", e)
 	}
 }
 
 // TestRunsPruneSparesControlLogAndFragments proves the default layout is
-// safe: the control ledger lives at .agenthof/control.jsonl, a sibling of
-// (not a member of) the default --log-dir .agenthof/runs, so an aged run
-// log under --log-dir is pruned while the ledger and its .torn-* repair
-// fragment — both outside --log-dir entirely — are untouched (spec §3.1).
+// safe: a decoy control.jsonl and its .torn-* fragment — both outside
+// --log-dir — survive while the aged run log under --log-dir is pruned. The
+// decoy is spared by name; the ledger prune actually records to is a real,
+// applied one elsewhere.
 func TestRunsPruneSparesControlLogAndFragments(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
 	root := t.TempDir()
 	agentDir := filepath.Join(root, ".agenthof")
 	runsDir := filepath.Join(agentDir, "runs")
-	if err := os.MkdirAll(runsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	oldRun := filepath.Join(runsDir, "r-old.jsonl")
-	controlLog := filepath.Join(agentDir, "control.jsonl")
-	fragment := controlLog + ".torn-1"
-	for _, p := range []string{oldRun, controlLog, fragment} {
+	oldRun := agedRun(t, runsDir, "r-old.jsonl")
+	decoy := filepath.Join(agentDir, "control.jsonl")
+	fragment := decoy + ".torn-1"
+	for _, p := range []string{decoy, fragment} {
 		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-	}
-	old := time.Now().Add(-48 * time.Hour)
-	for _, p := range []string{oldRun, controlLog, fragment} {
+		old := time.Now().Add(-48 * time.Hour)
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatal(err)
 		}
 	}
-
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "24h", "--log-dir", runsDir}, &out)
-	if code != 0 {
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "24h", "--log-dir", runsDir), &out); code != 0 {
 		t.Fatalf("prune: %d\n%s", code, out.String())
 	}
 	if _, err := os.Stat(oldRun); !os.IsNotExist(err) {
 		t.Fatalf("old run log should be pruned, err=%v", err)
 	}
-	if _, err := os.Stat(controlLog); err != nil {
-		t.Fatalf("control log must survive prune: %v", err)
-	}
-	if _, err := os.Stat(fragment); err != nil {
-		t.Fatalf("torn fragment must survive prune: %v", err)
+	for _, p := range []string{decoy, fragment} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive prune: %v", p, err)
+		}
 	}
 }
 
 // TestRunsPruneNeverDeletesControlLogEvenIfLogDirPointsAtItsDir covers the
-// misconfiguration case: an operator points --log-dir directly at the
-// control log's own directory (instead of the default .agenthof/runs).
-// pruneRuns's *.jsonl glob would otherwise match control.jsonl itself;
-// the ledger and its repair fragment must still survive (spec §3.1).
+// misconfiguration: --log-dir points at a directory holding a control.jsonl
+// and its fragment. Both survive by name while the aged run beside them is
+// pruned — the guard is discriminating, not "prune did nothing".
 func TestRunsPruneNeverDeletesControlLogEvenIfLogDirPointsAtItsDir(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
 	agentDir := t.TempDir()
-	oldRun := filepath.Join(agentDir, "r-old.jsonl")
-	controlLog := filepath.Join(agentDir, "control.jsonl")
-	fragment := controlLog + ".torn-1"
-	for _, p := range []string{oldRun, controlLog, fragment} {
+	oldRun := agedRun(t, agentDir, "r-old.jsonl")
+	decoy := filepath.Join(agentDir, "control.jsonl")
+	fragment := decoy + ".torn-1"
+	for _, p := range []string{decoy, fragment} {
 		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-	}
-	old := time.Now().Add(-48 * time.Hour)
-	for _, p := range []string{oldRun, controlLog, fragment} {
+		old := time.Now().Add(-48 * time.Hour)
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatal(err)
 		}
 	}
-
 	var out bytes.Buffer
-	// A misconfigured --log-dir that resolves to the same directory as
-	// control.jsonl must still prune plain aged run logs (proving the
-	// guard is discriminating, not just "prune did nothing")...
-	code := cmdRuns([]string{"prune", "--older-than", "24h", "--log-dir", agentDir}, &out)
-	if code != 0 {
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "24h", "--log-dir", agentDir), &out); code != 0 || !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
 		t.Fatalf("prune: %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
-		t.Fatalf("out: %s", out.String())
 	}
 	if _, err := os.Stat(oldRun); !os.IsNotExist(err) {
 		t.Fatalf("old run log should still be pruned, err=%v", err)
 	}
-	// ...while the control ledger and its repair fragment survive.
-	if _, err := os.Stat(controlLog); err != nil {
-		t.Fatalf("control log must survive prune even when --log-dir points at its directory: %v", err)
+	for _, p := range []string{decoy, fragment} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive prune even when --log-dir points at its directory: %v", p, err)
+		}
 	}
-	if _, err := os.Stat(fragment); err != nil {
-		t.Fatalf("torn fragment must survive prune: %v", err)
+}
+
+// TestRunsPruneNothingInstalledDeletesNothing: no roles, nobody is
+// authorized — the refusal is the ledger's genesis record and the aged run
+// survives. Prune has no --config fallback: it reads no directory.
+func TestRunsPruneNothingInstalledDeletesNothing(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	dir := t.TempDir()
+	aged := agedRun(t, dir, "r-old.jsonl")
+	var out bytes.Buffer
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out)
+	if code != 1 {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	for _, want := range []string{
+		"runs prune: " + msgNothingInstalled + "\n",
+		"no configuration installed under " + installedStore(ctl) + "; run: agenthof apply --config <dir> --control-log " + ctl + "\n",
+		"control head: seq=1 sha256=",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, out.String())
+		}
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "prune" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotAuthorized || e.Reason.Message != msgNothingInstalled || e.ConfigHash != "" || e.Detail != "" {
+		t.Fatalf("%+v", e)
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatalf("nothing may be deleted: %v", err)
+	}
+}
+
+func TestRunsPruneUngrantedDeletesNothing(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	aged := agedRun(t, dir, "r-old.jsonl")
+	var out bytes.Buffer
+	code := cmdRuns([]string{"prune", "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance", "--older-than", "180d", "--log-dir", dir}, &out)
+	if code != 1 || !strings.Contains(out.String(), "runs prune: not authorized: no role grants prune to the invoker") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotAuthorized || e.ConfigHash != "" {
+		t.Fatalf("%+v", e)
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatalf("nothing may be deleted: %v", err)
+	}
+}
+
+// TestRunsPruneArtifactStoreErrorRecordsPartialDetail: the runs WERE
+// deleted before the artifact store failed, and the error record says so.
+func TestRunsPruneArtifactStoreErrorRecordsPartialDetail(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	aged := agedRun(t, dir, "r-old.jsonl")
+	notADir := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir, "--artifact-dir", notADir), &out)
+	if code != 1 {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("the run was pruned before the artifact step: %v", err)
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.Detail != "pruned 1 run(s) and 0 artifact(s) older than 180d" {
+		t.Fatalf("want error with the partial detail: %+v", e)
+	}
+}
+
+// TestRunsPruneSparesTheLedgerItRecordsTo is the self-victim guard: the
+// ledger prune records to sits INSIDE --log-dir under a non-default name,
+// aged past the cutoff. Without the identity skip the sweep would delete it
+// and the final append would re-create a fresh genesis chain. The ledger
+// survives with one more record and the same log_id; the aged run beside it
+// is gone; the store and its lock file beside the ledger survive too.
+func TestRunsPruneSparesTheLedgerItRecordsTo(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	logDir := t.TempDir()
+	ctl := filepath.Join(logDir, "ledger.jsonl")
+	appliedAt(t, writeSample(t), ctl)
+	before, id := len(controlEvents(t, ctl)), controlLogID(t, ctl)
+	old := time.Now().Add(-200 * 24 * time.Hour)
+	if err := os.Chtimes(ctl, old, old); err != nil {
+		t.Fatal(err)
+	}
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logDir), &out); code != 0 || !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("the aged run must be gone: %v", err)
+	}
+	if n, after := len(controlEvents(t, ctl)), controlLogID(t, ctl); n != before+1 || after != id {
+		t.Fatalf("the ledger must survive as the same chain: records %d→%d, log_id %s→%s", before, n, id, after)
+	}
+	for _, p := range []string{installedStore(ctl), installedLock(ctl)} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive a prune of its directory: %v", p, err)
+		}
+	}
+}
+
+// TestRunsPruneSparesTheLedgerThroughASymlinkedControlLog: --control-log is
+// a symlink OUTSIDE --log-dir pointing at the real, aged ledger INSIDE it.
+// Both sides of the identity check follow links, so the real file is
+// spared.
+func TestRunsPruneSparesTheLedgerThroughASymlinkedControlLog(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	logDir := t.TempDir()
+	real := filepath.Join(logDir, "ledger.jsonl")
+	if err := os.WriteFile(real, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "control.jsonl")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	appliedAt(t, writeSample(t), link)
+	before, id := len(controlEvents(t, link)), controlLogID(t, link)
+	old := time.Now().Add(-200 * 24 * time.Hour)
+	if err := os.Chtimes(real, old, old); err != nil {
+		t.Fatal(err)
+	}
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(link, "--older-than", "180d", "--log-dir", logDir), &out); code != 0 || !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("the aged run must be gone: %v", err)
+	}
+	if _, err := os.Stat(real); err != nil {
+		t.Fatalf("the real ledger must survive: %v", err)
+	}
+	if n, after := len(controlEvents(t, link)), controlLogID(t, link); n != before+1 || after != id {
+		t.Fatalf("same chain: records %d→%d, log_id %s→%s", before, n, id, after)
+	}
+}
+
+// TestRunsPruneSparesTheLedgerBehindASymlinkedEntry: the entry INSIDE
+// --log-dir is a symlink to the real ledger elsewhere, which --control-log
+// names directly. DirEntry.Info is an lstat and would describe the link, so
+// an entry-side lstat would compare unequal and remove the link; the
+// follow-stat compares equal. os.Chtimes follows links and cannot age the
+// link itself, so the cutoff is made tiny instead: after the sleep every
+// entry is older than it, and only the identity skip can spare the link.
+func TestRunsPruneSparesTheLedgerBehindASymlinkedEntry(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	before, id := len(controlEvents(t, ctl)), controlLogID(t, ctl)
+	logDir := t.TempDir()
+	link := filepath.Join(logDir, "link.jsonl")
+	if err := os.Symlink(ctl, link); err != nil {
+		t.Fatal(err)
+	}
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	time.Sleep(1100 * time.Millisecond) // past a 1 s mtime granularity, so the link is older than a 10 ms cutoff
+	var out bytes.Buffer
+	// --artifact-dir is explicit: a 10 ms cutoff must never meet the default
+	// cwd-relative artifact store.
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "10ms", "--log-dir", logDir, "--artifact-dir", t.TempDir()), &out); code != 0 || !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("the aged run must be gone: %v", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("the symlink to the ledger must survive: %v", err)
+	}
+	if n, after := len(controlEvents(t, ctl)), controlLogID(t, ctl); n != before+1 || after != id {
+		t.Fatalf("same chain: records %d→%d, log_id %s→%s", before, n, id, after)
+	}
+}
+
+// TestRunsPruneSparesAHardLinkToTheLedger: a hard link shares the inode,
+// so it is the ledger by identity whatever it is called.
+func TestRunsPruneSparesAHardLinkToTheLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	before, id := len(controlEvents(t, ctl)), controlLogID(t, ctl)
+	logDir := t.TempDir()
+	hard := filepath.Join(logDir, "hard.jsonl")
+	if err := os.Link(ctl, hard); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-200 * 24 * time.Hour)
+	if err := os.Chtimes(ctl, old, old); err != nil { // one inode: ages the hard link too
+		t.Fatal(err)
+	}
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logDir), &out); code != 0 || !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("the aged run must be gone: %v", err)
+	}
+	if _, err := os.Stat(hard); err != nil {
+		t.Fatalf("the hard link must survive: %v", err)
+	}
+	if n, after := len(controlEvents(t, ctl)), controlLogID(t, ctl); n != before+1 || after != id {
+		t.Fatalf("same chain: records %d→%d, log_id %s→%s", before, n, id, after)
+	}
+}
+
+// TestPruneRunsFailsHardWhenTheControlLogCannotBeStatted: a guard that
+// cannot establish the ledger's identity deletes nothing — the error is
+// returned before the directory is even read.
+func TestPruneRunsFailsHardWhenTheControlLogCannotBeStatted(t *testing.T) {
+	logDir := t.TempDir()
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	missing := filepath.Join(t.TempDir(), "gone", "control.jsonl")
+	n, err := pruneRuns(logDir, time.Hour, missing)
+	if err == nil || n != 0 || !strings.Contains(err.Error(), "control log "+missing) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatalf("nothing may be deleted: %v", err)
+	}
+}
+
+// TestRunsPruneDeletesNothingWhenTheControlLogVanishesBeforeTheSweep is the
+// command-level twin: the ledger was writable at the precheck and cannot be
+// stat'd by the time the sweep starts (unlinked or made unreadable by
+// another process in between). The filesystem alone cannot stage that in a
+// test — the same path was just opened — so the stat goes through the
+// statControlLog seam. Exit 1, the printed line names the control log, the
+// aged run survives, and the error is recorded.
+func TestRunsPruneDeletesNothingWhenTheControlLogVanishesBeforeTheSweep(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	logDir := t.TempDir()
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	orig := statControlLog
+	statControlLog = func(name string) (os.FileInfo, error) {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+	}
+	t.Cleanup(func() { statControlLog = orig })
+	var out bytes.Buffer
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logDir), &out)
+	if code != 1 || !strings.Contains(out.String(), "control log "+ctl) {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatalf("nothing may be deleted: %v", err)
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.Detail != "" {
+		t.Fatalf("%+v", e)
 	}
 }
 
@@ -1285,6 +1606,9 @@ func TestControlAdjacentCommandsBusyWhenAnotherProcessHoldsTheLedger(t *testing.
 		prefix string
 	}{
 		{"gateway provision", func(_ *testing.T, ctl string) []string { return provisionArgs(ctl, "http://127.0.0.1:1") }, "gateway provision"},
+		{"runs prune", func(t *testing.T, ctl string) []string {
+			return pruneArgs(ctl, "--older-than", "180d", "--log-dir", t.TempDir())
+		}, "runs prune"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

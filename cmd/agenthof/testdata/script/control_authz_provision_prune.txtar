@@ -1,0 +1,55 @@
+# gateway provision and runs prune are control-plane actions: authorized
+# against the installed roles' control: grants and recorded in the control
+# ledger. A prune by an ungranted group is refused and recorded; a granted
+# prune records what it removed; a provision without the master key is a
+# usage fault that precedes identity and writes nothing.
+
+exec agenthof apply --config config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
+
+! exec agenthof runs prune --older-than 180d --log-dir runs --control-log control.jsonl --as mallory@example.com --groups finance
+stdout 'runs prune: not authorized: no role grants prune to the invoker'
+stdout 'control head: seq=2'
+grep '"action":"prune"' control.jsonl
+grep '"outcome":"refused"' control.jsonl
+
+exec agenthof runs prune --older-than 180d --log-dir runs --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'pruned 0 run\(s\) and 0 artifact\(s\) older than 180d'
+stdout 'control head: seq=3'
+grep '"detail":"pruned 0 run\(s\) and 0 artifact\(s\) older than 180d"' control.jsonl
+
+env LITELLM_MASTER_KEY=
+! exec agenthof gateway provision --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'LITELLM_MASTER_KEY'
+
+exec agenthof audit control --control-log control.jsonl
+stdout 'control ledger — 3 events'
+stdout 'seq 2 .*runs prune refused — mallory@example.com \(asserted\)'
+stdout 'seq 3 .*runs pruned \(pruned 0 run\(s\) and 0 artifact\(s\) older than 180d\) — dana@example.com \(asserted\)'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded install \(apply\)'
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair, provision, prune]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

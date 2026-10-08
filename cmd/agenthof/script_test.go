@@ -135,6 +135,7 @@ func TestScript(t *testing.T) {
 			// every script's `run` to a remote.
 			e.Setenv("AGENTHOF_SERVER", "")
 			e.Setenv("AGENTHOF_OIDC_AUDIENCE", "")
+			e.Setenv("LITELLM_MASTER_KEY", "")
 			e.Setenv("OIDC_ISSUER", oidcSrv.URL)
 			e.Setenv("OIDC_TOKEN", oidcToken)
 			if err := copyDir(filepath.Join("..", "..", "examples", "config"),
