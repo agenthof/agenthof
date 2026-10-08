@@ -474,3 +474,90 @@ func TestSnapshotDirStripsTheTypedPrefix(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// TestStageFilesWritesExactlyTheKeys is StageSnapshot's twin for an
+// in-memory proposal: every key lands under a fresh .staging-* temp
+// directly under the store, mode 0600, and the staged copy hashes as the
+// proposal.
+func TestStageFilesWritesExactlyTheKeys(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	m := map[string][]byte{
+		"agents/planner.yaml": []byte("name: planner\n"),
+		"roles/.x.yaml":       []byte("name: dot\n"),
+		"gateway.yaml":        []byte("models: {}\n"),
+	}
+	temp, err := StageFiles(store, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(filepath.Base(temp), ".staging-") || filepath.Dir(temp) != store {
+		t.Fatalf("temp must be a .staging-* dir directly under the store: %s", temp)
+	}
+	for rel, want := range m {
+		p := filepath.Join(temp, filepath.FromSlash(rel))
+		got, err := os.ReadFile(p)
+		if err != nil || string(got) != string(want) {
+			t.Fatalf("%s: got %q err=%v", rel, got, err)
+		}
+		info, _ := os.Stat(p)
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s: mode %v, want 0600", rel, info.Mode().Perm())
+		}
+	}
+	want, _ := HashFiles(m)
+	if got, err := HashDir(temp); err != nil || got != want {
+		t.Fatalf("HashDir(temp)=%q err=%v, want %q", got, err, want)
+	}
+	if _, installed, err := InstalledHash(store); installed || err != nil {
+		t.Fatalf("staging must not install: installed=%v err=%v", installed, err)
+	}
+}
+
+func TestStageFilesRejectsInvalidKeyLeavingNothing(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	_, err := StageFiles(store, map[string][]byte{"roles/r.yaml": []byte("ok"), "../escape.yaml": []byte("no")})
+	if err == nil {
+		t.Fatal("an invalid key must fail the whole stage")
+	}
+	if strings.Contains(err.Error(), "escape") {
+		t.Fatalf("the key is attacker-controlled and must not be echoed: %v", err)
+	}
+	if ents, _ := os.ReadDir(store); len(ents) != 0 {
+		t.Fatalf("nothing may remain under the store: %v", ents)
+	}
+}
+
+func TestStageFilesUnwritableStoreLeavesNoTemp(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	if err := os.WriteFile(store, []byte("in the way"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StageFiles(store, map[string][]byte{"roles/r.yaml": []byte("x")}); err == nil {
+		t.Fatal("a store that is a file must fail")
+	}
+}
+
+// TestStageFilesCaseVariantPairNeverSilentlyOverwrites: two keys the
+// filesystem may consider one name. On a case-insensitive volume (the
+// developer's APFS) the second O_EXCL create fails loud and nothing is left
+// behind; on a case-sensitive one (CI's ext4) both are staged and the canon
+// agrees. Either outcome is correct; a silent overwrite is the bug.
+func TestStageFilesCaseVariantPairNeverSilentlyOverwrites(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	m := map[string][]byte{"agents/X.yaml": []byte("name: X\n"), "agents/x.yaml": []byte("name: x\n")}
+	temp, err := StageFiles(store, m)
+	if err != nil {
+		// bundleOrder writes agents/X.yaml first, so agents/x.yaml is the one that collides.
+		if !strings.Contains(err.Error(), "agents/x.yaml") || !errors.Is(err, fs.ErrExist) {
+			t.Fatalf("the colliding key must be named and the cause be ErrExist: %v", err)
+		}
+		if ents, _ := os.ReadDir(store); len(ents) != 0 {
+			t.Fatalf("nothing may remain under the store after a failed stage: %v", ents)
+		}
+		return
+	}
+	want, _ := HashFiles(m)
+	if got, err := HashDir(temp); err != nil || got != want {
+		t.Fatalf("case-sensitive volume: HashDir(temp)=%q err=%v, want %q", got, err, want)
+	}
+}

@@ -149,6 +149,61 @@ func StageSnapshot(store, src string) (temp string, err error) {
 	return temp, nil
 }
 
+// StageFiles is StageSnapshot for an in-memory proposal: every key is
+// checked with ValidBundlePath (fail closed, whatever the caller checked —
+// the error names no key, since on the server the key is the caller's),
+// then written 0600 under a fresh .staging-* temp in store, in bundleOrder,
+// each file opened O_WRONLY|O_CREATE|O_EXCL — so two keys the filesystem
+// considers the same name ("agents/x.yaml" and "agents/X.yaml" on a
+// case-insensitive volume; NFC and NFD spellings of one name on HFS+) fail
+// loud on the second instead of one silently overwriting the other. On any
+// failure the temp is removed and nothing under store changes. The temp is
+// what the caller validates, hashes and installs — exactly as for
+// StageSnapshot.
+func StageFiles(store string, files map[string][]byte) (temp string, err error) {
+	for rel := range files {
+		if !ValidBundlePath(rel) {
+			return "", errors.New("installed config: proposal holds an invalid config path")
+		}
+	}
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		return "", fmt.Errorf("installed config: %w", err)
+	}
+	temp, err = os.MkdirTemp(store, ".staging-*")
+	if err != nil {
+		return "", fmt.Errorf("installed config: %w", err)
+	}
+	for _, rel := range bundleOrder(files) {
+		if err := writeStaged(temp, rel, files[rel]); err != nil {
+			_ = os.RemoveAll(temp)
+			return "", err
+		}
+	}
+	return temp, nil
+}
+
+// writeStaged writes one proposal file under temp, creating it exclusively.
+// rel has passed ValidBundlePath, so naming it in the error is safe; the
+// cause keeps the OS error (errors.Is(err, fs.ErrExist) on a collision).
+func writeStaged(temp, rel string, data []byte) error {
+	dst := filepath.Join(temp, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return fmt.Errorf("installed config: %w", err)
+	}
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("%s: %w", rel, err)
+	}
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("%s: %w", rel, werr)
+	}
+	return nil
+}
+
 // CommitSnapshot installs the staged copy at temp as the snapshot named by
 // hash (which the caller computed over temp) and flips the pointer to it.
 // The snapshot directory is content-addressed, so a rename that finds it
