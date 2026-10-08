@@ -71,3 +71,39 @@ func TestPutIdempotentAndPrune(t *testing.T) {
 		t.Fatal("old body must be gone")
 	}
 }
+
+// TestPruneRemovesOnlyContentAddressedBodies: Prune removes only the 64-hex
+// sha256 names Put writes, so a non-artifact file left in a misconfigured
+// artifact dir (a control ledger, a repair fragment, a lock) is never swept,
+// however old it is.
+func TestPruneRemovesOnlyContentAddressedBodies(t *testing.T) {
+	s, _ := NewStore(t.TempDir())
+	past := time.Now().Add(-48 * time.Hour)
+	// A real content-addressed body (must be pruned) and three intruders a
+	// misconfigured --artifact-dir could contain (must survive).
+	sha, _, _ := s.Put("body")
+	for _, name := range []string{"control.jsonl", "control.jsonl.torn-1", "installed.lock"} {
+		p := filepath.Join(s.Dir(), name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(filepath.Join(s.Dir(), sha), past, past); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.Prune(24 * time.Hour)
+	if err != nil || n != 1 {
+		t.Fatalf("prune n=%d err=%v; want exactly the one body", n, err)
+	}
+	if _, err := s.Get(sha); err == nil {
+		t.Fatal("the content-addressed body must be pruned")
+	}
+	for _, name := range []string{"control.jsonl", "control.jsonl.torn-1", "installed.lock"} {
+		if _, err := os.Stat(filepath.Join(s.Dir(), name)); err != nil {
+			t.Fatalf("%s must survive: %v", name, err)
+		}
+	}
+}

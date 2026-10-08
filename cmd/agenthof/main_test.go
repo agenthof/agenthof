@@ -714,8 +714,10 @@ func TestRunsPruneAlsoPrunesArtifactStore(t *testing.T) {
 	ctl := applied(t, writeSample(t))
 	logDir := t.TempDir()
 	artifactDir := t.TempDir()
-	oldArtifact := filepath.Join(artifactDir, "deadbeef")
-	newArtifact := filepath.Join(artifactDir, "cafef00d")
+	// Artifact bodies are named by their 64-hex sha256; prune only ever removes
+	// that content-addressed shape.
+	oldArtifact := filepath.Join(artifactDir, "0000000000000000000000000000000000000000000000000000000000000001")
+	newArtifact := filepath.Join(artifactDir, "0000000000000000000000000000000000000000000000000000000000000002")
 	if err := os.WriteFile(oldArtifact, []byte("stale body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1020,6 +1022,52 @@ func TestRunsPruneSparesTheLedgerItRecordsTo(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("%s must survive a prune of its directory: %v", p, err)
 		}
+	}
+}
+
+// TestRunsPruneArtifactSweepSparesTheControlLedger: the artifact sweep removes
+// only content-addressed bodies (the 64-hex sha256 Put writes), so a
+// misconfigured --artifact-dir pointing at the control ledger's own directory
+// never deletes the ledger, a repair fragment, or the installed-config lock —
+// and the prune's own success append does not re-genesis a fresh ledger. The
+// companion to the --log-dir guard above, on the other sweep.
+func TestRunsPruneArtifactSweepSparesTheControlLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	logDir := t.TempDir()
+	ctl := filepath.Join(logDir, "control.jsonl")
+	appliedAt(t, writeSample(t), ctl)
+	before, id := len(controlEvents(t, ctl)), controlLogID(t, ctl)
+	torn := ctl + ".torn-123"
+	if err := os.WriteFile(torn, []byte("fragment"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A real content-addressed body that MUST be pruned (proves the sweep works).
+	body := filepath.Join(logDir, "0000000000000000000000000000000000000000000000000000000000000001")
+	if err := os.WriteFile(body, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-200 * 24 * time.Hour)
+	for _, p := range []string{ctl, torn, body} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	// --artifact-dir is the ledger's OWN directory — the misconfiguration.
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", t.TempDir(), "--artifact-dir", logDir), &out); code != 0 ||
+		!strings.Contains(out.String(), "pruned 0 run(s) and 1 artifact(s)") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(body); !os.IsNotExist(err) {
+		t.Fatalf("the content-addressed body must be pruned: %v", err)
+	}
+	for _, p := range []string{ctl, torn, installedLock(ctl), installedStore(ctl)} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive the artifact sweep: %v", p, err)
+		}
+	}
+	if n, after := len(controlEvents(t, ctl)), controlLogID(t, ctl); n != before+1 || after != id {
+		t.Fatalf("the ledger must survive as the same chain: records %d→%d, log_id %s→%s", before, n, id, after)
 	}
 }
 

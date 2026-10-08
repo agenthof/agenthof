@@ -862,8 +862,12 @@ from the repository root, or pass
 `--control-log` explicitly. `runs prune` never removes a control log named `control.jsonl`, a `*.torn-*`
 fragment, or — since prune records to it — the exact file `--control-log`
 names, whatever it is called and wherever `--log-dir` points (by file
-identity, so a symlink or hard link to it is spared too). Keeping the ledger
-out from under `--log-dir` is still the tidy layout.
+identity, so a symlink or hard link to it is spared too). The sweep under
+`--artifact-dir` removes only content-addressed artifact bodies (the 64-hex
+`sha256` names Agenthof writes there), so a control log, a `*.torn-*` fragment,
+the installed-config store, or anything else left in a misconfigured
+`--artifact-dir` is left untouched. Keeping the ledger out from under
+`--log-dir`/`--artifact-dir` is still the tidy layout.
 
 The **installed-configuration store** lives beside it: `<dir>/installed/`
 (default `.agenthof/installed/`), holding one immutable snapshot directory per
@@ -890,7 +894,7 @@ and reads it for nothing. `gateway provision` no longer takes it: it mints
 for the installed roles. `registry list` still builds and lists `--config` —
 it shows the directory, not what is installed. `audit repair control` takes it
 too (default `./config`). For **authorization**
-none of the three reads it once a configuration is installed: the roles that
+none of these commands reads it once a configuration is installed: the roles that
 decide who may `apply`, `enable`, `disable`, `repair`, `provision`, or `prune` are the installed
 snapshot's (`--control-log`'s `installed/current`), read without validation,
 roles only. Only while nothing is installed yet — a fresh control root — do
