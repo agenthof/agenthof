@@ -86,14 +86,46 @@ func TestControlAllows(t *testing.T) {
 }
 
 func TestControlOpsFixedSet(t *testing.T) {
-	for _, op := range []string{"apply", "enable", "disable", "repair"} {
+	for _, op := range []string{"apply", "enable", "disable", "repair", "provision", "prune"} {
 		if !KnownControlOp(op) {
 			t.Fatalf("%q must be a control op", op)
 		}
 	}
-	for _, op := range []string{"", "*", "all", "Apply", "provision"} {
+	for _, op := range []string{"", "*", "all", "Apply", "deploy"} {
 		if KnownControlOp(op) {
 			t.Fatalf("%q must not be a control op", op)
 		}
+	}
+}
+
+// TestControlAllowsProvisionAndPruneAreOpByOp: the two new operations are
+// granted exactly like the old — by name, to a member — and neither implies
+// the other; the public marker grants neither on either side.
+func TestControlAllowsProvisionAndPruneAreOpByOp(t *testing.T) {
+	keys := config.RoleDef{Name: "keys", AllowedGroups: []string{"platform-eng"}, Control: []string{"provision"}}
+	retention := config.RoleDef{Name: "retention", AllowedGroups: []string{"ops"}, Control: []string{"prune"}}
+	public := config.RoleDef{Name: "open", AllowedGroups: []string{"*"}, Control: []string{"provision", "prune"}}
+	inv := func(groups ...string) identity.Invoker { return identity.Invoker{Subject: "x", Groups: groups} }
+	cases := []struct {
+		name  string
+		roles []config.RoleDef
+		inv   identity.Invoker
+		op    string
+		want  bool
+	}{
+		{"provision granted to a member", []config.RoleDef{keys}, inv("platform-eng"), "provision", true},
+		{"provision does not imply prune", []config.RoleDef{keys}, inv("platform-eng"), "prune", false},
+		{"prune granted to a member", []config.RoleDef{retention}, inv("ops"), "prune", true},
+		{"prune does not imply provision", []config.RoleDef{retention}, inv("ops"), "provision", false},
+		{"non-member denied", []config.RoleDef{keys}, inv("ops"), "provision", false},
+		{"public role grants no provision", []config.RoleDef{public}, inv("platform-eng"), "provision", false},
+		{"public role grants no prune, even to a claimed *", []config.RoleDef{public}, inv("*"), "prune", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ControlAllows(tc.roles, tc.inv, tc.op); got != tc.want {
+				t.Fatalf("ControlAllows(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
 	}
 }

@@ -395,12 +395,12 @@ func Validate(cfg config.Config) []ValidationError {
 		// is a typo that must fail here, not silently grant nothing at the gate.
 		if r.Control != nil && len(r.Control) == 0 {
 			add(r.SourceFile, r.Name, "control-empty",
-				"control is present but names no operations; list the operations this role may perform (apply, enable, disable, repair) or omit the key")
+				"control is present but names no operations; list the operations this role may perform ("+strings.Join(authz.ControlOps, ", ")+") or omit the key")
 		}
 		for _, op := range r.Control {
 			if !authz.KnownControlOp(op) {
 				add(r.SourceFile, r.Name, "control-bad-op",
-					fmt.Sprintf("control names %q, which is not a control operation (apply, enable, disable, repair)", op))
+					fmt.Sprintf("control names %q, which is not a control operation (%s)", op, strings.Join(authz.ControlOps, ", ")))
 			}
 		}
 		// The control gate never honors "*" (authz.ControlAllows), so a public

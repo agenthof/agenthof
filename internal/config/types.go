@@ -284,8 +284,9 @@ type RoleDef struct {
 	Workflows     []string `yaml:"workflows"`
 	AllowedGroups []string `yaml:"allowed_groups"`
 	// Control is the role's optional control-plane grant: the operations
-	// (apply, enable, disable, repair — the fixed set the authorization check owns) its
-	// allowed_groups members may perform. Absent or null leaves it nil, which
+	// (apply, enable, disable, repair, provision, prune — the fixed set
+	// authz.ControlOps owns) its allowed_groups members may perform. Absent or
+	// null leaves it nil, which
 	// means no control permission; a present-but-empty list decodes to a
 	// non-nil empty slice and is rejected at apply — a grant that names none
 	// is never widened (Article VI). There is no wildcard spelling.

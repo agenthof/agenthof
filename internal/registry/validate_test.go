@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/authz"
 	"github.com/agenthof/agenthof/internal/config"
 )
 
@@ -781,7 +782,7 @@ func TestValidateControlGrants(t *testing.T) {
 		wantMsg  string
 	}{
 		{"unknown token", config.RoleDef{Name: "x", AllowedGroups: []string{"ops"}, Control: []string{"apply", "nuke"}},
-			"control-bad-op", `control names "nuke", which is not a control operation (apply, enable, disable, repair)`},
+			"control-bad-op", `control names "nuke", which is not a control operation (` + strings.Join(authz.ControlOps, ", ") + `)`},
 		{"present-empty", config.RoleDef{Name: "x", Workflows: []string{"fix-bug"}, AllowedGroups: []string{"ops"}, Control: []string{}},
 			"control-empty", "control is present but names no operations"},
 		{"public control role", config.RoleDef{Name: "x", AllowedGroups: []string{"*"}, Control: []string{"disable"}},
@@ -805,6 +806,42 @@ func TestValidateControlGrants(t *testing.T) {
 				t.Fatalf("expected %s, got %v", tc.wantCode, errs)
 			}
 		})
+	}
+}
+
+// TestValidateControlMessagesDeriveFromControlOps: the two messages that
+// enumerate the operation set are produced from authz.ControlOps, so they
+// name every operation — provision and prune included — and cannot drift
+// from the gate; a role that grants the two new operations validates.
+func TestValidateControlMessagesDeriveFromControlOps(t *testing.T) {
+	want := "(" + strings.Join(authz.ControlOps, ", ") + ")"
+	if want != "(apply, enable, disable, repair, provision, prune)" {
+		t.Fatalf("ControlOps = %v", authz.ControlOps)
+	}
+	msgFor := func(role config.RoleDef, code string) string {
+		t.Helper()
+		for _, e := range Validate(roleOnlyCfg(role)) {
+			if e.Code == code {
+				return e.Msg
+			}
+		}
+		t.Fatalf("no %s for %+v", code, role)
+		return ""
+	}
+	bad := msgFor(config.RoleDef{Name: "x", AllowedGroups: []string{"ops"}, Control: []string{"deploy"}}, "control-bad-op")
+	empty := msgFor(config.RoleDef{Name: "y", AllowedGroups: []string{"ops"}, Control: []string{}}, "control-empty")
+	for _, msg := range []string{bad, empty} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("message must enumerate ControlOps %s: %q", want, msg)
+		}
+		for _, op := range authz.ControlOps {
+			if !strings.Contains(msg, op) {
+				t.Fatalf("message must name %q: %q", op, msg)
+			}
+		}
+	}
+	if errs := Validate(roleOnlyCfg(config.RoleDef{Name: "z", AllowedGroups: []string{"ops"}, Control: []string{"provision", "prune"}})); len(errs) != 0 {
+		t.Fatalf("a role granting provision and prune must validate: %v", errs)
 	}
 }
 
