@@ -517,9 +517,10 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 // directory is not touched — after a flip, --config and the installed
 // snapshot disagree until the next apply re-asserts the directory (the
 // declared-state model, docs/control-plane-lifecycle.md). Every failure
-// before the commit changes nothing and is recorded; the hash precedes the
-// state change, so a hash failure is a plain recorded error. After the
-// commit the pointer has moved and only the success append remains: a
+// before the commit changes nothing and is recorded — including a snapshot
+// whose bytes do not hash to the pointer, refused before anything is staged;
+// the hash precedes the state change, so a hash failure is a plain recorded
+// error. After the commit the pointer has moved and only the success append remains: a
 // failure there prints "state changed; event NOT recorded", and audit
 // control / audit verify control flag the pointer-vs-ledger mismatch.
 // Disabling an already-disabled agent whose snapshot a flip wrote yields the
@@ -528,6 +529,17 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 // (SetEnabled re-marshals the file).
 func flipInstalled(action, target, store, hash, controlLog string, inv identity.Invoker, assertedAs string,
 	recordExit func(outcome string, reason *control.Reason) int, out io.Writer) int {
+	// Verify before staging: a snapshot whose bytes no longer hash to the
+	// pointer must not be copied, flipped and installed under the copy's own,
+	// correct hash — that would launder tampered bytes into a legitimately
+	// named, legitimately recorded snapshot. The same helper and the same
+	// message as the execution read; nothing is staged, so there is no
+	// .staging-* residue, and the recorded message (200 bytes for two
+	// sha256 hashes) fits truncateErr's cap whole.
+	if verr := config.VerifyInstalled(store, hash); verr != nil {
+		_, _ = fmt.Fprintln(out, verr)
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(verr)})
+	}
 	temp, stageErr := config.StageSnapshot(store, config.SnapshotDir(store, hash))
 	if stageErr != nil {
 		_, _ = fmt.Fprintln(out, stageErr)

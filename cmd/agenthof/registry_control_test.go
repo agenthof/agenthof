@@ -1066,3 +1066,65 @@ func TestRegistryFlipAndApplyInterleavedNeverLoseAnInstall(t *testing.T) {
 		}
 	}
 }
+
+// TestRegistryFlipRefusesToStageATamperedSnapshot: a snapshot edited in place
+// under installed/<hex>/ must not be staged, flipped and installed under the
+// copy's own, correct hash — that would launder tampered bytes into a
+// legitimately named, legitimately recorded snapshot. The flip is refused
+// before anything is staged, recorded error/io_error with the mismatch text
+// WHOLE — asserted by equality, and its length equals the recording cap so a
+// wording change that overflows fails here, not in the field — the pointer
+// is untouched, no .staging-* residue, and a run on the same root is refused
+// with the same text.
+func TestRegistryFlipRefusesToStageATamperedSnapshot(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	before := readPointer(t, ctl)
+	store := installedStore(ctl)
+	snap := config.SnapshotDir(store, before)
+	coder := filepath.Join(snap, "agents", "coder.yaml")
+	data, err := os.ReadFile(coder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coder, append(data, []byte("# edited in place\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.HashDir(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "installed config " + before + ": snapshot hashes as " + got + ", not as its pointer"
+
+	var out bytes.Buffer
+	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	if code != 1 || !strings.Contains(out.String(), want) || strings.Contains(out.String(), "agent coder disabled") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "disable" || e.Agent != "coder" || e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.ConfigHash != "" {
+		t.Fatalf("want disable error/io_error without a hash: %+v", e)
+	}
+	if e.Reason.Message != want {
+		t.Fatalf("the message must be recorded whole:\n got %q\nwant %q", e.Reason.Message, want)
+	}
+	if len(e.Reason.Message) != maxRecordedErrLen {
+		t.Fatalf("the mismatch text must sit exactly at the recording cap: len %d, cap %d", len(e.Reason.Message), maxRecordedErrLen)
+	}
+	if readPointer(t, ctl) != before {
+		t.Fatal("the pointer must not move")
+	}
+	noStagingResidue(t, ctl)
+	if after, _ := os.ReadFile(filepath.Join(root, "agents", "coder.yaml")); !bytes.Equal(after, data) {
+		t.Fatal("the configuration directory must not be touched")
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "disable agent coder error — dana@example.com (asserted)") {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
+	// The execution read refuses the same bytes with the same text.
+	if code, runOut := runFixBug(t, root, ctl); code != 1 || !strings.Contains(runOut, want) || !strings.Contains(runOut, "refused: configuration invalid") {
+		t.Fatalf("run: %d\n%s", code, runOut)
+	}
+}
