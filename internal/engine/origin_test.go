@@ -5,9 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
-	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/agenthof/agenthof/internal/identity"
 )
@@ -63,27 +61,6 @@ func TestOriginNilIsByteAbsent(t *testing.T) {
 	}
 	if bytes.Contains(data, []byte("origin")) {
 		t.Fatalf("a nil Origin must not serialize: %s", data)
-	}
-}
-
-func TestOriginSanitized(t *testing.T) {
-	long := strings.Repeat("é", 300)
-	o := &Origin{Via: "api", UserAgent: "evil\x1b[2J\r\n\x00" + long, ForwardedFor: "1.2.3.4\n5.6.7.8"}
-	got := o.sanitized()
-	if strings.ContainsAny(got.UserAgent, "\x1b\r\n\x00") {
-		t.Fatalf("non-printables must be stripped: %q", got.UserAgent)
-	}
-	if n := utf8.RuneCountInString(got.UserAgent); n != originFieldMax {
-		t.Fatalf("UserAgent runes = %d, want the cap %d", n, originFieldMax)
-	}
-	if got.ForwardedFor != "1.2.3.45.6.7.8" {
-		t.Fatalf("ForwardedFor = %q", got.ForwardedFor)
-	}
-	if o.UserAgent == got.UserAgent {
-		t.Fatal("sanitized must return a copy, not mutate the caller's value")
-	}
-	if (*Origin)(nil).sanitized() != nil {
-		t.Fatal("nil must stay nil")
 	}
 }
 

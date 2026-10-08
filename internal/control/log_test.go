@@ -11,6 +11,7 @@ import (
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/origin"
 )
 
 // readFirstJSON reads the first line of the JSONL file at p and decodes it
@@ -176,5 +177,61 @@ func TestAppendBootstrapRoundTrips(t *testing.T) {
 	}
 	if !d0.Bootstrap || d1.Bootstrap {
 		t.Fatalf("decoded bootstrap: first=%v second=%v, want true/false", d0.Bootstrap, d1.Bootstrap)
+	}
+}
+
+// TestAppendOriginRoundTripsSanitizedAndOrdered: the additive origin lands
+// on the wire after fragment_sha256 and before prev, sanitized the way the
+// run ledger sanitizes it, and reads back through Decode.
+func TestAppendOriginRoundTripsSanitizedAndOrdered(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.jsonl")
+	inv := identity.Static("dana@example.com")
+	via := &origin.Origin{Via: "api", RemoteAddr: "127.0.0.1:5", UserAgent: "x\x1b[31m", ServerHost: "127.0.0.1:8080"}
+	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success",
+		Invoker: inv, Witness: control.CaptureWitness(), ConfigHash: "sha256:abc", Bootstrap: true, Origin: via}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `"config_hash":"sha256:abc","bootstrap":true,"origin":{"via":"api","remote_addr":"127.0.0.1:5","user_agent":"x[31m","server_host":"127.0.0.1:8080"},"prev":""`
+	if !strings.Contains(string(raw), want) {
+		t.Fatalf("wire order/sanitizing wrong:\n%s\nwant substring %s", raw, want)
+	}
+	if via.UserAgent != "x\x1b[31m" {
+		t.Fatal("Append must sanitize a copy, not the caller's value")
+	}
+	recs, _, verr := ledger.ReadVerify(p, ledger.Locked)
+	if verr != nil {
+		t.Fatal(verr)
+	}
+	d, err := control.Decode(recs[0].Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Origin == nil || d.Origin.Via != "api" || d.Origin.UserAgent != "x[31m" {
+		t.Fatalf("Decode origin = %+v", d.Origin)
+	}
+}
+
+// TestAppendNilOriginIsByteAbsent: every CLI control record (no origin) is
+// byte-identical to before the field existed.
+func TestAppendNilOriginIsByteAbsent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.jsonl")
+	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success",
+		Invoker: identity.Static("dana@example.com"), Witness: control.CaptureWitness(), ConfigHash: "sha256:abc"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "origin") {
+		t.Fatalf("a nil origin must not serialize: %s", raw)
+	}
+	recs, _, _ := ledger.ReadVerify(p, ledger.Locked)
+	if d, _ := control.Decode(recs[0].Raw); d.Origin != nil {
+		t.Fatalf("Decode must leave Origin nil: %+v", d.Origin)
 	}
 }

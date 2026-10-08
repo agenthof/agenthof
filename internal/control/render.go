@@ -142,7 +142,14 @@ func Render(records []ledger.Record, head ledger.Head, verr error) string {
 		// just a time of day; the seq is shown too so a reader can find
 		// the record the integrity line's "repaired at seq K" names.
 		t := rec.Time.UTC().Format("2006-01-02 15:04:05")
-		fmt.Fprintf(&sb, "  seq %d  %s  %s — %s (%s)\n", rec.Seq, t, label(rec), rec.Invoker.Subject, rec.Invoker.Method)
+		// An API-recorded action names its way in beside the method; a CLI
+		// record (no origin) renders exactly as before. The remote address
+		// and user agent stay in the record for raw readers, not here.
+		who := fmt.Sprintf("%s (%s)", rec.Invoker.Subject, rec.Invoker.Method)
+		if rec.Origin != nil {
+			who = fmt.Sprintf("%s (%s, via %s)", rec.Invoker.Subject, rec.Invoker.Method, rec.Origin.Via)
+		}
+		fmt.Fprintf(&sb, "  seq %d  %s  %s — %s\n", rec.Seq, t, label(rec), who)
 	}
 	sb.WriteString(integrityLine(records, head, verr))
 	return sb.String()

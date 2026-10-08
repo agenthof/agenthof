@@ -10,6 +10,7 @@ import (
 	"os/user"
 
 	"github.com/agenthof/agenthof/internal/identity"
+	"github.com/agenthof/agenthof/internal/origin"
 )
 
 // Reason codes for a control/1 record whose outcome is not "success".
@@ -44,7 +45,8 @@ type Witness struct {
 
 // Event is a control/1 record. Callers set Action, Agent, Outcome, Reason,
 // Invoker, AssertedAs, Witness, ConfigHash, Bootstrap (apply and
-// enable/disable), and (repair only) FragmentLen/FragmentSHA. V, and the
+// enable/disable), Origin (an API-recorded action; nil from the CLI), and
+// (repair only) FragmentLen/FragmentSHA. V, and the
 // seq/time/prev/log_id
 // fields on the wire, are set by Append; callers never set them.
 type Event struct {
@@ -68,6 +70,13 @@ type Event struct {
 	Bootstrap   bool   `json:"bootstrap,omitempty"`
 	FragmentLen int    `json:"fragment_len,omitempty"`
 	FragmentSHA string `json:"fragment_sha256,omitempty"`
+	// Origin is where the action's request arrived from — set by serve on
+	// an API-recorded action, nil from the CLI. Provenance from the
+	// untrusted request channel, never a witness: the witness on an API
+	// record is the serving host's OS user and hostname. Sanitized by
+	// Append. Additive and omitempty (Article VI): absent on every record
+	// written before it existed and on every CLI record after.
+	Origin *origin.Origin `json:"origin,omitempty"`
 }
 
 // CaptureWitness captures the local OS user (preferring $USER, falling

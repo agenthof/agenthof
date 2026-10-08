@@ -81,7 +81,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	if opts.ArtifactDir == "" {
 		opts.ArtifactDir = ".agenthof/artifacts"
 	}
-	opts.Origin = opts.Origin.sanitized()
+	opts.Origin = opts.Origin.Sanitized()
 	runID := opts.RunID
 	if runID == "" {
 		runID = NewRunID()
