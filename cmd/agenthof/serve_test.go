@@ -122,8 +122,10 @@ func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
 		t.Fatalf("a broken directory must not affect the installed resolution: hash=%q errs=%v", again, errs)
 	}
 
-	// The snapshot is read unverified (honest limit): a workflow-referenced
-	// agent disabled in place under installed/<hex>/ is a validation error.
+	// Verify-on-read: an in-place edit under installed/<hex>/ is a mismatch
+	// against the pointer, refused before the bytes are parsed — so the
+	// edit's own effect (a disabled agent) is never what surfaces. A real
+	// kill-switch flip is what makes disabled-agent-ref reach a run.
 	store := installedStore(ctl)
 	coder := filepath.Join(config.SnapshotDir(store, hash), "agents", "coder.yaml")
 	data, err := os.ReadFile(coder)
@@ -133,8 +135,13 @@ func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
 	if err := os.WriteFile(coder, append(data, []byte("enabled: false\n")...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, reg, _, installed, errs := resolveRunConfig(ctl); reg != nil || !installed || len(errs) == 0 || !strings.Contains(errs[0].Error(), "disabled in the registry") {
-		t.Fatalf("disabled-agent-ref must surface: reg=%v installed=%v errs=%v", reg, installed, errs)
+	got, err := config.HashDir(config.SnapshotDir(store, hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "installed config " + hash + ": snapshot hashes as " + got + ", not as its pointer"
+	if _, reg, _, installed, errs := resolveRunConfig(ctl); reg != nil || !installed || len(errs) != 1 || errs[0].Error() != want {
+		t.Fatalf("the mismatch must surface, alone: reg=%v installed=%v errs=%v", reg, installed, errs)
 	}
 
 	// A malformed pointer: errors first, installed=false.

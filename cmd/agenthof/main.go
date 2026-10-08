@@ -123,8 +123,9 @@ func buildRegistry(configRoot string, out io.Writer) *registry.Registry {
 // bootstrap over a damaged store. hash is the installed pointer's value,
 // verbatim — the hash the installer (apply, or a kill-switch flip) recorded
 // for this snapshot, and the key the audit readers join on; the bytes under
-// it are read unverified (docs/control-plane-lifecycle.md, honest limits).
-// It is never empty when installed and errs is nil. applyFloorErrors is
+// it are verified against it (config.VerifyInstalled) before they are parsed;
+// only the roles-only authorization read is not (docs/control-plane-lifecycle.md,
+// honest limits). It is never empty when installed and errs is nil. applyFloorErrors is
 // not run here: it is a property of what may be installed, and the snapshot
 // passed it at apply.
 func resolveRunConfig(controlLog string) (cfg config.Config, reg *registry.Registry, hash string, installed bool, errs []error) {

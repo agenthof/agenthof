@@ -452,17 +452,185 @@ func TestLoadInstalledReportsEveryFileErrorWhileRolesStillRead(t *testing.T) {
 	}
 }
 
-// TestLoadInstalledFailsClosedOnSnapshotWithNoRoles: a <hex>/ that exists but
-// has lost its files loads as an empty configuration with no error from the
-// file walk; that is damage, not a valid install (every installed snapshot
-// passed no-apply-floor, so it has at least one role). Fail closed naming the
-// snapshot rather than hand the engine an empty registry.
-func TestLoadInstalledFailsClosedOnSnapshotWithNoRoles(t *testing.T) {
+// mismatchText builds the exact verify-on-read error for a snapshot named
+// hash whose bytes now hash as got.
+func mismatchText(hash, got string) string {
+	return "installed config " + hash + ": snapshot hashes as " + got + ", not as its pointer"
+}
+
+// tamperSnapshot appends a comment to one file inside the installed
+// snapshot — the in-place edit verify-on-read exists to catch — and returns
+// what the directory hashes as afterwards.
+func tamperSnapshot(t *testing.T, store, hash, rel string) string {
+	t.Helper()
+	p := filepath.Join(SnapshotDir(store, hash), filepath.FromSlash(rel))
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, append(data, []byte("# edited in place\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := HashDir(SnapshotDir(store, hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == hash {
+		t.Fatal("the edit must change the hash, or the test proves nothing")
+	}
+	return got
+}
+
+func TestVerifyInstalledAcceptsAnIntactSnapshot(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	hash := installByHand(t, store, sampleConfig(t))
+	if err := VerifyInstalled(store, hash); err != nil {
+		t.Fatalf("an intact snapshot must verify: %v", err)
+	}
+}
+
+func TestVerifyInstalledMismatchNamesBothHashes(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	hash := installByHand(t, store, sampleConfig(t))
+	got := tamperSnapshot(t, store, hash, "agents/planner.yaml")
+	err := VerifyInstalled(store, hash)
+	if err == nil || err.Error() != mismatchText(hash, got) {
+		t.Fatalf("got %v\nwant %s", err, mismatchText(hash, got))
+	}
+}
+
+func TestVerifyInstalledMissingSnapshotWrapsTheRootError(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	hash := installByHand(t, store, sampleConfig(t))
+	if err := os.RemoveAll(SnapshotDir(store, hash)); err != nil {
+		t.Fatal(err)
+	}
+	err := VerifyInstalled(store, hash)
+	if err == nil || !strings.HasPrefix(err.Error(), "installed config "+hash+": config root ") || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a missing snapshot is the enumeration's own error, wrapped: %v", err)
+	}
+}
+
+// TestVerifyInstalledIsTheFrozenCanon: the golden-vector directory, installed
+// by hand under the name HashDir gives it, verifies — VerifyInstalled is
+// HashDir over the snapshot and nothing else.
+func TestVerifyInstalledIsTheFrozenCanon(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := t.TempDir()
+	writeCfg(t, src, "agents/a.yaml", "name: a\nmodel: m\n")
+	writeCfg(t, src, "roles/r.yaml", "name: r\nworkflows: [w]\n")
+	const golden = "sha256:3a2f6d0c0df4546527ad1ba5c5ae63cc803851f99614247fcbf38b16b4a5d885"
+	if h := installByHand(t, store, src); h != golden {
+		t.Fatalf("installed under %s, want the golden vector %s", h, golden)
+	}
+	if err := VerifyInstalled(store, golden); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLoadInstalledRefusesTamperedBytesBeforeParsing: one error, the exact
+// mismatch text, installed with the pointer's hash — and a zero config,
+// because bytes that do not match the pointer are never fed to the parser.
+func TestLoadInstalledRefusesTamperedBytesBeforeParsing(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	hash := installByHand(t, store, sampleConfig(t))
+	got := tamperSnapshot(t, store, hash, "agents/planner.yaml")
+	cfg, h, installed, errs := LoadInstalled(store)
+	if !installed || h != hash || len(errs) != 1 || errs[0].Error() != mismatchText(hash, got) {
+		t.Fatalf("installed=%v hash=%q errs=%v", installed, h, errs)
+	}
+	if len(cfg.Agents) != 0 || len(cfg.Roles) != 0 || len(cfg.Workflows) != 0 {
+		t.Fatalf("tampered bytes must never be parsed: %+v", cfg)
+	}
+}
+
+func TestLoadInstalledAddedFileIsAMismatch(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	hash := installByHand(t, store, sampleConfig(t))
+	writeCfg(t, SnapshotDir(store, hash), "roles/x.yaml", "name: x\nallowed_groups: [ops]\ncontrol: [apply]\n")
+	got, err := HashDir(SnapshotDir(store, hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, installed, errs := LoadInstalled(store)
+	if !installed || len(errs) != 1 || errs[0].Error() != mismatchText(hash, got) || len(cfg.Roles) != 0 {
+		t.Fatalf("a file dropped into the snapshot is enumerated and therefore a mismatch: installed=%v errs=%v roles=%d", installed, errs, len(cfg.Roles))
+	}
+}
+
+// TestLoadInstalledDeletedFileIsAMismatchNotALoadError: a snapshot that lost
+// roles/ after install hashes differently, so the first (only) error is the
+// mismatch — never "snapshot has no roles", which is the no-roles branch
+// below.
+func TestLoadInstalledDeletedFileIsAMismatchNotALoadError(t *testing.T) {
 	store := filepath.Join(t.TempDir(), "installed")
 	hash := installByHand(t, store, sampleConfig(t))
 	if err := os.RemoveAll(filepath.Join(SnapshotDir(store, hash), "roles")); err != nil {
 		t.Fatal(err)
 	}
+	got, err := HashDir(SnapshotDir(store, hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, installed, errs := LoadInstalled(store)
+	if !installed || len(errs) != 1 || errs[0].Error() != mismatchText(hash, got) {
+		t.Fatalf("installed=%v errs=%v", installed, errs)
+	}
+}
+
+// TestLoadInstalledUnreadableFileIsTheHashStepsError: the hash step runs
+// first, so an unreadable file surfaces as HashDir's error wrapped with the
+// snapshot's name — observable proof of the order.
+func TestLoadInstalledUnreadableFileIsTheHashStepsError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads mode-0 files")
+	}
+	store := filepath.Join(t.TempDir(), "installed")
+	hash := installByHand(t, store, sampleConfig(t))
+	p := filepath.Join(SnapshotDir(store, hash), "agents", "planner.yaml")
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+	_, _, installed, errs := LoadInstalled(store)
+	if !installed || len(errs) != 1 || !strings.HasPrefix(errs[0].Error(), "installed config "+hash+": hash config: agents/planner.yaml: ") || !errors.Is(errs[0], fs.ErrPermission) {
+		t.Fatalf("installed=%v errs=%v", installed, errs)
+	}
+}
+
+// TestInstalledRolesIsNotVerified pins the boundary: the roles-only
+// authorization read does not verify the snapshot against the pointer (a
+// snapshot whose agent files were edited still decides who may act), while
+// the execution read of the same store refuses. A later change to this is
+// deliberate, not accidental.
+func TestInstalledRolesIsNotVerified(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	hash := installByHand(t, store, sampleConfig(t))
+	tamperSnapshot(t, store, hash, "agents/planner.yaml")
+	roles, h, installed, err := InstalledRoles(store)
+	if err != nil || !installed || h != hash || len(roles) != 2 {
+		t.Fatalf("the lenient read must still yield roles: roles=%d hash=%q installed=%v err=%v", len(roles), h, installed, err)
+	}
+	if _, _, _, errs := LoadInstalled(store); len(errs) != 1 {
+		t.Fatalf("the execution read of the same store must refuse: %v", errs)
+	}
+}
+
+// TestLoadInstalledFailsClosedOnSnapshotWithNoRoles: the no-roles branch is
+// defense in depth. It is reachable only through a hand-built, correctly
+// hashed, role-less <hex>/ that a filesystem writer re-points current at —
+// a snapshot that LOST roles/ after install hashes differently and is the
+// mismatch case (TestLoadInstalledDeletedFileIsAMismatchNotALoadError). Here
+// roles/ is removed from the source BEFORE hashing, so the snapshot hashes
+// to its name and genuinely holds no roles; every installed snapshot passed
+// the no-apply-floor, so this is damage and fails closed naming the snapshot.
+func TestLoadInstalledFailsClosedOnSnapshotWithNoRoles(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := sampleConfig(t)
+	if err := os.RemoveAll(filepath.Join(src, "roles")); err != nil {
+		t.Fatal(err)
+	}
+	hash := installByHand(t, store, src)
 	_, _, installed, errs := LoadInstalled(store)
 	if !installed || len(errs) != 1 || errs[0].Error() != "installed config "+hash+": snapshot has no roles" {
 		t.Fatalf("installed=%v errs=%v", installed, errs)
