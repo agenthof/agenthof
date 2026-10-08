@@ -30,7 +30,7 @@ func IsTainted(records []ledger.Record) (bool, int) {
 
 // label derives the human-readable line label for a control record's
 // action/outcome pair (spec §3.6). It never claims a state change that
-// didn't happen: enable/disable/repair only get their past-tense label on
+// didn't happen: enable/disable/repair/prune only get their past-tense label on
 // outcome "success" — every other outcome is worded around the action,
 // not past it.
 func label(rec record) string {
@@ -61,6 +61,19 @@ func label(rec record) string {
 			return "ledger repaired"
 		}
 		return "ledger repair " + rec.Outcome
+	case "provision":
+		// "ok", not "keys provisioned": a successful provision may have minted
+		// nothing (every role control-only, or every key already valid), and
+		// the record carries no per-role outcome — stdout does.
+		if rec.Outcome == "success" {
+			return "provision ok"
+		}
+		return "provision " + rec.Outcome
+	case "prune":
+		if rec.Outcome == "success" {
+			return "runs pruned"
+		}
+		return "runs prune " + rec.Outcome
 	default:
 		return rec.Action
 	}
@@ -149,7 +162,13 @@ func Render(records []ledger.Record, head ledger.Head, verr error) string {
 		if rec.Origin != nil {
 			who = fmt.Sprintf("%s (%s, via %s)", rec.Invoker.Subject, rec.Invoker.Method, rec.Origin.Via)
 		}
-		fmt.Fprintf(&sb, "  seq %d  %s  %s — %s\n", rec.Seq, t, label(rec), who)
+		// A record with a detail renders it after the label, for any action:
+		// the renderer does not know which actions set it.
+		lbl := label(rec)
+		if rec.Detail != "" {
+			lbl += " (" + rec.Detail + ")"
+		}
+		fmt.Fprintf(&sb, "  seq %d  %s  %s — %s\n", rec.Seq, t, lbl, who)
 	}
 	sb.WriteString(integrityLine(records, head, verr))
 	return sb.String()

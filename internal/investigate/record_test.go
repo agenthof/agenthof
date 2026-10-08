@@ -74,3 +74,20 @@ func TestRecordJSONShape(t *testing.T) {
 		t.Fatalf("unexpected field: %s", s)
 	}
 }
+
+// TestNormalizeControlDoesNotCarryDetail: the investigate/1 record has no
+// detail field — a control event's prose summary is not part of the
+// published contract; provision and prune surface as kinds, nothing more.
+func TestNormalizeControlDoesNotCarryDetail(t *testing.T) {
+	r := normalizeControl(control.DecodedEvent{Seq: 3, Time: time.Unix(0, 0).UTC(), Action: "prune", Outcome: "success", Detail: "pruned 1 run(s) and 0 artifact(s) older than 180d"})
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Kind != "prune" || !strings.Contains(string(b), `"kind":"prune"`) {
+		t.Fatalf("kind must be the action: %s", b)
+	}
+	if strings.Contains(string(b), "detail") || strings.Contains(string(b), "pruned 1") {
+		t.Fatalf("detail must not reach investigate/1: %s", b)
+	}
+}

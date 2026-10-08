@@ -18,7 +18,7 @@ import (
 // record is the control/1 on-disk shape. Field order here is the wire
 // order (spec §3.2): v, seq, time, action, agent, outcome, reason,
 // invoker, asserted_as, witness, config_hash, bootstrap, fragment_len,
-// fragment_sha256, origin, prev, log_id. It intentionally does not embed Event,
+// fragment_sha256, origin, detail, prev, log_id. It intentionally does not embed Event,
 // since the wire order interleaves the writer-assigned fields (seq, time
 // up front; prev, log_id at the end) around the caller-assigned ones.
 //
@@ -42,6 +42,7 @@ type record struct {
 	FragmentLen int              `json:"fragment_len,omitempty"`
 	FragmentSHA string           `json:"fragment_sha256,omitempty"`
 	Origin      *origin.Origin   `json:"origin,omitempty"`
+	Detail      string           `json:"detail,omitempty"`
 	Prev        string           `json:"prev"`
 	LogID       string           `json:"log_id,omitempty"`
 }
@@ -80,6 +81,7 @@ func Append(path string, e Event) (ledger.Head, error) {
 		FragmentLen: e.FragmentLen,
 		FragmentSHA: e.FragmentSHA,
 		Origin:      e.Origin.Sanitized(),
+		Detail:      origin.Clean(e.Detail),
 		Prev:        c.Prev(),
 	}
 	if c.Count() == 0 {

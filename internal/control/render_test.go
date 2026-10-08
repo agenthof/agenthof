@@ -220,3 +220,49 @@ func TestControlRenderOrigin(t *testing.T) {
 		}
 	}
 }
+
+// recDetail is rec with a detail field, for the (<detail>) suffix.
+func recDetail(seq int, action, outcome, detail string) ledger.Record {
+	raw := fmt.Sprintf(
+		`{"v":"control/1","seq":%d,"time":"2026-10-08T10:%02d:00Z",`+
+			`"action":%q,"outcome":%q,`+
+			`"invoker":{"subject":"dana@example.com","issuer":"local","method":"asserted"},`+
+			`"witness":{"os_user":"dana","hostname":"host"},"detail":%q,"prev":""}`,
+		seq, seq, action, outcome, detail,
+	)
+	return ledger.Record{Raw: []byte(raw)}
+}
+
+// TestControlRenderProvisionAndPruneLabels: the six labels, worded around
+// the action on every non-success outcome; provision's success label is
+// "provision ok" (a success may have minted nothing); a record with detail
+// renders it in parentheses after the label, and one without renders as
+// before.
+func TestControlRenderProvisionAndPruneLabels(t *testing.T) {
+	recs := []ledger.Record{
+		rec(1, "provision", "", "success", "dana@example.com", "asserted"),
+		rec(2, "provision", "", "refused", "dana@example.com", "asserted"),
+		rec(3, "provision", "", "error", "dana@example.com", "asserted"),
+		rec(4, "prune", "", "refused", "dana@example.com", "asserted"),
+		rec(5, "prune", "", "error", "dana@example.com", "asserted"),
+		recDetail(6, "prune", "success", "pruned 3 run(s) and 1 artifact(s) older than 180d"),
+		rec(7, "prune", "", "success", "dana@example.com", "asserted"),
+	}
+	out := control.Render(recs, ledger.Head{Hash: "h", Count: 7}, nil)
+	for _, want := range []string{
+		"seq 1  2026-09-21 10:01:00  provision ok — dana@example.com (asserted)\n",
+		"seq 2  2026-09-21 10:02:00  provision refused — dana@example.com (asserted)\n",
+		"seq 3  2026-09-21 10:03:00  provision error — dana@example.com (asserted)\n",
+		"seq 4  2026-09-21 10:04:00  runs prune refused — dana@example.com (asserted)\n",
+		"seq 5  2026-09-21 10:05:00  runs prune error — dana@example.com (asserted)\n",
+		"seq 6  2026-10-08 10:06:00  runs pruned (pruned 3 run(s) and 1 artifact(s) older than 180d) — dana@example.com (asserted)\n",
+		"seq 7  2026-09-21 10:07:00  runs pruned — dana@example.com (asserted)\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "keys provisioned") {
+		t.Fatalf("a provision label must not claim keys were minted:\n%s", out)
+	}
+}

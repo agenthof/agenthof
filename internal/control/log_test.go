@@ -235,3 +235,71 @@ func TestAppendNilOriginIsByteAbsent(t *testing.T) {
 		t.Fatalf("Decode must leave Origin nil: %+v", d.Origin)
 	}
 }
+
+// TestAppendDetailRoundTripsSanitizedAndOrdered: detail is cleaned by Append
+// (printable runes only, at most 200), sits after origin and before prev on
+// the wire, and decodes back.
+func TestAppendDetailRoundTripsSanitizedAndOrdered(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.jsonl")
+	inv := identity.Static("dana@example.com")
+	const line = "pruned 3 run(s) and 1 artifact(s) older than 180d"
+	for _, e := range []control.Event{
+		{Action: "prune", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness(), Detail: line, Origin: &origin.Origin{Via: "api"}},
+		{Action: "prune", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness(), Detail: "a\x1b[31mb"},
+		{Action: "prune", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness(), Detail: strings.Repeat("x", 300)},
+	} {
+		if _, err := control.Append(p, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `"origin":{"via":"api"},"detail":"` + line + `","prev":""`
+	if !strings.Contains(string(raw), want) {
+		t.Fatalf("wire order wrong:\n%s\nwant substring %s", raw, want)
+	}
+	recs, _, verr := ledger.ReadVerify(p, ledger.Locked)
+	if verr != nil {
+		t.Fatal(verr)
+	}
+	var got []string
+	for _, r := range recs {
+		d, err := control.Decode(r.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, d.Detail)
+	}
+	if got[0] != line || got[1] != "a[31mb" || got[2] != strings.Repeat("x", 200) {
+		t.Fatalf("Decode detail = %q", got)
+	}
+}
+
+// TestAppendEmptyDetailIsByteAbsent: every record written before the field
+// existed, and every record that does not set it, carries no detail key at
+// all — the wire shape of an existing ledger is unchanged.
+func TestAppendEmptyDetailIsByteAbsent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.jsonl")
+	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success",
+		Invoker: identity.Static("dana@example.com"), Witness: control.CaptureWitness(), ConfigHash: "sha256:abc"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "detail") {
+		t.Fatalf("an empty detail must not serialize: %s", raw)
+	}
+	recs, _, _ := ledger.ReadVerify(p, ledger.Locked)
+	if d, _ := control.Decode(recs[0].Raw); d.Detail != "" {
+		t.Fatalf("Decode must leave Detail empty: %q", d.Detail)
+	}
+	// A record written before the field existed decodes with it empty.
+	old := []byte(`{"v":"control/1","seq":1,"time":"2026-09-21T10:01:00Z","action":"apply","outcome":"success","invoker":{"subject":"dana@example.com","issuer":"local","method":"asserted"},"witness":{"os_user":"dana","hostname":"host"},"prev":""}`)
+	if d, err := control.Decode(old); err != nil || d.Detail != "" {
+		t.Fatalf("existing record: err=%v detail=%q", err, d.Detail)
+	}
+}
