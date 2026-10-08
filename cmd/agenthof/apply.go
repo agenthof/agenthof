@@ -373,7 +373,8 @@ func (a *applyRun) hashFailure(hashErr error) applyOutcome {
 // proposer is any authorized token-holder and the message carries names
 // from the proposed YAML, so over the API (Origin present) it is cleaned
 // (printable, 200 runes) before the byte cap; a CLI apply (no Origin) records
-// it raw via truncateErr, byte-identical to 2a.
+// it raw via truncateErr, byte-identical to what the local command recorded
+// before the API path existed.
 func (a *applyRun) rejected(temp string, cause error) applyOutcome {
 	h, hashErr := hashConfigDir(temp)
 	if hashErr != nil {
@@ -386,9 +387,10 @@ func (a *applyRun) rejected(temp string, cause error) applyOutcome {
 // the proposer is any authorized token-holder) it sanitizes through
 // origin.Clean first, so attacker-shaped names from the proposed YAML cannot
 // put control runes or an over-long line into the ledger. On the CLI path
-// (no Origin) it is exactly truncateErr, byte-identical to what 2a wrote —
-// so no existing control record changes (a multi-line yaml TypeError keeps
-// its 2a form on the CLI; a blanket Clean would have collapsed it to one line).
+// (no Origin) it is exactly truncateErr, byte-identical to what the local
+// command recorded before the API path existed — so no existing control record
+// changes (a multi-line yaml TypeError keeps its original form on the CLI; a
+// blanket Clean would have collapsed it to one line).
 func (a *applyRun) cleanReason(err error) string {
 	if a.req.Origin == nil {
 		return truncateErr(err)
