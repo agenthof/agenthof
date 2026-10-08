@@ -841,7 +841,7 @@ recorded and why; this section is the flag-by-flag and exit-code reference.
 
 | Command | Flags |
 |---|---|
-| `agenthof apply --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--as`, `--groups`, `--token` |
+| `agenthof apply --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-installed <sha256:hex\|none>] [--server <url> [--bundle <file\|->]]` | `--control-log`, `--as`, `--groups`, `--token`, `--if-installed`, `--server`, `--bundle` |
 | `agenthof registry enable\|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | same |
 | `agenthof audit control [--control-log <path>]` | `--control-log` |
 | `agenthof audit verify control [--control-log <path>] [--expect-head <hex>]` | `--control-log`, `--expect-head` |
@@ -931,6 +931,34 @@ held only for the run and is never recorded. A
 as a `refused` control event (reason `token_verification_failed`) and the
 command exits nonzero.
 
+### `--if-installed` (apply)
+
+A compare-and-swap on the installed configuration: `--if-installed
+sha256:<hex>` proceeds only if that is the installed hash; `--if-installed
+none` proceeds only if nothing is installed. A mismatch prints `apply:
+precondition failed: installed configuration is <hash|nothing>, not
+<expected>`, exits 1, and records nothing — no decision was made. Optional
+locally (without it the apply runs as before); **required** with
+`--server`, where two writers cannot see each other's filesystem. The hash
+to name is the one the previous apply printed as `installed: sha256:…`
+(`--server`) or the value of `installed/current` beside the control log.
+
+### `--server`, `--bundle` (apply)
+
+`--server <url>` (or `AGENTHOF_SERVER`) with `--token` (or
+`AGENTHOF_TOKEN`) sends the configuration to a running `agenthof serve`
+instead of installing it here; `--as`/`--groups` are ignored (the server
+authenticates the token) and `--control-log` is the server's. The
+configuration is read from `--config` exactly as a local apply would
+snapshot it, or taken from `--bundle <file>` (`-` for stdin): a JSON
+object `{"files": {"roles/ops.yaml": "<yaml text>", …}}` keyed by
+config-relative path — the request body itself, so a bundle can be
+produced by any tool. A file that is not valid UTF-8, a key outside
+`agents/`, `workflows/`, `roles/` or `gateway.yaml`, more than 1000 files
+or more than 1 MiB is refused before anything is sent. Output is the local
+output plus `installed: sha256:<hex>` on success; see
+[`serve.md`](serve.md) for every answer. `--bundle` needs `--server`.
+
 ### `--expect-head`
 
 `agenthof audit verify control` only. The control-ledger head hash (hex) to
@@ -1001,8 +1029,8 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
-| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install) |
-| `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set |
+| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install); or (`--if-installed`) the precondition did not hold, printed and **not** recorded; or another process holds the installed-configuration writer lock (`another agenthof process holds the installed-configuration lock; retry`), not recorded; or (`--server`) any answer other than installed, and every transport error |
+| `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set; `--if-installed` not `sha256:<hex>` or `none`; `--server` without a token or without `--if-installed`; `--bundle` without `--server` |
 
 `agenthof run` (the installed-configuration refusals; the engine documents the rest):
 
@@ -1014,7 +1042,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 
 | Exit | Meaning |
 |---|---|
-| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code — and, when something is installed, a trailing `installed config:` line saying whether the pointer matches the last recorded install — the last successful `apply` or kill-switch flip (informational here; see `verify control`) |
+| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code — and, when something is installed, a trailing `installed config:` line saying whether the pointer matches the last recorded install — the last successful `apply` or kill-switch flip (informational here; see `verify control`). An event recorded over the API shows its way in beside the method — `dana@example.com (oidc, via api)` |
 | `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain — a torn or broken chain still renders whatever valid prefix was recovered, with the failure named in the trailing integrity line |
 | `2` | Usage error |
 

@@ -15,13 +15,15 @@ a later version, it says so — only shipped behavior is a guarantee.
 
 ## The commands
 
-Three commands write to the control plane:
+Three commands write to the control plane — and one of them, `apply`, can
+also arrive over the network:
 
 ```
 agenthof apply --config ./config --as dana@example.com --groups platform-eng                   # adopt a configuration
 agenthof registry disable coder --config ./config --as dana@example.com --groups platform-eng  # the kill switch: re-installs the configuration with coder disabled
 agenthof registry enable  coder --config ./config --as dana@example.com --groups platform-eng  # …and back on
 agenthof audit repair control --config ./config --as dana@example.com --groups platform-eng    # repair a torn ledger tail
+agenthof apply --server https://agenthof.example --token $TOKEN --if-installed sha256:…  # the same apply, over the API (serve)
 ```
 
 Each one is an *attempt* to change governance state, and each attempt — whether
@@ -183,7 +185,11 @@ installed snapshot is found beside the `--control-log` in use, so pointing a
 command at a fresh `--control-log` reaches the bootstrap / `--config` fallback
 with no write to any store at all. That grants nothing an operator did not
 already have, but it is why the control root, not the store directory alone, is
-the boundary to reason about.
+the boundary to reason about. Over the API that limit falls away for the
+caller: there is no filesystem, so the token-and-roles check is the only way
+in, and the first apply while nothing is installed is refused unless the server
+was started with `--allow-api-bootstrap`. What remains is the host: whoever can
+write `.agenthof/installed/` on the serving host can still remove the pointer.
 
 ## 3. Is the change valid?
 
@@ -284,6 +290,48 @@ manager). Later you can hand it to `audit verify control --expect-head <hash>`
 to prove the on-disk chain still ends exactly where you last saw it, closing the
 gap that a purely local log can't close on its own.
 
+## Applying over the API
+
+`agenthof serve` exposes the same `apply` as `POST /v1/config/apply`. The
+journey is the one above with two additions — a **precondition** on the
+installed hash, and a **writer lock** that makes the whole sequence one
+step with respect to every other writer:
+
+```
+  POST /v1/config/apply  {files: …}  If-Match: sha256:<installed>  |  If-None-Match: *
+      │
+      ▼
+  1. Who?         the bearer token is verified → Invoker {subject, issuer, groups}
+      │              (401 and nothing written if it is not; the witness is the server's)
+      ▼
+  2. May they?    take the writer lock; read the INSTALLED roles; default-deny
+      │              no → refused / not_authorized (recorded, with the proposal's hash, 403)
+      │              nothing installed and bootstrap not enabled → refused (recorded, 403)
+      ▼
+  3. Still true?  compare the installed hash to If-Match / If-None-Match
+      │              no → 412 with the current hash (NOT recorded: no decision was made)
+      ▼
+  4. Valid?       stage the files, load, validate, hash
+      │              no → rejected / validation_failed (recorded, with the copy's hash, 422)
+      ▼
+  5. Install      the copy becomes installed/<hex>/ and `current` points at it
+      ▼
+  6. Record       success (bootstrap when nothing was installed) + origin {via: api, …}
+      │              release the lock
+      ▼
+  7. Answer       200 {config_hash, head, counts} + ETag — the next run executes it
+```
+
+Everything the record carries is what a command-line apply records, plus
+`origin`: the way in. The witness on such a record is the serving host's OS
+user and hostname — it corroborates nothing about the caller; the token
+does that. Two outcomes are deliberately **not** recorded: a failed
+precondition (`412`) and a busy lock (`409`) — in both, nothing was decided
+and nothing was looked at. A kill-switch flip on the host takes the same
+lock, so an apply and a flip never interleave: the flip re-snapshots
+whatever the apply installed, or the apply authorizes against whatever the
+flip installed.
+
 ## 6. Reading it back
 
 ```
@@ -328,7 +376,8 @@ adopted. Because both carry the same key:
 
 | Shipped today | Reserved for later |
 |---|---|
-| `apply`, `registry enable/disable`, `audit repair control` | policy-as-config approval workflows |
+| `apply`, `registry enable/disable`, `audit repair control` | policy-as-config approval workflows; a configuration read/pull endpoint (`GET /v1/config`); operator-signed snapshots |
+| `apply` over the API (`POST /v1/config/apply`) with a required compare-and-swap on the installed hash, authorization at the API against the installed roles, one writer lock across apply and the kill switch, and `origin` on the record | `registry enable\|disable` and `audit repair control` over the API; `audit control --server` |
 | default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; pruning and tamper-evidence of the snapshot store |
 | `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs | verify-on-read of the installed snapshot; a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
 | hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts | external anchoring / write-once sink for the ledger |

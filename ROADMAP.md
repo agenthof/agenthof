@@ -137,8 +137,11 @@ The governed core is real and runnable today:
   `investigate` across both ledgers. A served run records where the
   request came from (`origin`) as provenance beside the verified
   identity. `run`, `audit` and `investigate` take `--server`, so the CLI
-  is a client of the same API. Config still changes only through
-  `apply`, locally.
+  is a client of the same API.
+  Configuration changes over the same API: `apply --server` posts the
+  configuration with a compare-and-swap on the installed hash, is
+  authorized against the installed roles, and is recorded with where it
+  came from.
 
 ## Next
 
@@ -148,9 +151,6 @@ The governed core is real and runnable today:
   model providers, sit with this.
 - **More harness adapters** — first-class support for registering and governing
   agents built on other runtimes and frameworks, not just an HTTP endpoint.
-- **Config changes over the API** — `apply` through `serve`, with a
-  compare-and-swap on the config hash so two writers cannot race, and
-  the control-plane authorization applied at the API.
 
 ## Later
 

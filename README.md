@@ -212,8 +212,9 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
 - [`docs/reference/logging.md`](docs/reference/logging.md) — the operational
   log on stderr: levels, formats, fields, and what is never logged.
 - [`docs/reference/serve.md`](docs/reference/serve.md) — the control-plane
-  API: the endpoints, per-call authentication, binding and TLS, who may
-  read, and the honest limits.
+  API: the endpoints, per-call authentication, applying configuration over
+  the API with a compare-and-swap, binding and TLS, who may read, and the
+  honest limits.
 - [`docs/demo.md`](docs/demo.md) — the scripted demos (CONFIG, AUDIT,
   GOVERNANCE, INVESTIGATE).
 - [`docs/constitution.md`](docs/constitution.md) — the binding invariants
