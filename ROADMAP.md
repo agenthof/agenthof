@@ -151,13 +151,29 @@ The governed core is real and runnable today:
   model providers, sit with this.
 - **More harness adapters** — first-class support for registering and governing
   agents built on other runtimes and frameworks, not just an HTTP endpoint.
+- **Every control-plane action authorized and recorded** — bring the last
+  operator actions that still bypass it — provisioning a role's model-gateway
+  key, pruning run ledgers — under the same default-deny `control:`
+  authorization, and record each, so no control action is unauthorized or
+  unlogged.
+- **Signed, verifiable configuration snapshots** — the installed-config
+  snapshot gains an operator signature and a tamper-evident pointer, is
+  verified when a run reads it (closing today's unverified read), and can be
+  pulled and checked over the API — so a run's configuration is provably the
+  one the operator installed.
+- **More confinement backends** — the reference runtime's confinement becomes a
+  selection seam with OS-native backends beyond rootless podman (for example
+  macOS Seatbelt, Linux Landlock), chosen per host with a fail-closed default
+  and the applied tier named in the ledger — an honest contract, since a
+  shared-kernel sandbox is not a container is not a VM.
 
 ## Later
 
 - **Governed skills & capabilities** — named capability bundles an agent may
   load, enabled or disabled per agent, workflow, or role.
 - **Finer-grained privileges** — per-agent scoping of what an agent may
-  touch, beyond today's per-tool, read-only, exec, and spawn grants.
+  touch, beyond today's per-tool, read-only, exec, and spawn grants, plus
+  per-object ownership in RBAC (an object's creator-owner alongside the admin).
 
 ## Exploring
 
