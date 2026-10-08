@@ -357,3 +357,97 @@ func TestTimelineMissingLogDirStillLoadsControl(t *testing.T) {
 		t.Fatalf("want exactly one control source and no run sources, got %+v", res.Sources)
 	}
 }
+
+// writeControl appends one apply record to a real control ledger at p.
+func writeControl(t *testing.T, p string) {
+	t.Helper()
+	if _, err := control.Append(p, control.Event{
+		Action: "apply", Outcome: "success", Invoker: identity.Static("dana@example.com"),
+		Witness: control.CaptureWitness(), ConfigHash: "sha256:aaa",
+	}); err != nil {
+		t.Fatalf("control.Append: %v", err)
+	}
+}
+
+// oneRun writes a single verified run log r-0a under dir.
+func oneRun(t *testing.T, dir string) {
+	t.Helper()
+	writeRun(t, dir, "r-0a", []engine.Event{
+		{Time: time.Now().Add(-time.Hour), Type: "workflow_started", Binding: engine.Binding{RunID: "r-0a", Invoker: identity.Static("dana@example.com")}},
+	})
+}
+
+// assertOneControlOneRun: exactly one control source at ctl and one run
+// source — never a run source whose path is the control ledger.
+func assertOneControlOneRun(t *testing.T, res Result, ctl string) {
+	t.Helper()
+	var controls, runs int
+	for _, s := range res.Sources {
+		switch s.Kind {
+		case "control":
+			controls++
+			if s.Path != ctl {
+				t.Fatalf("control source path = %q, want %q", s.Path, ctl)
+			}
+		case "run":
+			runs++
+			if s.Path == ctl {
+				t.Fatalf("the control ledger must never be a run source: %+v", s)
+			}
+		}
+	}
+	if controls != 1 || runs != 1 {
+		t.Fatalf("want 1 control + 1 run source, got %+v", res.Sources)
+	}
+}
+
+// TestTimelineNeverReadsTheControlLedgerAsARun: a control ledger under a
+// non-default name INSIDE --log-dir, named by --control-log, is one control
+// source — not a broken run source as well.
+func TestTimelineNeverReadsTheControlLedgerAsARun(t *testing.T) {
+	dir := t.TempDir()
+	ctl := filepath.Join(dir, "ledger.jsonl")
+	writeControl(t, ctl)
+	oneRun(t, dir)
+	res, err := Timeline(dir, ctl, Filter{})
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
+	}
+	assertOneControlOneRun(t, res, ctl)
+}
+
+// TestTimelineSkipsTheControlLedgerThroughASymlink: --control-log is a
+// symlink elsewhere pointing at the ledger inside --log-dir; both sides of
+// the identity check follow links.
+func TestTimelineSkipsTheControlLedgerThroughASymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "ledger.jsonl")
+	writeControl(t, real)
+	link := filepath.Join(t.TempDir(), "control.jsonl")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	oneRun(t, dir)
+	res, err := Timeline(dir, link, Filter{})
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
+	}
+	assertOneControlOneRun(t, res, link)
+}
+
+// TestTimelineUnstattableControlLogStillEnumeratesRuns: a reader never
+// fails on a control log it cannot stat — the identity skip is simply off,
+// the runs are enumerated, and the control source reports its own verdict
+// (missing: omitted, as always).
+func TestTimelineUnstattableControlLogStillEnumeratesRuns(t *testing.T) {
+	dir := t.TempDir()
+	oneRun(t, dir)
+	bad := filepath.Join(t.TempDir(), "nope", "control.jsonl")
+	res, err := Timeline(dir, bad, Filter{})
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
+	}
+	if len(res.Sources) != 1 || res.Sources[0].Kind != "run" {
+		t.Fatalf("want exactly the run source, got %+v", res.Sources)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -42,8 +43,10 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request, _ identity.Invok
 }
 
 // listRuns is the hosted table plus every run log under LogDir, skipping
-// exactly what investigate.Timeline skips: the control ledger, its torn
-// fragments, and anything that is not a run log.
+// exactly what investigate.Timeline and runs prune skip: the control ledger
+// by name, its torn fragments, anything that is not a run log — and the
+// file ControlLog names by identity, when it can be stat'd (a stat failure
+// disables only that skip, never a 500).
 func (s *Server) listRuns(w http.ResponseWriter, _ *http.Request, _ identity.Invoker, _ string) {
 	status := map[string]string{}
 	for _, st := range s.runs.snapshot() {
@@ -55,10 +58,19 @@ func (s *Server) listRuns(w http.ResponseWriter, _ *http.Request, _ identity.Inv
 		http.Error(w, "log directory unreadable", http.StatusInternalServerError)
 		return
 	}
+	var ctlInfo os.FileInfo
+	if info, err := os.Stat(s.cfg.ControlLog); err == nil {
+		ctlInfo = info
+	}
 	for _, ent := range entries {
 		name := ent.Name()
 		if ent.IsDir() || name == "control.jsonl" || strings.Contains(name, ".torn-") || !strings.HasSuffix(name, ".jsonl") {
 			continue
+		}
+		if ctlInfo != nil {
+			if info, err := os.Stat(filepath.Join(s.cfg.LogDir, name)); err == nil && os.SameFile(info, ctlInfo) {
+				continue
+			}
 		}
 		id := strings.TrimSuffix(name, ".jsonl")
 		if _, hosted := status[id]; hosted || !runIDPattern.MatchString(id) {
