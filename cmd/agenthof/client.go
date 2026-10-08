@@ -128,6 +128,25 @@ func applyViaServer(base, token, cfgDir, bundlePath string, pre apiclient.Precon
 	for rel, data := range files {
 		req.Files[rel] = string(data)
 	}
+	// Enforce the server's caps here, before anything is sent, for BOTH
+	// sources (--config and --bundle) and against the bytes actually sent:
+	// json.Marshal HTML-escapes <, >, and &, so a file under the raw cap can
+	// still encode above MaxApplyBody. loadBundle's checks cover only --bundle
+	// and the raw size. Use the same encoder apiclient.do uses so the measured
+	// length is the one that goes over the wire. The server's words, exactly.
+	if len(req.Files) > apiclient.MaxBundleFiles {
+		_, _ = fmt.Fprintf(out, "apply: %v\n", errors.New("too many files"))
+		return 1
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "apply: %v\n", err)
+		return 1
+	}
+	if len(body) > apiclient.MaxApplyBody {
+		_, _ = fmt.Fprintf(out, "apply: %v\n", errors.New("bundle exceeds 1 MiB"))
+		return 1
+	}
 	res, err := apiclient.New(base, token, nil).Apply(context.Background(), req, pre)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "apply: %v\n", err)

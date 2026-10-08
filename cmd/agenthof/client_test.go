@@ -284,6 +284,55 @@ func TestLoadBundleDuplicateKeyLastWins(t *testing.T) {
 	}
 }
 
+// TestApplyServerRefusesOverCapBeforeSending: applyViaServer enforces the
+// server's caps locally — for BOTH --config and --bundle, and against the
+// bytes json.Marshal actually sends — so nothing goes over the wire. The
+// --bundle case is the one loadBundle's raw check misses: json.Marshal
+// HTML-escapes <, >, and & (each < becomes the six bytes \u003c), so a file
+// under the raw cap can still encode above MaxApplyBody.
+func TestApplyServerRefusesOverCapBeforeSending(t *testing.T) {
+	var hit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit = true
+		http.Error(w, "the cap must be enforced before sending", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("AGENTHOF_SERVER", srv.URL)
+	t.Setenv("AGENTHOF_TOKEN", "tok")
+
+	// --config with more files than MaxBundleFiles: refused with the server's
+	// own words, before any request.
+	root := t.TempDir()
+	for i := 0; i <= apiclient.MaxBundleFiles; i++ {
+		writeFileIn(t, root, "roles/r"+strconv.Itoa(i)+".yaml", "name: r\n")
+	}
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--if-installed", "none"}, &out); code != 1 || out.String() != "apply: too many files\n" {
+		t.Fatalf("too many files: code %d out %q", code, out.String())
+	}
+
+	// --bundle whose raw bytes are under the cap but whose JSON re-encoding
+	// exceeds it. The file carries literal '<' (one byte each); the encoder
+	// expands every one to six, pushing the sent body over MaxApplyBody.
+	val := strings.Repeat("<", apiclient.MaxApplyBody/2)
+	raw := []byte(`{"files":{"roles/r.yaml":"` + val + `"}}`)
+	if len(raw) > apiclient.MaxApplyBody {
+		t.Fatalf("raw bundle must be under the cap for this test, got %d", len(raw))
+	}
+	p := filepath.Join(t.TempDir(), "b.json")
+	if err := os.WriteFile(p, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := cmdApply([]string{"--bundle", p, "--if-installed", "none"}, &out); code != 1 || out.String() != "apply: bundle exceeds 1 MiB\n" {
+		t.Fatalf("over-encoded bundle: code %d out %q", code, out.String())
+	}
+
+	if hit {
+		t.Fatal("a request reached the server; the cap must be enforced before sending")
+	}
+}
+
 // TestLoadBundleEnforcesServerCaps: the client refuses with the server's
 // own words rather than sending and getting a 400/413 it cannot explain.
 func TestLoadBundleEnforcesServerCaps(t *testing.T) {
