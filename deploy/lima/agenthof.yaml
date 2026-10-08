@@ -38,7 +38,7 @@ provision:
     # podman + uidmap for rootless; python3 and iproute2 are used by the e2es.
     apt-get install -y podman uidmap python3 iproute2 ca-certificates curl
     # Go, pinned to the repo toolchain. Keep GOVER in sync with go.mod.
-    GOVER=1.27.1
+    GOVER=1.27.2
     ARCH="$(dpkg --print-architecture)"   # arm64 | amd64 — matches Go's naming
     curl -fsSL "https://go.dev/dl/go${GOVER}.linux-${ARCH}.tar.gz" -o /tmp/go.tgz
     rm -rf /usr/local/go

@@ -2,6 +2,10 @@ module github.com/agenthof/agenthof
 
 go 1.27.1
 
+// Build on go1.27.2 (patched net/http CVEs); the `go` directive stays 1.27.1 so
+// golangci-lint, which cannot yet read go1.27.2 export data, can still lint.
+toolchain go1.27.2
+
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0

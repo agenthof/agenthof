@@ -116,11 +116,17 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # golangci-lint cannot yet read go1.27.2's export-data format, so lint runs
+    # on go1.27.1; GOTOOLCHAIN=local makes go ignore go.mod's `toolchain
+    # go1.27.2`. Drop this override (back to go-version-file) once golangci-lint
+    # supports go1.27.2 — tracked in the roadmap.
+    env:
+      GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: "1.27.1"
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.2

@@ -3,7 +3,7 @@
 # check (dial, touch, procs); it is not part of the bridge. No credential
 # enters this image: the bridge receives the tool credential per call from
 # Agenthof and hands it to the payload it spawns.
-FROM docker.io/library/golang:1.27.1 AS build
+FROM docker.io/library/golang:1.27.2 AS build
 WORKDIR /src
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/refbridge ./deploy/refbridge \
