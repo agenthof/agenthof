@@ -5,22 +5,51 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/identity/oidctest"
+	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rogpeppe/go-internal/testscript"
 )
 
 func TestMain(m *testing.M) {
+	// Lock-holder helper for the cross-process busy tests (apply_test.go,
+	// registry_control_test.go): hold the named lock, say so, wait, exit.
+	if p := os.Getenv("AGENTHOF_TEST_HOLD_LOCK"); p != "" {
+		ms, _ := strconv.Atoi(os.Getenv("AGENTHOF_TEST_HOLD_MS"))
+		var release func()
+		switch os.Getenv("AGENTHOF_TEST_HOLD_KIND") {
+		case "ledger":
+			c, err := ledger.Open(p, ledger.Locked)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			release = func() { _ = c.Close() }
+		default:
+			unlock, err := ledger.LockFile(p)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			release = unlock
+		}
+		fmt.Println("held")
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		release()
+		os.Exit(0)
+	}
 	testscript.Main(m, map[string]func(){
 		"agenthof": func() {
 			os.Exit(dispatch(os.Args[1:], os.Stdout, os.Stderr))

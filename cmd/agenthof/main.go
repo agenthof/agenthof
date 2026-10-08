@@ -36,7 +36,7 @@ import (
 const usage = `agenthof — the agents' court
 
 Usage:
-  agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
+  agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-installed <sha256:hex|none>]
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
@@ -143,35 +143,13 @@ func resolveRunConfig(controlLog string) (cfg config.Config, reg *registry.Regis
 	return cfg, reg, hash, true, nil
 }
 
-// hashConfigDir computes the config directory's join-key hash for
-// cmdApply and cmdRegistryFlip. It is a var (rather than a direct
-// config.HashDir call) so tests can force a hash failure independently of
-// LoadDir/Build's own read of the same files — the two read the same
-// bytes via the same enumeration, so there is no way to make one fail
-// without the other through the filesystem alone.
-var hashConfigDir = config.HashDir
-
-// cmdApply implements the audited path for `apply`: resolve the invoker;
-// pre-verify the control chain is writable before any append; authorize the
-// invoker against the roles of the configuration ALREADY installed under
-// this control root (nothing installed → the first apply is permitted and
-// recorded with bootstrap:true); then, snapshot-first, copy the proposed
-// --config dir into the installed store, LoadDir+Build the copy — plus the
-// no-apply-floor check — and only then install it: rename the copy to its
-// content-addressed directory and flip the `current` pointer. The proposed
-// configuration therefore cannot grant its own applier anything: the
-// decision is made before it is looked at, and its roles govern only the
-// NEXT control action.
-//
-// Recording: a copy that cannot be made (the bytes are unreadable, or the
-// store is unusable) is outcome "error"/io_error with no config_hash; a
-// copy that fails to parse or validate is "rejected"/validation_failed with
-// the config_hash of the copy; an unauthorized invoker is refused/
-// not_authorized with the hash of the proposed dir, before any copy or
-// validation — one refusal, never the config's errors. Apply now mutates
-// state (the store), so like cmdRegistryFlip it has an "installed; event NOT
-// recorded" case: the install landed but the success append failed; audit
-// control and audit verify control flag the pointer-vs-ledger mismatch.
+// cmdApply is `apply`: flags, the invoker, the ledger-writable check and
+// the refused-token branch (which records a fixed reason and never reaches
+// the installed configuration), then applyConfig — the one apply the
+// server runs too. Exit 0 only when a snapshot was installed AND recorded;
+// 1 for every recorded denial, a busy lock, a failed precondition, the
+// install-then-record gap, and a damaged ledger (which prints the repair
+// hint and records nothing); 2 for usage.
 func cmdApply(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	cfgDir := fs.String("config", "./config", "config directory")
@@ -179,8 +157,14 @@ func cmdApply(args []string, out io.Writer) int {
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
 	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
+	ifInstalled := fs.String("if-installed", "", "proceed only if the installed configuration is this sha256:<hex>, or `none` (nothing installed); a mismatch exits 1 and records nothing")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	pre, ok := parseIfInstalled(*ifInstalled)
+	if !ok {
+		_, _ = fmt.Fprintln(out, "apply: --if-installed must be sha256:<64 lowercase hex digits> or none")
 		return 2
 	}
 
@@ -190,13 +174,19 @@ func cmdApply(args []string, out io.Writer) int {
 		return 2
 	}
 
-	// Verify the control chain FIRST, before any append (including a
+	// Verify the control chain FIRST, before any append (including the
 	// refused-token append below): a torn or broken control ledger means
 	// the ledger itself is unwritable, so the "audit repair control" hint
 	// must always be what a damaged ledger prints, regardless of which
-	// branch would otherwise have run next.
+	// branch would otherwise have run next. applyConfig repeats this check
+	// (it must never append to a ledger it has not verified); the second
+	// open costs one verify of a small file.
 	c, err := ledger.Open(*controlLog, ledger.Locked)
 	if err != nil {
+		if errors.Is(err, ledger.ErrLockHeld) {
+			_, _ = fmt.Fprintf(out, "apply: %s\n", msgLockBusy)
+			return 1
+		}
 		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s --config %s\n", *controlLog, *cfgDir)
 		return 1
 	}
@@ -224,226 +214,19 @@ func cmdApply(args []string, out io.Writer) int {
 		return 1
 	}
 
-	store := installedStore(*controlLog)
-	installedRoles, _, installed, instErr := config.InstalledRoles(store)
-	if instErr != nil {
-		// A pointer that is present but cannot be honored — malformed, or
-		// naming a snapshot whose roles cannot be read: nobody can be
-		// authorized. Fail closed, recorded (the ledger is known writable),
-		// and name the one way out, which is itself recorded as a bootstrap.
-		_, _ = fmt.Fprintln(out, instErr)
-		_, _ = fmt.Fprintf(out, "apply: cannot read the installed configuration under %s; refusing to apply (remove %s to re-bootstrap)\n",
-			store, filepath.Join(store, config.InstalledPointer))
-		head, appendErr := control.Append(*controlLog, control.Event{
-			Action:     "apply",
-			Outcome:    "error",
-			Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)},
-			Invoker:    inv,
-			AssertedAs: assertedAs,
-			Witness:    control.CaptureWitness(),
-		})
-		if appendErr != nil {
-			_, _ = fmt.Fprintln(out, appendErr)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+	res := applyConfig(applyRequest{
+		ControlLog: *controlLog, Invoker: inv, AssertedAs: assertedAs,
+		Source: dirSource(*cfgDir), Precondition: pre, AllowBootstrap: true,
+	}, out)
+	switch res.Kind {
+	case applyInstalled:
+		return 0
+	case applyLedgerDamaged:
+		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s --config %s\n", *controlLog, *cfgDir)
+		return 1
+	default:
 		return 1
 	}
-
-	// Authorize BEFORE the proposed configuration is read, against the roles
-	// of the configuration already installed: a caller those roles grant no
-	// `apply` learns one refusal — never the proposed config's validation
-	// errors — and cannot grant themselves anything in the change itself.
-	// Nothing installed (a fresh control root, or the pointer removed on
-	// purpose) is the bootstrap: permitted for any invoker and marked as
-	// such on the record. In CLI mode the filesystem is still the root of
-	// trust — whoever can write the store can remove the pointer — so this
-	// is a recorded default-deny decision; docs/control-plane-lifecycle.md
-	// says so.
-	if installed && !authz.ControlAllows(installedRoles, inv, "apply") {
-		reason := control.NotAuthorized("apply")
-		_, _ = fmt.Fprintf(out, "apply: %s\n", reason.Message)
-		// The refused event carries the hash of what the unauthorized party
-		// tried to apply — that is the forensic value of recording it. The
-		// same rule as success/rejected applies: no hash, no refused record.
-		h, hashErr := hashConfigDir(*cfgDir)
-		if hashErr != nil {
-			return appendApplyHashFailure(*controlLog, inv, assertedAs, hashErr, out)
-		}
-		head, appendErr := control.Append(*controlLog, control.Event{
-			Action:     "apply",
-			Outcome:    "refused",
-			Reason:     reason,
-			Invoker:    inv,
-			AssertedAs: assertedAs,
-			Witness:    control.CaptureWitness(),
-			ConfigHash: h,
-		})
-		if appendErr != nil {
-			_, _ = fmt.Fprintln(out, appendErr)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-		return 1
-	}
-
-	// Snapshot-first: one read of the proposed bytes into the store, then
-	// everything below — parse, validate, hash, install — is over the copy.
-	// A copy that cannot be made is a genuine I/O denial (unreadable bytes
-	// or an unusable store), recorded hash-less as "error"/io_error.
-	temp, stageErr := config.StageSnapshot(store, *cfgDir)
-	if stageErr != nil {
-		_, _ = fmt.Fprintln(out, stageErr)
-		head, appendErr := control.Append(*controlLog, control.Event{
-			Action:     "apply",
-			Outcome:    "error",
-			Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(stageErr)},
-			Invoker:    inv,
-			AssertedAs: assertedAs,
-			Witness:    control.CaptureWitness(),
-		})
-		if appendErr != nil {
-			_, _ = fmt.Fprintln(out, appendErr)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-		return 1
-	}
-	committed := false
-	defer func() {
-		// A copy that was never installed is removed; after CommitSnapshot
-		// the temp no longer exists (renamed, or discarded as a duplicate).
-		if !committed {
-			_ = os.RemoveAll(temp)
-		}
-	}()
-
-	cfg, loadErrs := config.LoadDir(temp)
-	for _, e := range loadErrs {
-		_, _ = fmt.Fprintln(out, e)
-	}
-	if len(loadErrs) > 0 {
-		// The copy succeeded, so the bytes are readable: a parse failure here
-		// is a rejectable config, recorded with the copy's hash.
-		return appendApplyRejected(*controlLog, temp, inv, assertedAs, loadErrs[0], out)
-	}
-
-	_, valErrs := registry.Build(cfg)
-	valErrs = append(valErrs, applyFloorErrors(cfg)...)
-	for _, e := range valErrs {
-		_, _ = fmt.Fprintln(out, e.Error())
-	}
-	if len(valErrs) > 0 {
-		return appendApplyRejected(*controlLog, temp, inv, assertedAs, valErrs[0], out)
-	}
-
-	// config_hash is required on a "success" event, and it names the
-	// snapshot directory: routed through the hashConfigDir seam so a hash
-	// failure is exercisable by a test — recorded as io_error, never a
-	// hash-less success, and nothing installed.
-	h, hashErr := hashConfigDir(temp)
-	if hashErr != nil {
-		return appendApplyHashFailure(*controlLog, inv, assertedAs, hashErr, out)
-	}
-	if err := config.CommitSnapshot(store, temp, h); err != nil {
-		// CommitSnapshot leaves `current` untouched on any error: nothing is
-		// installed, so this is a plain recorded error, not the gap below.
-		_, _ = fmt.Fprintln(out, err)
-		head, appendErr := control.Append(*controlLog, control.Event{
-			Action:     "apply",
-			Outcome:    "error",
-			Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(err)},
-			Invoker:    inv,
-			AssertedAs: assertedAs,
-			Witness:    control.CaptureWitness(),
-		})
-		if appendErr != nil {
-			_, _ = fmt.Fprintln(out, appendErr)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-		return 1
-	}
-	committed = true
-	_, _ = fmt.Fprintf(out, "registry ok: %d agents, %d workflows, %d roles\n",
-		len(cfg.Agents), len(cfg.Workflows), len(cfg.Roles))
-
-	// Test-only crash hook (the apply twin of cmdRegistryFlip's): the
-	// process dies after the snapshot is installed and the pointer flipped
-	// but before the success append — the documented residual window,
-	// exercisable by a test instead of an unreproducible race.
-	if os.Getenv("AGENTHOF_TEST_CRASH_AT") == "after_install_before_append" {
-		_, _ = fmt.Fprintln(out, msgInstalledNotRecorded)
-		return 1
-	}
-	head, appendErr := control.Append(*controlLog, control.Event{
-		Action:     "apply",
-		Outcome:    "success",
-		Invoker:    inv,
-		AssertedAs: assertedAs,
-		Witness:    control.CaptureWitness(),
-		ConfigHash: h,
-		Bootstrap:  !installed,
-	})
-	if appendErr != nil {
-		_, _ = fmt.Fprintln(out, appendErr)
-		_, _ = fmt.Fprintln(out, msgInstalledNotRecorded)
-		return 1
-	}
-	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-	return 0
-}
-
-// appendApplyRejected records apply's "rejected"/validation_failed outcome
-// with the config_hash of the staged copy at temp — required on that
-// outcome — or, when the copy cannot be hashed at all, the honest
-// "error"/io_error via appendApplyHashFailure, never a hash-less rejected.
-// cause is the first load or validation error, bounded by truncateErr.
-func appendApplyRejected(controlLog, temp string, inv identity.Invoker, assertedAs string, cause error, out io.Writer) int {
-	h, hashErr := hashConfigDir(temp)
-	if hashErr != nil {
-		return appendApplyHashFailure(controlLog, inv, assertedAs, hashErr, out)
-	}
-	head, appendErr := control.Append(controlLog, control.Event{
-		Action:     "apply",
-		Outcome:    "rejected",
-		Reason:     &control.Reason{Code: control.CodeValidationFailed, Message: truncateErr(cause)},
-		Invoker:    inv,
-		AssertedAs: assertedAs,
-		Witness:    control.CaptureWitness(),
-		ConfigHash: h,
-	})
-	if appendErr != nil {
-		_, _ = fmt.Fprintln(out, appendErr)
-		return 1
-	}
-	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-	return 1
-}
-
-// appendApplyHashFailure records apply's success/rejected outcome as an
-// "error"/io_error control event instead, when config.HashDir itself
-// failed after LoadDir/Build already succeeded/rejected the same bytes:
-// config_hash is required on both of those outcomes (spec §3.2), so a
-// hash that cannot be computed is itself a writable-ledger denial (spec
-// §3.7's "a denial is itself an event" rule) — the same shape as the
-// LoadDir-error branch above, never a hash-less success/rejected.
-func appendApplyHashFailure(controlLog string, inv identity.Invoker, assertedAs string, hashErr error, out io.Writer) int {
-	_, _ = fmt.Fprintln(out, hashErr)
-	head, appendErr := control.Append(controlLog, control.Event{
-		Action:     "apply",
-		Outcome:    "error",
-		Reason:     &control.Reason{Code: control.CodeIOError, Message: truncateErr(hashErr)},
-		Invoker:    inv,
-		AssertedAs: assertedAs,
-		Witness:    control.CaptureWitness(),
-	})
-	if appendErr != nil {
-		_, _ = fmt.Fprintln(out, appendErr)
-		return 1
-	}
-	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
-	return 1
 }
 
 func cmdRegistry(args []string, out io.Writer) int {
