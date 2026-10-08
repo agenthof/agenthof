@@ -1,7 +1,7 @@
 # Build a static echo-agent and ship it in a distroless base — no shell, no
 # package manager. /probe is the CI perimeter check (dial, touch); it is not
 # the agent.
-FROM docker.io/library/golang:1.27.1 AS build
+FROM docker.io/library/golang:1.27.2 AS build
 WORKDIR /src
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/echo-agent ./examples/echo-agent \

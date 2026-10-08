@@ -5,7 +5,7 @@
 # --only-binary makes a wheel that does not exist for this platform fail the
 # build loudly instead of attempting a source build. /probe is the CI perimeter
 # check (dial, touch); it is not the agent. No credential enters this image.
-FROM docker.io/library/golang:1.27.1 AS probe
+FROM docker.io/library/golang:1.27.2 AS probe
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY deploy/refbox/probe ./deploy/refbox/probe
