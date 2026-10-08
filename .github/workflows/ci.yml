@@ -121,9 +121,10 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.13.2
+      # Build golangci-lint from source with the active toolchain so its
+      # type-checker matches the Go in go.mod (a prebuilt binary lags the
+      # toolchain's export-data version). Pinned for reproducibility.
+      - run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run ./...
 
   security:
     runs-on: ubuntu-latest
