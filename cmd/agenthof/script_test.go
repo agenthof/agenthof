@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/identity/oidctest"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -201,6 +202,19 @@ func TestScript(t *testing.T) {
 					time.Sleep(20 * time.Millisecond)
 				}
 				ts.Fatalf("serve never wrote %s", args[0])
+			},
+			// installedhash <control-log>: reads installed/current beside the
+			// control log and exports it as $HASH for the next --if-installed.
+			"installedhash": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 1 {
+					ts.Fatalf("usage: installedhash <control-log>")
+				}
+				hash, installed, err := config.InstalledHash(installedStore(ts.MkAbs(args[0])))
+				ts.Check(err)
+				if !installed {
+					ts.Fatalf("nothing installed under %s", args[0])
+				}
+				ts.Setenv("HASH", hash)
 			},
 		},
 	})

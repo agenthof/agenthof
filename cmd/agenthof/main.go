@@ -36,7 +36,7 @@ import (
 const usage = `agenthof — the agents' court
 
 Usage:
-  agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-installed <sha256:hex|none>]
+  agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-installed <sha256:hex|none>] [--server <url> [--bundle <file|->]]
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
@@ -158,6 +158,8 @@ func cmdApply(args []string, out io.Writer) int {
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
 	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	ifInstalled := fs.String("if-installed", "", "proceed only if the installed configuration is this sha256:<hex>, or `none` (nothing installed); a mismatch exits 1 and records nothing")
+	server := fs.String("server", "", "apply over an agenthof serve API at this base URL (env AGENTHOF_SERVER); needs --token/AGENTHOF_TOKEN and --if-installed")
+	bundle := fs.String("bundle", "", "with --server: send this bundle file (the request-body JSON; - reads stdin) instead of reading --config")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -165,6 +167,26 @@ func cmdApply(args []string, out io.Writer) int {
 	pre, ok := parseIfInstalled(*ifInstalled)
 	if !ok {
 		_, _ = fmt.Fprintln(out, "apply: --if-installed must be sha256:<64 lowercase hex digits> or none")
+		return 2
+	}
+
+	if base := serverBase(*server); base != "" {
+		tok := serverToken(*token)
+		if tok == "" {
+			_, _ = fmt.Fprintln(out, "apply: --server needs --token or AGENTHOF_TOKEN")
+			return 2
+		}
+		if pre == nil {
+			_, _ = fmt.Fprintln(out, "apply --server needs --if-installed <sha256:hex> or --if-installed none")
+			return 2
+		}
+		if *as != "" || *groups != "" {
+			_, _ = fmt.Fprintln(os.Stderr, "apply: --as/--groups are ignored with --server; the server authenticates your --token")
+		}
+		return applyViaServer(base, tok, *cfgDir, *bundle, apiclient.Precondition{ExpectInstalled: pre.ExpectInstalled, ExpectNone: pre.ExpectNone}, out)
+	}
+	if *bundle != "" {
+		_, _ = fmt.Fprintln(out, "apply: --bundle needs --server")
 		return 2
 	}
 
