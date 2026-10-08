@@ -56,6 +56,11 @@ const msgStagedDiffers = "staged copy differs from the proposal"
 type applySource interface {
 	Stage(store string) (temp string, err error)
 	Hash() (string, error)
+	// verifyStaged reports whether applyConfig must confirm the staged copy
+	// hashes exactly as Hash() before it commits (step 9a). A source answers
+	// for itself, so a future source cannot silently skip the identity check
+	// by escaping a concrete type assertion.
+	verifyStaged() bool
 }
 
 // dirSource is a configuration directory, read once by StageSnapshot.
@@ -64,6 +69,10 @@ type dirSource string
 func (d dirSource) Stage(store string) (string, error) { return config.StageSnapshot(store, string(d)) }
 func (d dirSource) Hash() (string, error)              { return hashConfigDir(string(d)) }
 
+// verifyStaged is false: a directory is read once by StageSnapshot, whose
+// copy is HashDir-identical to the source by construction.
+func (d dirSource) verifyStaged() bool { return false }
+
 // bundleSource is an in-memory proposal whose bytes the client already
 // hashed; applyConfig requires the staged copy to hash exactly as the
 // bundle before it commits (step 9a).
@@ -71,6 +80,11 @@ type bundleSource map[string][]byte
 
 func (b bundleSource) Stage(store string) (string, error) { return config.StageFiles(store, b) }
 func (b bundleSource) Hash() (string, error)              { return config.HashFiles(b) }
+
+// verifyStaged is true: the bytes arrived over the wire and the filesystem
+// may fold a name or normalize a rune, so the staged copy must hash as the
+// proposal before anything installs.
+func (b bundleSource) verifyStaged() bool { return true }
 
 // applyPrecondition is the compare-and-swap on the installed pointer. nil
 // means none (the CLI without --if-installed). ExpectNone: proceed only if
@@ -271,7 +285,7 @@ func applyConfig(req applyRequest, out io.Writer) applyOutcome {
 	// filesystem did to names or bytes in between (case folding, Unicode
 	// normalization). A directory is read once by StageSnapshot and may
 	// legitimately differ from a hash computed earlier, so it is exempt.
-	if _, isBundle := req.Source.(bundleSource); isBundle {
+	if req.Source.verifyStaged() {
 		want, err := req.Source.Hash()
 		if err != nil {
 			return a.hashFailure(err)
@@ -395,7 +409,10 @@ func (a *applyRun) cleanReason(err error) string {
 	if a.req.Origin == nil {
 		return truncateErr(err)
 	}
-	return truncateErr(errors.New(origin.Clean(err.Error())))
+	// origin.Clean already bounds the result (printable runes, length-capped);
+	// do NOT then truncateErr it — a byte cap over a rune cap would split a
+	// multibyte rune into U+FFFD, defeating the sanitizer it just applied.
+	return origin.Clean(err.Error())
 }
 
 func orNothing(hash string) string {

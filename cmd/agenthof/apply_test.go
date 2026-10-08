@@ -142,6 +142,8 @@ func (b blockingSource) Stage(store string) (string, error) {
 
 func (b blockingSource) Hash() (string, error) { return b.inner.Hash() }
 
+func (b blockingSource) verifyStaged() bool { return b.inner.verifyStaged() }
+
 // bootstrapped installs root under a fresh control root through applyConfig
 // and returns the control log and the installed hash.
 func bootstrapped(t *testing.T, root string) (string, string) {

@@ -336,6 +336,13 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	// regardless of which branch would otherwise have run next.
 	c, err := ledger.Open(controlLog, ledger.Locked)
 	if err != nil {
+		// Contention is not damage: another process holding the writer lock
+		// (an apply or a repair in progress) must print the retry line, not the
+		// repair hint — mirroring the apply path.
+		if errors.Is(err, ledger.ErrLockHeld) {
+			_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, msgLockBusy)
+			return 1
+		}
 		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s --config %s\n", controlLog, cfgDir)
 		return 1
 	}
