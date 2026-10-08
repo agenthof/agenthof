@@ -254,9 +254,8 @@ The default path is `.agenthof/control.jsonl`, resolved relative to the
 current working directory — run
 these commands from the repository root, or pass `--control-log`
 explicitly. It is never written under `--log-dir`, and `runs prune` skips
-it and any `*.torn-<timestamp>` repair fragment (below) by name — a control
-log saved under a different name inside `--log-dir` is not protected this
-way. Nothing rotates or seals the control log today; it is kept in full,
+it and any `*.torn-<timestamp>` repair fragment (below) by name, and the exact file `--control-log` names by identity, whatever it is
+called. Nothing rotates or seals the control log today; it is kept in full,
 indefinitely, as the compliance record, not run ephemera. Its invoker
 subjects are personal data like any other identity the ledger records, so
 the self-hosting operator is the data controller for it, same as for the

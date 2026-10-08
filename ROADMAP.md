@@ -57,7 +57,8 @@ The governed core is real and runnable today:
   counts. A provisioned role key lets the upstream gateway enforce
   `budget_usd_month`. Streamed calls are recorded without token counts.
   Agenthof does not itself cap spend.
-- **Retention** — `runs prune` ships in the core, not behind a paywall.
+- **Retention** — `runs prune` ships in the core, not behind a paywall; it is authorized against the installed roles' `prune`
+  grant and recorded in the control ledger.
 - **Auditable control plane** — *who applied config* and *who flipped the
   kill switch* is recorded to its own hash-chained control ledger, so "who
   changed the setup on the 14th, and who approved what's running?" is
@@ -66,8 +67,8 @@ The governed core is real and runnable today:
   control ledger with the run ledgers into one timeline — human-readable or
   `--json` — each source carrying its own verification verdict.
   Those control actions are themselves **authorized, default-deny**: a
-  role's `control:` grant names which of `apply`, `enable`, `disable`, and
-  `repair` its groups may perform — each named explicitly, no wildcard,
+  role's `control:` grant names which of `apply`, `enable`, `disable`,
+  `repair`, `provision`, and `prune` its groups may perform — each named explicitly, no wildcard,
   nothing by omission — and a caller no role grants is refused and the
   refusal recorded (a refused ledger repair is printed, not recorded, since
   the ledger it would go to is the damaged one).
@@ -84,8 +85,9 @@ The governed core is real and runnable today:
   refusal that names the `apply` to run. The kill switch re-installs the
   configuration with the one bit flipped — the directory is untouched, and an
   `apply` re-asserts what the directory declares. `audit <run-id>` names the
-  install a run executed under, `apply` or flip. The installed bytes are read
-  unverified today; verifying them on read is the next step.
+  install a run executed under, `apply` or flip. The installed bytes are verified
+  against the pointer before a run or a kill-switch flip reads them; the
+  store's pointer is not yet chained into the ledger.
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
   reach declared MCP tool resources only through Agenthof, which mirrors a
   whole resource (written `tools: ["*"], mode: read-write` — every-tool
@@ -158,7 +160,8 @@ The governed core is real and runnable today:
   unlogged.
 - **Signed, verifiable configuration snapshots** — the installed-config
   snapshot gains an operator signature and a tamper-evident pointer, is
-  verified when a run reads it (closing today's unverified read), and can be
+  verified against that signature when a run reads it (today the bytes are
+  checked against the pointer's hash only), and can be
   pulled and checked over the API — so a run's configuration is provably the
   one the operator installed.
 - **More confinement backends** — the reference runtime's confinement becomes a

@@ -15,7 +15,7 @@ a later version, it says so — only shipped behavior is a guarantee.
 
 ## The commands
 
-Three commands write to the control plane — and one of them, `apply`, can
+Five commands write to the control plane — and one of them, `apply`, can
 also arrive over the network:
 
 ```
@@ -23,6 +23,8 @@ agenthof apply --config ./config --as dana@example.com --groups platform-eng    
 agenthof registry disable coder --config ./config --as dana@example.com --groups platform-eng  # the kill switch: re-installs the configuration with coder disabled
 agenthof registry enable  coder --config ./config --as dana@example.com --groups platform-eng  # …and back on
 agenthof audit repair control --config ./config --as dana@example.com --groups platform-eng    # repair a torn ledger tail
+agenthof gateway provision --as dana@example.com --groups platform-eng                           # mint provider keys for the installed roles
+agenthof runs prune --older-than 180d --as dana@example.com --groups platform-eng               # remove aged run ledgers and artifact bodies
 agenthof apply --server https://agenthof.example --token $TOKEN --if-installed sha256:…  # the same apply, over the API (serve)
 ```
 
@@ -35,7 +37,7 @@ a record you can later verify**.
 ## The journey at a glance
 
 ```
-  agenthof apply / registry enable|disable / audit repair control
+  agenthof apply / registry enable|disable / audit repair control / gateway provision / runs prune
       │
       ▼
   1. Who is changing it?   authenticate  ──►  Invoker {subject, issuer, method}
@@ -84,7 +86,7 @@ non-zero.
 Knowing who asked is not the same as letting them. Every control action is
 **authorized, default-deny**, from two facts: the invoker's groups and the
 roles in the configuration directory. A role may carry a `control:` grant —
-any of `apply`, `enable`, `disable`, `repair`, named one by one, no wildcard —
+any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, named one by one, no wildcard —
 and the action is allowed only if some role both names one of the invoker's
 groups in `allowed_groups` **and** lists that operation. Membership and grant,
 never the grant alone. A role with no `control:` grants nothing; a public role
@@ -96,8 +98,28 @@ workflows at all — an operator who changes governance but runs nothing.
 # config/roles/platform-admin.yaml
 name: platform-admin
 allowed_groups: [platform-eng]
-control: [apply, enable, disable, repair]
+control: [apply, enable, disable, repair, provision, prune]
 ```
+
+Two of the operations guard commands that change no configuration but are
+control-plane actions all the same. `gateway provision` mints a provider key
+at the model gateway for every **installed** role that owns workflows — what
+the last `apply` installed, never a directory — and records `provision`
+with the installed configuration's hash; that record is not an install
+(`audit verify control` and a run's config-join ignore it). `runs prune`
+removes aged run ledgers and artifact bodies and records `prune` with a
+one-line `detail` of what it removed and no hash: it installs nothing and
+reads no configuration. Both refuse, recorded, when nothing is installed —
+there are no roles to authorize against, and prune has no directory to fall
+back to (the kill switch and repair do, while nothing is installed, because
+each has a directory in hand) — so after removing `installed/current` a
+retention job is refused until the re-bootstrap apply lands. A provision
+that fails on one role stops there: keys minted for earlier roles persist,
+one `error` record names the role that failed, and a re-run finds the
+earlier keys valid. A provision or prune whose success event could not be
+appended prints `provision ran; event NOT recorded` / `runs pruned; event
+NOT recorded`; nothing downstream flags a provision's gap (there is no
+pointer to compare), so the operator re-runs it.
 
 What each command authorizes against — the **installed** configuration:
 
@@ -156,12 +178,26 @@ can edit the configuration directory can edit `control:` too, so this gate is
 a *recorded default-deny decision* on the invoker's identity — meaningful
 under `--token`, where the groups are verified; self-asserted under `--as
 --groups` — not a wall against someone who already holds write access to the
-files. `run` executes the installed snapshot and stamps the pointer's hash
-**without re-hashing the bytes under it**: the snapshot is read unverified, so
-whoever can write `.agenthof/installed/` can edit a snapshot in place and make
-runs execute bytes whose recorded `config_hash` claims otherwise — the same
-writer can edit the ledger, so this adds no new trust boundary, but it is the
-sharpest limit here; verifying the snapshot on read is the named next step. The
+files. `run` and `serve` verify the installed snapshot's bytes against the
+pointer before reading them, and the kill switch verifies them before it
+stages a copy to re-install; both stop on a mismatch (`installed config
+<hash>: snapshot hashes as <got>, not as its pointer`), so tampered bytes
+are neither executed nor re-installed under a new name. One read does not
+verify: the roles-only read that decides who may act — and, for `gateway
+provision`, which roles get keys. And the pointer itself is not chained
+into the ledger. So the store is tamper-evident only as far as the
+pointer's name; whoever can write the store can still install, re-point,
+or edit the roles the control plane decides from — the same writer who
+can edit the ledger. Neither `gateway provision` nor `runs prune` takes
+the installed-configuration writer lock (they write nothing to the
+store), so an `apply` that lands concurrently and revokes the invoker's
+grant may be a few milliseconds too late — the same window a run's
+per-run read has; provision reads the roles once and mints for exactly
+the roles it authorized against, so there is no second window. The
+remedy for a mismatch is a control-plane one:
+`apply` again (a fresh, correct snapshot if the bytes differ; if the
+directory already exists under that name, `apply` refuses with a removal
+hint), or remove `installed/<hex>` and `apply`. The
 kill switch is a break-glass override of the **installed** configuration and is
 temporary by design (see below). A `run` executes a snapshot that either the
 old or the new install put in place, whole — the pointer is renamed atomically
@@ -223,6 +259,8 @@ not an error swallowed at the door.
 > false` in the agent's file and apply it; to see the override's history,
 > `audit control` shows the flip and the apply that superseded it, each
 > attributed.
+>
+> A flip first verifies the installed snapshot's bytes against the pointer; a mismatch stops the flip and is recorded as an `error` before anything is staged, so a tampered snapshot is never re-installed under a correct name.
 
 The sequence is short. A `disable coder` re-installs the configuration with
 `coder` disabled; a `run` of any workflow is then refused `configuration
@@ -376,10 +414,11 @@ adopted. Because both carry the same key:
 
 | Shipped today | Reserved for later |
 |---|---|
-| `apply`, `registry enable/disable`, `audit repair control` | policy-as-config approval workflows; a configuration read/pull endpoint (`GET /v1/config`); operator-signed snapshots |
+| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune` | policy-as-config approval workflows; a configuration read/pull endpoint (`GET /v1/config`); operator-signed snapshots |
 | `apply` over the API (`POST /v1/config/apply`) with a required compare-and-swap on the installed hash, authorization at the API against the installed roles, one writer lock across apply and the kill switch, and `origin` on the record | `registry enable\|disable` and `audit repair control` over the API; `audit control --server` |
-| default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; pruning and tamper-evidence of the snapshot store |
-| `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs | verify-on-read of the installed snapshot; a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
+| default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; pruning and tamper-evidence of the snapshot store; verifying the roles-only authorization read |
+| `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read and on the kill switch's re-snapshot read | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
+| `gateway provision` and `runs prune` authorized against the installed roles (`provision`, `prune`) and recorded; prune spares the control ledger by name and by identity | `provision`/`prune` over the API; a structured prune record; `detail` in `investigate/1` |
 | hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts | external anchoring / write-once sink for the ledger |
 | three identities per action (invoker / asserted_as / witness) | agent-to-IdP federation for the invoker's authority |
 | `--expect-head` off-machine head check | continuous/remote attestation of the head |
