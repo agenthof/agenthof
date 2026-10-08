@@ -6,10 +6,9 @@ the project changes, and why you do not have to take anyone's word for it.
 
 ## Who maintains Agenthof
 
-Agenthof is maintained under the pseudonym **rojaneerdev**. It is independent — not
-owned by, funded by, or steering toward any vendor's product. The pseudonym is
-deliberate; the project's credibility is meant to come from the guarantees
-below, all of which you can check for yourself.
+Agenthof is maintained by **rojaneerdev**. It is independent — not owned by,
+funded by, or steering toward any vendor's product. The project's credibility
+comes from the guarantees below, all of which you can check for yourself.
 
 ## What is guaranteed, and how it is enforced
 
@@ -42,8 +41,8 @@ These are binding, not aspirational:
   Certificate of Origin (see [CONTRIBUTING.md](CONTRIBUTING.md)); every commit
   is signed off.
 
-None of these depend on knowing the maintainer's legal identity — they are
-enforced by the license, the constitution, and the commit history, all public.
+None of these depend on taking anyone's word for it — they are enforced by the
+license, the constitution, and the commit history, all public.
 
 ## How the project changes
 
@@ -59,10 +58,9 @@ enforced by the license, the constitution, and the commit history, all public.
 ## Security
 
 Report vulnerabilities via [SECURITY.md](SECURITY.md) (security@agenthof.dev).
-Security handling does not depend on the maintainer's legal identity.
 
 ## "Who's behind this?"
 
-Maintained under the pseudonym **rojaneerdev**, independently, under Apache-2.0
-forever. Trust is anchored in the license, the constitution, and the DCO — all
-public and checkable — not in a name. Contributions and scrutiny are welcome.
+Maintained by **rojaneerdev**, independently, under Apache-2.0 forever. Trust is
+anchored in the license, the constitution, and the DCO — all public and
+checkable. Contributions and scrutiny are welcome.

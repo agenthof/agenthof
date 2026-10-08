@@ -24,10 +24,6 @@ Report unacceptable behavior to **security@agenthof.dev**. Reports are handled
 confidentially. The maintainer will review and respond, and may take any action
 appropriate to the circumstances, up to and including a ban from project spaces.
 
-Because Agenthof is maintained under a pseudonym, enforcement is carried out by
-the maintainer through this contact; it does not depend on, and will not
-require, disclosing any reporter's or maintainer's real identity.
-
 ## Attribution
 
 This Code of Conduct adopts the Contributor Covenant, version 2.1
