@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/identity"
+	"github.com/agenthof/agenthof/internal/origin"
 )
 
 // DecodedEvent is the reader-facing companion to Event: it carries the
@@ -28,6 +29,7 @@ type DecodedEvent struct {
 	Bootstrap   bool             `json:"bootstrap,omitempty"`
 	FragmentLen int              `json:"fragment_len,omitempty"`
 	FragmentSHA string           `json:"fragment_sha256,omitempty"`
+	Origin      *origin.Origin   `json:"origin,omitempty"`
 }
 
 // Decode unmarshals a single control/1 log line into a DecodedEvent.

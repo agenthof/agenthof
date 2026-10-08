@@ -1,0 +1,127 @@
+# apply over the API: the token is the actor, the installed roles authorize,
+# the precondition guards drift, the lock serializes writers, and every
+# outcome is the same record a local apply writes — plus its origin.
+
+env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER
+env AGENTHOF_OIDC_CLIENT_ID=agenthof
+env AGENTHOF_TOKEN=$OIDC_TOKEN
+
+# --if-installed is required with --server
+! exec agenthof apply --server http://127.0.0.1:1 --config config
+stdout 'apply --server needs --if-installed'
+
+# without --allow-api-bootstrap the first API apply is a recorded refusal
+exec agenthof serve --addr 127.0.0.1:0 --addr-file addr1.txt --log-dir logs --artifact-dir artifacts --control-log control.jsonl &
+waitaddr addr1.txt
+! exec agenthof apply --server $SERVER --if-installed none --config config
+stdout 'apply: not authorized: nothing is installed and bootstrap over the API is not enabled \(serve --allow-api-bootstrap\); apply locally first'
+stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
+! exists installed/current
+grep '"outcome":"refused".*"origin":{"via":"api"' control.jsonl
+
+# a second server over the same control root, bootstrap permitted
+exec agenthof serve --addr 127.0.0.1:0 --addr-file addr2.txt --log-dir logs --artifact-dir artifacts --control-log control.jsonl --allow-api-bootstrap &
+waitaddr addr2.txt
+exec agenthof apply --server $SERVER --if-installed none --config config
+stdout 'registry ok: 1 agents, 1 workflows, 2 roles'
+stdout 'control head: seq=2 sha256=[0-9a-f]{64}'
+stdout 'installed: sha256:[0-9a-f]{64}'
+grep '"outcome":"success".*"bootstrap":true,"origin":{"via":"api"' control.jsonl
+installedhash control.jsonl
+
+# a stale precondition is 412: the proposed bytes differ from the installed
+# ones, so there is no "already installed" hint. Not recorded.
+! exec agenthof apply --server $SERVER --if-installed none --config config2
+stdout 'apply: precondition failed: installed configuration is sha256:[0-9a-f]{64}, not none; retry with --if-installed sha256:[0-9a-f]{64}'
+! stdout 'already installed'
+
+# the same stale precondition, but the proposed bytes ARE the installed ones:
+# the client names them so the operator stops guessing. Still not recorded.
+! exec agenthof apply --server $SERVER --if-installed none --config config
+stdout 'precondition failed: installed configuration is sha256:[0-9a-f]{64}, not none; retry with --if-installed sha256:[0-9a-f]{64} — these bytes are already installed'
+exec agenthof audit control --control-log control.jsonl
+stdout 'control ledger — 2 events'
+
+# compare-and-swap replaces the installed configuration; the next run executes it
+exec agenthof apply --server $SERVER --if-installed $HASH --config config2
+stdout 'registry ok: 2 agents, 1 workflows, 2 roles'
+stdout 'control head: seq=3'
+exec agenthof run se plan-only --input hello --server $SERVER
+stdout 'run r-[0-9a-f]{16} finished: succeeded'
+
+# config2 moved the apply grant to a group the token lacks; now that it is the
+# installed configuration, authorization is judged against ITS roles — before
+# the precondition — so the engineering token is refused. Recorded with origin.
+installedhash control.jsonl
+! exec agenthof apply --server $SERVER --if-installed $HASH --config config
+stdout 'apply: not authorized: no role grants apply to the invoker'
+stdout 'control head: seq=4'
+
+# a bundle with a bad key never leaves the client
+! exec agenthof apply --server $SERVER --if-installed $HASH --bundle bad.json
+stdout 'apply: invalid config path: "../escape.yaml"'
+
+# the ledger reads back with the way in on every API record
+exec agenthof audit control --control-log control.jsonl
+stdout 'config apply refused — dana@example.com \(oidc, via api\)'
+stdout 'config applied \(bootstrap\) — dana@example.com \(oidc, via api\)'
+stdout 'config applied — dana@example.com \(oidc, via api\)'
+stdout 'control ledger integrity: verified \(4 events\)'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'installed config: sha256:[0-9a-f]{64} — matches the last recorded install \(apply\)'
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: [engineering]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [engineering]
+control: [apply, enable, disable, repair]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
+-- config2/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config2/agents/reviewer.yaml --
+name: reviewer
+model: fast
+instruction: review
+output: review
+-- config2/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config2/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: [engineering]
+-- config2/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+-- config2/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
+-- bad.json --
+{"files":{"../escape.yaml":"name: x\n"}}

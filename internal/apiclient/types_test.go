@@ -63,3 +63,17 @@ func TestInvestigateQueryValuesRoundTrip(t *testing.T) {
 		t.Fatalf("an empty query must encode no parameters, got %v", v)
 	}
 }
+
+func TestApplyWireTypesRoundTripAndKeys(t *testing.T) {
+	roundTrip(t, ApplyRequest{Files: map[string]string{"roles/ops.yaml": "name: ops\n"}})
+	roundTrip(t, ApplyResult{Status: ApplyRejected, ConfigHash: "sha256:ab", Reason: "r", Errors: []string{"a", "b"}, Head: &Head{Hash: "h", Count: 2}})
+	roundTrip(t, ApplyResult{Status: ApplyInstalled, ConfigHash: "sha256:ab", Bootstrap: true, Head: &Head{Hash: "h", Count: 1}, Agents: 1, Workflows: 2, Roles: 3})
+	data, err := json.Marshal(ApplyResult{Status: ApplyBusy})
+	if err != nil || string(data) != `{"status":"busy"}` {
+		t.Fatalf("busy body = %s (err %v), want {\"status\":\"busy\"}", data, err)
+	}
+	data, _ = json.Marshal(ApplyResult{Status: ApplyPreconditionFailed, CurrentHash: "sha256:cd"})
+	if string(data) != `{"status":"precondition_failed","current_hash":"sha256:cd"}` {
+		t.Fatalf("412 body = %s", data)
+	}
+}

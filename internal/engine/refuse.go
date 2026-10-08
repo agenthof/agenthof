@@ -49,7 +49,7 @@ func RecordRefused(opts Options, inv identity.Invoker, role, workflow, reason st
 		Time:    time.Now().UTC(),
 		Type:    "run_refused",
 		Reason:  reason,
-		Origin:  opts.Origin.sanitized(),
+		Origin:  opts.Origin.Sanitized(),
 		Binding: bind,
 	}
 	if err := log.Append(e); err != nil {

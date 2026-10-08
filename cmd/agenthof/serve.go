@@ -26,12 +26,14 @@ import (
 // cmdServe runs the control-plane API: governed runs over HTTP, every
 // call authenticated with the invoker's OIDC token, both ledgers readable
 // back. ctx ending (SIGINT/SIGTERM from dispatch) starts a graceful
-// shutdown: new runs are refused, in-flight runs are cancelled and waited
-// for up to --shutdown-timeout, then the listener closes.
+// shutdown: new runs and applies are refused, in-flight runs are cancelled
+// and waited for — applies are waited for — up to --shutdown-timeout, then
+// the listener closes.
 func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := fs.String("addr", "127.0.0.1:8080", "listen address; a non-loopback address needs --allow-non-loopback")
 	allowNonLoopback := fs.Bool("allow-non-loopback", false, "serve a non-loopback address (put TLS in front; see docs/reference/serve.md)")
+	allowAPIBootstrap := fs.Bool("allow-api-bootstrap", false, "permit POST /v1/config/apply while nothing is installed (the first authenticated caller then owns the configuration); off, such an apply is a recorded refusal — bootstrap locally instead")
 	addrFile := fs.String("addr-file", "", "after binding, write the actual host:port to this file (for a :0 port)")
 	fs.String("config", "./config", "accepted for compatibility; runs execute the installed configuration beside --control-log")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
@@ -102,8 +104,9 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 		return 1
 	}
 	host := &runHost{controlLog: *controlLog, logDir: *logDir, artifactDir: *artifactDir, logger: logger, broker: newBroker(subjectTokenTypeFromEnv(os.Getenv))}
+	cfgHost := &configHost{controlLog: *controlLog, allowBootstrap: *allowAPIBootstrap, logger: logger}
 	srv, err := serve.New(serve.Config{
-		Auth: auth, Host: host, LogDir: *logDir, ControlLog: *controlLog,
+		Auth: auth, Host: host, Config: cfgHost, LogDir: *logDir, ControlLog: *controlLog,
 		MaxConcurrentRuns: *maxRuns, ServerHost: ln.Addr().String(), Logger: logger,
 	})
 	if err != nil {
@@ -150,7 +153,7 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 	if err := srv.Shutdown(sctx); err != nil {
 		// A run cut off mid-step may have left its ledger without a final
 		// event; the status view reports it as incomplete — honestly.
-		logger.Warn("in-flight runs did not finish before the deadline", "err", err)
+		logger.Warn("in-flight runs or applies did not finish before the deadline", "err", err)
 	}
 	if err := hs.Shutdown(sctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		logger.Warn("listener shutdown", "err", err)

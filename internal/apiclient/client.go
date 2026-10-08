@@ -42,7 +42,7 @@ func New(base, token string, hc *http.Client) *Client {
 	return &Client{base: strings.TrimRight(base, "/"), token: token, http: hc}
 }
 
-func (c *Client) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
+func (c *Client) do(ctx context.Context, method, path string, body any, prepare ...func(*http.Request)) (*http.Response, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -59,6 +59,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (*http.R
 	req.Header.Set("Accept", "application/json, text/plain")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for _, p := range prepare {
+		p(req)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -105,6 +108,39 @@ func (c *Client) StartRun(ctx context.Context, req RunRequest) (RunAccepted, err
 		return acc, nil
 	default:
 		return RunAccepted{}, statusError(resp, body)
+	}
+}
+
+// Apply posts a configuration bundle with its precondition: If-Match:
+// sha256:<hex>, or If-None-Match: * for a bootstrap. Every governed answer
+// — 200, 403, 412, 422, 409 and the 500s — decodes into ApplyResult: an
+// outcome, not an error (the StartRun rule). 401 is ErrUnauthorized;
+// anything else is a StatusError.
+func (c *Client) Apply(ctx context.Context, req ApplyRequest, pre Precondition) (ApplyResult, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/v1/config/apply", req, func(r *http.Request) {
+		if pre.ExpectNone {
+			r.Header.Set("If-None-Match", "*")
+		} else {
+			r.Header.Set("If-Match", pre.ExpectInstalled)
+		}
+	})
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	body, err := readBody(resp)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusForbidden, http.StatusPreconditionFailed, http.StatusUnprocessableEntity,
+		http.StatusConflict, http.StatusInternalServerError:
+		var res ApplyResult
+		if err := json.Unmarshal(body, &res); err != nil {
+			return ApplyResult{}, fmt.Errorf("server: malformed answer: %w", err)
+		}
+		return res, nil
+	default:
+		return ApplyResult{}, statusError(resp, body)
 	}
 }
 

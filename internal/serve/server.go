@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/obs"
@@ -50,6 +51,17 @@ type Prepared interface {
 	Run(ctx context.Context, runID, role, workflow, input string, inv identity.Invoker, origin *engine.Origin) (engine.Result, error)
 }
 
+// ConfigHost is what serve needs to apply a configuration: the same apply
+// the CLI runs, over the control root this process serves, serialized by
+// the host against every other writer (its store-level writer lock). Apply
+// returns an outcome, never an error: every failure is a recorded (or
+// deliberately unrecorded) outcome with an HTTP status of its own. via is
+// the request channel's account of itself (origin), which the host records
+// on the control event.
+type ConfigHost interface {
+	Apply(inv identity.Invoker, files map[string][]byte, pre apiclient.Precondition, via *engine.Origin) apiclient.ApplyResult
+}
+
 // ErrConfigInvalid marks a Prepare failure that is the configuration's:
 // the run is refused (recorded, 422) with "configuration invalid: <first
 // error>", the same text the CLI ledgers.
@@ -63,8 +75,10 @@ var ErrNoConfigInstalled = errors.New("no configuration installed")
 // Config is everything a Server needs. MaxConcurrentRuns is required —
 // there is no unbounded default.
 type Config struct {
-	Auth       Authenticator
-	Host       RunHost
+	Auth Authenticator
+	Host RunHost
+	// Config applies configurations; required, like Host.
+	Config     ConfigHost
 	LogDir     string
 	ControlLog string
 	// MaxConcurrentRuns caps runs in flight; a POST beyond it answers 429.
@@ -91,12 +105,18 @@ type Server struct {
 	lifecycle sync.RWMutex
 	draining  bool
 	wg        sync.WaitGroup
+
+	// applyMu admits one API apply at a time: a second is answered 409 at
+	// once instead of parking a handler goroutine on the host's writer lock
+	// for its timeout. It covers only this process; the host's lock covers
+	// every writer.
+	applyMu sync.Mutex
 }
 
 // New validates cfg and builds the server; call Handler to serve it.
 func New(cfg Config) (*Server, error) {
-	if cfg.Auth == nil || cfg.Host == nil {
-		return nil, errors.New("serve: Auth and Host are required")
+	if cfg.Auth == nil || cfg.Host == nil || cfg.Config == nil {
+		return nil, errors.New("serve: Auth, Host and Config are required")
 	}
 	if cfg.LogDir == "" {
 		return nil, errors.New("serve: LogDir is required")
@@ -122,6 +142,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/runs/{id}/audit", s.authed(s.getAudit))
 	s.mux.HandleFunc("POST /v1/runs/{id}/cancel", s.authed(s.cancelRun))
 	s.mux.HandleFunc("GET /v1/investigate", s.authed(s.investigate))
+	s.mux.HandleFunc("POST /v1/config/apply", s.authed(s.applyConfig))
 }
 
 // Handler is the server's HTTP handler.
@@ -134,33 +155,48 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, "ok\n")
 }
 
-// reserve takes a run slot and registers the run with the WaitGroup, or
-// says why not: 503 while draining, 429 when every slot is held. The
-// returned release gives both back; it is safe to call once from whichever
-// path ends the run — a failed POST or the finished goroutine.
-func (s *Server) reserve() (release func(), code int) {
+// admit registers one unit of work with the WaitGroup, or says the server
+// is draining. The returned release is safe to call once from any path.
+// Shutdown waits for every admitted unit — a run, or an apply, whose
+// install-then-record window the drain deadline must not cut.
+func (s *Server) admit() (release func(), ok bool) {
 	s.lifecycle.RLock()
 	defer s.lifecycle.RUnlock()
 	if s.draining {
+		return nil, false
+	}
+	s.wg.Add(1)
+	var once sync.Once
+	return func() { once.Do(s.wg.Done) }, true
+}
+
+// reserve is admit plus a run slot: 503 while draining, 429 when every slot
+// is held. The returned release gives both back; it is safe to call once
+// from whichever path ends the run — a failed POST or the finished
+// goroutine.
+func (s *Server) reserve() (release func(), code int) {
+	done, ok := s.admit()
+	if !ok {
 		return nil, http.StatusServiceUnavailable
 	}
 	select {
 	case s.slots <- struct{}{}:
 	default:
+		done()
 		return nil, http.StatusTooManyRequests
 	}
-	s.wg.Add(1)
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			<-s.slots
-			s.wg.Done()
+			done()
 		})
 	}, 0
 }
 
-// Shutdown stops accepting runs (POST /v1/runs answers 503), keeps serving
-// reads, cancels every in-flight run, and waits for them until ctx ends.
+// Shutdown stops accepting new work (POST /v1/runs and POST /v1/config/apply
+// answer 503), keeps serving reads, cancels every in-flight run, and waits
+// for every admitted unit of work — runs and applies — until ctx ends.
 // A deadline shorter than the step timeout can return while a step is
 // still finishing; the caller decides what that is worth.
 func (s *Server) Shutdown(ctx context.Context) error {
@@ -177,7 +213,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("serve: shutdown deadline passed with runs still in flight: %w", ctx.Err())
+		return fmt.Errorf("serve: shutdown deadline passed with work still in flight: %w", ctx.Err())
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,5 +96,64 @@ func TestClientRefusalAndErrorsNeverEchoTheToken(t *testing.T) {
 	var se *StatusError
 	if !errors.As(err, &se) || se.Code != http.StatusBadGateway || len(se.Body) > 200 || strings.Contains(err.Error(), token) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestClientApplySendsPreconditionAndDecodesEveryStatus(t *testing.T) {
+	var gotIfMatch, gotIfNoneMatch, gotBody string
+	status := http.StatusOK
+	body := `{"status":"installed","config_hash":"sha256:ab","head":{"hash":"h","count":1},"agents":1}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok" || r.Method != http.MethodPost || r.URL.Path != "/v1/config/apply" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		gotIfMatch, gotIfNoneMatch = r.Header.Get("If-Match"), r.Header.Get("If-None-Match")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok", nil)
+	req := ApplyRequest{Files: map[string]string{"roles/ops.yaml": "name: ops\n"}}
+
+	res, err := c.Apply(context.Background(), req, Precondition{ExpectInstalled: "sha256:cd"})
+	if err != nil || res.Status != ApplyInstalled || res.ConfigHash != "sha256:ab" || res.Head == nil || res.Agents != 1 {
+		t.Fatalf("res %+v err %v", res, err)
+	}
+	if gotIfMatch != "sha256:cd" || gotIfNoneMatch != "" || gotBody != `{"files":{"roles/ops.yaml":"name: ops\n"}}` {
+		t.Fatalf("If-Match %q If-None-Match %q body %q", gotIfMatch, gotIfNoneMatch, gotBody)
+	}
+	if _, err := c.Apply(context.Background(), req, Precondition{ExpectNone: true}); err != nil || gotIfNoneMatch != "*" || gotIfMatch != "" {
+		t.Fatalf("bootstrap: If-None-Match %q If-Match %q err %v", gotIfNoneMatch, gotIfMatch, err)
+	}
+
+	for _, c2 := range []struct {
+		code int
+		body string
+		want string
+	}{
+		{http.StatusForbidden, `{"status":"refused","reason":"no"}`, ApplyRefused},
+		{http.StatusPreconditionFailed, `{"status":"precondition_failed","current_hash":"sha256:ef"}`, ApplyPreconditionFailed},
+		{http.StatusUnprocessableEntity, `{"status":"rejected","errors":["a","b"]}`, ApplyRejected},
+		{http.StatusConflict, `{"status":"busy"}`, ApplyBusy},
+		{http.StatusInternalServerError, `{"status":"ledger_damaged","reason":"control ledger damaged"}`, ApplyLedgerDamaged},
+	} {
+		status, body = c2.code, c2.body
+		res, err := c.Apply(context.Background(), req, Precondition{ExpectNone: true})
+		if err != nil || res.Status != c2.want {
+			t.Fatalf("%d: res %+v err %v", c2.code, res, err)
+		}
+	}
+	status, body = http.StatusServiceUnavailable, "identity provider unavailable\n"
+	_, err = c.Apply(context.Background(), req, Precondition{ExpectNone: true})
+	var se *StatusError
+	if !errors.As(err, &se) || se.Code != 503 || se.Body != "identity provider unavailable" {
+		t.Fatalf("503 must be a StatusError: %v", err)
+	}
+	if _, err := New(srv.URL, "wrong", nil).Apply(context.Background(), req, Precondition{ExpectNone: true}); !errors.Is(err, ErrUnauthorized) || strings.Contains(err.Error(), "wrong") {
+		t.Fatalf("401 → ErrUnauthorized without the token: %v", err)
 	}
 }

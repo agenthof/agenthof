@@ -83,3 +83,21 @@ func TestHashDirIncludesUnparseableYAML(t *testing.T) {
 		t.Fatalf("unparseable YAML must still hash (bytes-based): %v", err)
 	}
 }
+
+// TestHashFilesGoldenVector pins HashFiles to the SAME files/v1 constant
+// TestHashDirGoldenVector pins HashDir to — the canon is pinned absolutely
+// on both sides, not only relative to each other, so a change to the
+// per-file framing cannot drift in step.
+func TestHashFilesGoldenVector(t *testing.T) {
+	got, err := HashFiles(map[string][]byte{
+		"agents/a.yaml": []byte("name: a\nmodel: m\n"),
+		"roles/r.yaml":  []byte("name: r\nworkflows: [w]\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "sha256:3a2f6d0c0df4546527ad1ba5c5ae63cc803851f99614247fcbf38b16b4a5d885"
+	if got != want {
+		t.Fatalf("HashFiles golden vector drifted: got %q, want %q", got, want)
+	}
+}

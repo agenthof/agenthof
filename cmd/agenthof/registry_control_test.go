@@ -967,3 +967,102 @@ func TestAuditVerifyControlBootstrapFlipDoesNotVouchForUnrecordedApply(t *testin
 		t.Fatalf("the join must name the apply, never the bootstrap-era flip:\n%s", out.String())
 	}
 }
+
+// TestRegistryFlipBusyWhenAnotherProcessHoldsTheWriterLock: the kill switch
+// is the third pointer writer and serializes on installed.lock; held
+// elsewhere past the timeout it exits 1 unrecorded with the busy line, the
+// pointer untouched. Waits the real ~5 s lockTimeout; sequential, because
+// cmdRegistryFlip falls back to AGENTHOF_TOKEN and the env must be blank.
+func TestRegistryFlipBusyWhenAnotherProcessHoldsTheWriterLock(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl, h0 := bootstrapped(t, root)
+	before := len(controlEvents(t, ctl))
+	holdLock(t, "file", installedLock(ctl), 9000)
+	var out bytes.Buffer
+	code := cmdRegistryFlip("disable", "coder", root, ctl, "dana@example.com", "platform-eng", "", &out)
+	if code != 1 || out.String() != "registry disable: "+msgLockBusy+"\n" {
+		t.Fatalf("code %d out %q", code, out.String())
+	}
+	if len(controlEvents(t, ctl)) != before || readPointer(t, ctl) != h0 {
+		t.Fatal("busy must record nothing and move nothing")
+	}
+}
+
+// TestRegistryFlipBadTokenUnderContentionStillRecords: the lock sits AFTER
+// the refused-token branch, so a bad token while another process holds the
+// lock still records refused/token_verification_failed at once — never an
+// unrecorded busy. That branch reads no pointer and needs no lock.
+func TestRegistryFlipBadTokenUnderContentionStillRecords(t *testing.T) {
+	root := writeSample(t)
+	ctl, _ := bootstrapped(t, root)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := cmdTestOIDCServer(t, key)
+	otherKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	bad := cmdMintToken(t, otherKey, map[string]any{"iss": srv.URL, "aud": "agenthof", "exp": time.Now().Add(time.Hour).Unix(), "sub": "u-1"})
+	t.Setenv("AGENTHOF_OIDC_ISSUER", srv.URL)
+	t.Setenv("AGENTHOF_OIDC_CLIENT_ID", "agenthof")
+	holdLock(t, "file", installedLock(ctl), 9000)
+	var out bytes.Buffer
+	start := time.Now()
+	code := cmdRegistryFlip("disable", "coder", root, ctl, "", "", bad, &out)
+	if code != 1 || !strings.Contains(out.String(), "token authentication failed") || strings.Contains(out.String(), msgLockBusy) {
+		t.Fatalf("code %d out %q", code, out.String())
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("the refused-token branch must not wait on the lock")
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeTokenVerificationFailed {
+		t.Fatalf("want a recorded token refusal: %+v", e)
+	}
+}
+
+// TestRegistryFlipAndApplyInterleavedNeverLoseAnInstall: an apply parked in
+// its critical section holds the lock; a flip started meanwhile blocks, then
+// re-snapshots whatever the apply installed. The pointer always names the
+// last recorded install.
+func TestRegistryFlipAndApplyInterleavedNeverLoseAnInstall(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	rootA := writeSample(t)
+	ctl, _ := bootstrapped(t, rootA)
+	rootB := writeSample(t)
+	writeFileIn(t, rootB, "agents/coder.yaml", "name: coder\nmodel: fast\ninstruction: code v2\noutput: patch\nendpoint: http://127.0.0.1:1\n")
+	src := blockingSource{inner: dirSource(rootB), entered: make(chan struct{}), release: make(chan struct{})}
+	w1 := make(chan applyOutcome, 1)
+	go func() {
+		w1 <- applyConfig(applyRequest{ControlLog: ctl, Invoker: admin, Source: src, AllowBootstrap: true}, io.Discard)
+	}()
+	<-src.entered
+	flip := make(chan int, 1)
+	var flipOut bytes.Buffer
+	go func() {
+		flip <- cmdRegistryFlip("disable", "coder", rootA, ctl, "dana@example.com", "platform-eng", "", &flipOut)
+	}()
+	select {
+	case code := <-flip:
+		t.Fatalf("the flip (exit %d) ran while the apply held the lock:\n%s", code, flipOut.String())
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(src.release)
+	r1 := <-w1
+	if r1.Kind != applyInstalled {
+		t.Fatalf("apply: %+v", r1)
+	}
+	if code := <-flip; code != 0 {
+		t.Fatalf("flip: %d\n%s", code, flipOut.String())
+	}
+	if line, mismatch := installedPointerLine(ctl, mustRecords(t, ctl)); mismatch {
+		t.Fatalf("pointer and ledger disagree: %s", line)
+	}
+	// The flip re-snapshotted the apply's install (v2, disabled), not the
+	// pre-apply snapshot.
+	cfg, _, _, _ := config.LoadInstalled(installedStore(ctl))
+	for _, a := range cfg.Agents {
+		if a.Name == "coder" && (a.Instruction != "code v2" || a.IsEnabled()) {
+			t.Fatalf("installed coder = %+v; want the apply's bytes with enabled:false", a)
+		}
+	}
+}

@@ -20,11 +20,16 @@ func installedStore(controlLog string) string {
 	return filepath.Join(filepath.Dir(controlLog), "installed")
 }
 
-// msgInstalledNotRecorded is apply's analogue of the kill switch's "state
-// changed; event NOT recorded": the snapshot is installed and the pointer
-// flipped, but the success event could not be appended. audit control and
-// audit verify control surface the resulting pointer-vs-ledger mismatch.
-const msgInstalledNotRecorded = "installed; event NOT recorded"
+// installedLock is the installed-configuration writer lock for a control
+// ledger: "installed.lock" BESIDE the store (never inside it, so a store
+// listing holds only snapshots and the pointer). Every pointer writer —
+// apply (CLI or API) and the kill switch — takes it through
+// ledger.LockFile from its authorize-read through its success append. The
+// file is empty and never removed; a prune of this directory must not take
+// it for an orphan. Derived here, next to installedStore, and nowhere else.
+func installedLock(controlLog string) string {
+	return filepath.Join(filepath.Dir(controlLog), "installed.lock")
+}
 
 // msgNoConfigInstalled is run's fixed refusal reason — printed, ledgered,
 // and (as serve.ErrNoConfigInstalled) answered 422 — when the control root

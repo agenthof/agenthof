@@ -117,3 +117,64 @@ func InvestigateQueryFrom(v url.Values) InvestigateQuery {
 		Outcome: v.Get("outcome"), Run: v.Get("run"), ConfigHash: v.Get("config_hash"),
 	}
 }
+
+// MaxApplyBody caps POST /v1/config/apply's body (1 MiB — the same value
+// as the run body, a separate constant because it is a separate contract);
+// MaxBundleFiles caps the entries in a bundle. The server enforces both;
+// the CLI client checks them before sending.
+const (
+	MaxApplyBody   = 1 << 20
+	MaxBundleFiles = 1000
+)
+
+// ApplyRequest is the body of POST /v1/config/apply: the configuration's
+// files by their config-relative path (agents/, workflows/, roles/,
+// gateway.yaml), as text. It is also the `apply --bundle` file format.
+type ApplyRequest struct {
+	Files map[string]string `json:"files"`
+}
+
+// Precondition is the client's declared view of the installed
+// configuration: If-Match: sha256:<hex> (ExpectInstalled) or If-None-Match:
+// * (ExpectNone — install only if nothing is installed). Exactly one is
+// always sent; an apply with no precondition is not offered over the API.
+type Precondition struct {
+	ExpectInstalled string
+	ExpectNone      bool
+}
+
+// ApplyResult answers POST /v1/config/apply. Status is one of the Apply*
+// constants; the HTTP code follows from it.
+type ApplyResult struct {
+	Status      string   `json:"status"`
+	ConfigHash  string   `json:"config_hash,omitempty"`  // installed / rejected / refused / installed_not_recorded
+	CurrentHash string   `json:"current_hash,omitempty"` // precondition_failed, when something is installed
+	Bootstrap   bool     `json:"bootstrap,omitempty"`    // installed: nothing was installed before
+	Reason      string   `json:"reason,omitempty"`       // refused / rejected / error: the recorded reason message
+	Errors      []string `json:"errors,omitempty"`       // rejected: every load and validation error, as apply prints them
+	Head        *Head    `json:"head,omitempty"`         // the control head after the recorded event
+	Agents      int      `json:"agents,omitempty"`
+	Workflows   int      `json:"workflows,omitempty"`
+	Roles       int      `json:"roles,omitempty"`
+}
+
+// Apply statuses.
+const (
+	ApplyInstalled            = "installed"
+	ApplyRefused              = "refused"
+	ApplyRejected             = "rejected"
+	ApplyPreconditionFailed   = "precondition_failed"
+	ApplyError                = "error"
+	ApplyLedgerDamaged        = "ledger_damaged"
+	ApplyBusy                 = "busy"
+	ApplyInstalledNotRecorded = "installed_not_recorded"
+)
+
+// Fixed reasons on a 500 answer: the server never returns the recorded OS
+// text (it can name store paths); the operator who has the host reads it in
+// the control ledger and the server log.
+const (
+	ReasonStoreUnusable = "store unusable"
+	ReasonLedgerDamaged = "control ledger damaged"
+	ReasonNotRecorded   = "control event could not be recorded"
+)

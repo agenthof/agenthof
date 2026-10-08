@@ -182,3 +182,41 @@ func TestControlRenderBootstrapFlipLabel(t *testing.T) {
 		t.Fatalf("a flip must never render as (bootstrap):\n%s", out)
 	}
 }
+
+// recVia is rec with an origin on the wire, as an API-recorded control
+// event carries it.
+func recVia(seq int, action, outcome, subject, method, via string) ledger.Record {
+	raw := fmt.Sprintf(
+		`{"v":"control/1","seq":%d,"time":"2026-10-08T10:%02d:00Z",`+
+			`"action":%q,"outcome":%q,`+
+			`"invoker":{"subject":%q,"issuer":"https://idp.test","method":%q},`+
+			`"witness":{"os_user":"svc","hostname":"host"},"config_hash":"sha256:abc",`+
+			`"origin":{"via":%q,"remote_addr":"10.0.0.9:4","user_agent":"ua/1"},"prev":""}`,
+		seq, seq, action, outcome, subject, method, via,
+	)
+	return ledger.Record{Raw: []byte(raw)}
+}
+
+// TestControlRenderOrigin: a record with origin renders "(oidc, via api)";
+// one without renders "(oidc)" exactly as before; the remote address and
+// user agent are not rendered.
+func TestControlRenderOrigin(t *testing.T) {
+	recs := []ledger.Record{
+		recVia(1, "apply", "success", "dana@example.com", "oidc", "api"),
+		rec(2, "apply", "", "refused", "dana@example.com", "oidc"),
+	}
+	out := control.Render(recs, ledger.Head{Hash: "h", Count: 2}, nil)
+	for _, want := range []string{
+		"seq 1  2026-10-08 10:01:00  config applied — dana@example.com (oidc, via api)\n",
+		"seq 2  2026-09-21 10:02:00  config apply refused — dana@example.com (oidc)\n", // rec() stamps 2026-09-21
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q:\n%s", want, out)
+		}
+	}
+	for _, leak := range []string{"10.0.0.9", "ua/1"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("%q must not be rendered:\n%s", leak, out)
+		}
+	}
+}

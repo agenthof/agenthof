@@ -36,6 +36,8 @@
 // syscall.Flock, Locked mode is unix-only by design: this package
 // does not build a Windows-compatible locking path, and a Windows
 // compile failure here is the intended, recorded outcome, not a bug.
+// LockFile exposes the same flock on an arbitrary file for callers that
+// need a cross-process critical section wider than one append.
 package ledger
 
 import (
@@ -61,10 +63,11 @@ var lockTimeout = 5 * time.Second
 // lockRetryInterval is the sleep between non-blocking flock attempts.
 const lockRetryInterval = 50 * time.Millisecond
 
-// errLockHeld is the pinned error returned (wrapped with the failed
-// operation's context) when a Locked Open/ReadVerify cannot acquire the
-// flock within lockTimeout.
-var errLockHeld = errors.New("another agenthof process holds the ledger lock")
+// ErrLockHeld is the pinned error returned (wrapped with the failed
+// operation's context) when a Locked Open/Create/ReadVerify or LockFile
+// cannot acquire the flock within lockTimeout. Exported so a caller can tell
+// contention on a healthy file from damage with errors.Is.
+var ErrLockHeld = errors.New("another agenthof process holds the ledger lock")
 
 // flockRetry attempts a non-blocking flock(fd, how) in a loop, sleeping
 // lockRetryInterval between attempts, retrying EINTR indefinitely (it
@@ -85,7 +88,7 @@ func flockRetry(fd int, how int) error {
 			return err
 		}
 		if time.Now().After(deadline) {
-			return errLockHeld
+			return ErrLockHeld
 		}
 		time.Sleep(lockRetryInterval)
 	}
@@ -290,6 +293,34 @@ func (c *Chain) Close() error {
 		_ = syscall.Flock(int(c.f.Fd()), syscall.LOCK_UN)
 	}
 	return c.f.Close()
+}
+
+// LockFile takes an exclusive flock(2) on the file at path, creating the
+// file (0600) and its directory if needed, with the same bounded
+// non-blocking retry Open uses; the returned unlock releases the lock and
+// closes the file. It is this package's flock exported for its second
+// caller — the installed-configuration writer lock beside a control ledger
+// — and shares its honesty limits: flock is advisory, per open file
+// description (two handles in one process contend like two processes),
+// and only meaningful on a local filesystem. Contention past lockTimeout is
+// an error satisfying errors.Is(err, ErrLockHeld); any other error is an
+// I/O failure creating or opening the file.
+func LockFile(path string) (unlock func(), err error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if lerr := flockRetry(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lerr != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("ledger: lock %s: %w", path, lerr)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 // ReadVerify loads and verifies the ledger at path read-only. On
