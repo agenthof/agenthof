@@ -25,6 +25,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity/oidctest"
 )
@@ -309,7 +310,7 @@ func writeSample(t *testing.T) string {
 		"agents/coder.yaml":      "name: coder\nmodel: fast\ninstruction: code\noutput: patch\n" + ep,
 		"workflows/fix-bug.yaml": "name: fix-bug\nsteps:\n  - name: plan\n    agent: planner\n  - name: code\n    agent: coder\n    on_failure: plan\n",
 		"roles/se.yaml":          "name: software-engineer\nworkflows: [fix-bug]\nallowed_groups: [\"*\"]\n",
-		"roles/ops.yaml":         "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair]\n",
+		"roles/ops.yaml":         "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair, provision, prune]\n",
 		"gateway.yaml":           "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\n",
 	}
 	for rel, content := range files {
@@ -850,49 +851,462 @@ func TestRunsPruneNeverDeletesControlLogEvenIfLogDirPointsAtItsDir(t *testing.T)
 	}
 }
 
-func TestGatewayProvisionMissingMasterKey(t *testing.T) {
-	t.Setenv("LITELLM_MASTER_KEY", "")
-	var out bytes.Buffer
-	code := cmdGateway([]string{"provision", "--config", "./config"}, &out)
-	if code != 2 {
-		t.Fatalf("expected exit 2 with LITELLM_MASTER_KEY unset, got %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "LITELLM_MASTER_KEY") {
-		t.Fatalf("error must name LITELLM_MASTER_KEY: %s", out.String())
-	}
-}
-
-func TestGatewayProvisionEndToEnd(t *testing.T) {
-	root := writeSample(t)
-	// writeSample's role has no budget; add one so the provisioner acts.
-	rolePath := filepath.Join(root, "roles", "se.yaml")
-	if err := os.WriteFile(rolePath, []byte("name: software-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 50\nallowed_groups: [\"*\"]\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
+// adminMock is a LiteLLM-shaped admin API for the provision tests: it
+// answers /key/generate with a fresh key and counts the generations; when
+// failAt > 0 the failAt-th generation answers 500 with sentinel in its body,
+// so a test can prove the body never reaches stdout or the ledger. Every
+// other path is 500 (provision never calls /key/info for a role with no key
+// file yet).
+func adminMock(t *testing.T, failAt int, sentinel string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var generated atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/key/generate" {
+			n := generated.Add(1)
+			if int(n) == failAt {
+				http.Error(w, sentinel, http.StatusInternalServerError)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"key":"sk-test"}`))
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv, &generated
+}
 
+// provisionArgs is a gateway provision invocation by the platform-eng
+// group against ctl and the mock admin API.
+func provisionArgs(ctl, adminBase string) []string {
+	return []string{"provision", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng", "--admin-base", adminBase}
+}
+
+// budgetedSample is writeSample plus a $50 budget on software-engineer, so
+// the provisioner has something to mint; it must be applied AFTER this
+// rewrite, since provision reads the installed roles, budget included.
+func budgetedSample(t *testing.T) string {
+	t.Helper()
+	root := writeSample(t)
+	writeFileIn(t, root, "roles/se.yaml", "name: software-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 50\nallowed_groups: [\"*\"]\n")
+	return root
+}
+
+// TestGatewayProvisionMissingMasterKey: the master key is a usage fault of
+// the same class as a bad flag — checked before identity and the ledger, so
+// nothing is recorded and no ledger is created.
+func TestGatewayProvisionMissingMasterKey(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	code := cmdGateway([]string{"provision", "--control-log", ctl}, &out)
+	if code != 2 || !strings.Contains(out.String(), "LITELLM_MASTER_KEY") {
+		t.Fatalf("expected exit 2 naming LITELLM_MASTER_KEY, got %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(ctl); !os.IsNotExist(err) {
+		t.Fatalf("a usage fault must not create the control ledger: %v", err)
+	}
+}
+
+// TestGatewayProvisionConfigFlagIsRetired: provision mints for the
+// INSTALLED roles and takes no directory; the old flag is a loud usage
+// error, never silently ignored.
+func TestGatewayProvisionConfigFlagIsRetired(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
 	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	code := cmdGateway([]string{"provision", "--config", t.TempDir(), "--control-log", ctl}, &out)
+	if code != 2 || !strings.Contains(out.String(), "flag provided but not defined: -config") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(ctl); !os.IsNotExist(err) {
+		t.Fatalf("a usage fault must not create the control ledger: %v", err)
+	}
+}
+
+// TestGatewayProvisionNothingInstalledIsARecordedRefusal: no roles, nobody
+// is authorized — recorded not_authorized with the fixed path-free message
+// and no config_hash, the remedy printed, no admin-API call.
+func TestGatewayProvisionNothingInstalledIsARecordedRefusal(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	srv, generated := adminMock(t, 0, "")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	code := cmdGateway(provisionArgs(ctl, srv.URL), &out)
+	if code != 1 {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	for _, want := range []string{
+		"gateway provision: " + msgNothingInstalled + "\n",
+		"no configuration installed under " + installedStore(ctl) + "; run: agenthof apply --config <dir> --control-log " + ctl + "\n",
+		"control head: seq=1 sha256=",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, out.String())
+		}
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "provision" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotAuthorized || e.Reason.Message != msgNothingInstalled || e.ConfigHash != "" {
+		t.Fatalf("want refused/not_authorized without a hash: %+v", e)
+	}
+	if generated.Load() != 0 {
+		t.Fatal("a refusal must not touch the admin API")
+	}
+}
+
+// TestGatewayProvisionUngrantedIsRefusedWithTheInstalledHash: the invoker's
+// group is granted nothing — recorded refused/not_authorized with the hash
+// of the configuration they were refused against, no API call, no key.
+func TestGatewayProvisionUngrantedIsRefusedWithTheInstalledHash(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	ctl := applied(t, budgetedSample(t))
+	srv, generated := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	code := cmdGateway([]string{"provision", "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance", "--admin-base", srv.URL}, &out)
+	if code != 1 || !strings.Contains(out.String(), "gateway provision: not authorized: no role grants provision to the invoker") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotAuthorized || e.ConfigHash != readPointer(t, ctl) {
+		t.Fatalf("want refused with the installed hash: %+v", e)
+	}
+	if generated.Load() != 0 {
+		t.Fatal("a refusal must not touch the admin API")
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); !os.IsNotExist(err) {
+		t.Fatalf("no key may be written: %v", err)
+	}
+}
+
+// TestGatewayProvisionEndToEnd: an authorized provision mints for the
+// installed roles, records success with the installed hash, renders
+// "provision ok", and is never an install — audit verify control stays 0
+// and a run under the same hash still joins to the apply.
+func TestGatewayProvisionEndToEnd(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := applied(t, root)
+	srv, generated := adminMock(t, 0, "")
 	t.Chdir(t.TempDir())
 
 	var out bytes.Buffer
-	code := cmdGateway([]string{"provision", "--config", root, "--admin-base", srv.URL}, &out)
+	code := cmdGateway(provisionArgs(ctl, srv.URL), &out)
 	if code != 0 {
 		t.Fatalf("provision: %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "provisioned key for role software-engineer (budget $50)") {
-		t.Fatalf("out: %s", out.String())
+	for _, want := range []string{"provisioned key for role software-engineer (budget $50)", "control head: seq=2 sha256="} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, out.String())
+		}
 	}
 	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); err != nil {
 		t.Fatalf("key file not written under ./.agenthof/keys/: %v", err)
+	}
+	if generated.Load() != 1 {
+		t.Fatalf("key generations = %d, want 1", generated.Load())
+	}
+	pointer := readPointer(t, ctl)
+	e := lastControlEvent(t, ctl)
+	if e.Action != "provision" || e.Outcome != "success" || e.ConfigHash != pointer || e.Agent != "" || e.Detail != "" || e.Invoker.Subject != "dana@example.com" || e.Bootstrap {
+		t.Fatalf("want a success record carrying the installed hash and nothing else: %+v", e)
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
+	for _, want := range []string{"provision ok — dana@example.com (asserted)", "matches the last recorded install (apply)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, out.String())
+		}
+	}
+	out.Reset()
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 {
+		t.Fatalf("a provision record is not an install: %d\n%s", code, out.String())
+	}
+	// The run config-join ignores the provision: a run under the same hash
+	// names the apply.
+	logDir := t.TempDir()
+	out.Reset()
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", logDir, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	entries, err := os.ReadDir(logDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("one run log: %v %d", err, len(entries))
+	}
+	runID := strings.TrimSuffix(entries[0].Name(), ".jsonl")
+	out.Reset()
+	if code := cmdAudit([]string{runID, "--log-dir", logDir, "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "config "+pointer+" — applied by dana@example.com") {
+		t.Fatalf("audit %s: %d\n%s", runID, code, out.String())
+	}
+	out.Reset()
+	if code := cmdInvestigate([]string{"--config-hash", pointer, "--log-dir", logDir, "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "control provision — dana@example.com (asserted)") || !strings.Contains(out.String(), "control apply — dana@example.com (asserted)") {
+		t.Fatalf("investigate must list the provision beside the apply: %d\n%s", code, out.String())
+	}
+}
+
+// TestGatewayProvisionSkipsWorkflowLessRole: a control-only role runs nothing,
+// so provision mints it no provider key — a key with budget $0 would be a
+// credential nothing consumes. The mock counts key generations.
+func TestGatewayProvisionSkipsWorkflowLessRole(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	writeFileIn(t, root, "roles/ops.yaml", "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair, provision, prune]\n")
+	ctl := applied(t, root)
+	srv, generated := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+
+	var out bytes.Buffer
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "role platform-admin: owns no workflows; no key provisioned") {
+		t.Fatalf("missing skip line: %s", out.String())
+	}
+	if generated.Load() != 1 {
+		t.Fatalf("key generations = %d, want 1 (software-engineer only)", generated.Load())
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "platform-admin.key")); !os.IsNotExist(err) {
+		t.Fatalf("a control-only role must get no key file; stat err = %v", err)
+	}
+}
+
+// TestGatewayProvisionEveryRoleControlOnlyIsStillSuccess: nothing to mint is
+// still a completed, recorded provision — "provision ok", never a label
+// claiming keys were minted.
+func TestGatewayProvisionEveryRoleControlOnlyIsStillSuccess(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := t.TempDir()
+	writeFileIn(t, root, "roles/ops.yaml", "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair, provision, prune]\n")
+	ctl := applied(t, root)
+	srv, generated := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	if generated.Load() != 0 {
+		t.Fatal("nothing to mint")
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "provision" || e.Outcome != "success" || e.ConfigHash != readPointer(t, ctl) {
+		t.Fatalf("%+v", e)
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "provision ok") || strings.Contains(out.String(), "keys provisioned") {
+		t.Fatalf("%d\n%s", code, out.String())
+	}
+}
+
+// TestGatewayProvisionMintFailureIsPartialAndFixedInTheLedger: the first
+// failing role stops the loop; keys minted before it persist; stdout carries
+// the status text (generateKey never reads the body); the ledger carries the
+// fixed message naming the role and the installed hash; and a sentinel the
+// mock puts in its 500 body appears nowhere — not on stdout, not in the
+// ledger.
+func TestGatewayProvisionMintFailureIsPartialAndFixedInTheLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	// roles/ sorts ops, qa, se: ops is skipped, qa mints first, se second.
+	writeFileIn(t, root, "roles/qa.yaml", "name: qa-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 10\nallowed_groups: [\"*\"]\n")
+	ctl := applied(t, root)
+	const sentinel = "SENTINEL-BODY-5c0ffee"
+	srv, generated := adminMock(t, 2, sentinel)
+	t.Chdir(t.TempDir())
+
+	var out bytes.Buffer
+	code := cmdGateway(provisionArgs(ctl, srv.URL), &out)
+	if code != 1 || generated.Load() != 2 {
+		t.Fatalf("exit %d generations %d\n%s", code, generated.Load(), out.String())
+	}
+	if !strings.Contains(out.String(), "role software-engineer: gateway: key generate returned status 500") {
+		t.Fatalf("stdout must carry the status text:\n%s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "qa-engineer.key")); err != nil {
+		t.Fatalf("the key minted before the failure persists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); !os.IsNotExist(err) {
+		t.Fatalf("the failing role gets no key: %v", err)
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "provision" || e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.Reason.Message != "provisioning failed for role software-engineer" || e.ConfigHash != readPointer(t, ctl) {
+		t.Fatalf("want error/io_error with the fixed message and the installed hash: %+v", e)
+	}
+	raw, err := os.ReadFile(ctl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), sentinel) || strings.Contains(string(raw), sentinel) {
+		t.Fatal("the admin API's response body must never be read, printed or ledgered")
+	}
+}
+
+// TestGatewayProvisionIsNotBlockedByAKillSwitchFlip: after `registry disable
+// coder` the installed snapshot fails Build (disabled-agent-ref), which is
+// irrelevant to whether a role gets a key — provision reads roles only and
+// records the flip's pointer.
+func TestGatewayProvisionIsNotBlockedByAKillSwitchFlip(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := applied(t, root)
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("disable: %d\n%s", code, out.String())
+	}
+	flipPointer := readPointer(t, ctl)
+	srv, _ := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	out.Reset()
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
+		t.Fatalf("provision after a flip: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "success" || e.ConfigHash != flipPointer {
+		t.Fatalf("want success with the flip's pointer %s: %+v", flipPointer, e)
+	}
+}
+
+// TestGatewayProvisionMintsFromTheUnverifiedRolesRead pins the boundary:
+// provision reads through the lenient authorization read, which is not
+// verified against the pointer, so a snapshot edited in place still mints —
+// while a run on the same root is refused with the mismatch text. The two
+// outcomes side by side are the boundary; a later change to it is
+// deliberate.
+func TestGatewayProvisionMintsFromTheUnverifiedRolesRead(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := applied(t, root)
+	pointer := readPointer(t, ctl)
+	coder := filepath.Join(config.SnapshotDir(installedStore(ctl), pointer), "agents", "coder.yaml")
+	data, err := os.ReadFile(coder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coder, append(data, []byte("# edited in place\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
+		t.Fatalf("provision must mint from the lenient read: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "success" || e.ConfigHash != pointer {
+		t.Fatalf("%+v", e)
+	}
+	if code, runOut := runFixBug(t, root, ctl); code != 1 || !strings.Contains(runOut, "snapshot hashes as") {
+		t.Fatalf("the execution read must refuse the same root: %d\n%s", code, runOut)
+	}
+}
+
+// TestGatewayProvisionBadTokenRecordsRefusal: a token that fails
+// verification is a recorded refusal with the fixed reason — never the OIDC
+// error text — and no API call.
+func TestGatewayProvisionBadTokenRecordsRefusal(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	ctl := applied(t, budgetedSample(t))
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := cmdTestOIDCServer(t, key)
+	otherKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	bad := cmdMintToken(t, otherKey, map[string]any{"iss": issuer.URL, "aud": "agenthof", "exp": time.Now().Add(time.Hour).Unix(), "sub": "u-1"})
+	t.Setenv("AGENTHOF_OIDC_ISSUER", issuer.URL)
+	t.Setenv("AGENTHOF_OIDC_CLIENT_ID", "agenthof")
+	srv, generated := adminMock(t, 0, "")
+	var out bytes.Buffer
+	code := cmdGateway([]string{"provision", "--control-log", ctl, "--token", bad, "--admin-base", srv.URL}, &out)
+	if code != 1 || !strings.Contains(out.String(), "gateway provision: token authentication failed:") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "provision" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeTokenVerificationFailed || e.Reason.Message != "token verification failed" || e.ConfigHash != "" {
+		t.Fatalf("%+v", e)
+	}
+	if generated.Load() != 0 {
+		t.Fatal("a refusal must not touch the admin API")
+	}
+}
+
+// TestGatewayProvisionDamagedLedgerPrintsHintWithoutConfig: a torn ledger is
+// unwritable, so nothing is recorded, nothing is minted, and the repair hint
+// names no --config — provision no longer has one.
+func TestGatewayProvisionDamagedLedgerPrintsHintWithoutConfig(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	const torn = `{"v":"control/1","seq":1,"prev":""`
+	if err := os.WriteFile(ctl, []byte(torn), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, generated := adminMock(t, 0, "")
+	var out bytes.Buffer
+	code := cmdGateway(provisionArgs(ctl, srv.URL), &out)
+	if code != 1 || out.String() != "control ledger damaged; run: agenthof audit repair control --control-log "+ctl+"\n" {
+		t.Fatalf("exit %d out %q", code, out.String())
+	}
+	if after, _ := os.ReadFile(ctl); string(after) != torn {
+		t.Fatalf("a damaged ledger must not be written to:\n%s", after)
+	}
+	if generated.Load() != 0 {
+		t.Fatal("nothing may be minted")
+	}
+}
+
+// TestControlAdjacentCommandsBusyWhenAnotherProcessHoldsTheLedger waits the
+// real lockTimeout once: the parent blanks the env (t.Setenv is forbidden in
+// a parallel subtest), a helper process holds the ledger flock, and each
+// command prints its busy line, exits 1 and records nothing — contention on
+// a healthy ledger is busy, never the repair hint.
+func TestControlAdjacentCommandsBusyWhenAnotherProcessHoldsTheLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	cases := []struct {
+		name   string
+		args   func(t *testing.T, ctl string) []string // takes the SUBTEST's t: a parallel subtest must not use the parent's
+		prefix string
+	}{
+		{"gateway provision", func(_ *testing.T, ctl string) []string { return provisionArgs(ctl, "http://127.0.0.1:1") }, "gateway provision"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ctl := applied(t, writeSample(t))
+			before := len(controlEvents(t, ctl))
+			holdLock(t, "ledger", ctl, 9000)
+			var out bytes.Buffer
+			var code int
+			switch c.prefix {
+			case "gateway provision":
+				code = cmdGateway(c.args(t, ctl), &out)
+			default:
+				code = cmdRuns(c.args(t, ctl), &out)
+			}
+			if code != 1 || out.String() != c.prefix+": "+msgLockBusy+"\n" {
+				t.Fatalf("code %d out %q", code, out.String())
+			}
+			if len(controlEvents(t, ctl)) != before {
+				t.Fatal("busy must record nothing")
+			}
+		})
 	}
 }
 
@@ -1805,44 +2219,4 @@ func stubCallSpawn(proxyURL, token, spec string) (string, error) {
 		detail = out.Reason
 	}
 	return strings.TrimSpace(fmt.Sprintf("spawn %s %s %s", out.Status, id, detail)), nil
-}
-
-// TestGatewayProvisionSkipsWorkflowLessRole: a control-only role runs nothing,
-// so provision mints it no provider key — a key with budget $0 would be a
-// credential nothing consumes. The mock counts key generations.
-func TestGatewayProvisionSkipsWorkflowLessRole(t *testing.T) {
-	root := writeSample(t)
-	if err := os.WriteFile(filepath.Join(root, "roles", "se.yaml"), []byte("name: software-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 50\nallowed_groups: [\"*\"]\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "roles", "ops.yaml"), []byte("name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair]\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	generated := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/key/generate" {
-			generated++
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"key":"sk-test"}`))
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
-	t.Chdir(t.TempDir())
-
-	var out bytes.Buffer
-	if code := cmdGateway([]string{"provision", "--config", root, "--admin-base", srv.URL}, &out); code != 0 {
-		t.Fatalf("provision: %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "role platform-admin: owns no workflows; no key provisioned") {
-		t.Fatalf("missing skip line: %s", out.String())
-	}
-	if generated != 1 {
-		t.Fatalf("key generations = %d, want 1 (software-engineer only)", generated)
-	}
-	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "platform-admin.key")); !os.IsNotExist(err) {
-		t.Fatalf("a control-only role must get no key file; stat err = %v", err)
-	}
 }

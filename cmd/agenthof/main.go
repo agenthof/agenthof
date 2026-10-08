@@ -47,7 +47,7 @@ Usage:
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
-  agenthof gateway provision --config <dir> [--admin-base <url>]  (provisions a per-role model key for the reserved model gateway; no run consumes it)
+  agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]  (mints a per-role model key at the reserved model gateway for the installed roles; recorded in the control ledger; no run consumes it)
   agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>] [--server <url>] [--token <jwt>]
 `
 
@@ -310,6 +310,27 @@ func truncateErr(err error) string {
 		s = s[:maxRecordedErrLen]
 	}
 	return s
+}
+
+// controlLedgerWritable is the ledger-writable precheck gateway provision
+// and runs prune run before they record anything: the control chain must
+// open and verify. Contention is busy — printed after prefix, unrecorded,
+// the caller exits 1 — and anything else is damage: the repair hint,
+// unrecorded, exit 1. The hint names no --config, since neither command has
+// one (repair takes it only for its bootstrap fallback). false means the
+// caller returns 1 at once.
+func controlLedgerWritable(prefix, controlLog string, out io.Writer) bool {
+	c, err := ledger.Open(controlLog, ledger.Locked)
+	if err != nil {
+		if errors.Is(err, ledger.ErrLockHeld) {
+			_, _ = fmt.Fprintf(out, "%s: %s\n", prefix, msgLockBusy)
+			return false
+		}
+		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s\n", controlLog)
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 // cmdRegistryFlip implements the audited write path for `registry
@@ -829,35 +850,117 @@ func cmdGateway(args []string, out io.Writer) int {
 	}
 }
 
+// msgProvisionNotRecorded is printed when keys were written or verified but
+// the success event could not be appended. Unlike an apply, nothing
+// downstream flags it: there is no pointer for the audit readers to compare
+// against. The operator re-runs; the re-run finds the keys valid and
+// records success.
+const msgProvisionNotRecorded = "provision ran; event NOT recorded"
+
+// cmdGatewayProvision is `gateway provision`: mint a provider key at the
+// admin API for every INSTALLED role that owns workflows, authorized against
+// the installed roles and recorded in the control ledger. It reads the
+// installed configuration exactly once, through config.InstalledRoles — the
+// lenient roles-only read, never Build, never LoadInstalled — and uses that
+// one result both to authorize the caller and as the roles to mint for: a
+// kill-switch flip (after which the snapshot fails Build) never blocks key
+// rotation, and the roles authorized against are, by identity, the roles
+// minted for. That read is not verified against the pointer
+// (docs/control-plane-lifecycle.md, honest limits). Order: flags; the
+// master key (a usage fault, unrecorded); the invoker; ledger writable
+// (busy or damaged, unrecorded); a refused token (recorded); the installed
+// read (error recorded); nothing installed (refusal recorded, no hash);
+// authorize (refusal recorded with the installed hash); mint, the first
+// failing role stopping the loop (error recorded with a fixed message and
+// the hash — the upstream error is printed, never ledgered); success
+// recorded with the hash. Keys land under ./.agenthof/keys/ as before:
+// authorization decides whether keys are minted, not where they land. Exit
+// 0 only when every role was handled AND the event was recorded.
 func cmdGatewayProvision(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("gateway provision", flag.ContinueOnError)
-	cfgDir := fs.String("config", "./config", "config directory")
 	adminBase := fs.String("admin-base", "http://localhost:4000", "LiteLLM admin API base URL")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; the installed configuration is read from installed/ beside it")
+	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
+	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// A missing master key is a usage fault of the same class as a bad flag:
+	// it precedes identity, so a misconfigured shell never writes an event.
 	masterKey := os.Getenv("LITELLM_MASTER_KEY")
 	if masterKey == "" {
 		_, _ = fmt.Fprintln(out, "gateway provision needs LITELLM_MASTER_KEY set in the environment")
 		return 2
 	}
-	// Provisioning needs the raw role list (registry.Registry only exposes
-	// lookups), so load and validate the config directly rather than going
-	// through buildRegistry.
-	cfg, loadErrs := config.LoadDir(*cfgDir)
-	for _, e := range loadErrs {
-		_, _ = fmt.Fprintln(out, e)
+	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
+	if usageErr {
+		_, _ = fmt.Fprintln(out, "gateway provision: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
 	}
-	_, valErrs := registry.Build(cfg)
-	for _, e := range valErrs {
-		_, _ = fmt.Fprintln(out, e.Error())
-	}
-	if len(loadErrs) > 0 || len(valErrs) > 0 {
+	if !controlLedgerWritable("gateway provision", *controlLog, out) {
 		return 1
 	}
+
+	// record appends this invocation's terminal event and returns code. The
+	// chain is known writable, so the only way the recorded outcome and the
+	// exit can disagree is an append that itself fails here — after a success
+	// that is the install-then-record class, printed as such.
+	record := func(outcome string, reason *control.Reason, hash string, code int) int {
+		head, appendErr := control.Append(*controlLog, control.Event{
+			Action:     "provision",
+			Outcome:    outcome,
+			Reason:     reason,
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+			ConfigHash: hash,
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			if outcome == "success" {
+				_, _ = fmt.Fprintln(out, msgProvisionNotRecorded)
+			}
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return code
+	}
+
+	if refused {
+		// The recorded reason is fixed: the OIDC error can echo claim values
+		// from the unverified token, so only the printed line shows it.
+		_, _ = fmt.Fprintf(out, "gateway provision: token authentication failed: %v\n", verifyErr)
+		return record("refused", &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"}, "", 1)
+	}
+
+	// The one and only read of the installed configuration: the roles below
+	// are both what the caller is authorized against and what keys are
+	// minted for.
+	store := installedStore(*controlLog)
+	installedRoles, hash, installed, instErr := config.InstalledRoles(store)
+	if instErr != nil {
+		// A pointer that is present but cannot be honored: nobody can be
+		// authorized. Fail closed, recorded.
+		_, _ = fmt.Fprintln(out, instErr)
+		return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)}, "", 1)
+	}
+	if !installed {
+		// No roles, so nobody is authorized; provision consumes roles, it
+		// never creates them, so there is no bootstrap case.
+		_, _ = fmt.Fprintf(out, "gateway provision: %s\n", msgNothingInstalled)
+		_, _ = fmt.Fprintf(out, "%s under %s; run: agenthof apply --config <dir> --control-log %s\n", msgNoConfigInstalled, store, *controlLog)
+		return record("refused", &control.Reason{Code: control.CodeNotAuthorized, Message: msgNothingInstalled}, "", 1)
+	}
+	if !authz.ControlAllows(installedRoles, inv, "provision") {
+		reason := control.NotAuthorized("provision")
+		_, _ = fmt.Fprintf(out, "gateway provision: %s\n", reason.Message)
+		return record("refused", reason, hash, 1)
+	}
+
 	p := gateway.Provisioner{AdminBase: *adminBase, MasterKey: masterKey, HTTP: http.DefaultClient}
-	for _, role := range cfg.Roles {
+	for _, role := range installedRoles {
 		// A control-only role runs nothing, so it needs no provider key: a
 		// key with budget $0 would be a credential nothing consumes.
 		if len(role.Workflows) == 0 {
@@ -866,8 +969,12 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 		}
 		created, err := p.EnsureRoleKey(".", role)
 		if err != nil {
+			// Partial, not transactional: keys minted for earlier roles persist
+			// and a re-run finds them valid. The upstream text (an external
+			// API's status and transport) is printed only; the ledger gets a
+			// fixed message naming the role.
 			_, _ = fmt.Fprintf(out, "role %s: %v\n", role.Name, err)
-			return 1
+			return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(fmt.Errorf("provisioning failed for role %s", role.Name))}, hash, 1)
 		}
 		if created {
 			_, _ = fmt.Fprintf(out, "provisioned key for role %s (budget $%g); reserved model gateway, not consumed by a run\n", role.Name, role.BudgetUSDMonth)
@@ -875,7 +982,7 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 			_, _ = fmt.Fprintf(out, "role %s: key ok\n", role.Name)
 		}
 	}
-	return 0
+	return record("success", nil, hash, 0)
 }
 
 func cmdAudit(args []string, out io.Writer) int {
