@@ -457,7 +457,7 @@ and groups are used outside of `apply`).
 ### `control`
 
 Optional. The control-plane operations this role's `allowed_groups` members
-may perform: any of `apply`, `enable`, `disable`, `repair` — the four fixed
+may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune` — the six fixed
 operations, named individually. There is no wildcard spelling and no
 operation is granted by omission: a role with no `control` key (or `control:`
 left null) grants none, and a present-but-empty `control: []` is rejected by
@@ -467,7 +467,9 @@ groups — `allowed_groups: ["*"]` alongside a non-empty `control` is rejected
 with `public-control-role`, because the control gate never honors the public
 marker, so such a role would authorize no one — a silent no-op. A role may
 grant control operations and own no
-workflows (an operator role): see [`workflows`](#workflows).
+workflows (an operator role): see [`workflows`](#workflows). `provision` lets
+its members run `gateway provision`, which mints provider keys for the
+installed roles; `prune` lets them run `runs prune`.
 
 How the grant is enforced — which command checks which operation, what a
 refusal records, and the honest limits — is in
@@ -476,14 +478,15 @@ refusal records, and the honest limits — is in
 ```yaml
 name: platform-admin
 allowed_groups: [platform-eng]
-control: [apply, enable, disable, repair]
+control: [apply, enable, disable, repair, provision, prune]
 ```
 
 ### `budget_usd_month`
 
-Optional float. `apply` does not check its value. `gateway provision` sends
-it to the upstream gateway as that role's budget and writes the resulting
-key under `.agenthof/keys/<role>.key` in the working directory. A run that
+Optional float. `apply` does not check its value. `gateway provision` reads
+it from the **installed** roles and sends it to the upstream gateway as that
+role's budget, writing the resulting key under `.agenthof/keys/<role>.key`
+in the working directory. A run that
 finds the key injects it on model calls, so the upstream gateway enforces
 the budget (HTTP 429, recorded as a refused `model_call` with reason
 `budget`). Agenthof does not itself cap spend. With no key file, model
@@ -833,8 +836,9 @@ the life of an on-behalf-of call.
 
 ## Control-plane CLI
 
-`agenthof apply` and `agenthof registry enable|disable` — the kill switch —
-record every attempt to a hash-chained control log, and `agenthof audit`
+`agenthof apply`, `agenthof registry enable|disable` — the kill switch —
+`agenthof gateway provision` and `agenthof runs prune` record every attempt
+to a hash-chained control log, and `agenthof audit`
 gains three verbs to read and, if needed, recover it. See
 [`docs/concepts.md`](../concepts.md#control-plane-audit) for what gets
 recorded and why; this section is the flag-by-flag and exit-code reference.
@@ -846,6 +850,8 @@ recorded and why; this section is the flag-by-flag and exit-code reference.
 | `agenthof audit control [--control-log <path>]` | `--control-log` |
 | `agenthof audit verify control [--control-log <path>] [--expect-head <hex>]` | `--control-log`, `--expect-head` |
 | `agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--config`, `--as`, `--groups`, `--token` |
+| `agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]` | `--control-log`, `--as`, `--groups`, `--token`, `--admin-base` |
+| `agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--older-than`, `--log-dir`, `--artifact-dir`, `--control-log`, `--as`, `--groups`, `--token` |
 | `agenthof investigate [--since <dur\|ts>] [--until <dur\|ts>] [--invoker <id>] [--agent <name>] [--outcome <value>] [--run <run-id>] [--config-hash <sha256:…>] [--json] [--log-dir <dir>] [--control-log <path>]` | `--since`, `--until`, `--invoker`, `--agent`, `--outcome`, `--run`, `--config-hash`, `--json`, `--log-dir`, `--control-log` |
 
 ### `--control-log`
@@ -853,11 +859,15 @@ recorded and why; this section is the flag-by-flag and exit-code reference.
 Path to the control-plane ledger. Default `.agenthof/control.jsonl`,
 resolved relative to the current working directory — run these commands
 from the repository root, or pass
-`--control-log` explicitly. Keep it out from under any directory passed to
-`--log-dir`: `runs prune` skips a control log and a `*.torn-*` fragment only
-by name (`control.jsonl` and anything containing `.torn-`) — a control log
-saved under a different name inside `--log-dir` has no such protection and
-can be pruned like any other aged `.jsonl` file.
+`--control-log` explicitly. `runs prune` never removes a control log named `control.jsonl`, a `*.torn-*`
+fragment, or — since prune records to it — the exact file `--control-log`
+names, whatever it is called and wherever `--log-dir` points (by file
+identity, so a symlink or hard link to it is spared too). The sweep under
+`--artifact-dir` removes only content-addressed artifact bodies (the 64-hex
+`sha256` names Agenthof writes there), so a control log, a `*.torn-*` fragment,
+the installed-config store, or anything else left in a misconfigured
+`--artifact-dir` is left untouched. Keeping the ledger out from under
+`--log-dir`/`--artifact-dir` is still the tidy layout.
 
 The **installed-configuration store** lives beside it: `<dir>/installed/`
 (default `.agenthof/installed/`), holding one immutable snapshot directory per
@@ -880,11 +890,12 @@ configuration; the value appears only in the hint `run` prints when nothing is
 installed. `registry enable|disable` uses it to look up and flip the agent only
 while nothing is installed (afterwards the installed snapshot is flipped and
 re-installed; the directory is untouched). `serve` accepts it for compatibility
-and reads it for nothing. `registry list` still builds and lists `--config` —
+and reads it for nothing. `gateway provision` no longer takes it: it mints
+for the installed roles. `registry list` still builds and lists `--config` —
 it shows the directory, not what is installed. `audit repair control` takes it
 too (default `./config`). For **authorization**
-none of the three reads it once a configuration is installed: the roles that
-decide who may `apply`, `enable`, `disable`, or `repair` are the installed
+none of these commands reads it once a configuration is installed: the roles that
+decide who may `apply`, `enable`, `disable`, `repair`, `provision`, or `prune` are the installed
 snapshot's (`--control-log`'s `installed/current`), read without validation,
 roles only. Only while nothing is installed yet — a fresh control root — do
 `enable|disable` and `repair` fall back to the roles in `--config`, read
@@ -899,9 +910,11 @@ that grants `apply` to no role is rejected at apply (`no-apply-floor`).
 The same invoker-identity flags `agenthof run` takes. `--as` asserts an
 invoker identity (default: the OS user); `--groups` is a comma-separated
 list recorded alongside it — self-asserted, not verified — and the groups
-these commands authorize against: `apply`, `registry enable|disable`, and
-`audit repair control` each require that some role **of the installed
-configuration** (before any apply: of `--config`) name one of the invoker's
+these commands authorize against: `apply`, `registry enable|disable`,
+`audit repair control`, `gateway provision`, and `runs prune` each require
+that some role **of the installed configuration** (before any apply: of
+`--config`; `gateway provision` and `runs prune` have no such fallback and are
+refused while nothing is installed) name one of the invoker's
 groups in `allowed_groups` **and** list that operation in its
 [`control`](#control) grant (`allowed_groups: ["*"]` never qualifies). A
 caller no role grants is refused: `apply` and `registry enable|disable`
@@ -1036,7 +1049,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 
 | Exit | Meaning |
 |---|---|
-| `1` | A recorded refusal: `no configuration installed` (nothing is installed under `--control-log`'s root; the hint names the `apply` to run), or `configuration invalid: …` (the installed configuration fails validation — or the store itself is damaged: a malformed pointer, a missing snapshot — the label is generic, the text names the cause), or the registry gate's own reasons |
+| `1` | A recorded refusal: `no configuration installed` (nothing is installed under `--control-log`'s root; the hint names the `apply` to run), or `configuration invalid: …` (the installed configuration fails validation — or the store itself is damaged: a malformed pointer, a missing snapshot, or a snapshot whose bytes no longer hash to the pointer — the label is generic, the text names the cause), or the registry gate's own reasons |
 
 `agenthof audit control`:
 
@@ -1064,6 +1077,22 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | `0` | A torn tail was repaired: the damaged bytes were moved to a `<log>.torn-<timestamp>` fragment, the live log truncated to its last valid record, and a `repair` event appended — the ledger is now tainted |
 | `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; no role grants `repair` to the invoker, the installed pointer cannot be read, or — nothing installed — `--config` cannot be read (all printed, never recorded); or another IO error. None of these write a control event, since the ledger being repaired may itself be the file in question |
 | `2` | Usage error |
+
+`agenthof gateway provision`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Every installed role that owns workflows has a valid provider key (minted now, or already valid), and a `success` event carrying the installed hash was recorded |
+| `1` | A recorded `refused` (no role grants `provision` to the invoker; nothing installed; a token that failed verification) or `error` (the installed pointer cannot be honored; the first role whose key could not be minted — earlier keys persist); or the control ledger is torn or broken (the repair hint, nothing recorded); or another process holds the ledger lock (`another agenthof process holds the installed-configuration lock; retry`, nothing recorded); or keys were minted but the event could not be appended — `provision ran; event NOT recorded` |
+| `2` | Usage error — bad flags (including the retired `--config`), `LITELLM_MASTER_KEY` unset, or `--token` without `AGENTHOF_OIDC_ISSUER` |
+
+`agenthof runs prune`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | The sweep ran and a `success` event was recorded whose `detail` is the printed `pruned N run(s) and M artifact(s) older than …` line |
+| `1` | A recorded `refused` (no role grants `prune`; nothing installed; a token that failed verification) — nothing deleted; or a recorded `error` (the installed pointer cannot be honored, or the run directory or the control log could not be read — nothing deleted; or the artifact store failed after the runs were removed — the `detail` says how many); or a torn or broken control ledger (the repair hint, nothing recorded); or another process holds the ledger lock (nothing recorded); or the sweep ran but the event could not be appended — `runs pruned; event NOT recorded` |
+| `2` | Usage error — bad flags, `--older-than` missing, not a duration, non-positive, or a day count out of range, or `--token` without `AGENTHOF_OIDC_ISSUER`; checked before identity and before the ledger is touched |
 
 `agenthof investigate`:
 

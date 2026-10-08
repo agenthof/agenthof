@@ -165,3 +165,28 @@ func TestLoadControlErrorVerdict(t *testing.T) {
 		t.Fatalf("expected no events, got %+v", ev)
 	}
 }
+
+// TestConfigJoinIgnoresProvisionAndPrune: a successful provision carries the
+// installed hash but installs nothing, so the run's config-join still names
+// the apply; a prune carries no hash at all.
+func TestConfigJoinIgnoresProvisionAndPrune(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.jsonl")
+	dana, mallory := identity.Static("dana@example.com"), identity.Static("mallory@example.com")
+	for _, e := range []control.Event{
+		{Action: "apply", Outcome: "success", Invoker: dana, Witness: control.CaptureWitness(), ConfigHash: "sha256:aaa"},
+		{Action: "provision", Outcome: "success", Invoker: mallory, Witness: control.CaptureWitness(), ConfigHash: "sha256:aaa"},
+		{Action: "prune", Outcome: "success", Invoker: mallory, Witness: control.CaptureWitness(), Detail: "pruned 0 run(s) and 0 artifact(s) older than 180d"},
+	} {
+		if _, err := control.Append(p, e); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	ev, verdict, ok := LoadControl(p)
+	if !ok || verdict != "verified" {
+		t.Fatalf("verdict=%q ok=%v", verdict, ok)
+	}
+	line := ConfigJoin(ev, verdict, "sha256:aaa", time.Now())
+	if !strings.Contains(line, "applied by dana@example.com") || strings.Contains(line, "mallory") {
+		t.Fatalf("the join must name the apply, never the provision: %q", line)
+	}
+}

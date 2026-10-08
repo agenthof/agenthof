@@ -49,6 +49,26 @@ func (s *Store) Get(sha string) (string, error) {
 	return string(b), nil
 }
 
+// isArtifactName reports whether name is a content-addressed artifact body —
+// the 64-char lowercase-hex sha256 that Put writes. Prune removes only these,
+// so a control ledger, a *.torn-* repair fragment, installed.lock, or anything
+// else a human or another component placed under a misconfigured --artifact-dir
+// is never swept: the bad outcome is impossible, not merely forbidden.
+func isArtifactName(name string) bool {
+	if len(name) != 64 {
+		return false
+	}
+	for _, c := range name {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+			// a lowercase hex digit
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Store) Prune(olderThan time.Duration) (int, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -57,7 +77,7 @@ func (s *Store) Prune(olderThan time.Duration) (int, error) {
 	cutoff := time.Now().Add(-olderThan)
 	n := 0
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || !isArtifactName(e.Name()) {
 			continue
 		}
 		info, err := e.Info()

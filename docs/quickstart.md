@@ -74,15 +74,22 @@ and when:
 
     ./agenthof audit control
 
-Retention (compliance floor, free forever) — leaves the control ledger and its
-repair fragments untouched:
+Retention (compliance floor, free forever) — a control-plane action: the
+invoker needs a role that grants `prune`, and the sweep is recorded in the
+control ledger. It leaves the control ledger, its repair fragments and the
+exact file `--control-log` names untouched:
 
-    ./agenthof runs prune --older-than 180d
+    ./agenthof runs prune --older-than 180d --as you@example.com --groups platform-eng
 
 Model calls go through Agenthof when the agent targets the per-run proxy
 URL. `examples/echo-agent` does not make them. `examples/model-agent` does,
 and it needs an OpenAI-compatible endpoint in `gateway.models`.
-`gateway provision` writes a per-role key the model door injects;
+`gateway provision` writes a per-role key the model door injects, for the
+roles of the **installed** configuration; the invoker needs a role that
+grants `provision`, and the result is recorded:
+
+    LITELLM_MASTER_KEY=… ./agenthof gateway provision --as you@example.com --groups platform-eng
+
 `budget_usd_month` is enforced by that upstream gateway, not by Agenthof.
 See [`docs/lifecycle-model.md`](lifecycle-model.md).
 

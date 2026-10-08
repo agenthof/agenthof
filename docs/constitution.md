@@ -108,10 +108,11 @@ silently changing what it means.
 Schema changes must be backward compatible: additive only,
 never a breaking change to an existing field's meaning. Engine capability
 may grow (e.g. linear+fail-back today, DAG execution later) behind schemas
-that do not change shape for existing users. Control-plane actions (apply, the enable/disable kill switch, and
-control-ledger repair) are themselves authorized — default-deny, against the
-`control` operations a role declares — and recorded in a hash-chained control
-ledger.
+that do not change shape for existing users. Control-plane actions (apply, the enable/disable kill switch, control-ledger
+repair, provisioning a role's provider key, and pruning run ledgers and
+artifacts under retention) are themselves authorized — default-deny, against
+the `control` operations a role declares — and recorded in a hash-chained
+control ledger.
 
 ## Article VII — Scope discipline
 

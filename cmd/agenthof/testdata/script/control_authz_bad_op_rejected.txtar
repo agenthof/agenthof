@@ -5,7 +5,7 @@
 # never reach validation.
 
 ! exec agenthof apply --config config --control-log control.jsonl --as ops@example.com --groups platform-eng
-stdout 'roles/typo\.yaml: typo: control names "provision", which is not a control operation \(apply, enable, disable, repair\)'
+stdout 'roles/typo\.yaml: typo: control names "deploy", which is not a control operation \(apply, enable, disable, repair, provision, prune\)'
 ! stdout 'registry ok'
 grep '"outcome":"rejected"' control.jsonl
 
@@ -27,7 +27,7 @@ control: [apply, enable, disable, repair]
 name: typo
 workflows: [plan-only]
 allowed_groups: [release]
-control: [apply, provision]
+control: [apply, deploy]
 -- config/gateway.yaml --
 models:
   fast:

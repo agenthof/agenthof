@@ -14,7 +14,8 @@ except itself. model-agent needs:
   LiteLLM is the usual one);
 - the agent's `model` (or `gateway.defaults.model`) set to the logical name
   this process was started with (`-model`, default `fast`);
-- a role key from `agenthof gateway provision` when you want LiteLLM to
+- a role key from `agenthof gateway provision` (run by an invoker with the
+  `provision` grant, against the installed configuration) when you want LiteLLM to
   enforce `budget_usd_month`. With no role key, Agenthof uses the route's
   `api_key_env` and no budget applies.
 

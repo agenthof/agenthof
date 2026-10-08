@@ -135,6 +135,7 @@ func TestScript(t *testing.T) {
 			// every script's `run` to a remote.
 			e.Setenv("AGENTHOF_SERVER", "")
 			e.Setenv("AGENTHOF_OIDC_AUDIENCE", "")
+			e.Setenv("LITELLM_MASTER_KEY", "")
 			e.Setenv("OIDC_ISSUER", oidcSrv.URL)
 			e.Setenv("OIDC_TOKEN", oidcToken)
 			if err := copyDir(filepath.Join("..", "..", "examples", "config"),
@@ -215,6 +216,27 @@ func TestScript(t *testing.T) {
 					ts.Fatalf("nothing installed under %s", args[0])
 				}
 				ts.Setenv("HASH", hash)
+			},
+			// tamper <control-log> <rel> <text>: appends text to the file at
+			// <rel> inside the installed snapshot beside <control-log> — an
+			// in-place edit under installed/<hex>/, the thing verify-on-read
+			// exists to catch.
+			"tamper": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 3 {
+					ts.Fatalf("usage: tamper <control-log> <rel> <text>")
+				}
+				store := installedStore(ts.MkAbs(args[0]))
+				hash, installed, err := config.InstalledHash(store)
+				ts.Check(err)
+				if !installed {
+					ts.Fatalf("nothing installed under %s", args[0])
+				}
+				p := filepath.Join(config.SnapshotDir(store, hash), filepath.FromSlash(args[1]))
+				f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o600)
+				ts.Check(err)
+				_, werr := f.WriteString(args[2] + "\n")
+				ts.Check(f.Close())
+				ts.Check(werr)
 			},
 		},
 	})

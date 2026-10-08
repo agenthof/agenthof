@@ -31,6 +31,8 @@ func TestInstallingAxes(t *testing.T) {
 		{"disable refused", control.DecodedEvent{Action: "disable", Agent: "ghost", Outcome: "refused"}, false},
 		{"apply success without hash", control.DecodedEvent{Action: "apply", Outcome: "success"}, false},
 		{"repair success", control.DecodedEvent{Action: "repair", Outcome: "success"}, false},
+		{"provision success with hash is not an install", control.DecodedEvent{Action: "provision", Outcome: "success", ConfigHash: h}, false},
+		{"prune success is not an install", control.DecodedEvent{Action: "prune", Outcome: "success"}, false},
 	}
 	for _, c := range cases {
 		if got := control.Installing(c.e); got != c.want {

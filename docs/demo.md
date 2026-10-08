@@ -83,7 +83,7 @@ includes:
   declares `allowed_groups: ["*"]` (open to any authenticated invoker),
   `accountant` declares `allowed_groups: [finance]` (gated to that group), and
   `platform-admin` owns no workflows but grants the control-plane operations
-  (`control: [apply, enable, disable, repair]`) to the `platform-eng` group —
+  (`control: [apply, enable, disable, repair, provision, prune]`) to the `platform-eng` group —
   which is why every `apply` and kill-switch command in this demo passes
   `--groups platform-eng`. A caller no role grants is refused, and the refusal
   is recorded. (This very first `apply` is a bootstrap — nothing is installed
@@ -440,7 +440,8 @@ Even though the run was refused, it is **ledgered** (recorded) in the audit trai
 ### 3.3 Model budgets are the upstream gateway's
 
 `budget_usd_month` does not gate `apply` or the group check above. After
-`gateway provision`, the model door injects that role's key, and the
+`gateway provision` — which mints keys for the **installed** roles and is
+itself authorized and recorded — the model door injects that role's key, and the
 upstream gateway enforces the budget. A 429 is a refused `model_call`, not
 a `run_refused`. With no provisioned key, calls use `api_key_env` and no
 budget applies. This demo's echo agent does not make a model call. See

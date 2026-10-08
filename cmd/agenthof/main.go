@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -46,8 +47,8 @@ Usage:
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
-  agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>]
-  agenthof gateway provision --config <dir> [--admin-base <url>]  (provisions a per-role model key for the reserved model gateway; no run consumes it)
+  agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
+  agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]  (mints a per-role model key at the reserved model gateway for the installed roles; recorded in the control ledger; no run consumes it)
   agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>] [--server <url>] [--token <jwt>]
 `
 
@@ -123,8 +124,9 @@ func buildRegistry(configRoot string, out io.Writer) *registry.Registry {
 // bootstrap over a damaged store. hash is the installed pointer's value,
 // verbatim — the hash the installer (apply, or a kill-switch flip) recorded
 // for this snapshot, and the key the audit readers join on; the bytes under
-// it are read unverified (docs/control-plane-lifecycle.md, honest limits).
-// It is never empty when installed and errs is nil. applyFloorErrors is
+// it are verified against it (config.VerifyInstalled) before they are parsed;
+// only the roles-only authorization read is not (docs/control-plane-lifecycle.md,
+// honest limits). It is never empty when installed and errs is nil. applyFloorErrors is
 // not run here: it is a property of what may be installed, and the snapshot
 // passed it at apply.
 func resolveRunConfig(controlLog string) (cfg config.Config, reg *registry.Registry, hash string, installed bool, errs []error) {
@@ -309,6 +311,27 @@ func truncateErr(err error) string {
 		s = s[:maxRecordedErrLen]
 	}
 	return s
+}
+
+// controlLedgerWritable is the ledger-writable precheck gateway provision
+// and runs prune run before they record anything: the control chain must
+// open and verify. Contention is busy — printed after prefix, unrecorded,
+// the caller exits 1 — and anything else is damage: the repair hint,
+// unrecorded, exit 1. The hint names no --config, since neither command has
+// one (repair takes it only for its bootstrap fallback). false means the
+// caller returns 1 at once.
+func controlLedgerWritable(prefix, controlLog string, out io.Writer) bool {
+	c, err := ledger.Open(controlLog, ledger.Locked)
+	if err != nil {
+		if errors.Is(err, ledger.ErrLockHeld) {
+			_, _ = fmt.Fprintf(out, "%s: %s\n", prefix, msgLockBusy)
+			return false
+		}
+		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s\n", controlLog)
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 // cmdRegistryFlip implements the audited write path for `registry
@@ -516,9 +539,10 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 // directory is not touched — after a flip, --config and the installed
 // snapshot disagree until the next apply re-asserts the directory (the
 // declared-state model, docs/control-plane-lifecycle.md). Every failure
-// before the commit changes nothing and is recorded; the hash precedes the
-// state change, so a hash failure is a plain recorded error. After the
-// commit the pointer has moved and only the success append remains: a
+// before the commit changes nothing and is recorded — including a snapshot
+// whose bytes do not hash to the pointer, refused before anything is staged;
+// the hash precedes the state change, so a hash failure is a plain recorded
+// error. After the commit the pointer has moved and only the success append remains: a
 // failure there prints "state changed; event NOT recorded", and audit
 // control / audit verify control flag the pointer-vs-ledger mismatch.
 // Disabling an already-disabled agent whose snapshot a flip wrote yields the
@@ -527,6 +551,17 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 // (SetEnabled re-marshals the file).
 func flipInstalled(action, target, store, hash, controlLog string, inv identity.Invoker, assertedAs string,
 	recordExit func(outcome string, reason *control.Reason) int, out io.Writer) int {
+	// Verify before staging: a snapshot whose bytes no longer hash to the
+	// pointer must not be copied, flipped and installed under the copy's own,
+	// correct hash — that would launder tampered bytes into a legitimately
+	// named, legitimately recorded snapshot. The same helper and the same
+	// message as the execution read; nothing is staged, so there is no
+	// .staging-* residue, and the recorded message (200 bytes for two
+	// sha256 hashes) fits truncateErr's cap whole.
+	if verr := config.VerifyInstalled(store, hash); verr != nil {
+		_, _ = fmt.Fprintln(out, verr)
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(verr)})
+	}
 	temp, stageErr := config.StageSnapshot(store, config.SnapshotDir(store, hash))
 	if stageErr != nil {
 		_, _ = fmt.Fprintln(out, stageErr)
@@ -816,35 +851,117 @@ func cmdGateway(args []string, out io.Writer) int {
 	}
 }
 
+// msgProvisionNotRecorded is printed when keys were written or verified but
+// the success event could not be appended. Unlike an apply, nothing
+// downstream flags it: there is no pointer for the audit readers to compare
+// against. The operator re-runs; the re-run finds the keys valid and
+// records success.
+const msgProvisionNotRecorded = "provision ran; event NOT recorded"
+
+// cmdGatewayProvision is `gateway provision`: mint a provider key at the
+// admin API for every INSTALLED role that owns workflows, authorized against
+// the installed roles and recorded in the control ledger. It reads the
+// installed configuration exactly once, through config.InstalledRoles — the
+// lenient roles-only read, never Build, never LoadInstalled — and uses that
+// one result both to authorize the caller and as the roles to mint for: a
+// kill-switch flip (after which the snapshot fails Build) never blocks key
+// rotation, and the roles authorized against are, by identity, the roles
+// minted for. That read is not verified against the pointer
+// (docs/control-plane-lifecycle.md, honest limits). Order: flags; the
+// master key (a usage fault, unrecorded); the invoker; ledger writable
+// (busy or damaged, unrecorded); a refused token (recorded); the installed
+// read (error recorded); nothing installed (refusal recorded, no hash);
+// authorize (refusal recorded with the installed hash); mint, the first
+// failing role stopping the loop (error recorded with a fixed message and
+// the hash — the upstream error is printed, never ledgered); success
+// recorded with the hash. Keys land under ./.agenthof/keys/ as before:
+// authorization decides whether keys are minted, not where they land. Exit
+// 0 only when every role was handled AND the event was recorded.
 func cmdGatewayProvision(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("gateway provision", flag.ContinueOnError)
-	cfgDir := fs.String("config", "./config", "config directory")
 	adminBase := fs.String("admin-base", "http://localhost:4000", "LiteLLM admin API base URL")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; the installed configuration is read from installed/ beside it")
+	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
+	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// A missing master key is a usage fault of the same class as a bad flag:
+	// it precedes identity, so a misconfigured shell never writes an event.
 	masterKey := os.Getenv("LITELLM_MASTER_KEY")
 	if masterKey == "" {
 		_, _ = fmt.Fprintln(out, "gateway provision needs LITELLM_MASTER_KEY set in the environment")
 		return 2
 	}
-	// Provisioning needs the raw role list (registry.Registry only exposes
-	// lookups), so load and validate the config directly rather than going
-	// through buildRegistry.
-	cfg, loadErrs := config.LoadDir(*cfgDir)
-	for _, e := range loadErrs {
-		_, _ = fmt.Fprintln(out, e)
+	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
+	if usageErr {
+		_, _ = fmt.Fprintln(out, "gateway provision: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
 	}
-	_, valErrs := registry.Build(cfg)
-	for _, e := range valErrs {
-		_, _ = fmt.Fprintln(out, e.Error())
-	}
-	if len(loadErrs) > 0 || len(valErrs) > 0 {
+	if !controlLedgerWritable("gateway provision", *controlLog, out) {
 		return 1
 	}
+
+	// record appends this invocation's terminal event and returns code. The
+	// chain is known writable, so the only way the recorded outcome and the
+	// exit can disagree is an append that itself fails here — after a success
+	// that is the install-then-record class, printed as such.
+	record := func(outcome string, reason *control.Reason, hash string, code int) int {
+		head, appendErr := control.Append(*controlLog, control.Event{
+			Action:     "provision",
+			Outcome:    outcome,
+			Reason:     reason,
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+			ConfigHash: hash,
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			if outcome == "success" {
+				_, _ = fmt.Fprintln(out, msgProvisionNotRecorded)
+			}
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return code
+	}
+
+	if refused {
+		// The recorded reason is fixed: the OIDC error can echo claim values
+		// from the unverified token, so only the printed line shows it.
+		_, _ = fmt.Fprintf(out, "gateway provision: token authentication failed: %v\n", verifyErr)
+		return record("refused", &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"}, "", 1)
+	}
+
+	// The one and only read of the installed configuration: the roles below
+	// are both what the caller is authorized against and what keys are
+	// minted for.
+	store := installedStore(*controlLog)
+	installedRoles, hash, installed, instErr := config.InstalledRoles(store)
+	if instErr != nil {
+		// A pointer that is present but cannot be honored: nobody can be
+		// authorized. Fail closed, recorded.
+		_, _ = fmt.Fprintln(out, instErr)
+		return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)}, "", 1)
+	}
+	if !installed {
+		// No roles, so nobody is authorized; provision consumes roles, it
+		// never creates them, so there is no bootstrap case.
+		_, _ = fmt.Fprintf(out, "gateway provision: %s\n", msgNothingInstalled)
+		_, _ = fmt.Fprintf(out, "%s under %s; run: agenthof apply --config <dir> --control-log %s\n", msgNoConfigInstalled, store, *controlLog)
+		return record("refused", &control.Reason{Code: control.CodeNotAuthorized, Message: msgNothingInstalled}, "", 1)
+	}
+	if !authz.ControlAllows(installedRoles, inv, "provision") {
+		reason := control.NotAuthorized("provision")
+		_, _ = fmt.Fprintf(out, "gateway provision: %s\n", reason.Message)
+		return record("refused", reason, hash, 1)
+	}
+
 	p := gateway.Provisioner{AdminBase: *adminBase, MasterKey: masterKey, HTTP: http.DefaultClient}
-	for _, role := range cfg.Roles {
+	for _, role := range installedRoles {
 		// A control-only role runs nothing, so it needs no provider key: a
 		// key with budget $0 would be a credential nothing consumes.
 		if len(role.Workflows) == 0 {
@@ -853,8 +970,12 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 		}
 		created, err := p.EnsureRoleKey(".", role)
 		if err != nil {
+			// Partial, not transactional: keys minted for earlier roles persist
+			// and a re-run finds them valid. The upstream text (an external
+			// API's status and transport) is printed only; the ledger gets a
+			// fixed message naming the role.
 			_, _ = fmt.Fprintf(out, "role %s: %v\n", role.Name, err)
-			return 1
+			return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(fmt.Errorf("provisioning failed for role %s", role.Name))}, hash, 1)
 		}
 		if created {
 			_, _ = fmt.Fprintf(out, "provisioned key for role %s (budget $%g); reserved model gateway, not consumed by a run\n", role.Name, role.BudgetUSDMonth)
@@ -862,7 +983,7 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 			_, _ = fmt.Fprintf(out, "role %s: key ok\n", role.Name)
 		}
 	}
-	return 0
+	return record("success", nil, hash, 0)
 }
 
 func cmdAudit(args []string, out io.Writer) int {
@@ -1228,11 +1349,31 @@ func cmdRuns(args []string, out io.Writer) int {
 	}
 }
 
+// msgPrunedNotRecorded is printed when run logs and artifacts were removed
+// but the success event could not be appended.
+const msgPrunedNotRecorded = "runs pruned; event NOT recorded"
+
+// cmdRunsPrune is `runs prune`: remove run logs and artifact bodies older
+// than --older-than, authorized against the installed roles and recorded in
+// the control ledger with a one-line summary of what it removed. Order: the
+// --older-than usage checks first (exit 2, before identity and before the
+// ledger is touched); the invoker; ledger writable (busy or damaged,
+// unrecorded); a refused token (recorded); the installed read (error
+// recorded); nothing installed (refusal recorded — prune reads no directory,
+// so there are no roles to fall back to); authorize (refusal recorded); the
+// run sweep (error recorded, nothing deleted); the artifact sweep (error
+// recorded with the runs already removed in its detail); success recorded
+// with the printed line as its detail. No record ever carries a
+// config_hash: prune installs nothing and reads no configuration.
 func cmdRunsPrune(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("runs prune", flag.ContinueOnError)
 	olderThan := fs.String("older-than", "", "prune runs older than this duration (e.g. 720h or 180d)")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; the installed configuration is read from installed/ beside it")
+	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
+	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
+	token := fs.String("token", "", "raw OIDC token (ID token, or an access token minted for AGENTHOF_OIDC_AUDIENCE) to authenticate the invoker (env AGENTHOF_TOKEN fallback); when set, identity comes from the token, not --as/--groups")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1246,44 +1387,123 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, "--older-than must be a positive duration")
 		return 2
 	}
-
-	runsPruned, err := pruneRuns(*logDir, dur)
-	if err != nil {
-		_, _ = fmt.Fprintln(out, err)
+	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
+	if usageErr {
+		_, _ = fmt.Fprintln(out, "runs prune: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
+	}
+	if !controlLedgerWritable("runs prune", *controlLog, out) {
 		return 1
 	}
 
-	// Constitution Art. III keeps artifact bodies out of the append-only
-	// ledger precisely so they can be pruned independently; do that here
-	// too, rather than leaving retention half-enforced. A missing
-	// artifact-dir is not an error (no run has written one yet) — mirror the
-	// missing-log-dir case
-	// instead of having artifact.NewStore create it just to prune nothing.
+	record := func(outcome string, reason *control.Reason, detail string, code int) int {
+		head, appendErr := control.Append(*controlLog, control.Event{
+			Action:     "prune",
+			Outcome:    outcome,
+			Reason:     reason,
+			Invoker:    inv,
+			AssertedAs: assertedAs,
+			Witness:    control.CaptureWitness(),
+			Detail:     detail,
+		})
+		if appendErr != nil {
+			_, _ = fmt.Fprintln(out, appendErr)
+			if outcome == "success" {
+				_, _ = fmt.Fprintln(out, msgPrunedNotRecorded)
+			}
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+		return code
+	}
+	ioError := func(err error, detail string) int {
+		_, _ = fmt.Fprintln(out, err)
+		return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(err)}, detail, 1)
+	}
+
+	if refused {
+		_, _ = fmt.Fprintf(out, "runs prune: token authentication failed: %v\n", verifyErr)
+		return record("refused", &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"}, "", 1)
+	}
+	store := installedStore(*controlLog)
+	installedRoles, _, installed, instErr := config.InstalledRoles(store)
+	if instErr != nil {
+		return ioError(instErr, "")
+	}
+	if !installed {
+		_, _ = fmt.Fprintf(out, "runs prune: %s\n", msgNothingInstalled)
+		_, _ = fmt.Fprintf(out, "%s under %s; run: agenthof apply --config <dir> --control-log %s\n", msgNoConfigInstalled, store, *controlLog)
+		return record("refused", &control.Reason{Code: control.CodeNotAuthorized, Message: msgNothingInstalled}, "", 1)
+	}
+	if !authz.ControlAllows(installedRoles, inv, "prune") {
+		reason := control.NotAuthorized("prune")
+		_, _ = fmt.Fprintf(out, "runs prune: %s\n", reason.Message)
+		return record("refused", reason, "", 1)
+	}
+
+	runsPruned, err := pruneRuns(*logDir, dur, *controlLog)
+	if err != nil {
+		// pruneRuns errors only before its delete loop: nothing was removed.
+		return ioError(err, "")
+	}
+	// The printed line and the recorded detail are one format string, so
+	// they cannot disagree; <olderThan> is the flag's own text.
+	summary := func(artifacts int) string {
+		return fmt.Sprintf("pruned %d run(s) and %d artifact(s) older than %s", runsPruned, artifacts, *olderThan)
+	}
+
+	// Artifact bodies live outside the append-only ledger precisely so they
+	// can be pruned independently; do that here too, rather than leaving
+	// retention half-enforced. A missing artifact-dir is not an error (no
+	// run has written one yet) — mirror the missing-log-dir case instead of
+	// creating it just to prune nothing. An error here comes after the run
+	// sweep, so the record says what was already removed.
 	artifactsPruned := 0
 	if _, statErr := os.Stat(*artifactDir); statErr == nil {
-		store, err := artifact.NewStore(*artifactDir)
+		artifacts, err := artifact.NewStore(*artifactDir)
 		if err != nil {
-			_, _ = fmt.Fprintln(out, err)
-			return 1
+			return ioError(err, summary(0))
 		}
-		artifactsPruned, err = store.Prune(dur)
+		artifactsPruned, err = artifacts.Prune(dur)
 		if err != nil {
-			_, _ = fmt.Fprintln(out, err)
-			return 1
+			return ioError(err, summary(0))
 		}
 	} else if !os.IsNotExist(statErr) {
-		_, _ = fmt.Fprintln(out, statErr)
-		return 1
+		return ioError(statErr, summary(0))
 	}
 
-	_, _ = fmt.Fprintf(out, "pruned %d run(s) and %d artifact(s) older than %s\n", runsPruned, artifactsPruned, *olderThan)
-	return 0
+	line := summary(artifactsPruned)
+	_, _ = fmt.Fprintln(out, line)
+	return record("success", nil, line, 0)
 }
+
+// statControlLog is pruneRuns' stat of the control ledger. It is a var so a
+// test can make the identity check fail between the ledger-writable
+// precheck and the sweep — through the filesystem alone the same path was
+// just opened successfully.
+var statControlLog = os.Stat
 
 // pruneRuns removes run log files under logDir whose modification time is
 // older than dur. A missing logDir is not an error — nothing has run yet —
-// and prunes 0.
-func pruneRuns(logDir string, dur time.Duration) (int, error) {
+// and prunes 0. The control ledger is never a run log: by name
+// (control.jsonl and the <control-log>.torn-* repair fragments, wherever
+// --log-dir points), and by identity — the exact file controlLog names,
+// whatever it is called inside logDir, compared with os.SameFile over
+// follow-stats on BOTH sides, so a symlink in either direction and a hard
+// link all compare equal (DirEntry.Info is an lstat: it would describe a
+// symlink, not the ledger, and the sweep would remove the link and the
+// final append would re-create a fresh genesis chain). A controlLog that
+// cannot be stat'd is a hard error before anything is read or removed: a
+// guard that cannot establish the ledger's identity must not delete. A
+// per-entry stat failure (vanished, or a dangling link) skips that entry —
+// it is not a resolvable run log and cannot be the ledger, whose own stat
+// succeeded. investigate.Timeline and serve's run listing carry the same
+// skips.
+func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error) {
+	ctlInfo, err := statControlLog(controlLog)
+	if err != nil {
+		return 0, fmt.Errorf("control log %s: %w", controlLog, err)
+	}
 	cutoff := time.Now().Add(-dur)
 	entries, err := os.ReadDir(logDir)
 	if err != nil {
@@ -1294,11 +1514,6 @@ func pruneRuns(logDir string, dur time.Duration) (int, error) {
 	}
 	pruned := 0
 	for _, entry := range entries {
-		// The control ledger and its "<control-log>.torn-*" repair
-		// fragments (internal/control/log.go's writeTornFragment) must
-		// never be deleted here, even if --log-dir is misconfigured to
-		// point at the ledger's own directory instead of the default
-		// .agenthof/runs (spec §3.1).
 		if entry.Name() == "control.jsonl" || strings.Contains(entry.Name(), ".torn-") {
 			continue
 		}
@@ -1306,6 +1521,13 @@ func pruneRuns(logDir string, dur time.Duration) (int, error) {
 			continue
 		}
 		path := filepath.Join(logDir, entry.Name())
+		target, serr := os.Stat(path)
+		if serr != nil {
+			continue
+		}
+		if os.SameFile(target, ctlInfo) {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
@@ -1320,12 +1542,18 @@ func pruneRuns(logDir string, dur time.Duration) (int, error) {
 }
 
 // parseRetentionDuration parses a Go duration string, plus a "d" suffix
-// meaning days (e.g. "180d" = 180*24h).
+// meaning days (e.g. "180d" = 180*24h). A day count outside the duration's
+// range is rejected rather than wrapped: a wrapped value can come out
+// positive and set a cutoff nowhere near what was asked.
 func parseRetentionDuration(s string) (time.Duration, error) {
 	if before, ok := strings.CutSuffix(s, "d"); ok {
 		n, err := strconv.Atoi(before)
 		if err != nil {
 			return 0, fmt.Errorf("not a valid day count: %s", s)
+		}
+		const maxDays = int(math.MaxInt64 / (24 * time.Hour))
+		if n > maxDays || n < -maxDays {
+			return 0, fmt.Errorf("day count out of range: %s", s)
 		}
 		return time.Duration(n) * 24 * time.Hour, nil
 	}

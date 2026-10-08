@@ -107,16 +107,31 @@ func Timeline(logDir, controlLog string, f Filter) (Result, error) {
 
 	// Every run log is read, even under --run: a child of the requested run
 	// lives in its own file, so the selection happens after the read.
+	// The control ledger is never a run log — by name (control.jsonl and its
+	// torn-repair fragments, wherever --log-dir points), and by identity when
+	// --control-log can be stat'd: the exact file it names, whatever it is
+	// called inside logDir, compared with os.SameFile over follow-stats on
+	// both sides so a symlink in either direction matches. A control log that
+	// cannot be stat'd disables only the identity skip: this is a reader, the
+	// control log is consulted separately below, and a missing one is its own
+	// verdict. runs prune and serve's run listing carry the same skips.
+	var ctlInfo os.FileInfo
+	if info, err := os.Stat(controlLog); err == nil {
+		ctlInfo = info
+	}
 	var runs []runLog
 	for _, entry := range entries {
 		name := entry.Name()
-		// Mirror pruneRuns' skip rules: never touch the control ledger or
-		// its torn-repair fragments, directories, or non-log files.
 		if name == "control.jsonl" || strings.Contains(name, ".torn-") {
 			continue
 		}
 		if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") {
 			continue
+		}
+		if ctlInfo != nil {
+			if info, err := os.Stat(filepath.Join(logDir, name)); err == nil && os.SameFile(info, ctlInfo) {
+				continue
+			}
 		}
 		runID := strings.TrimSuffix(name, ".jsonl")
 

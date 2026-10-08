@@ -1,0 +1,26 @@
+# run and the kill switch verify the installed snapshot's bytes against the
+# pointer before reading them: an in-place edit under installed/<hex>/ is
+# refused by both, the pointer is untouched, and the pointer-only readers
+# (audit verify control) still pass — the documented limit.
+
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+cp installed/current current.before
+
+tamper control.jsonl agents/coder.yaml '# edited in place'
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'installed config sha256:[0-9a-f]{64}: snapshot hashes as sha256:[0-9a-f]{64}, not as its pointer'
+stdout 'run r-[0-9a-f]{16} refused: configuration invalid'
+lastrun logs
+grep '"reason":"configuration invalid: installed config sha256:[0-9a-f]{64}: snapshot hashes as' logs/$RUNID.jsonl
+
+! exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'snapshot hashes as'
+! stdout 'agent coder disabled'
+cmp installed/current current.before
+exec agenthof audit control --control-log control.jsonl
+stdout 'seq 2 .*disable agent coder error — dana@example.com \(asserted\)'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded install \(apply\)'

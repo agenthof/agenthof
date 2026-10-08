@@ -6,8 +6,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -25,8 +27,10 @@ import (
 
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity/oidctest"
+	"github.com/agenthof/agenthof/internal/ledger"
 )
 
 func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
@@ -309,7 +313,7 @@ func writeSample(t *testing.T) string {
 		"agents/coder.yaml":      "name: coder\nmodel: fast\ninstruction: code\noutput: patch\n" + ep,
 		"workflows/fix-bug.yaml": "name: fix-bug\nsteps:\n  - name: plan\n    agent: planner\n  - name: code\n    agent: coder\n    on_failure: plan\n",
 		"roles/se.yaml":          "name: software-engineer\nworkflows: [fix-bug]\nallowed_groups: [\"*\"]\n",
-		"roles/ops.yaml":         "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair]\n",
+		"roles/ops.yaml":         "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair, provision, prune]\n",
 		"gateway.yaml":           "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\n",
 	}
 	for rel, content := range files {
@@ -621,26 +625,72 @@ func TestRunRefusedUnknownRole(t *testing.T) {
 	}
 }
 
-func TestRunsPruneDeletesOldRuns(t *testing.T) {
-	dir := t.TempDir()
-	oldPath := filepath.Join(dir, "r-old.jsonl")
-	newPath := filepath.Join(dir, "r-new.jsonl")
-	if err := os.WriteFile(oldPath, []byte("{}\n"), 0o644); err != nil {
+// pruneArgs is a runs prune invocation by the platform-eng group against ctl.
+func pruneArgs(ctl string, extra ...string) []string {
+	return append([]string{"prune", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, extra...)
+}
+
+// appliedAt is applied with the control log at a path the test chooses —
+// for the self-victim layouts, where the ledger must sit inside --log-dir.
+func appliedAt(t *testing.T, root, ctl string) {
+	t.Helper()
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("apply %s at %s: exit %d\n%s", root, ctl, code, out.String())
+	}
+}
+
+// controlLogID reads the genesis record's log_id — the chain's identity,
+// which a fresh genesis (the self-victim wound) would replace.
+func controlLogID(t *testing.T, ctl string) string {
+	t.Helper()
+	recs, _, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("read %s: %v (%d records)", ctl, err, len(recs))
+	}
+	var genesis struct {
+		LogID string `json:"log_id"`
+	}
+	if err := json.Unmarshal(recs[0].Raw, &genesis); err != nil || genesis.LogID == "" {
+		t.Fatalf("genesis log_id: %v %q", err, genesis.LogID)
+	}
+	return genesis.LogID
+}
+
+// agedRun writes a run-log-shaped file under logDir with an mtime 200 days
+// in the past and returns its path.
+func agedRun(t *testing.T, logDir, name string) string {
+	t.Helper()
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(newPath, []byte("{}\n"), 0o644); err != nil {
+	p := filepath.Join(logDir, name)
+	if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-200 * 24 * time.Hour)
-	if err := os.Chtimes(oldPath, old, old); err != nil {
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestRunsPruneDeletesOldRuns(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	oldPath := agedRun(t, dir, "r-old.jsonl")
+	newPath := filepath.Join(dir, "r-new.jsonl")
+	if err := os.WriteFile(newPath, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", dir}, &out)
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out)
 	if code != 0 {
 		t.Fatalf("prune: %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+	const line = "pruned 1 run(s) and 0 artifact(s) older than 180d"
+	if !strings.Contains(out.String(), line+"\n") || !strings.Contains(out.String(), "control head: seq=2 sha256=") {
 		t.Fatalf("out: %s", out.String())
 	}
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
@@ -649,14 +699,25 @@ func TestRunsPruneDeletesOldRuns(t *testing.T) {
 	if _, err := os.Stat(newPath); err != nil {
 		t.Fatalf("new run should remain: %v", err)
 	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "prune" || e.Outcome != "success" || e.Detail != line || e.ConfigHash != "" || e.Agent != "" || e.Invoker.Subject != "dana@example.com" {
+		t.Fatalf("want success with detail == the printed line and no hash: %+v", e)
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "runs pruned ("+line+") — dana@example.com (asserted)") {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
 }
 
 func TestRunsPruneAlsoPrunesArtifactStore(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
 	logDir := t.TempDir()
 	artifactDir := t.TempDir()
-
-	oldArtifact := filepath.Join(artifactDir, "deadbeef")
-	newArtifact := filepath.Join(artifactDir, "cafef00d")
+	// Artifact bodies are named by their 64-hex sha256; prune only ever removes
+	// that content-addressed shape.
+	oldArtifact := filepath.Join(artifactDir, "0000000000000000000000000000000000000000000000000000000000000001")
+	newArtifact := filepath.Join(artifactDir, "0000000000000000000000000000000000000000000000000000000000000002")
 	if err := os.WriteFile(oldArtifact, []byte("stale body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -667,14 +728,10 @@ func TestRunsPruneAlsoPrunesArtifactStore(t *testing.T) {
 	if err := os.Chtimes(oldArtifact, old, old); err != nil {
 		t.Fatal(err)
 	}
-
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", logDir, "--artifact-dir", artifactDir}, &out)
-	if code != 0 {
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logDir, "--artifact-dir", artifactDir), &out)
+	if code != 0 || !strings.Contains(out.String(), "pruned 0 run(s) and 1 artifact(s)") {
 		t.Fatalf("prune: %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "pruned 0 run(s) and 1 artifact(s)") {
-		t.Fatalf("out: %s", out.String())
 	}
 	if _, err := os.Stat(oldArtifact); !os.IsNotExist(err) {
 		t.Fatalf("old artifact should be gone, err=%v", err)
@@ -682,25 +739,28 @@ func TestRunsPruneAlsoPrunesArtifactStore(t *testing.T) {
 	if _, err := os.Stat(newArtifact); err != nil {
 		t.Fatalf("new artifact should remain: %v", err)
 	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "success" || e.Detail != "pruned 0 run(s) and 1 artifact(s) older than 180d" {
+		t.Fatalf("%+v", e)
+	}
 }
 
 func TestRunsPruneMissingArtifactDirIsNotAnError(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
 	logDir := t.TempDir()
 	artifactDir := filepath.Join(t.TempDir(), "does-not-exist")
-
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", logDir, "--artifact-dir", artifactDir}, &out)
-	if code != 0 {
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logDir, "--artifact-dir", artifactDir), &out)
+	if code != 0 || !strings.Contains(out.String(), "pruned 0 run(s) and 0 artifact(s)") {
 		t.Fatalf("prune: %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "pruned 0 run(s) and 0 artifact(s)") {
-		t.Fatalf("out: %s", out.String())
 	}
 	if _, err := os.Stat(artifactDir); !os.IsNotExist(err) {
 		t.Fatalf("a missing artifact-dir must not be created just to find nothing to prune: %v", err)
 	}
 }
 
+// TestRunsPruneGarbageDuration stays flag-free on purpose: the usage check
+// precedes identity and the ledger, so it needs no installed configuration.
 func TestRunsPruneGarbageDuration(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
@@ -711,17 +771,17 @@ func TestRunsPruneGarbageDuration(t *testing.T) {
 }
 
 func TestRunsPruneMissingLogDir(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", dir}, &out)
-	if code != 0 {
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out)
+	if code != 0 || !strings.Contains(out.String(), "pruned 0 run(s) and 0 artifact(s)") {
 		t.Fatalf("expected exit 0 for missing log dir, got %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "pruned 0 run(s) and 0 artifact(s)") {
-		t.Fatalf("out: %s", out.String())
 	}
 }
 
+// TestRunsPruneNonPositiveDuration stays flag-free: see TestRunsPruneGarbageDuration.
 func TestRunsPruneNonPositiveDuration(t *testing.T) {
 	// A non-positive duration would push the cutoff into the future,
 	// deleting every run file. Guard against it instead.
@@ -735,11 +795,8 @@ func TestRunsPruneNonPositiveDuration(t *testing.T) {
 			}
 			var out bytes.Buffer
 			code := cmdRuns([]string{"prune", "--older-than", olderThan, "--log-dir", dir}, &out)
-			if code != 2 {
+			if code != 2 || !strings.Contains(out.String(), "--older-than must be a positive duration") {
 				t.Fatalf("expected exit 2 for %q, got %d\n%s", olderThan, code, out.String())
-			}
-			if !strings.Contains(out.String(), "--older-than must be a positive duration") {
-				t.Fatalf("out for %q: %s", olderThan, out.String())
 			}
 			if _, err := os.Stat(path); err != nil {
 				t.Fatalf("run file should be untouched for %q: %v", olderThan, err)
@@ -748,151 +805,880 @@ func TestRunsPruneNonPositiveDuration(t *testing.T) {
 	}
 }
 
+// TestRunsPruneUsageErrorsTouchNoLedger: a bad --older-than — garbage,
+// non-positive, or a day count that would overflow the duration and wrap
+// to a positive value — exits 2 before identity and before the ledger is
+// opened, so no control log is created and no run file is touched.
+func TestRunsPruneUsageErrorsTouchNoLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	for _, olderThan := range []string{"abc", "0d", "-3h", "99999999999d", "9223372036854775807d"} {
+		t.Run(olderThan, func(t *testing.T) {
+			dir := t.TempDir()
+			aged := agedRun(t, dir, "r-old.jsonl")
+			ctl := filepath.Join(t.TempDir(), "control.jsonl")
+			var out bytes.Buffer
+			code := cmdRuns(pruneArgs(ctl, "--older-than", olderThan, "--log-dir", dir), &out)
+			if code != 2 {
+				t.Fatalf("exit %d for %q\n%s", code, olderThan, out.String())
+			}
+			if _, err := os.Stat(ctl); !os.IsNotExist(err) {
+				t.Fatalf("a usage fault must not create the control ledger: %v", err)
+			}
+			if _, err := os.Stat(aged); err != nil {
+				t.Fatalf("nothing may be deleted on a usage fault: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunsPruneLogDirIsRegularFile(t *testing.T) {
-	dir := t.TempDir()
-	notADir := filepath.Join(dir, "not-a-dir")
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	notADir := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", notADir}, &out)
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", notADir), &out)
 	if code != 1 {
 		t.Fatalf("expected exit 1 when --log-dir is a regular file, got %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "prune" || e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.Detail != "" {
+		t.Fatalf("want error/io_error with no detail (nothing was deleted): %+v", e)
 	}
 }
 
 // TestRunsPruneSparesControlLogAndFragments proves the default layout is
-// safe: the control ledger lives at .agenthof/control.jsonl, a sibling of
-// (not a member of) the default --log-dir .agenthof/runs, so an aged run
-// log under --log-dir is pruned while the ledger and its .torn-* repair
-// fragment — both outside --log-dir entirely — are untouched (spec §3.1).
+// safe: a decoy control.jsonl and its .torn-* fragment — both outside
+// --log-dir — survive while the aged run log under --log-dir is pruned. The
+// decoy is spared by name; the ledger prune actually records to is a real,
+// applied one elsewhere.
 func TestRunsPruneSparesControlLogAndFragments(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
 	root := t.TempDir()
 	agentDir := filepath.Join(root, ".agenthof")
 	runsDir := filepath.Join(agentDir, "runs")
-	if err := os.MkdirAll(runsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	oldRun := filepath.Join(runsDir, "r-old.jsonl")
-	controlLog := filepath.Join(agentDir, "control.jsonl")
-	fragment := controlLog + ".torn-1"
-	for _, p := range []string{oldRun, controlLog, fragment} {
+	oldRun := agedRun(t, runsDir, "r-old.jsonl")
+	decoy := filepath.Join(agentDir, "control.jsonl")
+	fragment := decoy + ".torn-1"
+	for _, p := range []string{decoy, fragment} {
 		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-	}
-	old := time.Now().Add(-48 * time.Hour)
-	for _, p := range []string{oldRun, controlLog, fragment} {
+		old := time.Now().Add(-48 * time.Hour)
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatal(err)
 		}
 	}
-
 	var out bytes.Buffer
-	code := cmdRuns([]string{"prune", "--older-than", "24h", "--log-dir", runsDir}, &out)
-	if code != 0 {
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "24h", "--log-dir", runsDir), &out); code != 0 {
 		t.Fatalf("prune: %d\n%s", code, out.String())
 	}
 	if _, err := os.Stat(oldRun); !os.IsNotExist(err) {
 		t.Fatalf("old run log should be pruned, err=%v", err)
 	}
-	if _, err := os.Stat(controlLog); err != nil {
-		t.Fatalf("control log must survive prune: %v", err)
-	}
-	if _, err := os.Stat(fragment); err != nil {
-		t.Fatalf("torn fragment must survive prune: %v", err)
+	for _, p := range []string{decoy, fragment} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive prune: %v", p, err)
+		}
 	}
 }
 
 // TestRunsPruneNeverDeletesControlLogEvenIfLogDirPointsAtItsDir covers the
-// misconfiguration case: an operator points --log-dir directly at the
-// control log's own directory (instead of the default .agenthof/runs).
-// pruneRuns's *.jsonl glob would otherwise match control.jsonl itself;
-// the ledger and its repair fragment must still survive (spec §3.1).
+// misconfiguration: --log-dir points at a directory holding a control.jsonl
+// and its fragment. Both survive by name while the aged run beside them is
+// pruned — the guard is discriminating, not "prune did nothing".
 func TestRunsPruneNeverDeletesControlLogEvenIfLogDirPointsAtItsDir(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
 	agentDir := t.TempDir()
-	oldRun := filepath.Join(agentDir, "r-old.jsonl")
-	controlLog := filepath.Join(agentDir, "control.jsonl")
-	fragment := controlLog + ".torn-1"
-	for _, p := range []string{oldRun, controlLog, fragment} {
+	oldRun := agedRun(t, agentDir, "r-old.jsonl")
+	decoy := filepath.Join(agentDir, "control.jsonl")
+	fragment := decoy + ".torn-1"
+	for _, p := range []string{decoy, fragment} {
 		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-	}
-	old := time.Now().Add(-48 * time.Hour)
-	for _, p := range []string{oldRun, controlLog, fragment} {
+		old := time.Now().Add(-48 * time.Hour)
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatal(err)
 		}
 	}
-
 	var out bytes.Buffer
-	// A misconfigured --log-dir that resolves to the same directory as
-	// control.jsonl must still prune plain aged run logs (proving the
-	// guard is discriminating, not just "prune did nothing")...
-	code := cmdRuns([]string{"prune", "--older-than", "24h", "--log-dir", agentDir}, &out)
-	if code != 0 {
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "24h", "--log-dir", agentDir), &out); code != 0 || !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
 		t.Fatalf("prune: %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
-		t.Fatalf("out: %s", out.String())
 	}
 	if _, err := os.Stat(oldRun); !os.IsNotExist(err) {
 		t.Fatalf("old run log should still be pruned, err=%v", err)
 	}
-	// ...while the control ledger and its repair fragment survive.
-	if _, err := os.Stat(controlLog); err != nil {
-		t.Fatalf("control log must survive prune even when --log-dir points at its directory: %v", err)
-	}
-	if _, err := os.Stat(fragment); err != nil {
-		t.Fatalf("torn fragment must survive prune: %v", err)
+	for _, p := range []string{decoy, fragment} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive prune even when --log-dir points at its directory: %v", p, err)
+		}
 	}
 }
 
-func TestGatewayProvisionMissingMasterKey(t *testing.T) {
-	t.Setenv("LITELLM_MASTER_KEY", "")
+// TestRunsPruneNothingInstalledDeletesNothing: no roles, nobody is
+// authorized — the refusal is the ledger's genesis record and the aged run
+// survives. Prune has no --config fallback: it reads no directory.
+func TestRunsPruneNothingInstalledDeletesNothing(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	dir := t.TempDir()
+	aged := agedRun(t, dir, "r-old.jsonl")
 	var out bytes.Buffer
-	code := cmdGateway([]string{"provision", "--config", "./config"}, &out)
-	if code != 2 {
-		t.Fatalf("expected exit 2 with LITELLM_MASTER_KEY unset, got %d\n%s", code, out.String())
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out)
+	if code != 1 {
+		t.Fatalf("exit %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "LITELLM_MASTER_KEY") {
-		t.Fatalf("error must name LITELLM_MASTER_KEY: %s", out.String())
+	for _, want := range []string{
+		"runs prune: " + msgNothingInstalled + "\n",
+		"no configuration installed under " + installedStore(ctl) + "; run: agenthof apply --config <dir> --control-log " + ctl + "\n",
+		"control head: seq=1 sha256=",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, out.String())
+		}
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "prune" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotAuthorized || e.Reason.Message != msgNothingInstalled || e.ConfigHash != "" || e.Detail != "" {
+		t.Fatalf("%+v", e)
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatalf("nothing may be deleted: %v", err)
 	}
 }
 
-func TestGatewayProvisionEndToEnd(t *testing.T) {
-	root := writeSample(t)
-	// writeSample's role has no budget; add one so the provisioner acts.
-	rolePath := filepath.Join(root, "roles", "se.yaml")
-	if err := os.WriteFile(rolePath, []byte("name: software-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 50\nallowed_groups: [\"*\"]\n"), 0o644); err != nil {
+func TestRunsPruneUngrantedDeletesNothing(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	aged := agedRun(t, dir, "r-old.jsonl")
+	var out bytes.Buffer
+	code := cmdRuns([]string{"prune", "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance", "--older-than", "180d", "--log-dir", dir}, &out)
+	if code != 1 || !strings.Contains(out.String(), "runs prune: not authorized: no role grants prune to the invoker") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotAuthorized || e.ConfigHash != "" {
+		t.Fatalf("%+v", e)
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatalf("nothing may be deleted: %v", err)
+	}
+}
+
+// TestRunsPruneArtifactStoreErrorRecordsPartialDetail: the runs WERE
+// deleted before the artifact store failed, and the error record says so.
+func TestRunsPruneArtifactStoreErrorRecordsPartialDetail(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	aged := agedRun(t, dir, "r-old.jsonl")
+	notADir := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	var out bytes.Buffer
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir, "--artifact-dir", notADir), &out)
+	if code != 1 {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("the run was pruned before the artifact step: %v", err)
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.Detail != "pruned 1 run(s) and 0 artifact(s) older than 180d" {
+		t.Fatalf("want error with the partial detail: %+v", e)
+	}
+}
 
+// TestRunsPruneSparesTheLedgerItRecordsTo is the self-victim guard: the
+// ledger prune records to sits INSIDE --log-dir under a non-default name,
+// aged past the cutoff. Without the identity skip the sweep would delete it
+// and the final append would re-create a fresh genesis chain. The ledger
+// survives with one more record and the same log_id; the aged run beside it
+// is gone; the store and its lock file beside the ledger survive too.
+func TestRunsPruneSparesTheLedgerItRecordsTo(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	logDir := t.TempDir()
+	ctl := filepath.Join(logDir, "ledger.jsonl")
+	appliedAt(t, writeSample(t), ctl)
+	before, id := len(controlEvents(t, ctl)), controlLogID(t, ctl)
+	old := time.Now().Add(-200 * 24 * time.Hour)
+	if err := os.Chtimes(ctl, old, old); err != nil {
+		t.Fatal(err)
+	}
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logDir), &out); code != 0 || !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("the aged run must be gone: %v", err)
+	}
+	if n, after := len(controlEvents(t, ctl)), controlLogID(t, ctl); n != before+1 || after != id {
+		t.Fatalf("the ledger must survive as the same chain: records %d→%d, log_id %s→%s", before, n, id, after)
+	}
+	for _, p := range []string{installedStore(ctl), installedLock(ctl)} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive a prune of its directory: %v", p, err)
+		}
+	}
+}
+
+// TestRunsPruneArtifactSweepSparesTheControlLedger: the artifact sweep removes
+// only content-addressed bodies (the 64-hex sha256 Put writes), so a
+// misconfigured --artifact-dir pointing at the control ledger's own directory
+// never deletes the ledger, a repair fragment, or the installed-config lock —
+// and the prune's own success append does not re-genesis a fresh ledger. The
+// companion to the --log-dir guard above, on the other sweep.
+func TestRunsPruneArtifactSweepSparesTheControlLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	logDir := t.TempDir()
+	ctl := filepath.Join(logDir, "control.jsonl")
+	appliedAt(t, writeSample(t), ctl)
+	before, id := len(controlEvents(t, ctl)), controlLogID(t, ctl)
+	torn := ctl + ".torn-123"
+	if err := os.WriteFile(torn, []byte("fragment"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A real content-addressed body that MUST be pruned (proves the sweep works).
+	body := filepath.Join(logDir, "0000000000000000000000000000000000000000000000000000000000000001")
+	if err := os.WriteFile(body, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-200 * 24 * time.Hour)
+	for _, p := range []string{ctl, torn, body} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	// --artifact-dir is the ledger's OWN directory — the misconfiguration.
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", t.TempDir(), "--artifact-dir", logDir), &out); code != 0 ||
+		!strings.Contains(out.String(), "pruned 0 run(s) and 1 artifact(s)") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(body); !os.IsNotExist(err) {
+		t.Fatalf("the content-addressed body must be pruned: %v", err)
+	}
+	for _, p := range []string{ctl, torn, installedLock(ctl), installedStore(ctl)} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive the artifact sweep: %v", p, err)
+		}
+	}
+	if n, after := len(controlEvents(t, ctl)), controlLogID(t, ctl); n != before+1 || after != id {
+		t.Fatalf("the ledger must survive as the same chain: records %d→%d, log_id %s→%s", before, n, id, after)
+	}
+}
+
+// TestRunsPruneSparesTheLedgerThroughASymlinkedControlLog: --control-log is
+// a symlink OUTSIDE --log-dir pointing at the real, aged ledger INSIDE it.
+// Both sides of the identity check follow links, so the real file is
+// spared.
+func TestRunsPruneSparesTheLedgerThroughASymlinkedControlLog(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	logDir := t.TempDir()
+	real := filepath.Join(logDir, "ledger.jsonl")
+	if err := os.WriteFile(real, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "control.jsonl")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	appliedAt(t, writeSample(t), link)
+	before, id := len(controlEvents(t, link)), controlLogID(t, link)
+	old := time.Now().Add(-200 * 24 * time.Hour)
+	if err := os.Chtimes(real, old, old); err != nil {
+		t.Fatal(err)
+	}
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(link, "--older-than", "180d", "--log-dir", logDir), &out); code != 0 || !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("the aged run must be gone: %v", err)
+	}
+	if _, err := os.Stat(real); err != nil {
+		t.Fatalf("the real ledger must survive: %v", err)
+	}
+	if n, after := len(controlEvents(t, link)), controlLogID(t, link); n != before+1 || after != id {
+		t.Fatalf("same chain: records %d→%d, log_id %s→%s", before, n, id, after)
+	}
+}
+
+// TestRunsPruneSparesTheLedgerBehindASymlinkedEntry: the entry INSIDE
+// --log-dir is a symlink to the real ledger elsewhere, which --control-log
+// names directly. DirEntry.Info is an lstat and would describe the link, so
+// an entry-side lstat would compare unequal and remove the link; the
+// follow-stat compares equal. os.Chtimes follows links and cannot age the
+// link itself, so the cutoff is made tiny instead: after the sleep every
+// entry is older than it, and only the identity skip can spare the link.
+func TestRunsPruneSparesTheLedgerBehindASymlinkedEntry(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	before, id := len(controlEvents(t, ctl)), controlLogID(t, ctl)
+	logDir := t.TempDir()
+	link := filepath.Join(logDir, "link.jsonl")
+	if err := os.Symlink(ctl, link); err != nil {
+		t.Fatal(err)
+	}
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	time.Sleep(1100 * time.Millisecond) // past a 1 s mtime granularity, so the link is older than a 10 ms cutoff
+	var out bytes.Buffer
+	// --artifact-dir is explicit: a 10 ms cutoff must never meet the default
+	// cwd-relative artifact store.
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "10ms", "--log-dir", logDir, "--artifact-dir", t.TempDir()), &out); code != 0 || !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("the aged run must be gone: %v", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("the symlink to the ledger must survive: %v", err)
+	}
+	if n, after := len(controlEvents(t, ctl)), controlLogID(t, ctl); n != before+1 || after != id {
+		t.Fatalf("same chain: records %d→%d, log_id %s→%s", before, n, id, after)
+	}
+}
+
+// TestRunsPruneSparesAHardLinkToTheLedger: a hard link shares the inode,
+// so it is the ledger by identity whatever it is called.
+func TestRunsPruneSparesAHardLinkToTheLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	before, id := len(controlEvents(t, ctl)), controlLogID(t, ctl)
+	logDir := t.TempDir()
+	hard := filepath.Join(logDir, "hard.jsonl")
+	if err := os.Link(ctl, hard); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-200 * 24 * time.Hour)
+	if err := os.Chtimes(ctl, old, old); err != nil { // one inode: ages the hard link too
+		t.Fatal(err)
+	}
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logDir), &out); code != 0 || !strings.Contains(out.String(), "pruned 1 run(s) and 0 artifact(s)") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("the aged run must be gone: %v", err)
+	}
+	if _, err := os.Stat(hard); err != nil {
+		t.Fatalf("the hard link must survive: %v", err)
+	}
+	if n, after := len(controlEvents(t, ctl)), controlLogID(t, ctl); n != before+1 || after != id {
+		t.Fatalf("same chain: records %d→%d, log_id %s→%s", before, n, id, after)
+	}
+}
+
+// TestPruneRunsFailsHardWhenTheControlLogCannotBeStatted: a guard that
+// cannot establish the ledger's identity deletes nothing — the error is
+// returned before the directory is even read.
+func TestPruneRunsFailsHardWhenTheControlLogCannotBeStatted(t *testing.T) {
+	logDir := t.TempDir()
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	missing := filepath.Join(t.TempDir(), "gone", "control.jsonl")
+	n, err := pruneRuns(logDir, time.Hour, missing)
+	if err == nil || n != 0 || !strings.Contains(err.Error(), "control log "+missing) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatalf("nothing may be deleted: %v", err)
+	}
+}
+
+// TestRunsPruneDeletesNothingWhenTheControlLogVanishesBeforeTheSweep is the
+// command-level twin: the ledger was writable at the precheck and cannot be
+// stat'd by the time the sweep starts (unlinked or made unreadable by
+// another process in between). The filesystem alone cannot stage that in a
+// test — the same path was just opened — so the stat goes through the
+// statControlLog seam. Exit 1, the printed line names the control log, the
+// aged run survives, and the error is recorded.
+func TestRunsPruneDeletesNothingWhenTheControlLogVanishesBeforeTheSweep(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	logDir := t.TempDir()
+	aged := agedRun(t, logDir, "r-old.jsonl")
+	orig := statControlLog
+	statControlLog = func(name string) (os.FileInfo, error) {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+	}
+	t.Cleanup(func() { statControlLog = orig })
+	var out bytes.Buffer
+	code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logDir), &out)
+	if code != 1 || !strings.Contains(out.String(), "control log "+ctl) {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatalf("nothing may be deleted: %v", err)
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.Detail != "" {
+		t.Fatalf("%+v", e)
+	}
+}
+
+// adminMock is a LiteLLM-shaped admin API for the provision tests: it
+// answers /key/generate with a fresh key and counts the generations; when
+// failAt > 0 the failAt-th generation answers 500 with sentinel in its body,
+// so a test can prove the body never reaches stdout or the ledger. Every
+// other path is 500 (provision never calls /key/info for a role with no key
+// file yet).
+func adminMock(t *testing.T, failAt int, sentinel string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var generated atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/key/generate" {
+			n := generated.Add(1)
+			if int(n) == failAt {
+				http.Error(w, sentinel, http.StatusInternalServerError)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"key":"sk-test"}`))
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv, &generated
+}
 
+// provisionArgs is a gateway provision invocation by the platform-eng
+// group against ctl and the mock admin API.
+func provisionArgs(ctl, adminBase string) []string {
+	return []string{"provision", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng", "--admin-base", adminBase}
+}
+
+// budgetedSample is writeSample plus a $50 budget on software-engineer, so
+// the provisioner has something to mint; it must be applied AFTER this
+// rewrite, since provision reads the installed roles, budget included.
+func budgetedSample(t *testing.T) string {
+	t.Helper()
+	root := writeSample(t)
+	writeFileIn(t, root, "roles/se.yaml", "name: software-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 50\nallowed_groups: [\"*\"]\n")
+	return root
+}
+
+// TestGatewayProvisionMissingMasterKey: the master key is a usage fault of
+// the same class as a bad flag — checked before identity and the ledger, so
+// nothing is recorded and no ledger is created.
+func TestGatewayProvisionMissingMasterKey(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	code := cmdGateway([]string{"provision", "--control-log", ctl}, &out)
+	if code != 2 || !strings.Contains(out.String(), "LITELLM_MASTER_KEY") {
+		t.Fatalf("expected exit 2 naming LITELLM_MASTER_KEY, got %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(ctl); !os.IsNotExist(err) {
+		t.Fatalf("a usage fault must not create the control ledger: %v", err)
+	}
+}
+
+// TestGatewayProvisionConfigFlagIsRetired: provision mints for the
+// INSTALLED roles and takes no directory; the old flag is a loud usage
+// error, never silently ignored.
+func TestGatewayProvisionConfigFlagIsRetired(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
 	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	code := cmdGateway([]string{"provision", "--config", t.TempDir(), "--control-log", ctl}, &out)
+	if code != 2 || !strings.Contains(out.String(), "flag provided but not defined: -config") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(ctl); !os.IsNotExist(err) {
+		t.Fatalf("a usage fault must not create the control ledger: %v", err)
+	}
+}
+
+// TestGatewayProvisionNothingInstalledIsARecordedRefusal: no roles, nobody
+// is authorized — recorded not_authorized with the fixed path-free message
+// and no config_hash, the remedy printed, no admin-API call.
+func TestGatewayProvisionNothingInstalledIsARecordedRefusal(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	srv, generated := adminMock(t, 0, "")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	code := cmdGateway(provisionArgs(ctl, srv.URL), &out)
+	if code != 1 {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	for _, want := range []string{
+		"gateway provision: " + msgNothingInstalled + "\n",
+		"no configuration installed under " + installedStore(ctl) + "; run: agenthof apply --config <dir> --control-log " + ctl + "\n",
+		"control head: seq=1 sha256=",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, out.String())
+		}
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "provision" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotAuthorized || e.Reason.Message != msgNothingInstalled || e.ConfigHash != "" {
+		t.Fatalf("want refused/not_authorized without a hash: %+v", e)
+	}
+	if generated.Load() != 0 {
+		t.Fatal("a refusal must not touch the admin API")
+	}
+}
+
+// TestGatewayProvisionUngrantedIsRefusedWithTheInstalledHash: the invoker's
+// group is granted nothing — recorded refused/not_authorized with the hash
+// of the configuration they were refused against, no API call, no key.
+func TestGatewayProvisionUngrantedIsRefusedWithTheInstalledHash(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	ctl := applied(t, budgetedSample(t))
+	srv, generated := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	code := cmdGateway([]string{"provision", "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance", "--admin-base", srv.URL}, &out)
+	if code != 1 || !strings.Contains(out.String(), "gateway provision: not authorized: no role grants provision to the invoker") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotAuthorized || e.ConfigHash != readPointer(t, ctl) {
+		t.Fatalf("want refused with the installed hash: %+v", e)
+	}
+	if generated.Load() != 0 {
+		t.Fatal("a refusal must not touch the admin API")
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); !os.IsNotExist(err) {
+		t.Fatalf("no key may be written: %v", err)
+	}
+}
+
+// TestGatewayProvisionEndToEnd: an authorized provision mints for the
+// installed roles, records success with the installed hash, renders
+// "provision ok", and is never an install — audit verify control stays 0
+// and a run under the same hash still joins to the apply.
+func TestGatewayProvisionEndToEnd(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := applied(t, root)
+	srv, generated := adminMock(t, 0, "")
 	t.Chdir(t.TempDir())
 
 	var out bytes.Buffer
-	code := cmdGateway([]string{"provision", "--config", root, "--admin-base", srv.URL}, &out)
+	code := cmdGateway(provisionArgs(ctl, srv.URL), &out)
 	if code != 0 {
 		t.Fatalf("provision: %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "provisioned key for role software-engineer (budget $50)") {
-		t.Fatalf("out: %s", out.String())
+	for _, want := range []string{"provisioned key for role software-engineer (budget $50)", "control head: seq=2 sha256="} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, out.String())
+		}
 	}
 	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); err != nil {
 		t.Fatalf("key file not written under ./.agenthof/keys/: %v", err)
+	}
+	if generated.Load() != 1 {
+		t.Fatalf("key generations = %d, want 1", generated.Load())
+	}
+	pointer := readPointer(t, ctl)
+	e := lastControlEvent(t, ctl)
+	if e.Action != "provision" || e.Outcome != "success" || e.ConfigHash != pointer || e.Agent != "" || e.Detail != "" || e.Invoker.Subject != "dana@example.com" || e.Bootstrap {
+		t.Fatalf("want a success record carrying the installed hash and nothing else: %+v", e)
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
+	for _, want := range []string{"provision ok — dana@example.com (asserted)", "matches the last recorded install (apply)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, out.String())
+		}
+	}
+	out.Reset()
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 {
+		t.Fatalf("a provision record is not an install: %d\n%s", code, out.String())
+	}
+	// The run config-join ignores the provision: a run under the same hash
+	// names the apply.
+	logDir := t.TempDir()
+	out.Reset()
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", logDir, "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 {
+		t.Fatalf("run: %d\n%s", code, out.String())
+	}
+	entries, err := os.ReadDir(logDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("one run log: %v %d", err, len(entries))
+	}
+	runID := strings.TrimSuffix(entries[0].Name(), ".jsonl")
+	out.Reset()
+	if code := cmdAudit([]string{runID, "--log-dir", logDir, "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "config "+pointer+" — applied by dana@example.com") {
+		t.Fatalf("audit %s: %d\n%s", runID, code, out.String())
+	}
+	out.Reset()
+	if code := cmdInvestigate([]string{"--config-hash", pointer, "--log-dir", logDir, "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "control provision — dana@example.com (asserted)") || !strings.Contains(out.String(), "control apply — dana@example.com (asserted)") {
+		t.Fatalf("investigate must list the provision beside the apply: %d\n%s", code, out.String())
+	}
+}
+
+// TestGatewayProvisionSkipsWorkflowLessRole: a control-only role runs nothing,
+// so provision mints it no provider key — a key with budget $0 would be a
+// credential nothing consumes. The mock counts key generations.
+func TestGatewayProvisionSkipsWorkflowLessRole(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	writeFileIn(t, root, "roles/ops.yaml", "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair, provision, prune]\n")
+	ctl := applied(t, root)
+	srv, generated := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+
+	var out bytes.Buffer
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "role platform-admin: owns no workflows; no key provisioned") {
+		t.Fatalf("missing skip line: %s", out.String())
+	}
+	if generated.Load() != 1 {
+		t.Fatalf("key generations = %d, want 1 (software-engineer only)", generated.Load())
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "platform-admin.key")); !os.IsNotExist(err) {
+		t.Fatalf("a control-only role must get no key file; stat err = %v", err)
+	}
+}
+
+// TestGatewayProvisionEveryRoleControlOnlyIsStillSuccess: nothing to mint is
+// still a completed, recorded provision — "provision ok", never a label
+// claiming keys were minted.
+func TestGatewayProvisionEveryRoleControlOnlyIsStillSuccess(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := t.TempDir()
+	writeFileIn(t, root, "roles/ops.yaml", "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair, provision, prune]\n")
+	ctl := applied(t, root)
+	srv, generated := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	if generated.Load() != 0 {
+		t.Fatal("nothing to mint")
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "provision" || e.Outcome != "success" || e.ConfigHash != readPointer(t, ctl) {
+		t.Fatalf("%+v", e)
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "provision ok") || strings.Contains(out.String(), "keys provisioned") {
+		t.Fatalf("%d\n%s", code, out.String())
+	}
+}
+
+// TestGatewayProvisionMintFailureIsPartialAndFixedInTheLedger: the first
+// failing role stops the loop; keys minted before it persist; stdout carries
+// the status text (generateKey never reads the body); the ledger carries the
+// fixed message naming the role and the installed hash; and a sentinel the
+// mock puts in its 500 body appears nowhere — not on stdout, not in the
+// ledger.
+func TestGatewayProvisionMintFailureIsPartialAndFixedInTheLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	// roles/ sorts ops, qa, se: ops is skipped, qa mints first, se second.
+	writeFileIn(t, root, "roles/qa.yaml", "name: qa-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 10\nallowed_groups: [\"*\"]\n")
+	ctl := applied(t, root)
+	const sentinel = "SENTINEL-BODY-5c0ffee"
+	srv, generated := adminMock(t, 2, sentinel)
+	t.Chdir(t.TempDir())
+
+	var out bytes.Buffer
+	code := cmdGateway(provisionArgs(ctl, srv.URL), &out)
+	if code != 1 || generated.Load() != 2 {
+		t.Fatalf("exit %d generations %d\n%s", code, generated.Load(), out.String())
+	}
+	if !strings.Contains(out.String(), "role software-engineer: gateway: key generate returned status 500") {
+		t.Fatalf("stdout must carry the status text:\n%s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "qa-engineer.key")); err != nil {
+		t.Fatalf("the key minted before the failure persists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); !os.IsNotExist(err) {
+		t.Fatalf("the failing role gets no key: %v", err)
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "provision" || e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.Reason.Message != "provisioning failed for role software-engineer" || e.ConfigHash != readPointer(t, ctl) {
+		t.Fatalf("want error/io_error with the fixed message and the installed hash: %+v", e)
+	}
+	raw, err := os.ReadFile(ctl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), sentinel) || strings.Contains(string(raw), sentinel) {
+		t.Fatal("the admin API's response body must never be read, printed or ledgered")
+	}
+}
+
+// TestGatewayProvisionIsNotBlockedByAKillSwitchFlip: after `registry disable
+// coder` the installed snapshot fails Build (disabled-agent-ref), which is
+// irrelevant to whether a role gets a key — provision reads roles only and
+// records the flip's pointer.
+func TestGatewayProvisionIsNotBlockedByAKillSwitchFlip(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := applied(t, root)
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("disable: %d\n%s", code, out.String())
+	}
+	flipPointer := readPointer(t, ctl)
+	srv, _ := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	out.Reset()
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
+		t.Fatalf("provision after a flip: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "success" || e.ConfigHash != flipPointer {
+		t.Fatalf("want success with the flip's pointer %s: %+v", flipPointer, e)
+	}
+}
+
+// TestGatewayProvisionMintsFromTheUnverifiedRolesRead pins the boundary:
+// provision reads through the lenient authorization read, which is not
+// verified against the pointer, so a snapshot edited in place still mints —
+// while a run on the same root is refused with the mismatch text. The two
+// outcomes side by side are the boundary; a later change to it is
+// deliberate.
+func TestGatewayProvisionMintsFromTheUnverifiedRolesRead(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := applied(t, root)
+	pointer := readPointer(t, ctl)
+	coder := filepath.Join(config.SnapshotDir(installedStore(ctl), pointer), "agents", "coder.yaml")
+	data, err := os.ReadFile(coder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coder, append(data, []byte("# edited in place\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
+		t.Fatalf("provision must mint from the lenient read: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "success" || e.ConfigHash != pointer {
+		t.Fatalf("%+v", e)
+	}
+	if code, runOut := runFixBug(t, root, ctl); code != 1 || !strings.Contains(runOut, "snapshot hashes as") {
+		t.Fatalf("the execution read must refuse the same root: %d\n%s", code, runOut)
+	}
+}
+
+// TestGatewayProvisionBadTokenRecordsRefusal: a token that fails
+// verification is a recorded refusal with the fixed reason — never the OIDC
+// error text — and no API call.
+func TestGatewayProvisionBadTokenRecordsRefusal(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	ctl := applied(t, budgetedSample(t))
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := cmdTestOIDCServer(t, key)
+	otherKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	bad := cmdMintToken(t, otherKey, map[string]any{"iss": issuer.URL, "aud": "agenthof", "exp": time.Now().Add(time.Hour).Unix(), "sub": "u-1"})
+	t.Setenv("AGENTHOF_OIDC_ISSUER", issuer.URL)
+	t.Setenv("AGENTHOF_OIDC_CLIENT_ID", "agenthof")
+	srv, generated := adminMock(t, 0, "")
+	var out bytes.Buffer
+	code := cmdGateway([]string{"provision", "--control-log", ctl, "--token", bad, "--admin-base", srv.URL}, &out)
+	if code != 1 || !strings.Contains(out.String(), "gateway provision: token authentication failed:") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "provision" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeTokenVerificationFailed || e.Reason.Message != "token verification failed" || e.ConfigHash != "" {
+		t.Fatalf("%+v", e)
+	}
+	if generated.Load() != 0 {
+		t.Fatal("a refusal must not touch the admin API")
+	}
+}
+
+// TestGatewayProvisionDamagedLedgerPrintsHintWithoutConfig: a torn ledger is
+// unwritable, so nothing is recorded, nothing is minted, and the repair hint
+// names no --config — provision no longer has one.
+func TestGatewayProvisionDamagedLedgerPrintsHintWithoutConfig(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	const torn = `{"v":"control/1","seq":1,"prev":""`
+	if err := os.WriteFile(ctl, []byte(torn), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, generated := adminMock(t, 0, "")
+	var out bytes.Buffer
+	code := cmdGateway(provisionArgs(ctl, srv.URL), &out)
+	if code != 1 || out.String() != "control ledger damaged; run: agenthof audit repair control --control-log "+ctl+"\n" {
+		t.Fatalf("exit %d out %q", code, out.String())
+	}
+	if after, _ := os.ReadFile(ctl); string(after) != torn {
+		t.Fatalf("a damaged ledger must not be written to:\n%s", after)
+	}
+	if generated.Load() != 0 {
+		t.Fatal("nothing may be minted")
+	}
+}
+
+// TestControlAdjacentCommandsBusyWhenAnotherProcessHoldsTheLedger waits the
+// real lockTimeout once: the parent blanks the env (t.Setenv is forbidden in
+// a parallel subtest), a helper process holds the ledger flock, and each
+// command prints its busy line, exits 1 and records nothing — contention on
+// a healthy ledger is busy, never the repair hint.
+func TestControlAdjacentCommandsBusyWhenAnotherProcessHoldsTheLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	cases := []struct {
+		name   string
+		args   func(t *testing.T, ctl string) []string // takes the SUBTEST's t: a parallel subtest must not use the parent's
+		prefix string
+	}{
+		{"gateway provision", func(_ *testing.T, ctl string) []string { return provisionArgs(ctl, "http://127.0.0.1:1") }, "gateway provision"},
+		{"runs prune", func(t *testing.T, ctl string) []string {
+			return pruneArgs(ctl, "--older-than", "180d", "--log-dir", t.TempDir())
+		}, "runs prune"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ctl := applied(t, writeSample(t))
+			before := len(controlEvents(t, ctl))
+			holdLock(t, "ledger", ctl, 9000)
+			var out bytes.Buffer
+			var code int
+			switch c.prefix {
+			case "gateway provision":
+				code = cmdGateway(c.args(t, ctl), &out)
+			default:
+				code = cmdRuns(c.args(t, ctl), &out)
+			}
+			if code != 1 || out.String() != c.prefix+": "+msgLockBusy+"\n" {
+				t.Fatalf("code %d out %q", code, out.String())
+			}
+			if len(controlEvents(t, ctl)) != before {
+				t.Fatal("busy must record nothing")
+			}
+		})
 	}
 }
 
@@ -1805,44 +2591,4 @@ func stubCallSpawn(proxyURL, token, spec string) (string, error) {
 		detail = out.Reason
 	}
 	return strings.TrimSpace(fmt.Sprintf("spawn %s %s %s", out.Status, id, detail)), nil
-}
-
-// TestGatewayProvisionSkipsWorkflowLessRole: a control-only role runs nothing,
-// so provision mints it no provider key — a key with budget $0 would be a
-// credential nothing consumes. The mock counts key generations.
-func TestGatewayProvisionSkipsWorkflowLessRole(t *testing.T) {
-	root := writeSample(t)
-	if err := os.WriteFile(filepath.Join(root, "roles", "se.yaml"), []byte("name: software-engineer\nworkflows: [fix-bug]\nbudget_usd_month: 50\nallowed_groups: [\"*\"]\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "roles", "ops.yaml"), []byte("name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, enable, disable, repair]\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	generated := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/key/generate" {
-			generated++
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"key":"sk-test"}`))
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
-	t.Chdir(t.TempDir())
-
-	var out bytes.Buffer
-	if code := cmdGateway([]string{"provision", "--config", root, "--admin-base", srv.URL}, &out); code != 0 {
-		t.Fatalf("provision: %d\n%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "role platform-admin: owns no workflows; no key provisioned") {
-		t.Fatalf("missing skip line: %s", out.String())
-	}
-	if generated != 1 {
-		t.Fatalf("key generations = %d, want 1 (software-engineer only)", generated)
-	}
-	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "platform-admin.key")); !os.IsNotExist(err) {
-		t.Fatalf("a control-only role must get no key file; stat err = %v", err)
-	}
 }

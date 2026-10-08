@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/apiclient"
+	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 )
 
@@ -228,5 +229,35 @@ func TestShutdownRefusesNewRunsCancelsInFlightAndWaits(t *testing.T) {
 	release()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestListRunsSkipsTheControlLedgerByIdentity: a hard link to the control
+// ledger inside LogDir, named like a run id, is skipped by identity — never
+// summarized, never warned about, never listed.
+func TestListRunsSkipsTheControlLedgerByIdentity(t *testing.T) {
+	ts := newTestServer(t, &fakeHost{}, fakeAuth{}, 1)
+	if _, err := control.Append(ts.srv.cfg.ControlLog, control.Event{Action: "apply", Outcome: "success",
+		Invoker: testInvoker, Witness: control.CaptureWitness(), ConfigHash: "sha256:aaa"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ts.logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const alias = "r-0000000000000c71"
+	if err := os.Link(ts.srv.cfg.ControlLog, filepath.Join(ts.logDir, alias+".jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	id, err := engine.Refuse(ts.logDir, "se", "fix-bug", testInvoker, "why not", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, body := ts.do(t, http.MethodGet, "/v1/runs", goodToken, nil)
+	list := decode[apiclient.RunList](t, body)
+	if resp.StatusCode != 200 || len(list.Runs) != 1 || list.Runs[0].RunID != id {
+		t.Fatalf("%d %+v, want only %s", resp.StatusCode, list.Runs, id)
+	}
+	if strings.Contains(ts.logs.String(), alias) {
+		t.Fatalf("the ledger must not be read as a run:\n%s", ts.logs.String())
 	}
 }

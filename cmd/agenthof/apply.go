@@ -42,6 +42,13 @@ const msgLockBusy = "another agenthof process holds the installed-configuration 
 // bootstrap (the server without --allow-api-bootstrap).
 const msgBootstrapDisabled = "not authorized: nothing is installed and bootstrap over the API is not enabled (serve --allow-api-bootstrap); apply locally first"
 
+// msgNothingInstalled is the recorded not_authorized reason for a control
+// command that reads no configuration directory and finds nothing installed
+// to authorize against (gateway provision, runs prune): there are no roles
+// to grant anything, and nothing to fall back to. Path-free; the hint
+// printed beside it names the store and the apply to run.
+const msgNothingInstalled = "not authorized: nothing is installed; apply a configuration first"
+
 // msgStagedDiffers is the recorded io_error reason when a bundle's staged
 // copy does not hash as the bundle itself: the filesystem changed a name or
 // the bytes between staging and hashing, and nothing is installed.

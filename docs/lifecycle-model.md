@@ -48,7 +48,9 @@ On a match, Agenthof resolves the logical name to a route: a provider
 endpoint, a provider model name, and a key.
 
 - **Budgeted path.** `agenthof gateway provision` writes a per-role key at
-  `.agenthof/keys/<role>.key` in the working directory, with
+  `.agenthof/keys/<role>.key` in the working directory, for each role of the
+  **installed** configuration that owns workflows (the invoker needs a
+  `provision` grant; the result is recorded in the control ledger), with
   `budget_usd_month` as that key's budget at the upstream gateway (LiteLLM).
   The model door reads that same directory. Injecting the key means the
   upstream gateway enforces the budget. An exhausted budget comes back as
