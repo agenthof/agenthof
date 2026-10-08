@@ -351,6 +351,25 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		return recordExit("refused", &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"})
 	}
 
+	// The installed-configuration writer lock (apply.go, step 2): the hash
+	// InstalledRoles returns below is the one flipInstalled stages from, so
+	// the lock must already be held here, not inside flipInstalled — an
+	// apply landing between that read and the stage would otherwise be
+	// re-snapshotted over. After the refused-token branch on purpose: a bad
+	// token under contention must still record its refusal (that branch
+	// reads no pointer), never an unrecorded busy. Held until this command
+	// returns, through flipInstalled's commit and append.
+	unlock, lockErr := ledger.LockFile(installedLock(controlLog))
+	if lockErr != nil {
+		if errors.Is(lockErr, ledger.ErrLockHeld) {
+			_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, msgLockBusy)
+			return 1
+		}
+		_, _ = fmt.Fprintln(out, lockErr)
+		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(lockErr)})
+	}
+	defer unlock()
+
 	// Authorize before loading --config whenever a snapshot is installed: the
 	// invoker is checked against the INSTALLED configuration's roles — what a
 	// previous apply approved — so an unauthorized caller learns one refusal
