@@ -228,6 +228,9 @@ func printApplyResult(res apiclient.ApplyResult, pre apiclient.Precondition, loc
 	case apiclient.ApplyInstalled:
 		_, _ = fmt.Fprintf(out, "registry ok: %d agents, %d workflows, %d roles\n", res.Agents, res.Workflows, res.Roles)
 		head()
+		if res.KeyID != "" {
+			_, _ = fmt.Fprintf(out, "signed: key_id %s\n", res.KeyID)
+		}
 		_, _ = fmt.Fprintf(out, "installed: %s\n", res.ConfigHash)
 		return 0
 	case apiclient.ApplyRefused:
@@ -262,6 +265,10 @@ func printApplyResult(res apiclient.ApplyResult, pre apiclient.Precondition, loc
 	case apiclient.ApplyInstalledNotRecorded:
 		_, _ = fmt.Fprintf(out, "registry ok: %d agents, %d workflows, %d roles\n", res.Agents, res.Workflows, res.Roles)
 		_, _ = fmt.Fprintln(out, msgInstalledNotRecorded)
+	case apiclient.ApplyInstalledNotSigned:
+		_, _ = fmt.Fprintf(out, "registry ok: %d agents, %d workflows, %d roles\n", res.Agents, res.Workflows, res.Roles)
+		head()
+		_, _ = fmt.Fprintf(out, "%s; an operator must run config sign on the server\n", msgInstalledNotSigned)
 	default:
 		_, _ = fmt.Fprintf(out, "apply: server answered with an unknown status %q\n", res.Status)
 	}

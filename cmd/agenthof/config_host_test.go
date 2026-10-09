@@ -286,3 +286,43 @@ func TestPullStatusCoversEveryKind(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigHostApplyInstalledNotSignedAndKeyID: the API apply carries the
+// key id when the host signed; a configured-and-failing sign step is
+// installed_not_signed with hash, head and counts, the cause logged on the
+// host and never returned; state C is the same, never a silent unsigned install.
+func TestConfigHostApplyInstalledNotSignedAndKeyID(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	h, ctl, logs := newConfigHost(t, true)
+	bundle := sampleBundle(t)
+	id, _ := keygenAt(t, ctl)
+	first := h.Apply(apiInvoker, bundle, apiclient.Precondition{ExpectNone: true}, apiVia())
+	if first.Status != apiclient.ApplyInstalled || first.KeyID != id {
+		t.Fatalf("%+v", first)
+	}
+	if err := os.Remove(signingKeyPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	res := h.Apply(apiInvoker, bundle, apiclient.Precondition{ExpectInstalled: first.ConfigHash}, apiVia())
+	if res.Status != apiclient.ApplyInstalledNotSigned || res.ConfigHash != first.ConfigHash || res.Head == nil || res.Head.Count != 2 ||
+		res.Agents != 2 || res.Workflows != 1 || res.Roles != 2 || res.Reason != "" || res.KeyID != "" {
+		t.Fatalf("%+v", res)
+	}
+	if !strings.Contains(logs.String(), "signing.key missing") || !strings.Contains(logs.String(), "config sign --control-log "+ctl) {
+		t.Fatalf("the cause and the remedy are logged on the host:\n%s", logs.String())
+	}
+	if ev := controlEvents(t, ctl); len(ev) != 2 || ev[1].Outcome != "success" {
+		t.Fatalf("the install is recorded: %+v", ev)
+	}
+	// State C over the API: installed_not_signed with the keygen cause.
+	if err := os.Rename(signingPubPath(ctl), signingKeyPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	res = h.Apply(apiInvoker, bundle, apiclient.Precondition{ExpectInstalled: first.ConfigHash}, apiVia())
+	if res.Status != apiclient.ApplyInstalledNotSigned || res.Head.Count != 3 {
+		t.Fatalf("%+v", res)
+	}
+	if !strings.Contains(logs.String(), "config keygen --control-log "+ctl) {
+		t.Fatalf("state C names keygen:\n%s", logs.String())
+	}
+}

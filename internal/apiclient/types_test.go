@@ -3,6 +3,7 @@ package apiclient
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,5 +98,22 @@ func TestConfigSnapshotRoundTripAndKeys(t *testing.T) {
 	var req ApplyRequest
 	if err := json.Unmarshal(data, &req); err != nil || req.Files["gateway.yaml"] != "models: {}\n" {
 		t.Fatalf("a pulled document must decode as an ApplyRequest: %v %+v", err, req)
+	}
+}
+
+// TestApplyResultKeyIDIsAdditive: key_id travels on installed when the
+// server signed, and is absent otherwise; the new status is a fixed string.
+func TestApplyResultKeyIDIsAdditive(t *testing.T) {
+	const id = "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c"
+	data, err := json.Marshal(ApplyResult{Status: ApplyInstalled, ConfigHash: "sha256:ab", KeyID: id})
+	if err != nil || string(data) != `{"status":"installed","config_hash":"sha256:ab","key_id":"`+id+`"}` {
+		t.Fatalf("%s %v", data, err)
+	}
+	data, _ = json.Marshal(ApplyResult{Status: ApplyInstalled, ConfigHash: "sha256:ab"})
+	if strings.Contains(string(data), "key_id") {
+		t.Fatalf("absent when unsigned: %s", data)
+	}
+	if ApplyInstalledNotSigned != "installed_not_signed" {
+		t.Fatal("the status is a wire constant")
 	}
 }

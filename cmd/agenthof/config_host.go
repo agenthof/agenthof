@@ -33,10 +33,15 @@ func (h *configHost) Apply(inv identity.Invoker, files map[string][]byte, pre ap
 	if out.Kind == applyLedgerDamaged {
 		h.logger.Error("control ledger damaged; run: agenthof audit repair control --control-log " + h.controlLog)
 	}
+	if out.Kind == applyInstalledNotSigned {
+		// The cause can name paths: logged here for the operator, never returned.
+		h.logger.Warn(msgInstalledNotSigned+"; "+signRemedy(h.controlLog, out.SignCause), "config_hash", out.ConfigHash, "err", out.SignCause)
+	}
 	return applyResult(out)
 }
 
-// applyResult maps an applyOutcome to the wire shape. The 500 bodies are
+// applyResult maps an applyOutcome to the wire shape, carrying the signing
+// key id on an installed result. The 500 bodies are
 // fixed strings (the recorded reason can name store paths); the 422 lines
 // are cleaned the way their recorded reason is.
 func applyResult(o applyOutcome) apiclient.ApplyResult {
@@ -51,6 +56,7 @@ func applyResult(o applyOutcome) apiclient.ApplyResult {
 	case applyInstalled:
 		res.Status = apiclient.ApplyInstalled
 		res.Bootstrap = !o.Installed
+		res.KeyID = o.KeyID
 	case applyLedgerDamaged:
 		res.Status = apiclient.ApplyLedgerDamaged
 		res.Reason = apiclient.ReasonLedgerDamaged
@@ -72,6 +78,8 @@ func applyResult(o applyOutcome) apiclient.ApplyResult {
 		res = apiclient.ApplyResult{Status: apiclient.ApplyError, Reason: apiclient.ReasonNotRecorded}
 	case applyInstalledNotRecorded:
 		res.Status = apiclient.ApplyInstalledNotRecorded
+	case applyInstalledNotSigned:
+		res.Status = apiclient.ApplyInstalledNotSigned
 	}
 	return res
 }

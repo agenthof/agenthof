@@ -228,6 +228,7 @@ func TestApplyConfigStatusMapping(t *testing.T) {
 		{"500 append failed", apiclient.ApplyResult{Status: apiclient.ApplyError, Reason: "whatever"}, 500, "", apiclient.ReasonNotRecorded, false, ""},
 		{"500 ledger damaged", apiclient.ApplyResult{Status: apiclient.ApplyLedgerDamaged, Reason: "ledger torn at byte 9"}, 500, "", apiclient.ReasonLedgerDamaged, false, ""},
 		{"500 installed not recorded", apiclient.ApplyResult{Status: apiclient.ApplyInstalledNotRecorded, ConfigHash: goodHash, Agents: 2, Workflows: 1, Roles: 2}, 500, "", "", false, ""},
+		{"500 installed not signed", apiclient.ApplyResult{Status: apiclient.ApplyInstalledNotSigned, ConfigHash: goodHash, Head: head, Agents: 2, Workflows: 1, Roles: 2}, 500, "", "", false, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -249,8 +250,11 @@ func TestApplyConfigStatusMapping(t *testing.T) {
 			if c.name == "422" && len(res.Errors) != 2 {
 				t.Fatalf("422 must return every line: %+v", res.Errors)
 			}
-			if c.name == "500 installed not recorded" && (res.Agents != 2 || res.ConfigHash != goodHash) {
+			if (c.name == "500 installed not recorded" || c.name == "500 installed not signed") && (res.Agents != 2 || res.ConfigHash != goodHash) {
 				t.Fatalf("the counts and hash are known: %+v", res)
+			}
+			if c.name == "500 installed not signed" && res.Head == nil {
+				t.Fatal("the head is known: the install was recorded")
 			}
 			if strings.Contains(string(body), "/srv/") || strings.Contains(string(body), "torn at") {
 				t.Fatalf("a 500 body must carry no host text: %s", body)

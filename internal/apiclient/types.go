@@ -147,7 +147,7 @@ type Precondition struct {
 // constants; the HTTP code follows from it.
 type ApplyResult struct {
 	Status      string   `json:"status"`
-	ConfigHash  string   `json:"config_hash,omitempty"`  // installed / rejected / refused / installed_not_recorded
+	ConfigHash  string   `json:"config_hash,omitempty"`  // installed / rejected / refused / installed_not_recorded / installed_not_signed
 	CurrentHash string   `json:"current_hash,omitempty"` // precondition_failed, when something is installed
 	Bootstrap   bool     `json:"bootstrap,omitempty"`    // installed: nothing was installed before
 	Reason      string   `json:"reason,omitempty"`       // refused / rejected / error: the recorded reason message
@@ -156,6 +156,7 @@ type ApplyResult struct {
 	Agents      int      `json:"agents,omitempty"`
 	Workflows   int      `json:"workflows,omitempty"`
 	Roles       int      `json:"roles,omitempty"`
+	KeyID       string   `json:"key_id,omitempty"` // installed: the operator's signing key id, when the server signs
 }
 
 // Apply statuses.
@@ -168,6 +169,7 @@ const (
 	ApplyLedgerDamaged        = "ledger_damaged"
 	ApplyBusy                 = "busy"
 	ApplyInstalledNotRecorded = "installed_not_recorded"
+	ApplyInstalledNotSigned   = "installed_not_signed"
 )
 
 // Fixed reasons on a 500 answer: the server never returns the recorded OS

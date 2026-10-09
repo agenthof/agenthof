@@ -76,6 +76,10 @@ func fakeServeAPI(t *testing.T) *httptest.Server {
 				answer(http.StatusInternalServerError, apiclient.ApplyResult{Status: apiclient.ApplyLedgerDamaged, Reason: apiclient.ReasonLedgerDamaged})
 			case strings.Contains(req.Files["roles/ops.yaml"], "unrecorded-me"):
 				answer(http.StatusInternalServerError, apiclient.ApplyResult{Status: apiclient.ApplyInstalledNotRecorded, ConfigHash: fakeInstalledHash, Agents: 1, Workflows: 2, Roles: 3})
+			case strings.Contains(req.Files["roles/ops.yaml"], "unsigned-me"):
+				answer(http.StatusInternalServerError, apiclient.ApplyResult{Status: apiclient.ApplyInstalledNotSigned, ConfigHash: fakeInstalledHash, Head: head, Agents: 1, Workflows: 2, Roles: 3})
+			case strings.Contains(req.Files["roles/ops.yaml"], "signed-me"):
+				answer(http.StatusOK, apiclient.ApplyResult{Status: apiclient.ApplyInstalled, ConfigHash: "sha256:" + strings.Repeat("c", 64), Head: head, Agents: 1, Workflows: 2, Roles: 3, KeyID: goldenKeyID})
 			default:
 				answer(http.StatusOK, apiclient.ApplyResult{Status: apiclient.ApplyInstalled, ConfigHash: "sha256:" + strings.Repeat("c", 64), Head: head, Agents: 1, Workflows: 2, Roles: 3})
 			}
@@ -168,6 +172,8 @@ func TestApplyServerPrintsEveryRow(t *testing.T) {
 		{"500 error", "error-me", hc, 1, "apply: store unusable\ncontrol head: seq=7 sha256=abc\n"},
 		{"500 ledger damaged", "damaged-me", hc, 1, "apply: control ledger damaged; an operator must run audit repair control on the server\n"},
 		{"500 installed not recorded", "unrecorded-me", hc, 1, "registry ok: 1 agents, 2 workflows, 3 roles\ninstalled; event NOT recorded\n"},
+		{"500 installed not signed", "unsigned-me", hc, 1, "registry ok: 1 agents, 2 workflows, 3 roles\ncontrol head: seq=7 sha256=abc\ninstalled; signature NOT written; an operator must run config sign on the server\n"},
+		{"installed and signed", "signed-me", hc, 0, "registry ok: 1 agents, 2 workflows, 3 roles\ncontrol head: seq=7 sha256=abc\nsigned: key_id " + goldenKeyID + "\ninstalled: sha256:" + strings.Repeat("c", 64) + "\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

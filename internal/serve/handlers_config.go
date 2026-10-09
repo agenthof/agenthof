@@ -172,8 +172,9 @@ func (s *Server) answerApply(w http.ResponseWriter, inv identity.Invoker, res ap
 		}
 	case apiclient.ApplyLedgerDamaged:
 		res.Reason = apiclient.ReasonLedgerDamaged
-	case apiclient.ApplyInstalledNotRecorded:
-		// the counts and hash are known: the install landed
+	case apiclient.ApplyInstalledNotRecorded, apiclient.ApplyInstalledNotSigned:
+		// the counts, hash and head are known: the install landed and was
+		// recorded; only the server's own follow-up failed
 	default:
 		res = apiclient.ApplyResult{Status: apiclient.ApplyError, Reason: apiclient.ReasonStoreUnusable}
 	}
