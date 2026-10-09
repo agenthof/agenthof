@@ -150,16 +150,16 @@ The governed core is real and runnable today:
   installed pointer and the control ledger records the install that put it
   there, re-applies to the same hash, and — as a read — is not recorded.
 - **Operator-signed configuration snapshots** — with an Ed25519 key on the
-  install host (`config keygen`; the operator keeps the private key there and
-  pins the public key at each execution point), every install signs the
-  configuration over a payload binding its hash to the control ledger's
-  identity, the install's version, and its time. `serve` returns the signature
-  on the pull and verifies it as it serves, answering only when the ledger
-  vouches for the pointer **and** a matching signature verifies — so an edge
-  that pins the public key can prove the configuration is the one the operator
-  installed, not merely one a server stated. Signing is opt-in; `config sign`
-  (re)signs an install. It is evidence of origin, as strong as the private
-  key's custody on the host — not a vault.
+  install host (`config keygen`; the operator keeps the private key there),
+  every install signs the configuration over a payload binding its hash to the
+  control ledger's identity, the install's version, and its time. `serve`
+  returns that signature on the pull and verifies it against the bytes as it
+  serves them, answering only when the ledger vouches for the pointer **and** a
+  matching signature verifies; `config pull` names the signer. Signing is
+  opt-in; `config sign` (re)signs an install. It is evidence of origin, as
+  strong as the private key's custody on the host — not a vault. Pinning the
+  public key at each execution point and verifying the pulled configuration
+  against it there is the next step.
 
 ## Next
 
@@ -174,13 +174,15 @@ The governed core is real and runnable today:
   the command line today; the same two operations over the API, under the same
   default-deny `control:` authorization, and a structured record of what a
   prune removed, are still to come.
-- **A tamper-evident pointer, and verification on the run path** — the
-  installed-config pointer is chained into the control ledger, and a run
-  verifies the installed snapshot's operator signature before it executes, with
-  a staleness bound (today that signature is produced and verified when the
-  configuration is pulled; the bytes a run reads are still checked against the
-  pointer's hash only) — so a run's configuration is provably the one the
-  operator installed, end to end.
+- **A tamper-evident pointer, and verification at the edge** — the
+  installed-config pointer is chained into the control ledger; a run verifies
+  the installed snapshot's operator signature before it executes, and an
+  execution point verifies the pulled configuration against a pinned public
+  key, both with a staleness bound (today `serve` verifies the signature as it
+  serves it and `config pull` names the signer; an execution point does not yet
+  verify against a pinned key, and the bytes a run reads are still checked
+  against the pointer's hash only) — so a run's configuration is provably the
+  one the operator installed, end to end.
 - **More confinement backends** — the reference runtime's confinement becomes a
   selection seam with OS-native backends beyond rootless podman (for example
   macOS Seatbelt, Linux Landlock), chosen per host with a fail-closed default

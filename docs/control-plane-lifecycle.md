@@ -443,16 +443,20 @@ on the install host — the operator keeps the private key there, as they keep
 the control ledger, and pins the public key at each execution point out of
 band. With a key present, every install signs, over a payload that binds the
 configuration hash to the control ledger's identity, the install's sequence,
-and its time — so an edge that pins the public key can tell the configuration
-the operator installed, as a specific numbered install, from an older one
-replayed or an impostor's. `serve` returns that signature on the pull and
-verifies it against the bytes as it serves them: with a key configured, it
-answers only when the control ledger vouches for the pointer **and** a matching
-signature verifies, else a retryable *not yet signed* while an install is a
-moment ahead of its signature (`config sign` writes it; an install normally
-does). With no key, nothing is signed and the transport and the token are the
-trust, exactly as before. The signature is as strong as the custody of that
-private key on the install host: it is evidence of origin, not a vault.
+and its time — so that, pinned to the public key, an execution point can tell
+the configuration the operator installed, as a specific numbered install, from
+an older one replayed or an impostor's. `serve` returns that signature on the
+pull and verifies it against the bytes as it serves them: with a key
+configured, it answers only when the control ledger vouches for the pointer
+**and** a matching signature verifies; otherwise a retryable *not yet signed* —
+usually the moment an install is ahead of its signature, but also whenever the
+installed snapshot has no current signature (after `config keygen` on a
+configuration installed earlier, or a removed or stale `.sig`), which `config
+sign` clears. A broken key state — the public half missing or unreadable — is a
+hard `500` instead, failing closed rather than dropping silently to unsigned.
+With no key, nothing is signed and the transport and the token are the trust,
+exactly as before. The signature is as strong as the custody of that private
+key on the install host: it is evidence of origin, not a vault.
 
 ## 6. Reading it back
 

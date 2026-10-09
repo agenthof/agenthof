@@ -846,9 +846,10 @@ to a hash-chained control log, and `agenthof audit`
 gains three verbs to read and, if needed, recover it. See
 [`docs/concepts.md`](../concepts.md#control-plane-audit) for what gets
 recorded and why; this section is the flag-by-flag and exit-code reference.
-`config pull`, `config keygen` and `config sign` are host-local and
-**not** recorded: a pull is a read, and keygen/sign derive or attest the
-operator's signature of an install the control ledger already records, gated by
+`config pull` is a read (of the local store, or a server with `--server`) and
+`config keygen` / `config sign` are host-local; none of the three is
+recorded: a pull reads, and keygen/sign derive or attest the operator's
+signature of an install the control ledger already records, gated by
 possession of the signing key on the host (constitution, Article VI).
 
 | Command | Flags |
