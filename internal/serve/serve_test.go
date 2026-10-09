@@ -158,6 +158,18 @@ func (h *fakeConfigHost) Pull(inv identity.Invoker) PullResult {
 	return h.pull
 }
 
+func (h *fakeConfigHost) pullCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.pulls)
+}
+
+func (h *fakeConfigHost) lastPull() identity.Invoker {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.pulls[len(h.pulls)-1]
+}
+
 type testServer struct {
 	srv    *Server
 	http   *httptest.Server

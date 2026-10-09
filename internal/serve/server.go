@@ -170,6 +170,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/runs/{id}/cancel", s.authed(s.cancelRun))
 	s.mux.HandleFunc("GET /v1/investigate", s.authed(s.investigate))
 	s.mux.HandleFunc("POST /v1/config/apply", s.authed(s.applyConfig))
+	s.mux.HandleFunc("GET /v1/config", s.authed(s.getConfig))
+	s.mux.HandleFunc("GET /v1/config/hash", s.authed(s.getConfigHash))
 }
 
 // Handler is the server's HTTP handler.
