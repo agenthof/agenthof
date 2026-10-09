@@ -345,8 +345,6 @@ func signInstalled(controlLog string) (signatureInfo, error) {
 // signIfConfigured is the installers' sign step: with signing off it does
 // nothing (signed false, err nil — the unsigned success); otherwise
 // signInstalled, whose failure the caller reports as installed-but-not-signed.
-//
-//nolint:unused // the shared installers' entry point; the apply path inlines it around its crash hook
 func signIfConfigured(controlLog string) (info signatureInfo, signed bool, err error) {
 	state, err := signingStateOf(controlLog)
 	if err != nil {

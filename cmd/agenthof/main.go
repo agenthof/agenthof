@@ -552,7 +552,10 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 // Disabling an already-disabled agent whose snapshot a flip wrote yields the
 // same bytes → the same hash → CommitSnapshot's identical-snapshot branch
 // re-points; the first flip on apply-written bytes always yields a new hash
-// (SetEnabled re-marshals the file).
+// (SetEnabled re-marshals the file). After the success append, when a
+// signing key is configured beside the control ledger, the re-install is
+// signed exactly as an apply's is; a sign failure prints "signature NOT
+// written" with the remedy and exits 1 — the flip stands, recorded.
 func flipInstalled(action, target, store, hash, controlLog string, inv identity.Invoker, assertedAs string,
 	recordExit func(outcome string, reason *control.Reason) int, out io.Writer) int {
 	// Verify before staging: a snapshot whose bytes no longer hash to the
@@ -647,6 +650,18 @@ func flipInstalled(action, target, store, hash, controlLog string, inv identity.
 		return 1
 	}
 	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+	// The flip is an install the pull's version follows, so it signs as
+	// apply does — after the record, under the writer lock cmdRegistryFlip
+	// holds. A failure leaves the flip installed and recorded; only the
+	// signature is missing, and the remedy is named.
+	info, signed, err := signIfConfigured(controlLog)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "signature NOT written: %v; %s\n", err, signRemedy(controlLog, err))
+		return 1
+	}
+	if signed {
+		_, _ = fmt.Fprintf(out, "signed: key_id %s\n", info.KeyID)
+	}
 	return 0
 }
 

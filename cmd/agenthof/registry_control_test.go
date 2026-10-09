@@ -1128,3 +1128,95 @@ func TestRegistryFlipRefusesToStageATamperedSnapshot(t *testing.T) {
 		t.Fatalf("run: %d\n%s", code, runOut)
 	}
 }
+
+// TestRegistryFlipSignsTheReinstall: a flip is an install the pull's version
+// follows, so it signs: disable writes a verifying .sig for the flip's hash
+// at the flip's seq; the apply's .sig stays at its seq; a repeated disable
+// (same bytes, same hash — the idempotent flip the kill-switch tests already
+// pin) rewrites that hash's .sig with the newer seq; enable installs a third
+// hash with its own .sig.
+func TestRegistryFlipSignsTheReinstall(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	id, _ := keygenAt(t, ctl)
+	appliedAt(t, root, ctl)
+	applyHash := readPointer(t, ctl)
+	flip := func(action string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if code := cmdRegistry([]string{action, "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+			t.Fatalf("%s: %d\n%s", action, code, out.String())
+		}
+		return out.String()
+	}
+	if out := flip("disable"); !strings.HasSuffix(out, "signed: key_id "+id+"\n") {
+		t.Fatalf("disable must print the key id last:\n%s", out)
+	}
+	disableHash := readPointer(t, ctl)
+	f := readSig(t, ctl)
+	if f.Hash != disableHash || f.Version != 2 || !config.Verify(signingPub(t, ctl), f.Payload, f.Sig) {
+		t.Fatalf("flip .sig: %+v", f)
+	}
+	orig, err := config.ParseSignatureFile(mustRead(t, config.SignaturePath(installedStore(ctl), applyHash)))
+	if err != nil || orig.Version != 1 {
+		t.Fatalf("the apply's .sig is untouched: %v %+v", err, orig)
+	}
+	flip("disable") // idempotent: same bytes, same hash, a new seq
+	if readPointer(t, ctl) != disableHash {
+		t.Fatal("a repeated disable must re-point to the same snapshot")
+	}
+	if f := readSig(t, ctl); f.Version != 3 || f.Hash != disableHash {
+		t.Fatalf("a flip onto an already-installed hash rewrites its .sig for the newer seq: %+v", f)
+	}
+	flip("enable")
+	if f := readSig(t, ctl); f.Version != 4 || f.Hash == disableHash || f.Hash == applyHash || !config.Verify(signingPub(t, ctl), f.Payload, f.Sig) {
+		t.Fatalf("enable: %+v", f)
+	}
+	noStagingResidue(t, ctl)
+}
+
+// TestRegistryFlipNotSignedWhenPrivateKeyMissing: the flip lands and is
+// recorded; the signature is missing, loudly, and the exit code says so.
+func TestRegistryFlipNotSignedWhenPrivateKeyMissing(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	keygenAt(t, ctl)
+	appliedAt(t, root, ctl)
+	applyHash := readPointer(t, ctl)
+	if err := os.Remove(signingKeyPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	if code != 1 || !strings.Contains(out.String(), "agent coder disabled\ncontrol head: seq=2 ") ||
+		!strings.HasSuffix(out.String(), "signature NOT written: signing.key missing; run: agenthof config sign --control-log "+ctl+"\n") {
+		t.Fatalf("%d\n%s", code, out.String())
+	}
+	if readPointer(t, ctl) == applyHash {
+		t.Fatal("the pointer must have moved")
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "disable" || e.Outcome != "success" {
+		t.Fatalf("%+v", e)
+	}
+	noSig(t, ctl)
+}
+
+// TestRegistryFlipUnrecordedNeverSigns: the state-changed-not-recorded
+// branch returns before the sign step — there is no (version, time) to sign.
+func TestRegistryFlipUnrecordedNeverSigns(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	keygenAt(t, ctl)
+	appliedAt(t, root, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_state_before_append")
+	var out bytes.Buffer
+	code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if code != 1 || !strings.Contains(out.String(), "state changed; event NOT recorded") || strings.Contains(out.String(), "signature") {
+		t.Fatalf("%d\n%s", code, out.String())
+	}
+	noSig(t, ctl)
+}
