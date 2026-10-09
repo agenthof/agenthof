@@ -457,9 +457,10 @@ and groups are used outside of `apply`).
 ### `control`
 
 Optional. The control-plane operations this role's `allowed_groups` members
-may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune` — the six fixed
+may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull` — the seven fixed
 operations, named individually. There is no wildcard spelling and no
-operation is granted by omission: a role with no `control` key (or `control:`
+operation is granted by omission — the one implication is that `apply`
+includes `pull`; nothing else is implied: a role with no `control` key (or `control:`
 left null) grants none, and a present-but-empty `control: []` is rejected by
 `apply` with `control-empty`. An unknown token is rejected with
 `control-bad-op`. A role that grants control operations must name real
@@ -469,7 +470,10 @@ marker, so such a role would authorize no one — a silent no-op. A role may
 grant control operations and own no
 workflows (an operator role): see [`workflows`](#workflows). `provision` lets
 its members run `gateway provision`, which mints provider keys for the
-installed roles; `prune` lets them run `runs prune`.
+installed roles; `prune` lets them run `runs prune`. `pull` lets its members
+read the installed configuration over the API — `config pull --server`,
+`GET /v1/config` — so an execution point can enforce it; a grant of `apply`
+includes it.
 
 How the grant is enforced — which command checks which operation, what a
 refusal records, and the honest limits — is in
@@ -846,6 +850,7 @@ recorded and why; this section is the flag-by-flag and exit-code reference.
 | Command | Flags |
 |---|---|
 | `agenthof apply --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-installed <sha256:hex\|none>] [--server <url> [--bundle <file\|->]]` | `--control-log`, `--as`, `--groups`, `--token`, `--if-installed`, `--server`, `--bundle` |
+| `agenthof config pull [--server <url> [--token <jwt>]] [--control-log <path>] [--out <dir>] [--json]` | `--server`, `--token`, `--control-log`, `--out`, `--json` |
 | `agenthof registry enable\|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | same |
 | `agenthof audit control [--control-log <path>]` | `--control-log` |
 | `agenthof audit verify control [--control-log <path>] [--expect-head <hex>]` | `--control-log`, `--expect-head` |
@@ -972,6 +977,27 @@ or more than 1 MiB is refused before anything is sent. Output is the local
 output plus `installed: sha256:<hex>` on success; see
 [`serve.md`](serve.md) for every answer. `--bundle` needs `--server`.
 
+### `config pull`
+
+Reads the installed configuration: with `--server <url>` (or
+`AGENTHOF_SERVER`) and `--token` (or `AGENTHOF_TOKEN`) from a running
+`agenthof serve`, authorized against the installed roles (`pull`, or
+`apply`, which includes it); without `--server`, from the store beside
+`--control-log` (default `.agenthof/control.jsonl`) with no identity — the
+caller owns the filesystem, as with `audit control`. Either way the files
+must hash to the hash before anything is printed or written; a mismatch
+prints `config pull: snapshot does not hash as its pointer: got <h>, want
+<hash>` and exits 1. The summary is `installed: sha256:<hex>`, then
+`version: <seq>  installed_at: <RFC3339>` — the control-ledger sequence
+number and time of the install — then `files: <n>` and one line per file in
+the bundle's order. `--out <dir>` writes the configuration as a directory,
+which must not exist (an existing path, even an empty directory, exits 2:
+`--out <dir> exists; name a new directory`), re-hashes it and removes it on
+a mismatch; the directory then applies with `apply --config <dir>` (locally
+or `--server`) to the same hash. `--json` prints the document instead of the
+summary; `apply --bundle` accepts it as is. `--control-log` is ignored with
+`--server`. The CLI does not retry a `503`; it prints the server's answer.
+
 ### `--expect-head`
 
 `agenthof audit verify control` only. The control-ledger head hash (hex) to
@@ -1044,6 +1070,14 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
 | `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install); or (`--if-installed`) the precondition did not hold, printed and **not** recorded; or another process holds the installed-configuration writer lock (`another agenthof process holds the installed-configuration lock; retry`), not recorded; or (`--server`) any answer other than installed, and every transport error |
 | `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set; `--if-installed` not `sha256:<hex>` or `none`; `--server` without a token or without `--if-installed`; `--bundle` without `--server` |
+
+`agenthof config pull`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Pulled and verified — and, with `--out`, written and re-hashed |
+| `1` | Any other answer (`401`, `403`, `404`, `500`, `503` — printed as `server answered <code>: <body>`, or `server rejected the token`), any transport error, a snapshot whose files do not hash as its hash, a write failure (nothing is left behind), or — locally — nothing installed (`no configuration installed under <store>; run: agenthof apply …`), a pointer the ledger does not vouch for, or a store or ledger fault (printed with its cause) |
+| `2` | Usage error — no or unknown subcommand, `--server` without a token, or an existing `--out` path |
 
 `agenthof run` (the installed-configuration refusals; the engine documents the rest):
 

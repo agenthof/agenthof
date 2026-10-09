@@ -52,21 +52,40 @@ All bodies are JSON except `/audit`, which is plain text.
 | `GET /v1/investigate?since&until&invoker&agent&outcome&run&config_hash` | The `investigate/1` document over both ledgers; `since`/`until` are RFC3339. |
 | `POST /v1/runs/{id}/cancel` | Cancels a run this process is hosting; `202`. **Any** authenticated invoker may cancel a run this process is hosting, not only the one who started it. The engine records `cancelled` at or after the current step. A run this process does not host is `404` (there is nothing to cancel), one that is already over is `409`. |
 | `POST /v1/config/apply` `{"files": {"roles/ops.yaml": "<yaml>", …}}` with `If-Match: sha256:<hex>` or `If-None-Match: *` | Applies a configuration — the same `apply` the command line runs, over the server's control root. The body is the configuration's files by config-relative path (`agents/`, `workflows/`, `roles/`, `gateway.yaml`), as text, at most 1 MiB and 1000 files. Exactly one precondition header is required: `If-Match` names the installed configuration's hash the caller believes is current; `If-None-Match: *` means "only if nothing is installed" (a bootstrap, permitted only with `--allow-api-bootstrap`). Answers `200` `{status:"installed", config_hash, bootstrap, head, agents, workflows, roles}` with an `ETag` — a **recorded** `success`; `403` `{status:"refused", reason, config_hash, head}` — a **recorded** refusal when the installed configuration's roles grant the caller no `apply` (or nothing is installed and bootstrap is off); `422` `{status:"rejected", reason, errors, config_hash, head}` — a **recorded** rejection with every load and validation line; `412` `{status:"precondition_failed", current_hash}` (and an `ETag`) when the pointer is not what `If-Match` said — nothing recorded, retry with `current_hash`; `409` `{status:"busy"}` with `Retry-After` while another apply holds the writer lock — nothing recorded. A malformed body or key is `400`, over the cap `413`, neither recorded. `500` carries `{status:"error", reason:"store unusable"}` (a **recorded** `error`), `{status:"ledger_damaged"}` (nothing can be recorded) or `{status:"installed_not_recorded"}` (the install landed, its record did not); the server never returns its own paths. `503` while shutting down. |
+| `GET /v1/config` | The installed configuration, for the execution points that enforce it: `200` `{hash, version, installed_at, files}` with an `ETag` (the hash, quoted) — `files` is the exact `{path: text}` body `POST /v1/config/apply` accepts, `hash` is the installed pointer, `version` is the control-ledger sequence number of the event that installed it (an apply, or a kill-switch flip) and `installed_at` that event's time. Authorized against the installed roles: a role granting `pull`, or `apply`, which includes it; otherwise `403` `not authorized: no role grants pull or apply to the invoker`. `404` `no configuration installed`. `503` with `Retry-After: 1` when the ledger does not yet vouch for the pointer (`installed configuration is not yet on record; retry`) or another process holds the ledger lock (`control ledger busy; retry`). `500` `store unusable` (the pointer or roles cannot be read, the snapshot is gone, or its bytes do not hash as the pointer — tampered bytes are never served), `control ledger damaged`, or `snapshot cannot be distributed as a bundle` (a file name or encoding a bundle cannot carry). Non-`200` bodies are plain text. **A read — nothing is recorded.** |
+| `GET /v1/config/hash` | The same answer without `files` — the poll. It runs the same authorization, the same verification and the same ledger check, so it never names a hash the full pull would then refuse. **A read — nothing is recorded.** |
 | `GET /healthz` | Liveness, unauthenticated, `ok`. Nothing else. |
 
 Run ids are validated before anything touches the filesystem.
 
+A consumer that is not this CLI checks a pulled configuration the way the
+CLI does: every key of `files` is a config-relative path under `agents/`,
+`workflows/` or `roles/` with a `.yaml`/`.yml` name, or `gateway.yaml`; the
+hash is `sha256:` + hex of the `files/v1` canon — for each file in order
+(`agents/`, then `workflows/`, then `roles/`, keys sorted bytewise within
+each group, then `gateway.yaml`), `sha256(path) || sha256(bytes)` fed to one
+outer sha256. The two-file vector `{"agents/a.yaml": "name: a\nmodel: m\n",
+"roles/r.yaml": "name: r\nworkflows: [w]\n"}` hashes to
+`sha256:3a2f6d0c0df4546527ad1ba5c5ae63cc803851f99614247fcbf38b16b4a5d885`,
+the constant `internal/config`'s tests pin; a consumer that reproduces it
+conforms. Do not trust a byte of a pull whose files do not hash to its
+`hash`.
+
 ## The CLI as a client
 
-`run`, `audit <id>`, `investigate` and `apply` take `--server <url>` (or
-`AGENTHOF_SERVER`) with `--token` (or `AGENTHOF_TOKEN`) and print what
-they print locally: `run` waits for the run to finish, `audit` prints the
-server's rendering, `investigate` prints the text or `--json` document,
-and `apply --server --if-installed <sha256:hex|none>` sends the
-configuration (`--config`, read exactly as a local apply would snapshot
-it, or `--bundle <file|->`, the request body itself) and prints the local
-lines plus `installed: sha256:<hex>` — the hash the next `--if-installed`
-names. `registry enable|disable` and `audit repair control` stay local.
+`run`, `audit <id>`, `investigate`, `apply` and `config pull` take `--server
+<url>` (or `AGENTHOF_SERVER`) with `--token` (or `AGENTHOF_TOKEN`) and print
+what they print locally: `run` waits for the run to finish, `audit` prints
+the server's rendering, `investigate` prints the text or `--json` document,
+`apply --server --if-installed <sha256:hex|none>` sends the configuration
+(`--config`, read exactly as a local apply would snapshot it, or `--bundle
+<file|->`, the request body itself) and prints the local lines plus
+`installed: sha256:<hex>` — the hash the next `--if-installed` names — and
+`config pull --server [--out <dir>] [--json]` fetches the installed
+configuration, checks that it hashes as the server said, and prints the same
+`installed:` line, writes it as a directory `apply --config` accepts, or
+prints the document `apply --bundle` accepts. `registry enable|disable` and
+`audit repair control` stay local.
 
 ## Where a change came from: `origin`
 
@@ -133,6 +152,15 @@ and doors recorded (which may quote an upstream's answer), and in
 `investigate` the server-side paths of the ledgers read. A finer
 read/audit permission is a planned addition, not a current one.
 
+The configuration is read whole or not at all, by any invoker a role grants
+`pull` (or `apply`). A pull hands that invoker the governance policy itself:
+every role's groups, grants and budget, every agent's instruction, tools and
+exec grants, every workflow, the gateway's endpoints and tool resource URLs
+(which may name internal hosts), and the **names** of the environment
+variables that hold credentials — never a credential value, which the
+configuration does not contain. Grant `pull` to the execution points' group
+and to nothing broader. A finer per-object read permission is reserved.
+
 ## Binding and TLS
 
 The default bind is `127.0.0.1:8080`. Serving any other address
@@ -149,7 +177,8 @@ one as what it is — a leftover, not a running server.
 taken before the request body is read or the config loaded, so a caller
 cannot make the server load config outside the cap. On `SIGINT`/`SIGTERM`
 the server stops accepting runs and applies (`POST /v1/runs` and `POST
-/v1/config/apply` answer `503`), keeps answering reads, cancels every
+/v1/config/apply` answer `503`), keeps answering reads, keeps the
+configuration pullable (a pull is a read), cancels every
 in-flight run, waits for an apply in flight, and waits up to
 `--shutdown-timeout` (default: the config's step timeout) before
 closing. A deadline shorter than the step timeout can cut a run off
@@ -185,7 +214,11 @@ mid-step; its ledger then has no final event and reads back as
   records `cancelled`.
 - `GET /v1/runs` and `/v1/investigate` read and verify every ledger under
   the log directory on each call, and are not paginated; both are fine at a
-  single host's scale and are where aggregation/pagination will land later.
+  single host's scale and are where aggregation/pagination will land later
+  — and every `GET /v1/config` and `GET /v1/config/hash` verifies the whole
+  control ledger under a shared lock to find the installing event, and reads
+  and hashes the whole snapshot: the poll is cheap relative to the full pull,
+  not free. An in-process memo of that scan is the reserved optimization.
 - While the identity provider is unreachable, token verification waits on
   the discovery timeout and requests serialize behind it; a negative
   cache / backoff is reserved.
@@ -214,5 +247,41 @@ mid-step; its ledger then has no final event and reads back as
   that normalizes names (HFS+ stores NFD): the staged copy no longer
   hashes as the proposal, and the apply is recorded as an error with
   nothing installed. APFS and ext4 preserve names and are unaffected.
-- `apply` is the only control command over the API; `registry
-  enable|disable`, `audit repair control`, and `audit control` stay local.
+- `apply` and `config pull` are the control commands over the API;
+  `registry enable|disable`, `audit repair control` and `audit control` stay
+  local.
+- No record says who pulled. Reads do not write the control ledger; a
+  refused pull is a `403` in the server log, a successful one an Info line.
+  Centrally, an execution point's use of the configuration shows only as the
+  config hash its runs stamp. Recording pulls is reserved.
+- `503` is the honest answer for a pointer the ledger does not vouch for:
+  the install→record window inside every apply (milliseconds), an install
+  whose record was never appended (`installed; event NOT recorded` — re-apply
+  to clear it), and a pointer re-aimed by hand. `run` and `serve` on the host
+  execute such a pointer; an execution point is not handed it. Two of those
+  three clear only when an operator acts, so a poller should back off rather
+  than honor `Retry-After: 1` forever.
+- A repaired ledger still vouches: after `audit repair control` the chain
+  verifies and the pull answers `200` when the pointer matches the last
+  recorded install; the taint stays visible to `audit verify control` (exit
+  3) and `investigate`, not to the puller.
+- Who may pull is decided from the installed `roles/` as the pointer names
+  them, unverified; the bytes served are verified whole, `roles/` included,
+  so a tampered snapshot authorizes nobody to receive anything but is refused
+  for everyone (`500 store unusable`), and the host's log names the cause.
+- Two answers precede authorization and disclose store state to any
+  authenticated invoker: `404` (nothing is installed) and `500 store unusable`
+  (the pointer or the roles file cannot be read) — there are no roles to
+  decide with. `POST /v1/runs` already answers `422` for both states.
+- Two snapshot classes cannot be distributed: a config file whose name is
+  non-printable or over 200 characters, or whose bytes are not valid UTF-8 —
+  `500 snapshot cannot be distributed as a bundle`. They run locally; rename
+  or re-encode the file and apply. A snapshot over 8 MiB cannot be pulled by
+  `config pull`.
+- Nothing is signed yet. The puller's check is a content address against a
+  hash the server stated over an authenticated channel; put TLS in front of
+  `serve` (above). Operator signing with a key pinned at the execution point
+  is reserved.
+- `version` is a ledger sequence number, not an apply count: it advances on a
+  kill-switch flip and on a re-apply of identical bytes. Key on `hash` for
+  "did the bytes change", on `version` for "which install".

@@ -83,8 +83,9 @@ includes:
   declares `allowed_groups: ["*"]` (open to any authenticated invoker),
   `accountant` declares `allowed_groups: [finance]` (gated to that group), and
   `platform-admin` owns no workflows but grants the control-plane operations
-  (`control: [apply, enable, disable, repair, provision, prune]`) to the `platform-eng` group —
-  which is why every `apply` and kill-switch command in this demo passes
+  (`control: [apply, enable, disable, repair, provision, prune]`) to the `platform-eng` group
+  (and, because `apply` includes `pull`, that group may read the installed
+  configuration back) — which is why every `apply` and kill-switch command in this demo passes
   `--groups platform-eng`. A caller no role grants is refused, and the refusal
   is recorded. (This very first `apply` is a bootstrap — nothing is installed
   yet, so it is permitted and recorded as such; every control command after it
