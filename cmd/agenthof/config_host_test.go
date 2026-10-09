@@ -279,6 +279,7 @@ func TestPullStatusCoversEveryKind(t *testing.T) {
 		pulled: serve.PullOK, pullNothingInstalled: serve.PullNothingInstalled, pullRefused: serve.PullRefused,
 		pullStoreUnusable: serve.PullStoreUnusable, pullNotBundleable: serve.PullNotBundleable,
 		pullLedgerDamaged: serve.PullLedgerDamaged, pullBusy: serve.PullBusy, pullNotRecorded: serve.PullNotRecorded,
+		pullNotSigned: serve.PullNotSigned,
 	}
 	for k, s := range want {
 		if got := pullStatus(k); got != s {

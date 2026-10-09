@@ -74,9 +74,15 @@ func TestConfigSignRepairsTheSignGap(t *testing.T) {
 	}
 	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
 	noSig(t, ctl)
+	if out := pullConfig(pullRequest{ControlLog: ctl}); out.Kind != pullNotSigned {
+		t.Fatalf("before sign: %d", out.Kind)
+	}
 	hash := readPointer(t, ctl)
 	if code, out := signCode(t, ctl); code != 0 || out != "signed: "+hash+"\nversion: 1  key_id: "+id+"\n" {
 		t.Fatalf("%d %q", code, out)
+	}
+	if out := pullConfig(pullRequest{ControlLog: ctl}); out.Kind != pulled || out.Snapshot.Signature == nil {
+		t.Fatalf("after sign: %d", out.Kind)
 	}
 	f := readSig(t, ctl)
 	if f.Version != 1 || !config.Verify(signingPub(t, ctl), f.Payload, f.Sig) {
