@@ -59,7 +59,10 @@ func SnapshotDir(store, hash string) string {
 // read, called by LoadInstalled (the execution read: run, serve) before any
 // file is parsed, and by the kill switch before it stages a copy to
 // re-install — so tampered bytes are neither executed nor re-installed under
-// a new, correct name. It is not called by InstalledRoles, the lenient
+// a new, correct name. The distribution read (SnapshotBundle) makes the
+// same judgment over the bytes it returns, with the same canon, the same
+// enumeration and the same mismatch text. It is not called by
+// InstalledRoles, the lenient
 // authorization read (docs/control-plane-lifecycle.md, honest limits). An
 // unreadable snapshot is that read error; a mismatch is
 // "installed config <hash>: snapshot hashes as <got>, not as its pointer".
