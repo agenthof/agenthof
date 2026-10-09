@@ -45,6 +45,7 @@ func TestPullConfigStatusMapping(t *testing.T) {
 		{PullLedgerDamaged, http.StatusInternalServerError, apiclient.ReasonLedgerDamaged, false},
 		{PullBusy, http.StatusServiceUnavailable, apiclient.PullBodyBusy, true},
 		{PullNotRecorded, http.StatusServiceUnavailable, apiclient.PullBodyNotRecorded, true},
+		{PullNotSigned, http.StatusServiceUnavailable, apiclient.PullBodyNotSigned, true},
 		{"something-new", http.StatusInternalServerError, apiclient.ReasonStoreUnusable, false},
 	}
 	for _, path := range []string{"/v1/config", "/v1/config/hash"} {
@@ -193,5 +194,52 @@ func TestPullHandlerSourceNeverAdmitsOrRecords(t *testing.T) {
 		if strings.Contains(string(src), forbidden) {
 			t.Fatalf("handlers_pull.go must not contain %q: a pull is a read served through the drain", forbidden)
 		}
+	}
+}
+
+var signedSnapshot = apiclient.ConfigSnapshot{
+	Hash: goodHash, Version: 7, InstalledAt: time.Date(2026, 10, 9, 2, 12, 1, 500000000, time.UTC),
+	Files: map[string]string{"roles/ops.yaml": "name: ops\ncontrol: [apply]\nallowed_groups: [engineering]\n"},
+	Signature: &apiclient.ConfigSignature{Format: "agenthof-config-signature/v1", LogID: "00112233445566778899aabbccddeeff",
+		KeyID: "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+		Sig:   "7Zj+G/3H5lmX+zAr8dVH+/R9r0f08gA7DLnMYD4x7OkIn/JG51vkZsUybg4O7USrgfhnQJgw488YTrPxqsGODg=="},
+}
+
+// TestPullConfigBothRoutesCarryTheSignature: the full pull and the hash
+// poll both carry the signature object verbatim (the poll lets an edge
+// verify BEFORE it fetches the files); the full pull's log line names the
+// key id; the poll logs nothing.
+func TestPullConfigBothRoutesCarryTheSignature(t *testing.T) {
+	ts := newTestServer(t, &fakeHost{}, fakeAuth{}, 1)
+	ts.config.pull = PullResult{Status: PullOK, Snapshot: signedSnapshot}
+	const sigJSON = `"signature":{"format":"agenthof-config-signature/v1","log_id":"00112233445566778899aabbccddeeff","key_id":"56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c","sig":"7Zj+G/3H5lmX+zAr8dVH+/R9r0f08gA7DLnMYD4x7OkIn/JG51vkZsUybg4O7USrgfhnQJgw488YTrPxqsGODg=="}`
+	resp, body := ts.do(t, http.MethodGet, "/v1/config/hash", goodToken, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), sigJSON) || strings.Contains(string(body), `"files"`) {
+		t.Fatalf("hash route: %d %s", resp.StatusCode, body)
+	}
+	if strings.Contains(ts.logs.String(), "config pulled") {
+		t.Fatalf("the poll logs nothing:\n%s", ts.logs.String())
+	}
+	resp, body = ts.do(t, http.MethodGet, "/v1/config", goodToken, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), sigJSON) || !strings.Contains(string(body), `"files"`) {
+		t.Fatalf("full route: %d %s", resp.StatusCode, body)
+	}
+	snap := decode[apiclient.ConfigSnapshot](t, body)
+	if snap.Signature == nil || *snap.Signature != *signedSnapshot.Signature {
+		t.Fatalf("%+v", snap.Signature)
+	}
+	logs := ts.logs.String()
+	if !strings.Contains(logs, "config pulled") || !strings.Contains(logs, "key_id="+signedSnapshot.Signature.KeyID) || strings.Contains(logs, signedSnapshot.Signature.Sig) {
+		t.Fatalf("the 200 line names the key id, never the signature bytes:\n%s", logs)
+	}
+	// Not signed: a retryable 503 with the fixed body, logged once at Info.
+	ts.logs.Reset()
+	ts.config.pull = PullResult{Status: PullNotSigned}
+	resp, body = ts.do(t, http.MethodGet, "/v1/config", goodToken, nil)
+	if resp.StatusCode != http.StatusServiceUnavailable || strings.TrimSpace(string(body)) != apiclient.PullBodyNotSigned || resp.Header.Get("Retry-After") != "1" {
+		t.Fatalf("%d %q %q", resp.StatusCode, body, resp.Header.Get("Retry-After"))
+	}
+	if logs := ts.logs.String(); !strings.Contains(logs, "level=INFO") || !strings.Contains(logs, "status=not_signed") || strings.Contains(logs, "config sign") {
+		t.Fatalf("one Info status line, no remedy (the host's Warn carries it):\n%s", logs)
 	}
 }
