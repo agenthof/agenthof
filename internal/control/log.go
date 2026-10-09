@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/identity"
@@ -256,4 +257,31 @@ func newLogID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// genesisLogIDRE is what newLogID produces: 16 bytes, lowercase hex.
+var genesisLogIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// GenesisLogID reads the control ledger's identity: the log_id Append set
+// on the genesis record and nothing since — audit repair control truncates
+// a torn tail and never rewrites genesis, so it is stable for the ledger's
+// life. It is a one-field decode of records[0]: DecodedEvent omits log_id
+// on purpose. An empty ledger, a genesis that does not decode, and a
+// genesis without a log_id or with one that is not 32 lowercase hex are
+// refused — no ledger this package wrote looks like that, and a reader
+// binding a signature to the ledger's identity must not guess one.
+func GenesisLogID(records []ledger.Record) (string, error) {
+	if len(records) == 0 {
+		return "", errors.New("control ledger: no genesis record")
+	}
+	var genesis struct {
+		LogID string `json:"log_id"`
+	}
+	if err := json.Unmarshal(records[0].Raw, &genesis); err != nil {
+		return "", fmt.Errorf("control ledger genesis: %w", err)
+	}
+	if !genesisLogIDRE.MatchString(genesis.LogID) {
+		return "", errors.New("control ledger genesis has no log_id")
+	}
+	return genesis.LogID, nil
 }
