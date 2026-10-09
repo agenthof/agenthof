@@ -75,9 +75,15 @@ func ledgerBytes(t *testing.T, ctl string) []byte {
 func pullAPI(t *testing.T, ctl string, inv identity.Invoker) pullOutcome {
 	t.Helper()
 	before := ledgerBytes(t, ctl)
+	_, errBefore := os.Stat(ctl)
 	out := pullConfig(pullRequest{ControlLog: ctl, Authorize: true, Invoker: inv})
 	if after := ledgerBytes(t, ctl); !bytes.Equal(before, after) {
 		t.Fatalf("a pull must never write the control ledger (kind %d)", out.Kind)
+	}
+	// Existence, not just bytes: bytes.Equal(nil, []byte{}) is true, so a pull
+	// that created an empty ledger would slip past the byte compare.
+	if _, errAfter := os.Stat(ctl); (errBefore == nil) != (errAfter == nil) {
+		t.Fatalf("a pull must never create or remove the control ledger (kind %d)", out.Kind)
 	}
 	return out
 }
@@ -390,8 +396,10 @@ func TestPullConfigVersionFollowsEveryInstall(t *testing.T) {
 
 // TestPullConfigBusyWhenTheLedgerLockIsHeld: a writer holding the ledger's
 // exclusive flock past the retry makes the pull busy — nothing else set,
-// nothing written. Waits the real lockTimeout; t.Parallel, so the install
-// goes through the host (which reads no environment).
+// nothing written. Waits the real lockTimeout; t.Parallel, so it runs only
+// after every sequential t.Setenv test has returned — the apply path reads
+// AGENTHOF_TEST_CRASH_AT (set by some of those), which a parallel test must
+// not race.
 func TestPullConfigBusyWhenTheLedgerLockIsHeld(t *testing.T) {
 	t.Parallel()
 	h, ctl, _ := newConfigHost(t, true)

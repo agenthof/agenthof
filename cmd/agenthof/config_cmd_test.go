@@ -211,6 +211,30 @@ func TestConfigPullJSONFeedsApplyBundle(t *testing.T) {
 	if got, _ := config.HashFiles(files); got != snap.Hash {
 		t.Fatalf("the --json document must hash as the pull: %q vs %q", got, snap.Hash)
 	}
+
+	// --json --out together: the "wrote …" confirmation goes to stderr, so
+	// stdout stays a single document apply --bundle still accepts, and the
+	// directory is written.
+	srv2 := fakePullAPI(t, http.StatusOK, snapshotJSON(t, snap))
+	outDir := filepath.Join(t.TempDir(), "d")
+	var out2 bytes.Buffer
+	if code := cmdConfigPull([]string{"--server", srv2.URL, "--token", "tok", "--json", "--out", outDir}, &out2); code != 0 {
+		t.Fatalf("--json --out: %d %q", code, out2.String())
+	}
+	if _, err := os.Stat(outDir); err != nil {
+		t.Fatalf("--out dir must be written: %v", err)
+	}
+	p2 := filepath.Join(t.TempDir(), "b2.json")
+	if err := os.WriteFile(p2, out2.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files2, err := loadBundle("", p2, strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("stdout under --json --out must be valid apply --bundle input: %v\n%q", err, out2.String())
+	}
+	if got, _ := config.HashFiles(files2); got != snap.Hash {
+		t.Fatalf("the --json --out document must hash as the pull: %q vs %q", got, snap.Hash)
+	}
 }
 
 // TestConfigPullOutRefusals: an existing directory (even empty), an existing

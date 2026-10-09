@@ -150,7 +150,13 @@ func printPull(snap apiclient.ConfigSnapshot, outDir string, jsonOut bool, out i
 		}
 	}
 	if outDir != "" {
-		_, _ = fmt.Fprintf(out, "wrote %d files to %s\n", len(files), outDir)
+		// The confirmation goes to stderr under --json so the document on stdout
+		// stays valid `apply --bundle` input; to stdout in human mode.
+		confirm := out
+		if jsonOut {
+			confirm = os.Stderr
+		}
+		_, _ = fmt.Fprintf(confirm, "wrote %d files to %s\n", len(files), outDir)
 	}
 	return 0
 }
