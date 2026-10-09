@@ -442,8 +442,9 @@ func cmdConfigSign(args []string, out io.Writer) int {
 }
 
 // signingStartupWarning is serve's one look at the signature at startup —
-// a read with no lock, no write and no re-drive (serve never holds the
-// writer lock at startup and must not start signing on its own; audit
+// a read that takes a shared read and not the writer lock, no write and no
+// re-drive (serve never holds the writer lock at startup and must not start
+// signing on its own; audit
 // verify control is the operator's reconcile). It returns "" when signing
 // is off or the vouched install is signed; the keygen remedy for a private
 // key without its public file; the config sign remedy when the ledger
@@ -479,7 +480,11 @@ func signingStartupWarning(controlLog string) string {
 	if err != nil {
 		return ""
 	}
-	if _, err := servedSignature(store, hash, logID, last.Seq, last.Time.UTC(), pub); err != nil {
+	// Only a sign gap earns the config sign remedy. A signature newer than
+	// the vouched install is a read racing a re-apply (the pull retries to
+	// 200), and any other error is a store fault the sign remedy cannot fix.
+	_, err = servedSignature(store, hash, logID, last.Seq, last.Time.UTC(), pub)
+	if errors.Is(err, errNotSigned) && !errors.Is(err, errSignatureNewer) {
 		return fmt.Sprintf("installed configuration is not signed; every pull will answer 503 until signed; run: agenthof config sign --control-log %s", controlLog)
 	}
 	return ""
