@@ -137,6 +137,14 @@ func TestPullConfigSignatureOutcomeTable(t *testing.T) {
 		t.Fatalf("foreign log_id: %d %v", out.Kind, out.Err)
 	}
 
+	// D with a foreign log_id AND a version above the vouched seq: foreign,
+	// not the read race — the race is only the same hash and ledger, newer.
+	newerForeign, _ := config.SignaturePayload(hash, strings.Repeat("f", 32), 3, at, id)
+	writeSigAt(t, ctl, newerForeign, config.Sign(priv, newerForeign))
+	if out := pullAPI(t, ctl, edgeInvoker); out.Kind != pullNotSigned || errors.Is(out.Err, errSignatureNewer) || !strings.Contains(out.Err.Error(), "signature is for log_id ffff") {
+		t.Fatalf("foreign log_id, newer version: %d %v", out.Kind, out.Err)
+	}
+
 	// D with a good payload and a bad signature.
 	good, _ := config.SignaturePayload(hash, logID, 2, at, id)
 	writeSigAt(t, ctl, good, config.Sign(priv, other))

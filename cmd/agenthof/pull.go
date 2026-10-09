@@ -196,9 +196,11 @@ func pullConfig(req pullRequest) pullOutcome {
 // key id against the configured key (a rotated or foreign key is "by key",
 // before any verify); then the first six lines must be byte-identical to
 // the payload rebuilt from the vouched fields — and when they are not, WHICH
-// field differs decides the verdict: a version above the vouched seq means
-// this read raced an install (errSignatureNewer: benign, retry), a version
-// below, another hash or another log_id is a genuine stale or foreign file;
+// field differs decides the verdict, in this order: another hash or another
+// log_id is a foreign file, whatever its version; with hash and log_id
+// matching, a version above the vouched seq means this read raced an
+// identical re-apply (errSignatureNewer: benign, retry) and a version below
+// is a stale file;
 // then the Ed25519 verify. Every not-signed cause wraps errNotSigned; a
 // read failure other than not-exist is store damage.
 func servedSignature(store, hash, logID string, version int, at time.Time, pub ed25519.PublicKey) (*apiclient.ConfigSignature, error) {
@@ -223,14 +225,14 @@ func servedSignature(store, hash, logID string, version int, at time.Time, pub e
 	}
 	if !bytes.Equal(f.Payload, expected) {
 		switch {
-		case f.Version > version:
-			return nil, fmt.Errorf("%w: %w", errNotSigned, errSignatureNewer)
-		case f.Version < version:
-			return nil, fmt.Errorf("%w: signature is for version %d, installed is %d", errNotSigned, f.Version, version)
 		case f.Hash != hash:
 			return nil, fmt.Errorf("%w: signature is for hash %s, installed is %s", errNotSigned, f.Hash, hash)
 		case f.LogID != logID:
 			return nil, fmt.Errorf("%w: signature is for log_id %s, installed is %s", errNotSigned, f.LogID, logID)
+		case f.Version > version:
+			return nil, fmt.Errorf("%w: %w", errNotSigned, errSignatureNewer)
+		case f.Version < version:
+			return nil, fmt.Errorf("%w: signature is for version %d, installed is %d", errNotSigned, f.Version, version)
 		}
 		return nil, fmt.Errorf("%w: signature is for installed_at %s, installed is %s", errNotSigned, f.InstalledAt, at.Format(time.RFC3339Nano))
 	}
