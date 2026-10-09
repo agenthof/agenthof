@@ -224,12 +224,12 @@ func TestServeStartupWarnsAboutSigning(t *testing.T) {
 	}
 }
 
-// TestServeStartupSaysNothingForARacedOrUnreadableSignature: the config sign
-// remedy is for a sign gap only. A .sig at a version above the vouched
-// install is a read racing a re-apply (the pull retries to 200), and a .sig
-// that cannot be read at all is a store fault the remedy cannot fix; serve
-// starts without a signing warning in both.
-func TestServeStartupSaysNothingForARacedOrUnreadableSignature(t *testing.T) {
+// TestServeStartupWarnsAboutAnUnreadableSignatureButNotARace: the config sign
+// remedy is for a sign gap only. A .sig at a version above the vouched install
+// is a read racing a re-apply (the pull retries to 200), so serve starts
+// silently. A .sig that cannot be read at all is a store fault the remedy
+// cannot fix, so serve warns about it — but without offering config sign.
+func TestServeStartupWarnsAboutAnUnreadableSignatureButNotARace(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	ctl, _, keyID := signedRoot(t)
 	hash := readPointer(t, ctl)
@@ -251,7 +251,11 @@ func TestServeStartupSaysNothingForARacedOrUnreadableSignature(t *testing.T) {
 	if err := os.Mkdir(sigPath, 0o700); err != nil { // reading it fails with something other than not-exist
 		t.Fatal(err)
 	}
-	if logs := startServeOnce(t, ctl); strings.Contains(logs, "not signed") || strings.Contains(logs, "config sign") || strings.Contains(logs, "level=WARN") {
-		t.Fatalf("unreadable signature: no warning:\n%s", logs)
+	logs := startServeOnce(t, ctl)
+	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "unreadable") {
+		t.Fatalf("unreadable signature: want a store-fault warning:\n%s", logs)
+	}
+	if strings.Contains(logs, "config sign") {
+		t.Fatalf("unreadable signature: must not offer the config sign remedy:\n%s", logs)
 	}
 }

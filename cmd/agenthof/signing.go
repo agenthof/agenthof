@@ -166,8 +166,8 @@ func cmdConfigKeygen(args []string, out io.Writer) int {
 	switch state {
 	case signingOn:
 		id := "unreadable"
-		if priv, err := loadSigningKey(*controlLog); err == nil {
-			id = config.KeyID(priv.Public().(ed25519.PublicKey))
+		if pub, err := loadSigningPub(*controlLog); err == nil {
+			id = config.KeyID(pub) // the public key's id — the one edges pin
 		}
 		_, _ = fmt.Fprintf(out, "config keygen: %s exists (key_id %s); key rotation is not supported yet — to start over, remove signing.key and signing.pub (every edge pinned to the old key must re-pin)\n", keyPath, id)
 		return 1
@@ -221,8 +221,10 @@ func cmdConfigKeygen(args []string, out io.Writer) int {
 
 // keygenDone prints what was written (keyPath is "" when only the public
 // file was re-derived), the key id, the public PEM verbatim, the pin line
-// and — when something is installed under the control root — that it is
-// not signed yet and how to sign it.
+// and — when something is installed under the control root — how to sign it.
+// A fresh pair cannot have signed anything, so it says "not signed yet"; a
+// re-derived public file may face an install already signed under the old
+// pair, so it offers config sign conditionally rather than asserting the gap.
 func keygenDone(out io.Writer, controlLog, keyPath, pubPath string, pub ed25519.PublicKey, pubPEM []byte) int {
 	if keyPath != "" {
 		_, _ = fmt.Fprintf(out, "wrote %s (private key, 0600 — keep it on this host)\n", keyPath)
@@ -232,7 +234,11 @@ func keygenDone(out io.Writer, controlLog, keyPath, pubPath string, pub ed25519.
 	_, _ = out.Write(pubPEM)
 	_, _ = fmt.Fprintln(out, msgKeygenPin)
 	if hash, installed, err := config.InstalledHash(installedStore(controlLog)); err == nil && installed {
-		_, _ = fmt.Fprintf(out, "installed configuration %s is not signed yet; run: agenthof config sign --control-log %s\n", hash, controlLog)
+		if keyPath != "" {
+			_, _ = fmt.Fprintf(out, "installed configuration %s is not signed yet; run: agenthof config sign --control-log %s\n", hash, controlLog)
+		} else {
+			_, _ = fmt.Fprintf(out, "installed configuration %s: if it is not yet signed, run: agenthof config sign --control-log %s\n", hash, controlLog)
+		}
 	}
 	return 0
 }
@@ -484,8 +490,12 @@ func signingStartupWarning(controlLog string) string {
 	// the vouched install is a read racing a re-apply (the pull retries to
 	// 200), and any other error is a store fault the sign remedy cannot fix.
 	_, err = servedSignature(store, hash, logID, last.Seq, last.Time.UTC(), pub)
-	if errors.Is(err, errNotSigned) && !errors.Is(err, errSignatureNewer) {
+	switch {
+	case err == nil, errors.Is(err, errSignatureNewer):
+		return ""
+	case errors.Is(err, errNotSigned):
 		return fmt.Sprintf("installed configuration is not signed; every pull will answer 503 until signed; run: agenthof config sign --control-log %s", controlLog)
+	default:
+		return fmt.Sprintf("installed configuration signature is unreadable (%v); every pull will answer 500 until it is repaired", err)
 	}
-	return ""
 }
