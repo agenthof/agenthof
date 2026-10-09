@@ -435,8 +435,24 @@ says nothing about what its operator may do on their own machine.
 
 The pulled files, and the hash, are the contract: `config pull` refuses a
 pull whose files do not hash as the server said, before printing or writing
-anything, and `--out` re-hashes the written directory. Nothing is signed yet;
-the transport and the token are the trust.
+anything, and `--out` re-hashes the written directory.
+
+A hash binds the files to what the server *stated*; a signature binds them to
+who the operator *is*. Signing is opt-in. `config keygen` makes an Ed25519 pair
+on the install host — the operator keeps the private key there, as they keep
+the control ledger, and pins the public key at each execution point out of
+band. With a key present, every install signs, over a payload that binds the
+configuration hash to the control ledger's identity, the install's sequence,
+and its time — so an edge that pins the public key can tell the configuration
+the operator installed, as a specific numbered install, from an older one
+replayed or an impostor's. `serve` returns that signature on the pull and
+verifies it against the bytes as it serves them: with a key configured, it
+answers only when the control ledger vouches for the pointer **and** a matching
+signature verifies, else a retryable *not yet signed* while an install is a
+moment ahead of its signature (`config sign` writes it; an install normally
+does). With no key, nothing is signed and the transport and the token are the
+trust, exactly as before. The signature is as strong as the custody of that
+private key on the install host: it is evidence of origin, not a vault.
 
 ## 6. Reading it back
 
@@ -483,7 +499,8 @@ adopted. Because both carry the same key:
 
 | Shipped today | Reserved for later |
 |---|---|
-| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune` | policy-as-config approval workflows; operator-signed snapshots |
+| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune` | policy-as-config approval workflows |
+| operator signing of the installed snapshot: `config keygen` mints the Ed25519 pair on the host, every install signs (opt-in), and `serve` returns the signature on the pull and verifies it as it serves — 200 only when the ledger vouches **and** a matching signature verifies, else a retryable *not yet signed*; `config sign` (re)signs an install; the public key is pinned at the edge | verifying the signature on the `run` read with a staleness bound; a recorded key-lifecycle event for rotation and revocation |
 | `apply` over the API (`POST /v1/config/apply`) with a required compare-and-swap on the installed hash, authorization at the API against the installed roles, one writer lock across apply and the kill switch, and `origin` on the record; pulling the installed configuration over the API (`GET /v1/config`, `GET /v1/config/hash`, `config pull`), authorized by `pull` (or `apply`, which includes it), content-addressed, unrecorded | `registry enable\|disable` and `audit repair control` over the API; `audit control --server` |
 | default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; pruning and tamper-evidence of the snapshot store; verifying the roles-only authorization read |
 | `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read and on the kill switch's re-snapshot read | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |

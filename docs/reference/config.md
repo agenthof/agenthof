@@ -846,11 +846,17 @@ to a hash-chained control log, and `agenthof audit`
 gains three verbs to read and, if needed, recover it. See
 [`docs/concepts.md`](../concepts.md#control-plane-audit) for what gets
 recorded and why; this section is the flag-by-flag and exit-code reference.
+`config pull`, `config keygen` and `config sign` are host-local and
+**not** recorded: a pull is a read, and keygen/sign derive or attest the
+operator's signature of an install the control ledger already records, gated by
+possession of the signing key on the host (constitution, Article VI).
 
 | Command | Flags |
 |---|---|
 | `agenthof apply --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-installed <sha256:hex\|none>] [--server <url> [--bundle <file\|->]]` | `--control-log`, `--as`, `--groups`, `--token`, `--if-installed`, `--server`, `--bundle` |
 | `agenthof config pull [--server <url> [--token <jwt>]] [--control-log <path>] [--out <dir>] [--json]` | `--server`, `--token`, `--control-log`, `--out`, `--json` |
+| `agenthof config keygen [--control-log <path>]` | `--control-log` |
+| `agenthof config sign [--control-log <path>]` | `--control-log` |
 | `agenthof registry enable\|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | same |
 | `agenthof audit control [--control-log <path>]` | `--control-log` |
 | `agenthof audit verify control [--control-log <path>] [--expect-head <hex>]` | `--control-log`, `--expect-head` |
@@ -887,6 +893,14 @@ control` report whether it matches the last recorded install (an `apply` or a
 kill-switch flip). Snapshots are never pruned by any command today; removing
 `current` makes the next `apply` a bootstrap — permitted for any identity and
 recorded as such.
+
+The **operator signing pair**, when present, lives beside the ledger too:
+`<dir>/signing.key` (the Ed25519 private key, `0600` — keep it on this host)
+and `<dir>/signing.pub` (the public key to pin at execution points). `config
+keygen` writes them; an install signs with them; `config sign` (re)signs the
+installed snapshot and writes `installed/<hash>.sig`. They are credentials, not
+configuration — they are never part of a snapshot and never pulled. With
+neither file, signing is off and installs are unsigned.
 
 ### `--config`
 

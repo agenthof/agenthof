@@ -278,10 +278,20 @@ mid-step; its ledger then has no final event and reads back as
   `500 snapshot cannot be distributed as a bundle`. They run locally; rename
   or re-encode the file and apply. A snapshot over 8 MiB cannot be pulled by
   `config pull`.
-- Nothing is signed yet. The puller's check is a content address against a
-  hash the server stated over an authenticated channel; put TLS in front of
-  `serve` (above). Operator signing with a key pinned at the execution point
-  is reserved.
+- Signing is opt-in. With an Ed25519 signing key on the host (`config keygen`),
+  both routes carry the operator's `signature` over a payload binding the hash
+  to the ledger's identity, the install's version, and its time; `serve`
+  verifies that signature against the bytes as it serves them and answers `200`
+  only when the control ledger vouches for the pointer **and** a matching
+  signature verifies — otherwise `503` *not yet signed* with `Retry-After`,
+  for the moment between an install and its signature (`config sign` writes it).
+  A pinned public key at the execution point then proves the configuration is
+  the one the operator installed, not just one a server stated. With no key
+  configured nothing is signed, the puller's check is a content address against
+  a hash the server stated, and the authenticated channel is the trust — so put
+  TLS in front of `serve` (above). A broken key state (a private key whose
+  public file is missing or unreadable) fails closed: `500` on the pull until
+  `config keygen` restores it, never a silent drop to unsigned.
 - `version` is a ledger sequence number, not an apply count: it advances on a
   kill-switch flip and on a re-apply of identical bytes. Key on `hash` for
   "did the bytes change", on `version` for "which install".
