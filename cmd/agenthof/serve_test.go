@@ -152,3 +152,110 @@ func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
 		t.Fatalf("malformed pointer: reg=%v installed=%v hash=%q errs=%v", reg, installed, hash, errs)
 	}
 }
+
+// startServeOnce starts serve on ctl with a stderr buffer, waits for the
+// address file, stops it, and returns the operational log.
+func startServeOnce(t *testing.T, ctl string) string {
+	t.Helper()
+	t.Chdir(t.TempDir())                                 // serve's relative defaults land here, never in the repo
+	t.Setenv("AGENTHOF_OIDC_ISSUER", "https://idp.test") // never dialed
+	addrFile := filepath.Join(t.TempDir(), "addr")
+	ctx, cancel := context.WithCancel(context.Background())
+	var out, logs bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cmdServe(ctx, []string{"--addr", "127.0.0.1:0", "--addr-file", addrFile, "--control-log", ctl, "--log-dir", t.TempDir()}, &out, &logs)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(addrFile); err == nil && strings.TrimSpace(string(b)) != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("serve exited %d\n%s", code, out.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not stop")
+	}
+	return logs.String()
+}
+
+// TestServeStartupWarnsAboutSigning: one Warn when signing is configured
+// and the vouched install has no verifying .sig (with the config sign
+// remedy); the keygen Warn for a private key without its public file;
+// neither line when signing is off or the install is signed. serve starts
+// in every case and writes nothing under the store.
+func TestServeStartupWarnsAboutSigning(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _, _ := signedRoot(t)
+	hash := readPointer(t, ctl)
+	before := mustReadDirNames(t, installedStore(ctl))
+	if logs := startServeOnce(t, ctl); strings.Contains(logs, "not signed") || strings.Contains(logs, "config keygen") {
+		t.Fatalf("signed: no warning:\n%s", logs)
+	}
+	if err := os.Remove(config.SignaturePath(installedStore(ctl), hash)); err != nil {
+		t.Fatal(err)
+	}
+	logs := startServeOnce(t, ctl)
+	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "installed configuration is not signed; every pull will answer 503 until signed; run: agenthof config sign --control-log "+ctl) {
+		t.Fatalf("not signed:\n%s", logs)
+	}
+	if err := os.Remove(signingPubPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	logs = startServeOnce(t, ctl)
+	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, signingKeyPath(ctl)+" present without "+signingPubPath(ctl)+"; run: agenthof config keygen --control-log "+ctl) {
+		t.Fatalf("state C:\n%s", logs)
+	}
+	if err := os.Remove(signingKeyPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	if logs := startServeOnce(t, ctl); strings.Contains(logs, "not signed") || strings.Contains(logs, "config keygen") {
+		t.Fatalf("unsigned host: no warning:\n%s", logs)
+	}
+	after := mustReadDirNames(t, installedStore(ctl))
+	if len(after) != len(before)-1 { // the .sig we removed; serve wrote nothing
+		t.Fatalf("serve must write nothing under the store: %v → %v", before, after)
+	}
+}
+
+// TestServeStartupWarnsAboutAnUnreadableSignatureButNotARace: the config sign
+// remedy is for a sign gap only. A .sig at a version above the vouched install
+// is a read racing a re-apply (the pull retries to 200), so serve starts
+// silently. A .sig that cannot be read at all is a store fault the remedy
+// cannot fix, so serve warns about it — but without offering config sign.
+func TestServeStartupWarnsAboutAnUnreadableSignatureButNotARace(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _, keyID := signedRoot(t)
+	hash := readPointer(t, ctl)
+	sigPath := config.SignaturePath(installedStore(ctl), hash)
+
+	at := controlEvents(t, ctl)[0].Time.UTC() // the vouched install is seq 1
+	newer, err := config.SignaturePayload(hash, controlLogID(t, ctl), 2, at, keyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSigAt(t, ctl, newer, config.Sign(hostPriv(t, ctl), newer))
+	if logs := startServeOnce(t, ctl); strings.Contains(logs, "not signed") || strings.Contains(logs, "config sign") || strings.Contains(logs, "level=WARN") {
+		t.Fatalf("raced signature: no warning:\n%s", logs)
+	}
+
+	if err := os.Remove(sigPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sigPath, 0o700); err != nil { // reading it fails with something other than not-exist
+		t.Fatal(err)
+	}
+	logs := startServeOnce(t, ctl)
+	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "unreadable") {
+		t.Fatalf("unreadable signature: want a store-fault warning:\n%s", logs)
+	}
+	if strings.Contains(logs, "config sign") {
+		t.Fatalf("unreadable signature: must not offer the config sign remedy:\n%s", logs)
+	}
+}

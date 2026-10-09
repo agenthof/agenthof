@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 
@@ -33,10 +34,15 @@ func (h *configHost) Apply(inv identity.Invoker, files map[string][]byte, pre ap
 	if out.Kind == applyLedgerDamaged {
 		h.logger.Error("control ledger damaged; run: agenthof audit repair control --control-log " + h.controlLog)
 	}
+	if out.Kind == applyInstalledNotSigned {
+		// The cause can name paths: logged here for the operator, never returned.
+		h.logger.Warn(msgInstalledNotSigned+"; "+signRemedy(h.controlLog, out.SignCause), "config_hash", out.ConfigHash, "err", out.SignCause)
+	}
 	return applyResult(out)
 }
 
-// applyResult maps an applyOutcome to the wire shape. The 500 bodies are
+// applyResult maps an applyOutcome to the wire shape, carrying the signing
+// key id on an installed result. The 500 bodies are
 // fixed strings (the recorded reason can name store paths); the 422 lines
 // are cleaned the way their recorded reason is.
 func applyResult(o applyOutcome) apiclient.ApplyResult {
@@ -51,6 +57,7 @@ func applyResult(o applyOutcome) apiclient.ApplyResult {
 	case applyInstalled:
 		res.Status = apiclient.ApplyInstalled
 		res.Bootstrap = !o.Installed
+		res.KeyID = o.KeyID
 	case applyLedgerDamaged:
 		res.Status = apiclient.ApplyLedgerDamaged
 		res.Reason = apiclient.ReasonLedgerDamaged
@@ -72,6 +79,8 @@ func applyResult(o applyOutcome) apiclient.ApplyResult {
 		res = apiclient.ApplyResult{Status: apiclient.ApplyError, Reason: apiclient.ReasonNotRecorded}
 	case applyInstalledNotRecorded:
 		res.Status = apiclient.ApplyInstalledNotRecorded
+	case applyInstalledNotSigned:
+		res.Status = apiclient.ApplyInstalledNotSigned
 	}
 	return res
 }
@@ -80,7 +89,9 @@ func applyResult(o applyOutcome) apiclient.ApplyResult {
 // path, authorized against the installed roles. The cause of a store, ledger
 // or bundle failure can name store paths, so it is logged here, where the
 // operator who has the host reads it, and never returned to a client — the
-// same rule applyResult applies to a 500.
+// same rule applyResult applies to a 500. A not-signed verdict is logged at
+// Warn with the config sign remedy, or at Info with none when the read
+// merely raced an install.
 func (h *configHost) Pull(inv identity.Invoker) serve.PullResult {
 	out := pullConfig(pullRequest{ControlLog: h.controlLog, Authorize: true, Invoker: inv})
 	status := pullStatus(out.Kind)
@@ -90,6 +101,14 @@ func (h *configHost) Pull(inv identity.Invoker) serve.PullResult {
 	case pullLedgerDamaged:
 		h.logger.Error("config pull failed", "status", status, "err", out.Err)
 		h.logger.Error("control ledger damaged; run: agenthof audit repair control --control-log " + h.controlLog)
+	case pullNotSigned:
+		if errors.Is(out.Err, errSignatureNewer) {
+			// This read raced an install; a retry gets 200. No remedy — a
+			// config sign hint here would be false.
+			h.logger.Info("config pull not signed", "status", status, "err", out.Err)
+		} else {
+			h.logger.Warn("config pull not signed; run: agenthof config sign --control-log "+h.controlLog, "status", status, "err", out.Err)
+		}
 	}
 	return serve.PullResult{Status: status, Snapshot: out.Snapshot}
 }
@@ -112,6 +131,8 @@ func pullStatus(k pullKind) string {
 		return serve.PullBusy
 	case pullNotRecorded:
 		return serve.PullNotRecorded
+	case pullNotSigned:
+		return serve.PullNotSigned
 	}
 	return serve.PullStoreUnusable
 }

@@ -29,14 +29,20 @@ func (s *Server) getConfigHash(w http.ResponseWriter, _ *http.Request, inv ident
 // while the server drains, like every read; and nothing is recorded on any
 // outcome. Non-200 answers are fixed text bodies, never a path and never
 // the OS text; one log line at most — the 500s log nothing here, since the
-// host already logged the cause; the hash poll's 200 logs nothing at all.
+// host already logged the cause; the hash poll's 200 logs nothing at all;
+// the full pull's 200 names the signing key when signed, never the
+// signature.
 func (s *Server) answerPull(w http.ResponseWriter, inv identity.Invoker, withFiles bool) {
 	res := s.cfg.Config.Pull(inv)
 	switch res.Status {
 	case PullOK:
 		snap := res.Snapshot
 		if withFiles {
-			s.logger.Info("config pulled", "invoker", inv.Subject, "hash", snap.Hash, "version", snap.Version)
+			attrs := []any{"invoker", inv.Subject, "hash", snap.Hash, "version", snap.Version}
+			if snap.Signature != nil {
+				attrs = append(attrs, "key_id", snap.Signature.KeyID)
+			}
+			s.logger.Info("config pulled", attrs...)
 		} else {
 			snap.Files = nil
 		}
@@ -60,6 +66,13 @@ func (s *Server) answerPull(w http.ResponseWriter, inv identity.Invoker, withFil
 		s.logger.Info("config pull", "invoker", inv.Subject, "status", res.Status)
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, apiclient.PullBodyNotRecorded, http.StatusServiceUnavailable)
+	case PullNotSigned:
+		// Retryable like not-on-record, with its own body so an edge's error
+		// names the right remedy (config sign, not re-apply). The host logs
+		// the cause at the level it deserves; this line is the status only.
+		s.logger.Info("config pull", "invoker", inv.Subject, "status", res.Status)
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, apiclient.PullBodyNotSigned, http.StatusServiceUnavailable)
 	default:
 		// PullStoreUnusable, and any status this handler does not know:
 		// fail closed with the fixed store body.

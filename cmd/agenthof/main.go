@@ -39,6 +39,8 @@ const usage = `agenthof — the agents' court
 Usage:
   agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-installed <sha256:hex|none>] [--server <url> [--bundle <file|->]]
   agenthof config pull [--server <url> [--token <jwt>]] [--control-log <path>] [--out <dir>] [--json]  (the installed configuration, from the server or the local store; --out writes a directory apply --config accepts)
+  agenthof config keygen [--control-log <path>]  (generates the operator's Ed25519 signing pair beside the control ledger and prints the public key to pin at every execution point; never overwrites an existing pair)
+  agenthof config sign   [--control-log <path>]  (signs the installed configuration with the signing pair beside the control ledger — the remedy when an install reports "signature NOT written"; never recorded)
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
@@ -551,7 +553,10 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 // Disabling an already-disabled agent whose snapshot a flip wrote yields the
 // same bytes → the same hash → CommitSnapshot's identical-snapshot branch
 // re-points; the first flip on apply-written bytes always yields a new hash
-// (SetEnabled re-marshals the file).
+// (SetEnabled re-marshals the file). After the success append, when a
+// signing key is configured beside the control ledger, the re-install is
+// signed exactly as an apply's is; a sign failure prints "signature NOT
+// written" with the remedy and exits 1 — the flip stands, recorded.
 func flipInstalled(action, target, store, hash, controlLog string, inv identity.Invoker, assertedAs string,
 	recordExit func(outcome string, reason *control.Reason) int, out io.Writer) int {
 	// Verify before staging: a snapshot whose bytes no longer hash to the
@@ -646,6 +651,18 @@ func flipInstalled(action, target, store, hash, controlLog string, inv identity.
 		return 1
 	}
 	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+	// The flip is an install the pull's version follows, so it signs as
+	// apply does — after the record, under the writer lock cmdRegistryFlip
+	// holds. A failure leaves the flip installed and recorded; only the
+	// signature is missing, and the remedy is named.
+	info, signed, err := signIfConfigured(controlLog)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "signature NOT written: %v; %s\n", err, signRemedy(controlLog, err))
+		return 1
+	}
+	if signed {
+		_, _ = fmt.Fprintf(out, "signed: key_id %s\n", info.KeyID)
+	}
 	return 0
 }
 

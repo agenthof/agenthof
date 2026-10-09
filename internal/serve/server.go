@@ -65,7 +65,8 @@ type ConfigHost interface {
 	// Pull reads the installed configuration for distribution: authorized
 	// against the installed roles (pull, or apply, which includes it),
 	// verified over the bytes returned, with the control ledger's account
-	// of the install. An outcome, never an error, and never recorded.
+	// of the install and, when the host signs, the operator's signature
+	// over it. An outcome, never an error, and never recorded.
 	Pull(inv identity.Invoker) PullResult
 }
 
@@ -87,6 +88,7 @@ const (
 	PullLedgerDamaged    = "ledger_damaged"
 	PullBusy             = "busy"
 	PullNotRecorded      = "not_recorded"
+	PullNotSigned        = "not_signed"
 )
 
 // ErrConfigInvalid marks a Prepare failure that is the configuration's:

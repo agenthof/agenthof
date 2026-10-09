@@ -3,6 +3,7 @@ package apiclient
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,5 +98,40 @@ func TestConfigSnapshotRoundTripAndKeys(t *testing.T) {
 	var req ApplyRequest
 	if err := json.Unmarshal(data, &req); err != nil || req.Files["gateway.yaml"] != "models: {}\n" {
 		t.Fatalf("a pulled document must decode as an ApplyRequest: %v %+v", err, req)
+	}
+}
+
+// TestApplyResultKeyIDIsAdditive: key_id travels on installed when the
+// server signed, and is absent otherwise; the new status is a fixed string.
+func TestApplyResultKeyIDIsAdditive(t *testing.T) {
+	const id = "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c"
+	data, err := json.Marshal(ApplyResult{Status: ApplyInstalled, ConfigHash: "sha256:ab", KeyID: id})
+	if err != nil || string(data) != `{"status":"installed","config_hash":"sha256:ab","key_id":"`+id+`"}` {
+		t.Fatalf("%s %v", data, err)
+	}
+	data, _ = json.Marshal(ApplyResult{Status: ApplyInstalled, ConfigHash: "sha256:ab"})
+	if strings.Contains(string(data), "key_id") {
+		t.Fatalf("absent when unsigned: %s", data)
+	}
+	if ApplyInstalledNotSigned != "installed_not_signed" {
+		t.Fatal("the status is a wire constant")
+	}
+}
+
+// TestConfigSnapshotSignatureKeysArePinned: the signature object's keys and
+// order, on the hash-route body; absent when the server is unsigned.
+func TestConfigSnapshotSignatureKeysArePinned(t *testing.T) {
+	at := time.Date(2026, 10, 9, 2, 12, 1, 500000000, time.UTC)
+	sig := &ConfigSignature{Format: "agenthof-config-signature/v1", LogID: "00112233445566778899aabbccddeeff",
+		KeyID: "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+		Sig:   "7Zj+G/3H5lmX+zAr8dVH+/R9r0f08gA7DLnMYD4x7OkIn/JG51vkZsUybg4O7USrgfhnQJgw488YTrPxqsGODg=="}
+	roundTrip(t, ConfigSnapshot{Hash: "sha256:ab", Version: 7, InstalledAt: at, Signature: sig})
+	data, err := json.Marshal(ConfigSnapshot{Hash: "sha256:ab", Version: 7, InstalledAt: at, Signature: sig})
+	want := `{"hash":"sha256:ab","version":7,"installed_at":"2026-10-09T02:12:01.5Z","signature":{"format":"agenthof-config-signature/v1","log_id":"00112233445566778899aabbccddeeff","key_id":"56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c","sig":"7Zj+G/3H5lmX+zAr8dVH+/R9r0f08gA7DLnMYD4x7OkIn/JG51vkZsUybg4O7USrgfhnQJgw488YTrPxqsGODg=="}}`
+	if err != nil || string(data) != want {
+		t.Fatalf("signed hash-route body:\n%s\nwant\n%s", data, want)
+	}
+	if PullBodyNotSigned != "installed configuration is not yet signed; retry" {
+		t.Fatal("the 503 body is a wire constant")
 	}
 }

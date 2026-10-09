@@ -10,4 +10,5 @@ paths = [
   '''cmd/agenthof/main_test\.go''',             # hand-minted offline test JWTs
   '''internal/identity/oidc_test\.go''',        # offline test JWTs minted with throwaway keys
   '''internal/gateway/provision_test\.go''',    # fake "sk-..." strings returned by an in-test mock LiteLLM admin server; never real credentials
+  '''internal/config/signingkey_test\.go''',    # the Ed25519 golden seed 00..1f as PKCS#8 PEM — a published test vector pinning the key-file format, never a credential
 ]

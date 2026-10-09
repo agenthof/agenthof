@@ -1,0 +1,143 @@
+# Operator signing of the installed configuration, end to end: with no key
+# the server is unsigned exactly as before; once a pair exists every install
+# is signed and the pull serves the signature, verified, or answers 503
+# until config sign repairs it; a flip signs; a lost private key keeps
+# serving until the next install; removing both files turns signing off;
+# and no sign or keygen ever writes the control ledger.
+
+env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER
+env AGENTHOF_OIDC_CLIENT_ID=agenthof
+env AGENTHOF_TOKEN=$OIDC_TOKEN
+
+exec agenthof serve --addr 127.0.0.1:0 --addr-file addr.txt --log-dir logs --artifact-dir artifacts --control-log control.jsonl --allow-api-bootstrap &
+waitaddr addr.txt
+
+# no key: the bootstrap apply (seq 1) is unsigned, the pull carries no signature
+exec agenthof apply --server $SERVER --if-installed none --config config
+stdout 'installed: sha256:[0-9a-f]{64}'
+! stdout 'signed: key_id'
+installedhash control.jsonl
+exec agenthof config pull --server $SERVER
+stdout 'version: 1  '
+! stdout 'signed_by:'
+exec agenthof config pull --server $SERVER --json
+! stdout '"signature"'
+
+# keygen: prints the key id, the public key to pin, and that the install is not signed yet
+exec agenthof config keygen --control-log control.jsonl
+stdout 'wrote .*signing.key \(private key, 0600'
+stdout 'key_id: [0-9a-f]{64}'
+stdout '[-]{5}BEGIN PUBLIC KEY[-]{5}'
+stdout 'pin this public key at every execution point'
+stdout 'installed configuration '${HASH@R}' is not signed yet; run: agenthof config sign --control-log control.jsonl'
+! stdout 'PRIVATE KEY'
+
+# opted in, not yet signed: the pull is a retryable 503 with its own body
+! exec agenthof config pull --server $SERVER
+stdout 'config pull: server answered 503: installed configuration is not yet signed; retry'
+
+# config sign repairs it; the pull serves the signature on both shapes
+exec agenthof config sign --control-log control.jsonl
+stdout 'signed: '${HASH@R}
+stdout 'version: 1  key_id: [0-9a-f]{64}'
+exec agenthof config pull --server $SERVER
+stdout 'version: 1  '
+stdout 'signed_by: [0-9a-f]{64}'
+exec agenthof config pull --server $SERVER --json
+stdout '"signature":\{"format":"agenthof-config-signature/v1","log_id":"[0-9a-f]{32}","key_id":"[0-9a-f]{64}","sig":"[A-Za-z0-9+/]{86}=="\}'
+exec agenthof config sign --control-log control.jsonl
+stdout 'already signed: '${HASH@R}
+
+# an identical re-apply (seq 2) signs again; the pull follows the new version
+exec agenthof apply --server $SERVER --if-installed $HASH --config config
+stdout 'control head: seq=2'
+stdout 'signed: key_id [0-9a-f]{64}'
+exec agenthof config pull --server $SERVER
+stdout 'version: 2  '
+stdout 'signed_by:'
+
+# a kill-switch flip (seq 3) is an install: it signs, the pull follows it
+exec agenthof registry disable planner --config config --control-log control.jsonl --as dana@example.com --groups engineering
+stdout 'signed: key_id'
+exec agenthof config pull --server $SERVER
+stdout 'version: 3  '
+stdout 'signed_by:'
+
+# the .sig removed by hand: 503 until config sign
+sigfile control.jsonl
+rm $SIG
+! exec agenthof config pull --server $SERVER
+stdout 'server answered 503: installed configuration is not yet signed'
+exec agenthof config sign --control-log control.jsonl
+stdout 'signed: sha256:'
+exec agenthof config pull --server $SERVER
+stdout 'signed_by:'
+
+# the private key lost: the existing signature keeps serving; the next
+# install (seq 4) lands, is recorded, and reports the missing signature
+rm signing.key
+exec agenthof config pull --server $SERVER
+stdout 'signed_by:'
+installedhash control.jsonl
+! exec agenthof apply --server $SERVER --if-installed $HASH --config config
+stdout 'control head: seq=4'
+stdout 'installed; signature NOT written; an operator must run config sign on the server'
+! exec agenthof config pull --server $SERVER
+stdout 'server answered 503: installed configuration is not yet signed'
+! exec agenthof config keygen --control-log control.jsonl
+stdout 'signing.pub exists without its private key'
+
+# both files removed: signing is off — an unsigned 200, as before the key existed
+rm signing.pub
+exec agenthof config pull --server $SERVER
+stdout 'version: 4  '
+! stdout 'signed_by:'
+exec agenthof config pull --server $SERVER --json
+! stdout '"signature"'
+
+# a fresh pair: the next apply (seq 5) is signed under it; a second keygen is refused
+exec agenthof config keygen --control-log control.jsonl
+stdout 'key_id: [0-9a-f]{64}'
+installedhash control.jsonl
+exec agenthof apply --server $SERVER --if-installed $HASH --config config
+stdout 'control head: seq=5'
+stdout 'signed: key_id'
+exec agenthof config pull --server $SERVER
+stdout 'version: 5  '
+stdout 'signed_by:'
+! exec agenthof config keygen --control-log control.jsonl
+stdout 'signing.key exists \(key_id [0-9a-f]{64}\); key rotation is not supported yet'
+
+# five events — four applies and the flip; no sign, no keygen, no pull
+exec agenthof audit control --control-log control.jsonl
+stdout 'control ledger — 5 events'
+! stdout 'sign'
+! stdout 'keygen'
+! stdout 'pull'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded install \(apply\)'
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: [engineering]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [engineering]
+control: [apply, enable, disable, repair]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

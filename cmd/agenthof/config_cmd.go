@@ -13,15 +13,22 @@ import (
 	"github.com/agenthof/agenthof/internal/config"
 )
 
-// cmdConfig is the `config` subcommand group; `pull` is its only verb.
+// cmdConfig is the `config` subcommand group: pull (the installed
+// configuration, from the server or the local store), sign (the operator's
+// signature of the installed configuration) and keygen (the operator's
+// signing pair).
 func cmdConfig(args []string, out io.Writer) int {
 	if len(args) < 1 {
-		_, _ = fmt.Fprintln(out, "config needs a subcommand: pull")
+		_, _ = fmt.Fprintln(out, "config needs a subcommand: pull, sign, keygen")
 		return 2
 	}
 	switch args[0] {
 	case "pull":
 		return cmdConfigPull(args[1:], out)
+	case "sign":
+		return cmdConfigSign(args[1:], out)
+	case "keygen":
+		return cmdConfigKeygen(args[1:], out)
 	default:
 		_, _ = fmt.Fprintf(out, "unknown config subcommand %q\n", args[0])
 		return 2
@@ -36,7 +43,9 @@ func cmdConfig(args []string, out io.Writer) int {
 // files must equal the hash — because that check is the consumer's half of
 // the contract, not a courtesy. --out writes the configuration as a
 // directory that must not exist and re-hashes it on disk; --json prints
-// the document, which apply --bundle accepts as is. Exit 0 only when
+// the document, which apply --bundle accepts as is. --out writes the
+// configuration directory only — never the signature, which is the server's
+// ledger's statement, not the edge's. Exit 0 only when
 // pulled (and, with --out, written and verified); 1 for every other
 // answer, transport error, mismatch or write failure; 2 for usage.
 func cmdConfigPull(args []string, out io.Writer) int {
@@ -85,6 +94,12 @@ func cmdConfigPull(args []string, out io.Writer) int {
 		case pullNotRecorded:
 			_, _ = fmt.Fprintf(out, "config pull: %s\n", apiclient.PullBodyNotRecorded)
 			return 1
+		case pullNotSigned:
+			// One fixed line and the remedy, like not-on-record. The cause
+			// (which file, which field) is the host's log line on the API
+			// path; locally, config sign states what it finds.
+			_, _ = fmt.Fprintf(out, "config pull: %s; run: agenthof config sign --control-log %s\n", apiclient.PullBodyNotSigned, *controlLog)
+			return 1
 		default:
 			// Store, bundle, ledger and lock failures carry their cause; the
 			// caller owns the host, so the paths in it are theirs to see.
@@ -97,7 +112,8 @@ func cmdConfigPull(args []string, out io.Writer) int {
 
 // printPull checks the content address, then writes (--out), then prints:
 // the summary (the first line is the string apply --server prints on
-// success, so scripts read one shape; the listing is in the canon's order)
+// success, so scripts read one shape; signed_by follows version when the
+// server signed; the listing is in the canon's order)
 // or the document (--json), then the wrote line.
 func printPull(snap apiclient.ConfigSnapshot, outDir string, jsonOut bool, out io.Writer) int {
 	files := make(map[string][]byte, len(snap.Files))
@@ -144,7 +160,11 @@ func printPull(snap apiclient.ConfigSnapshot, outDir string, jsonOut bool, out i
 			return 1
 		}
 	} else {
-		_, _ = fmt.Fprintf(out, "installed: %s\nversion: %d  installed_at: %s\nfiles: %d\n", snap.Hash, snap.Version, snap.InstalledAt.UTC().Format(time.RFC3339), len(files))
+		_, _ = fmt.Fprintf(out, "installed: %s\nversion: %d  installed_at: %s\n", snap.Hash, snap.Version, snap.InstalledAt.UTC().Format(time.RFC3339))
+		if snap.Signature != nil {
+			_, _ = fmt.Fprintf(out, "signed_by: %s\n", snap.Signature.KeyID)
+		}
+		_, _ = fmt.Fprintf(out, "files: %d\n", len(files))
 		for _, rel := range config.BundleOrder(files) {
 			_, _ = fmt.Fprintf(out, "  %s  %d bytes\n", rel, len(files[rel]))
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -301,5 +302,51 @@ func TestAppendEmptyDetailIsByteAbsent(t *testing.T) {
 	old := []byte(`{"v":"control/1","seq":1,"time":"2026-09-21T10:01:00Z","action":"apply","outcome":"success","invoker":{"subject":"dana@example.com","issuer":"local","method":"asserted"},"witness":{"os_user":"dana","hostname":"host"},"prev":""}`)
 	if d, err := control.Decode(old); err != nil || d.Detail != "" {
 		t.Fatalf("existing record: err=%v detail=%q", err, d.Detail)
+	}
+}
+
+// TestGenesisLogID: the one-field decode of the genesis record Append wrote
+// yields the 32-hex log_id the raw line carries, for the ledger's whole life;
+// an empty ledger, an undecodable genesis, and a genesis without a log_id or
+// with a malformed one are refused.
+func TestGenesisLogID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.jsonl")
+	ev := control.Event{Action: "apply", Outcome: "success", ConfigHash: "sha256:" + strings.Repeat("a", 64),
+		Invoker: identity.Invoker{Subject: "dana@example.com", Issuer: "local", Method: "asserted"}, Witness: control.CaptureWitness()}
+	if _, err := control.Append(path, ev); err != nil {
+		t.Fatal(err)
+	}
+	recs, _, err := ledger.ReadVerify(path, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := control.GenesisLogID(recs)
+	if err != nil || !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(id) {
+		t.Fatalf("GenesisLogID = %q, %v", id, err)
+	}
+	if !strings.Contains(string(recs[0].Raw), `"log_id":"`+id+`"`) {
+		t.Fatalf("the id must be the genesis line's: %s", recs[0].Raw)
+	}
+	if _, err := control.Append(path, ev); err != nil {
+		t.Fatal(err)
+	}
+	recs, _, _ = ledger.ReadVerify(path, ledger.Locked)
+	if again, _ := control.GenesisLogID(recs); again != id {
+		t.Fatalf("the id is the genesis record's for the ledger's life: %s vs %s", again, id)
+	}
+	if strings.Contains(string(recs[1].Raw), "log_id") {
+		t.Fatal("only the genesis record carries log_id")
+	}
+	for name, bad := range map[string][]ledger.Record{
+		"empty":     nil,
+		"no log_id": {{Raw: []byte(`{"v":"control/1","seq":1,"prev":""}`)}},
+		"not hex":   {{Raw: []byte(`{"v":"control/1","seq":1,"prev":"","log_id":"zz112233445566778899aabbccddeeff"}`)}},
+		"short":     {{Raw: []byte(`{"log_id":"0011"}`)}},
+		"uppercase": {{Raw: []byte(`{"log_id":"00112233445566778899AABBCCDDEEFF"}`)}},
+		"not json":  {{Raw: []byte(`{"log_id":`)}},
+	} {
+		if _, err := control.GenesisLogID(bad); err == nil {
+			t.Fatalf("%s must be refused", name)
+		}
 	}
 }

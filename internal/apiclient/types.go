@@ -147,7 +147,7 @@ type Precondition struct {
 // constants; the HTTP code follows from it.
 type ApplyResult struct {
 	Status      string   `json:"status"`
-	ConfigHash  string   `json:"config_hash,omitempty"`  // installed / rejected / refused / installed_not_recorded
+	ConfigHash  string   `json:"config_hash,omitempty"`  // installed / rejected / refused / installed_not_recorded / installed_not_signed
 	CurrentHash string   `json:"current_hash,omitempty"` // precondition_failed, when something is installed
 	Bootstrap   bool     `json:"bootstrap,omitempty"`    // installed: nothing was installed before
 	Reason      string   `json:"reason,omitempty"`       // refused / rejected / error: the recorded reason message
@@ -156,6 +156,7 @@ type ApplyResult struct {
 	Agents      int      `json:"agents,omitempty"`
 	Workflows   int      `json:"workflows,omitempty"`
 	Roles       int      `json:"roles,omitempty"`
+	KeyID       string   `json:"key_id,omitempty"` // installed: the operator's signing key id, when the server signs
 }
 
 // Apply statuses.
@@ -168,6 +169,7 @@ const (
 	ApplyLedgerDamaged        = "ledger_damaged"
 	ApplyBusy                 = "busy"
 	ApplyInstalledNotRecorded = "installed_not_recorded"
+	ApplyInstalledNotSigned   = "installed_not_signed"
 )
 
 // Fixed reasons on a 500 answer: the server never returns the recorded OS
@@ -189,24 +191,41 @@ const (
 // the ledger does not vouch for — and on GET /v1/config Files is never
 // empty (every installed snapshot passed the no-apply-floor, so it holds
 // at least one roles file); omitempty exists only for the hash route.
-// Additive (Article VI): a signature over the files/v1 canon is reserved
-// as a further field named "signature"; no consumer may use that name for
-// anything else.
+// Signature is the operator's Ed25519 signature over this install (format
+// agenthof-config-signature/v1 — hash, log_id, version, installed_at and
+// key_id are the signed payload), present iff the server signs and the
+// signature verifies under its configured public key; absent on an
+// unsigned server. Additive (Article VI).
 type ConfigSnapshot struct {
 	Hash        string            `json:"hash"`
 	Version     int               `json:"version"`
 	InstalledAt time.Time         `json:"installed_at"`
 	Files       map[string]string `json:"files,omitempty"`
+	Signature   *ConfigSignature  `json:"signature,omitempty"`
+}
+
+// ConfigSignature is the detached signature as served: the payload format
+// it was made under, the control ledger's identity and the signing key's id
+// (both inside the signed payload), and the signature itself. An object,
+// not a bare string, so a future format can be announced additively; a
+// second signature or algorithm is a new format, never a new field.
+type ConfigSignature struct {
+	Format string `json:"format"` // "agenthof-config-signature/v1"
+	LogID  string `json:"log_id"` // the control ledger's genesis log_id, 32 lowercase hex
+	KeyID  string `json:"key_id"` // lowercase hex SHA-256 of the raw public key
+	Sig    string `json:"sig"`    // standard base64 with padding, 64 bytes decoded
 }
 
 // Fixed text bodies on the configuration pull's non-200 answers. The
 // server writes them with http.Error and the local pull prints the same
 // words, so one condition reads the same from either side. The 404 body is
 // serve.ErrNoConfigInstalled's text; the 500 store and ledger bodies are
-// ReasonStoreUnusable and ReasonLedgerDamaged.
+// ReasonStoreUnusable and ReasonLedgerDamaged; the not-yet-signed 503 is
+// PullBodyNotSigned.
 const (
 	PullBodyRefused       = "not authorized: no role grants pull or apply to the invoker"
 	PullBodyNotBundleable = "snapshot cannot be distributed as a bundle"
 	PullBodyNotRecorded   = "installed configuration is not yet on record; retry"
 	PullBodyBusy          = "control ledger busy; retry"
+	PullBodyNotSigned     = "installed configuration is not yet signed; retry"
 )
