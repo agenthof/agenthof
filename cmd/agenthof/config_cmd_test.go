@@ -156,6 +156,7 @@ func TestConfigPullServerPrintsEveryRow(t *testing.T) {
 		{http.StatusInternalServerError, apiclient.ReasonLedgerDamaged},
 		{http.StatusServiceUnavailable, apiclient.PullBodyNotRecorded},
 		{http.StatusServiceUnavailable, apiclient.PullBodyBusy},
+		{http.StatusServiceUnavailable, apiclient.PullBodyNotSigned},
 	} {
 		srv := fakePullAPI(t, c.code, c.body)
 		out.Reset()
@@ -319,5 +320,97 @@ func TestConfigPullLocal(t *testing.T) {
 	out.Reset()
 	if code := cmdConfigPull([]string{"--control-log", ctl3}, &out); code != 1 || out.String() != "config pull: "+apiclient.PullBodyNotRecorded+"\n" {
 		t.Fatalf("not on record: %d %q", code, out.String())
+	}
+}
+
+// signedSample is pulledSample with a signature, as a signing server serves it.
+func signedSample(t *testing.T) apiclient.ConfigSnapshot {
+	t.Helper()
+	snap := pulledSample(t)
+	snap.Signature = &apiclient.ConfigSignature{Format: "agenthof-config-signature/v1", LogID: "00112233445566778899aabbccddeeff", KeyID: goldenKeyID,
+		Sig: "7Zj+G/3H5lmX+zAr8dVH+/R9r0f08gA7DLnMYD4x7OkIn/JG51vkZsUybg4O7USrgfhnQJgw488YTrPxqsGODg=="}
+	return snap
+}
+
+// TestConfigPullServerPrintsSignedBy: a signed answer adds one line after
+// version; --json carries the object; the CLI does not verify (no pinned
+// key) and prints what it was given; the 503 not-yet-signed row prints like
+// every other non-200.
+func TestConfigPullServerPrintsSignedBy(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	snap := signedSample(t)
+	srv := fakePullAPI(t, http.StatusOK, snapshotJSON(t, snap))
+	var out bytes.Buffer
+	if code := cmdConfigPull([]string{"--server", srv.URL, "--token", "tok"}, &out); code != 0 {
+		t.Fatalf("%d %q", code, out.String())
+	}
+	head := "installed: " + snap.Hash + "\nversion: 7  installed_at: 2026-10-09T02:12:01Z\nsigned_by: " + goldenKeyID + "\nfiles: 6\n"
+	if !strings.HasPrefix(out.String(), head) || len(strings.Split(strings.TrimRight(out.String(), "\n"), "\n")) != 10 {
+		t.Fatalf("summary:\n%s", out.String())
+	}
+	out.Reset()
+	if code := cmdConfigPull([]string{"--server", srv.URL, "--token", "tok", "--json"}, &out); code != 0 || !strings.Contains(out.String(), `"signature":{"format":"agenthof-config-signature/v1","log_id":"00112233445566778899aabbccddeeff","key_id":"`+goldenKeyID+`","sig":"`) {
+		t.Fatalf("--json: %d %s", code, out.String())
+	}
+	outDir := filepath.Join(t.TempDir(), "pulled")
+	out.Reset()
+	if code := cmdConfigPull([]string{"--server", srv.URL, "--token", "tok", "--out", outDir}, &out); code != 0 {
+		t.Fatalf("--out: %d %q", code, out.String())
+	}
+	if got, _ := config.HashDir(outDir); got != snap.Hash {
+		t.Fatalf("HashDir(out) = %q", got)
+	}
+	ents, _ := os.ReadDir(outDir)
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".sig") {
+			t.Fatal("--out writes the configuration only, never the .sig")
+		}
+	}
+	srv503 := fakePullAPI(t, http.StatusServiceUnavailable, apiclient.PullBodyNotSigned)
+	out.Reset()
+	if code := cmdConfigPull([]string{"--server", srv503.URL, "--token", "tok"}, &out); code != 1 || out.String() != "config pull: server answered 503: "+apiclient.PullBodyNotSigned+"\n" {
+		t.Fatalf("503: %d %q", code, out.String())
+	}
+}
+
+// TestConfigPullLocalSigned: the local pull runs the same pull — not yet
+// signed is a named line with the config sign remedy and exit 1 (never a
+// nil error printed); once signed, signed_by appears and --json carries the
+// object.
+func TestConfigPullLocalSigned(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("AGENTHOF_SERVER", "")
+	ctl, _, id := signedRoot(t)
+	hash := readPointer(t, ctl)
+	if err := os.Remove(config.SignaturePath(installedStore(ctl), hash)); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := cmdConfigPull([]string{"--control-log", ctl}, &out); code != 1 ||
+		out.String() != "config pull: "+apiclient.PullBodyNotSigned+"; run: agenthof config sign --control-log "+ctl+"\n" {
+		t.Fatalf("not signed: %d %q", code, out.String())
+	}
+	if code, _ := signCode(t, ctl); code != 0 {
+		t.Fatal("sign")
+	}
+	out.Reset()
+	if code := cmdConfigPull([]string{"--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "\nsigned_by: "+id+"\nfiles: 8\n") {
+		t.Fatalf("signed: %d %q", code, out.String())
+	}
+	out.Reset()
+	if code := cmdConfigPull([]string{"--control-log", ctl, "--json"}, &out); code != 0 {
+		t.Fatalf("--json: %d", code)
+	}
+	var doc apiclient.ConfigSnapshot
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil || doc.Signature == nil || doc.Signature.KeyID != id || doc.Signature.LogID != controlLogID(t, ctl) {
+		t.Fatalf("%v %+v", err, doc.Signature)
+	}
+	outDir := filepath.Join(t.TempDir(), "pulled")
+	out.Reset()
+	if code := cmdConfigPull([]string{"--control-log", ctl, "--out", outDir}, &out); code != 0 {
+		t.Fatalf("--out: %d %q", code, out.String())
+	}
+	if _, err := os.Stat(outDir + ".sig"); !os.IsNotExist(err) {
+		t.Fatal("no .sig beside --out")
 	}
 }
