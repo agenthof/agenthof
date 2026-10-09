@@ -240,3 +240,65 @@ func TestAuditVerifyControlTaintPrecedesInstalledMismatch(t *testing.T) {
 		t.Fatalf("the installed line is still printed: %s", out.String())
 	}
 }
+
+// TestAuditVerifyControlRepairedRootsExitThree: the two repair shapes the
+// configuration pull answers differently — a repaired ledger whose pointer
+// matches, and a repaired ledger whose last install is not the pointer —
+// both exit 3 here, because taint takes precedence over the pointer verdict.
+func TestAuditVerifyControlRepairedRootsExitThree(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	fragment := func(ctl string) {
+		f, err := os.OpenFile(ctl, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write([]byte(`{"v":"control/1","seq":2,"partial`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repair := func(root, ctl string) {
+		var out bytes.Buffer
+		if code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--as", "ops@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+			t.Fatalf("repair: exit %d\n%s", code, out.String())
+		}
+	}
+	args := func(root, ctl string) []string {
+		return []string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}
+	}
+
+	root := writeSample(t)
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	var buf bytes.Buffer
+	if code := cmdApply(args(root, ctl), &buf); code != 0 {
+		t.Fatalf("apply: %d\n%s", code, buf.String())
+	}
+	fragment(ctl)
+	repair(root, ctl)
+	var out bytes.Buffer
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 3 || !strings.Contains(out.String(), "matches the last recorded install (apply)") {
+		t.Fatalf("repaired, matching pointer: exit %d\n%s", code, out.String())
+	}
+
+	root = writeSample(t)
+	ctl = filepath.Join(t.TempDir(), "control.jsonl")
+	buf.Reset()
+	if code := cmdApply(args(root, ctl), &buf); code != 0 {
+		t.Fatalf("apply: %d\n%s", code, buf.String())
+	}
+	if err := os.WriteFile(filepath.Join(root, "agents", "planner.yaml"), []byte("name: planner\nmodel: fast\ninstruction: plan B\noutput: plan\nendpoint: http://127.0.0.1:1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_install_before_append")
+	buf.Reset()
+	_ = cmdApply(args(root, ctl), &buf)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	fragment(ctl)
+	repair(root, ctl)
+	out.Reset()
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 3 || !strings.Contains(out.String(), "does NOT match the last recorded install (") {
+		t.Fatalf("repaired, mismatching pointer: exit %d\n%s", code, out.String())
+	}
+}
