@@ -83,6 +83,13 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 			cfg = config.Config{}
 		case !installed:
 			logger.Warn("no configuration installed; every run will be refused until apply", "store", installedStore(*controlLog))
+		default:
+			// Installed and usable: say once whether the pull will serve it
+			// signed. No reconcile, no signing — audit verify control and
+			// config sign are the operator's tools.
+			if msg := signingStartupWarning(*controlLog); msg != "" {
+				logger.Warn(msg, "store", installedStore(*controlLog))
+			}
 		}
 		*shutdownTimeout = cfg.Gateway.EffectiveStepTimeout()
 	}

@@ -440,3 +440,47 @@ func cmdConfigSign(args []string, out io.Writer) int {
 	_, _ = fmt.Fprintf(out, "signed: %s\nversion: %d  key_id: %s\n", info.Hash, info.Version, info.KeyID)
 	return 0
 }
+
+// signingStartupWarning is serve's one look at the signature at startup —
+// a read with no lock, no write and no re-drive (serve never holds the
+// writer lock at startup and must not start signing on its own; audit
+// verify control is the operator's reconcile). It returns "" when signing
+// is off or the vouched install is signed; the keygen remedy for a private
+// key without its public file; the config sign remedy when the ledger
+// vouches for the pointer and no .sig verifies. A ledger that is busy,
+// damaged or does not vouch says nothing here: those are the pull's and the
+// audit readers' verdicts.
+func signingStartupWarning(controlLog string) string {
+	state, err := signingStateOf(controlLog)
+	if err != nil || !state.configured() {
+		return ""
+	}
+	if state == signingKeyOnly {
+		return fmt.Sprintf("%s present without %s; run: agenthof config keygen --control-log %s", signingKeyPath(controlLog), signingPubPath(controlLog), controlLog)
+	}
+	pub, err := loadSigningPub(controlLog)
+	if err != nil {
+		return fmt.Sprintf("%v; every pull will answer 500 until it is restored", err)
+	}
+	store := installedStore(controlLog)
+	hash, installed, err := config.InstalledHash(store)
+	if err != nil || !installed {
+		return ""
+	}
+	records, _, verr := ledger.ReadVerify(controlLog, ledger.Locked)
+	if verr != nil {
+		return ""
+	}
+	last, found := control.LastInstalling(records)
+	if !found || last.ConfigHash != hash {
+		return ""
+	}
+	logID, err := control.GenesisLogID(records)
+	if err != nil {
+		return ""
+	}
+	if _, err := servedSignature(store, hash, logID, last.Seq, last.Time.UTC(), pub); err != nil {
+		return fmt.Sprintf("installed configuration is not signed; every pull will answer 503 until signed; run: agenthof config sign --control-log %s", controlLog)
+	}
+	return ""
+}
