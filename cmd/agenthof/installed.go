@@ -82,23 +82,14 @@ func installedPointerLine(controlLog string, records []ledger.Record) (line stri
 	if !installed {
 		return "", false
 	}
-	var last *control.DecodedEvent
-	for _, r := range records {
-		d, derr := control.Decode(r.Raw)
-		if derr != nil {
-			continue
-		}
-		if control.Installing(d) {
-			last = &d
-		}
-	}
+	last, found := control.LastInstalling(records)
 	switch {
-	case last == nil:
+	case !found:
 		return fmt.Sprintf("installed config: %s — no install on record: the install was not recorded, or its record was lost\n", hash), true
 	case last.ConfigHash != hash:
-		return fmt.Sprintf("installed config: %s — does NOT match the last recorded install (%s, %s): the install was not recorded, or its record was lost\n", hash, last.ConfigHash, installLabel(*last)), true
+		return fmt.Sprintf("installed config: %s — does NOT match the last recorded install (%s, %s): the install was not recorded, or its record was lost\n", hash, last.ConfigHash, installLabel(last)), true
 	}
-	return fmt.Sprintf("installed config: %s — matches the last recorded install (%s)\n", hash, installLabel(*last)), false
+	return fmt.Sprintf("installed config: %s — matches the last recorded install (%s)\n", hash, installLabel(last)), false
 }
 
 // installLabel names an installing event for the audit readers: "apply", or
