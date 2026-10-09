@@ -109,12 +109,15 @@ func engineRun(t *testing.T, logDir string, exec engine.StepExecutor) func(ctx c
 	}
 }
 
-// fakeConfigHost records every Apply call and answers with result; when
-// block is non-nil, Apply waits on it first (to hold an apply in flight).
+// fakeConfigHost records every Apply and Pull call and answers with result
+// (Apply) or pull (Pull); when block is non-nil, Apply waits on it first (to
+// hold an apply in flight).
 type fakeConfigHost struct {
 	mu     sync.Mutex
 	calls  []fakeApplyCall
+	pulls  []identity.Invoker
 	result apiclient.ApplyResult
+	pull   PullResult
 	block  chan struct{}
 }
 
@@ -146,6 +149,13 @@ func (h *fakeConfigHost) last() fakeApplyCall {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.calls[len(h.calls)-1]
+}
+
+func (h *fakeConfigHost) Pull(inv identity.Invoker) PullResult {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pulls = append(h.pulls, inv)
+	return h.pull
 }
 
 type testServer struct {

@@ -8,6 +8,7 @@ import (
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/origin"
+	"github.com/agenthof/agenthof/internal/serve"
 )
 
 // configHost is serve.ConfigHost over this process's control root: the
@@ -73,4 +74,44 @@ func applyResult(o applyOutcome) apiclient.ApplyResult {
 		res.Status = apiclient.ApplyInstalledNotRecorded
 	}
 	return res
+}
+
+// Pull is serve.ConfigHost's read: the one pull (pullConfig) on the API
+// path, authorized against the installed roles. The cause of a store, ledger
+// or bundle failure can name store paths, so it is logged here, where the
+// operator who has the host reads it, and never returned to a client — the
+// same rule applyResult applies to a 500.
+func (h *configHost) Pull(inv identity.Invoker) serve.PullResult {
+	out := pullConfig(pullRequest{ControlLog: h.controlLog, Authorize: true, Invoker: inv})
+	status := pullStatus(out.Kind)
+	switch out.Kind {
+	case pullStoreUnusable, pullNotBundleable:
+		h.logger.Error("config pull failed", "status", status, "err", out.Err)
+	case pullLedgerDamaged:
+		h.logger.Error("config pull failed", "status", status, "err", out.Err)
+		h.logger.Error("control ledger damaged; run: agenthof audit repair control --control-log " + h.controlLog)
+	}
+	return serve.PullResult{Status: status, Snapshot: out.Snapshot}
+}
+
+// pullStatus maps a pull outcome to its wire status. An unknown kind falls
+// through to store_unusable, the fail-closed answer.
+func pullStatus(k pullKind) string {
+	switch k {
+	case pulled:
+		return serve.PullOK
+	case pullNothingInstalled:
+		return serve.PullNothingInstalled
+	case pullRefused:
+		return serve.PullRefused
+	case pullNotBundleable:
+		return serve.PullNotBundleable
+	case pullLedgerDamaged:
+		return serve.PullLedgerDamaged
+	case pullBusy:
+		return serve.PullBusy
+	case pullNotRecorded:
+		return serve.PullNotRecorded
+	}
+	return serve.PullStoreUnusable
 }
