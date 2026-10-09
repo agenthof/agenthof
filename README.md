@@ -241,6 +241,15 @@ The full mapping — each standard to the Agenthof guarantee it supports, with
 links, and where the design *deliberately diverges* — is in
 [`docs/standards.md`](docs/standards.md).
 
+Beyond standards, Agenthof takes inspiration from the agent-infrastructure
+ecosystem — notably [agentgateway](https://github.com/agentgateway/agentgateway)
+(a governed data plane for agent-to-tool and agent-to-agent traffic) and
+SPIFFE/SPIRE (cryptographic workload identity). Agenthof sits at a different
+layer: a **governance-only control plane** — not a harness, not just a proxy —
+where every action carries three verifiable identities, passes through governed
+doors, and is recorded in an append-only, hash-chained ledger, with behavior
+traceable to declarative config (config is law).
+
 ## License
 
 Apache-2.0
