@@ -112,7 +112,10 @@ that do not change shape for existing users. Control-plane actions (apply, the e
 repair, provisioning a role's provider key, and pruning run ledgers and
 artifacts under retention) are themselves authorized — default-deny, against
 the `control` operations a role declares — and recorded in a hash-chained
-control ledger.
+control ledger. Reading the installed configuration out of the control plane,
+to distribute it to the execution points that enforce it, is authorized the
+same way — the `pull` operation, which a grant of `apply` includes — and, as a
+read, is not recorded.
 
 ## Article VII — Scope discipline
 
