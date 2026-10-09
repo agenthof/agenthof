@@ -217,6 +217,20 @@ func TestScript(t *testing.T) {
 				}
 				ts.Setenv("HASH", hash)
 			},
+			// sigfile <control-log>: exports the path of installed/<hex>.sig
+			// for the current pointer as $SIG, so a script can remove it.
+			"sigfile": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 1 {
+					ts.Fatalf("usage: sigfile <control-log>")
+				}
+				store := installedStore(ts.MkAbs(args[0]))
+				hash, installed, err := config.InstalledHash(store)
+				ts.Check(err)
+				if !installed {
+					ts.Fatalf("nothing installed under %s", args[0])
+				}
+				ts.Setenv("SIG", config.SignaturePath(store, hash))
+			},
 			// tamper <control-log> <rel> <text>: appends text to the file at
 			// <rel> inside the installed snapshot beside <control-log> — an
 			// in-place edit under installed/<hex>/, the thing verify-on-read
