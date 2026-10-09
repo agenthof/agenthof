@@ -1,0 +1,126 @@
+# config pull over the API: the token is the actor, the installed roles
+# authorize (apply includes pull), the bytes are served verified and the
+# ledger vouches for them with the install's version — and no pull writes
+# anything. The pulled directory and the pulled document both re-apply to
+# the same hash.
+
+env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER
+env AGENTHOF_OIDC_CLIENT_ID=agenthof
+env AGENTHOF_TOKEN=$OIDC_TOKEN
+
+exec agenthof serve --addr 127.0.0.1:0 --addr-file addr.txt --log-dir logs --artifact-dir artifacts --control-log control.jsonl --allow-api-bootstrap &
+waitaddr addr.txt
+
+# before any apply: nothing installed, and a pull creates no ledger
+! exec agenthof config pull --server $SERVER
+stdout 'config pull: server answered 404: no configuration installed'
+! exists control.jsonl
+
+# the bootstrap apply (seq 1); the pull answers its hash and version
+exec agenthof apply --server $SERVER --if-installed none --config config
+stdout 'installed: sha256:[0-9a-f]{64}'
+installedhash control.jsonl
+exec agenthof config pull --server $SERVER
+stdout installed:.${HASH@R}
+stdout 'version: 1  installed_at: 20[0-9]{2}-'
+stdout 'files: 5'
+stdout '  gateway.yaml  [0-9]+ bytes'
+exec agenthof audit control --control-log control.jsonl
+stdout 'control ledger — 1 events'
+
+# --out writes a directory that applies to the SAME hash (seq 2)
+exec agenthof config pull --server $SERVER --out pulled
+stdout 'wrote 5 files to pulled'
+exists pulled/gateway.yaml
+exists pulled/roles/ops.yaml
+exec agenthof apply --server $SERVER --if-installed $HASH --config pulled
+stdout 'control head: seq=2'
+stdout installed:.${HASH@R}
+
+# an identical re-apply advances version, not the hash
+exec agenthof config pull --server $SERVER
+stdout installed:.${HASH@R}
+stdout 'version: 2  '
+
+# --json is the bundle apply --bundle accepts (seq 3)
+exec agenthof config pull --server $SERVER --json
+stdout "hash":"${HASH@R}","version":2,
+cp stdout b.json
+exec agenthof apply --server $SERVER --if-installed $HASH --bundle b.json
+stdout 'control head: seq=3'
+stdout installed:.${HASH@R}
+
+# a kill-switch flip on the host re-installs (seq 4): version is the flip's,
+# the hash is the flip's pointer
+exec agenthof registry disable planner --config config --control-log control.jsonl --as dana@example.com --groups engineering
+exec agenthof config pull --server $SERVER
+stdout 'version: 4  '
+! stdout installed:.${HASH@R}
+stdout 'installed: sha256:[0-9a-f]{64}'
+
+# config2 moves the apply grant to a group the token lacks (seq 5): once it
+# is installed, the pull is refused and --out leaves nothing behind
+installedhash control.jsonl
+exec agenthof apply --server $SERVER --if-installed $HASH --config config2
+stdout 'control head: seq=5'
+! exec agenthof config pull --server $SERVER
+stdout 'config pull: server answered 403: not authorized: no role grants pull or apply to the invoker'
+! exec agenthof config pull --server $SERVER --out x
+stdout 'server answered 403'
+! exists x
+
+# no pull wrote the ledger: five events, all of them applies and the flip
+exec agenthof audit control --control-log control.jsonl
+stdout 'control ledger — 5 events'
+! stdout 'pull'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'installed config: sha256:[0-9a-f]{64} — matches the last recorded install \(apply\)'
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: [engineering]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [engineering]
+control: [apply, enable, disable, repair]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
+-- config2/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config2/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config2/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: [engineering]
+-- config2/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+-- config2/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
