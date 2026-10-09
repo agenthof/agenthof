@@ -38,6 +38,7 @@ const usage = `agenthof — the agents' court
 
 Usage:
   agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-installed <sha256:hex|none>] [--server <url> [--bundle <file|->]]
+  agenthof config pull [--server <url> [--token <jwt>]] [--control-log <path>] [--out <dir>] [--json]  (the installed configuration, from the server or the local store; --out writes a directory apply --config accepts)
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
@@ -67,6 +68,8 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 	switch argv[0] {
 	case "apply":
 		return cmdApply(argv[1:], stdout)
+	case "config":
+		return cmdConfig(argv[1:], stdout)
 	case "registry":
 		return cmdRegistry(argv[1:], stdout)
 	case "run":

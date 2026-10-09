@@ -13,6 +13,7 @@ import (
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/obs"
+	"github.com/agenthof/agenthof/internal/serve"
 )
 
 var apiInvoker = identity.Invoker{Subject: "dana@example.com", Issuer: "https://idp.test", Method: "oidc", Groups: []string{"platform-eng"}}
@@ -216,6 +217,72 @@ func TestConfigHostBusyMapsTo409Body(t *testing.T) {
 	if _, err := os.Stat(ctl); err == nil {
 		if len(controlEvents(t, ctl)) != 0 {
 			t.Fatal("busy records nothing")
+		}
+	}
+}
+
+// TestConfigHostPullMapsEveryOutcome: each pull kind becomes its wire status;
+// the cause of a 500-class outcome is logged, never returned; a non-pulled
+// result carries no snapshot.
+func TestConfigHostPullMapsEveryOutcome(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	h, ctl, logs := newConfigHost(t, true)
+	if res := h.Pull(apiInvoker); res.Status != serve.PullNothingInstalled || res.Snapshot.Hash != "" {
+		t.Fatalf("%+v", res)
+	}
+	installed := h.Apply(apiInvoker, sampleBundle(t), apiclient.Precondition{ExpectNone: true}, apiVia())
+	if installed.Status != apiclient.ApplyInstalled {
+		t.Fatalf("%+v", installed)
+	}
+	res := h.Pull(apiInvoker)
+	if res.Status != serve.PullOK || res.Snapshot.Hash != installed.ConfigHash || res.Snapshot.Version != 1 || len(res.Snapshot.Files) != 6 {
+		t.Fatalf("%+v", res)
+	}
+	outsider := identity.Invoker{Subject: "mallory@example.com", Issuer: "https://idp.test", Method: "oidc", Groups: []string{"finance"}}
+	if res := h.Pull(outsider); res.Status != serve.PullRefused || res.Snapshot.Hash != "" {
+		t.Fatalf("%+v", res)
+	}
+	if len(controlEvents(t, ctl)) != 1 {
+		t.Fatal("a pull records nothing")
+	}
+
+	// Store unusable: the mismatch text goes to the log, not the result.
+	snap := filepath.Join(installedStore(ctl), strings.TrimPrefix(installed.ConfigHash, "sha256:"))
+	if err := os.WriteFile(filepath.Join(snap, "gateway.yaml"), []byte("models: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res := h.Pull(apiInvoker); res.Status != serve.PullStoreUnusable || res.Snapshot.Hash != "" {
+		t.Fatalf("%+v", res)
+	}
+	if !strings.Contains(logs.String(), "snapshot hashes as") || !strings.Contains(logs.String(), "status=store_unusable") {
+		t.Fatalf("the cause must be logged:\n%s", logs.String())
+	}
+
+	// Ledger damaged: the repair hint is logged, as it is for an apply.
+	h2, ctl2, logs2 := newConfigHost(t, true)
+	if res := h2.Apply(apiInvoker, sampleBundle(t), apiclient.Precondition{ExpectNone: true}, apiVia()); res.Status != apiclient.ApplyInstalled {
+		t.Fatalf("%+v", res)
+	}
+	if err := os.WriteFile(ctl2, append(mustRead(t, ctl2), []byte(`{"v":"control/1",`)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res := h2.Pull(apiInvoker); res.Status != serve.PullLedgerDamaged {
+		t.Fatalf("%+v", res)
+	}
+	if !strings.Contains(logs2.String(), "audit repair control --control-log "+ctl2) {
+		t.Fatalf("the repair hint must be logged:\n%s", logs2.String())
+	}
+}
+
+func TestPullStatusCoversEveryKind(t *testing.T) {
+	want := map[pullKind]string{
+		pulled: serve.PullOK, pullNothingInstalled: serve.PullNothingInstalled, pullRefused: serve.PullRefused,
+		pullStoreUnusable: serve.PullStoreUnusable, pullNotBundleable: serve.PullNotBundleable,
+		pullLedgerDamaged: serve.PullLedgerDamaged, pullBusy: serve.PullBusy, pullNotRecorded: serve.PullNotRecorded,
+	}
+	for k, s := range want {
+		if got := pullStatus(k); got != s {
+			t.Fatalf("pullStatus(%d) = %q, want %q", k, got, s)
 		}
 	}
 }

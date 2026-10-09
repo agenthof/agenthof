@@ -68,8 +68,8 @@ The governed core is real and runnable today:
   `--json` — each source carrying its own verification verdict.
   Those control actions are themselves **authorized, default-deny**: a
   role's `control:` grant names which of `apply`, `enable`, `disable`,
-  `repair`, `provision`, and `prune` its groups may perform — each named explicitly, no wildcard,
-  nothing by omission — and a caller no role grants is refused and the
+  `repair`, `provision`, `prune` and `pull` its groups may perform — each named explicitly, no wildcard,
+  nothing by omission except that a grant of `apply` includes `pull` — and a caller no role grants is refused and the
   refusal recorded (a refused ledger repair is printed, not recorded, since
   the ledger it would go to is the damaged one).
   Those decisions are made against the **installed** configuration — the
@@ -144,6 +144,11 @@ The governed core is real and runnable today:
   configuration with a compare-and-swap on the installed hash, is
   authorized against the installed roles, and is recorded with where it
   came from.
+  An execution point pulls the installed configuration over the same API
+  (`GET /v1/config`, `config pull --server`): authorized by a `pull` grant
+  (or `apply`, which includes it), served only when its bytes hash as the
+  installed pointer and the control ledger records the install that put it
+  there, re-applies to the same hash, and — as a read — is not recorded.
 
 ## Next
 
@@ -159,11 +164,10 @@ The governed core is real and runnable today:
   default-deny `control:` authorization, and a structured record of what a
   prune removed, are still to come.
 - **Signed, verifiable configuration snapshots** — the installed-config
-  snapshot gains an operator signature and a tamper-evident pointer, is
-  verified against that signature when a run reads it (today the bytes are
-  checked against the pointer's hash only), and can be
-  pulled and checked over the API — so a run's configuration is provably the
-  one the operator installed.
+  snapshot gains an operator signature and a tamper-evident pointer, and is
+  verified against that signature when a run reads it and when it is pulled
+  (today the bytes are checked against the pointer's hash only) — so a run's
+  configuration is provably the one the operator installed.
 - **More confinement backends** — the reference runtime's confinement becomes a
   selection seam with OS-native backends beyond rootless podman (for example
   macOS Seatbelt, Linux Landlock), chosen per host with a fail-closed default

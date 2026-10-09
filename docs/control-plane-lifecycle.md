@@ -26,13 +26,17 @@ agenthof audit repair control --config ./config --as dana@example.com --groups p
 agenthof gateway provision --as dana@example.com --groups platform-eng                           # mint provider keys for the installed roles
 agenthof runs prune --older-than 180d --as dana@example.com --groups platform-eng               # remove aged run ledgers and artifact bodies
 agenthof apply --server https://agenthof.example --token $TOKEN --if-installed sha256:…  # the same apply, over the API (serve)
+agenthof config pull --server https://agenthof.example --token $TOKEN --out ./pulled           # read the installed configuration back, for an execution point (a read: not recorded)
 ```
 
 Each one is an *attempt* to change governance state, and each attempt — whether
 it succeeds, is rejected, or is refused — is recorded to a single, append-only,
 hash-chained **control ledger** (`.agenthof/control.jsonl`). The control plane's
 promise is not that nothing bad can happen; it is that **nothing happens without
-a record you can later verify**.
+a record you can later verify**. One command reads the control plane without
+writing it: `config pull` hands an execution point the installed
+configuration, authorized like every control action and — because it changes
+nothing — not recorded.
 
 ## The journey at a glance
 
@@ -86,10 +90,12 @@ non-zero.
 Knowing who asked is not the same as letting them. Every control action is
 **authorized, default-deny**, from two facts: the invoker's groups and the
 roles in the configuration directory. A role may carry a `control:` grant —
-any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, named one by one, no wildcard —
+any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, named one by one, no wildcard —
 and the action is allowed only if some role both names one of the invoker's
 groups in `allowed_groups` **and** lists that operation. Membership and grant,
-never the grant alone. A role with no `control:` grants nothing; a public role
+never the grant alone. One grant includes another: a grant of `apply`
+includes `pull` (whoever may change the configuration may read it); nothing
+else is implied. A role with no `control:` grants nothing; a public role
 (`allowed_groups: ["*"]`) can never grant a control operation, and `apply`
 rejects one that tries. A role may grant control operations and own no
 workflows at all — an operator who changes governance but runs nothing.
@@ -120,6 +126,12 @@ earlier keys valid. A provision or prune whose success event could not be
 appended prints `provision ran; event NOT recorded` / `runs pruned; event
 NOT recorded`; nothing downstream flags a provision's gap (there is no
 pointer to compare), so the operator re-runs it.
+
+`pull` guards the one control-plane action that is a read: `config pull`
+(and `GET /v1/config`) hands the installed configuration to an execution
+point so it can enforce it. It is authorized against the installed roles like
+every other action and, as a read, records nothing — see "Pulling the
+configuration" below.
 
 What each command authorizes against — the **installed** configuration:
 
@@ -226,6 +238,10 @@ caller: there is no filesystem, so the token-and-roles check is the only way
 in, and the first apply while nothing is installed is refused unless the server
 was started with `--allow-api-bootstrap`. What remains is the host: whoever can
 write `.agenthof/installed/` on the serving host can still remove the pointer.
+A pull reads the installed snapshot whole and verifies every byte against the
+pointer before serving any of it, so it never distributes a tampered
+snapshot — but who may pull is decided from the same roles-only read, and no
+ledger line records that a pull happened.
 
 ## 3. Is the change valid?
 
@@ -370,10 +386,63 @@ lock, so an apply and a flip never interleave: the flip re-snapshots
 whatever the apply installed, or the apply authorizes against whatever the
 flip installed.
 
+## Pulling the configuration
+
+Execution points that are not the serving host need the law they are to
+enforce. `agenthof config pull --server …` (or `GET /v1/config`) reads the
+installed configuration back out of the control plane — authorized like
+every control action, verified before it is served, and vouched for by the
+ledger:
+
+```
+  GET /v1/config   (or /v1/config/hash for the hash, version and time alone)
+      │
+      ▼
+  1. Who?         the bearer token is verified → Invoker {subject, issuer, groups}
+      │              (401 and nothing read if it is not)
+      ▼
+  2. May they?    read the INSTALLED roles; default-deny: pull, or apply, which includes it
+      │              nothing installed → 404 · roles unreadable → 500 · not granted → 403
+      ▼
+  3. The bytes    read the snapshot the pointer names and hash what was read:
+      │              it must hash as the pointer, or nothing is served (500)
+      ▼
+  4. Vouched?     verify the control ledger and find the last install it recorded
+      │              torn/broken → 500 · lock held → 503 retry
+      │              last install ≠ the pointer → 503 "not yet on record; retry"
+      ▼
+  5. Answer       200 {hash, version, installed_at, files} + ETag — nothing recorded
+```
+
+`version` and `installed_at` are the ledger's own account of the install:
+the sequence number and time of the last `apply` or kill-switch flip that
+put a snapshot in place. The server answers `503` rather than a snapshot the
+ledger does not vouch for — three situations produce it: the moment inside
+every apply between the pointer moving and its record landing
+(milliseconds); an install whose record was never appended (`installed;
+event NOT recorded` — re-apply to clear it); and a pointer re-aimed by hand
+at some other snapshot. A ledger that was repaired still vouches: the taint
+is the audit readers' verdict about history, not about whether the current
+pointer is on record.
+
+A pull is a read: it is not recorded, and the server's log is the only
+trace of who read the policy. What the puller then does is theirs: `config
+pull --out <dir>` followed by `apply --config <dir>` on their own host is an
+ordinary command-line apply there, recorded in that host's control ledger
+under that host's rules, with the same hash the central ledger recorded. The
+`pull` grant confines what an execution point may obtain from the server; it
+says nothing about what its operator may do on their own machine.
+
+The pulled files, and the hash, are the contract: `config pull` refuses a
+pull whose files do not hash as the server said, before printing or writing
+anything, and `--out` re-hashes the written directory. Nothing is signed yet;
+the transport and the token are the trust.
+
 ## 6. Reading it back
 
 ```
 agenthof audit control                          # render the chain + an integrity line
+agenthof config pull [--control-log <path>] [--out <dir>] [--json]   # the installed configuration, as it would be served
 agenthof audit verify control [--expect-head H] # verify, and optionally check the head
 agenthof audit repair control [--config <dir>]  # repair a torn tail (see below)
 ```
@@ -414,8 +483,8 @@ adopted. Because both carry the same key:
 
 | Shipped today | Reserved for later |
 |---|---|
-| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune` | policy-as-config approval workflows; a configuration read/pull endpoint (`GET /v1/config`); operator-signed snapshots |
-| `apply` over the API (`POST /v1/config/apply`) with a required compare-and-swap on the installed hash, authorization at the API against the installed roles, one writer lock across apply and the kill switch, and `origin` on the record | `registry enable\|disable` and `audit repair control` over the API; `audit control --server` |
+| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune` | policy-as-config approval workflows; operator-signed snapshots |
+| `apply` over the API (`POST /v1/config/apply`) with a required compare-and-swap on the installed hash, authorization at the API against the installed roles, one writer lock across apply and the kill switch, and `origin` on the record; pulling the installed configuration over the API (`GET /v1/config`, `GET /v1/config/hash`, `config pull`), authorized by `pull` (or `apply`, which includes it), content-addressed, unrecorded | `registry enable\|disable` and `audit repair control` over the API; `audit control --server` |
 | default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; pruning and tamper-evidence of the snapshot store; verifying the roles-only authorization read |
 | `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read and on the kill switch's re-snapshot read | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
 | `gateway provision` and `runs prune` authorized against the installed roles (`provision`, `prune`) and recorded; prune spares the control ledger by name and by identity | `provision`/`prune` over the API; a structured prune record; `detail` in `investigate/1` |

@@ -1,9 +1,10 @@
 // Package serve hosts governed runs behind an authenticated HTTP API:
 // every request except GET /healthz carries a bearer verified per call;
 // a run executes in a goroutine under the server's own context (a client
-// hanging up never cancels a run); and the two ledgers are read back over
-// the same API. It is a control surface over the existing doors — no new
-// door, no new containment claim.
+// hanging up never cancels a run); the two ledgers are read back over the
+// same API; and the installed configuration is read back for distribution
+// to the execution points that enforce it. It is a control surface over
+// the existing doors — no new door, no new containment claim.
 package serve
 
 import (
@@ -51,16 +52,42 @@ type Prepared interface {
 	Run(ctx context.Context, runID, role, workflow, input string, inv identity.Invoker, origin *engine.Origin) (engine.Result, error)
 }
 
-// ConfigHost is what serve needs to apply a configuration: the same apply
-// the CLI runs, over the control root this process serves, serialized by
-// the host against every other writer (its store-level writer lock). Apply
-// returns an outcome, never an error: every failure is a recorded (or
+// ConfigHost is what serve needs to apply, and to read for distribution, a
+// configuration: the same apply the CLI runs, over the control root this
+// process serves, serialized by the host against every other writer (its
+// store-level writer lock); and the same read the CLI's local pull runs.
+// Apply returns an outcome, never an error: every failure is a recorded (or
 // deliberately unrecorded) outcome with an HTTP status of its own. via is
 // the request channel's account of itself (origin), which the host records
 // on the control event.
 type ConfigHost interface {
 	Apply(inv identity.Invoker, files map[string][]byte, pre apiclient.Precondition, via *engine.Origin) apiclient.ApplyResult
+	// Pull reads the installed configuration for distribution: authorized
+	// against the installed roles (pull, or apply, which includes it),
+	// verified over the bytes returned, with the control ledger's account
+	// of the install. An outcome, never an error, and never recorded.
+	Pull(inv identity.Invoker) PullResult
 }
+
+// PullResult is the host's answer to Pull; Status is one of the Pull*
+// constants and the handler maps it to an HTTP status and a fixed body.
+// Snapshot is set only on PullOK.
+type PullResult struct {
+	Status   string
+	Snapshot apiclient.ConfigSnapshot
+}
+
+// Pull statuses.
+const (
+	PullOK               = "pulled"
+	PullNothingInstalled = "nothing_installed"
+	PullRefused          = "refused"
+	PullStoreUnusable    = "store_unusable"
+	PullNotBundleable    = "not_bundleable"
+	PullLedgerDamaged    = "ledger_damaged"
+	PullBusy             = "busy"
+	PullNotRecorded      = "not_recorded"
+)
 
 // ErrConfigInvalid marks a Prepare failure that is the configuration's:
 // the run is refused (recorded, 422) with "configuration invalid: <first
@@ -143,6 +170,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/runs/{id}/cancel", s.authed(s.cancelRun))
 	s.mux.HandleFunc("GET /v1/investigate", s.authed(s.investigate))
 	s.mux.HandleFunc("POST /v1/config/apply", s.authed(s.applyConfig))
+	s.mux.HandleFunc("GET /v1/config", s.authed(s.getConfig))
+	s.mux.HandleFunc("GET /v1/config/hash", s.authed(s.getConfigHash))
 }
 
 // Handler is the server's HTTP handler.

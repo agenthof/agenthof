@@ -2,8 +2,9 @@
 // role's declared groups: who may run a role's workflows (GroupsAllow — the
 // run-time RBAC the engine enforces) and who may change governance itself
 // (ControlAllows — the control-plane gate every control command enforces:
-// apply, the enable/disable kill switch, ledger repair, key provisioning and
-// retention pruning). It is a leaf package — it imports only config and
+// apply, the enable/disable kill switch, ledger repair, key provisioning,
+// retention pruning, and reading the installed configuration for
+// distribution). It is a leaf package — it imports only config and
 // identity — so the engine and the CLI share one decision instead of two
 // drifting copies.
 package authz
@@ -19,7 +20,7 @@ import (
 // may be granted through its control: list. The set is internal and fixed, so
 // there is no widest marker: a grant names each operation it confers. The
 // validation messages that enumerate the set are built from this slice.
-var ControlOps = []string{"apply", "enable", "disable", "repair", "provision", "prune"}
+var ControlOps = []string{"apply", "enable", "disable", "repair", "provision", "prune", "pull"}
 
 // KnownControlOp reports whether op is one of ControlOps.
 func KnownControlOp(op string) bool { return slices.Contains(ControlOps, op) }
@@ -55,6 +56,9 @@ func GroupsAllow(invokerGroups, allowedGroups []string) bool {
 // against without validation — the installed snapshot's roles, or, before the
 // first apply, the configuration directory's — so the apply-time
 // public-control-role rejection cannot be relied on here: this is the guard.
+// It is op-by-op: no operation implies another here. The one implication —
+// a grant of apply includes pull — lives at the pull action's own
+// authorization, not in this function.
 // An op outside
 // ControlOps is denied regardless of what a role lists, so a typo in a raw,
 // never-applied config grants nothing.

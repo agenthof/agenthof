@@ -25,7 +25,8 @@ import (
 
 // cmdServe runs the control-plane API: governed runs over HTTP, every
 // call authenticated with the invoker's OIDC token, both ledgers readable
-// back. ctx ending (SIGINT/SIGTERM from dispatch) starts a graceful
+// back, and the installed configuration pullable by the execution points
+// it governs. ctx ending (SIGINT/SIGTERM from dispatch) starts a graceful
 // shutdown: new runs and applies are refused, in-flight runs are cancelled
 // and waited for — applies are waited for — up to --shutdown-timeout, then
 // the listener closes.

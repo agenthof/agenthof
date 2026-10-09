@@ -157,3 +157,59 @@ func TestClientApplySendsPreconditionAndDecodesEveryStatus(t *testing.T) {
 		t.Fatalf("401 → ErrUnauthorized without the token: %v", err)
 	}
 }
+
+func TestClientPullConfigAndConfigHash(t *testing.T) {
+	status := http.StatusOK
+	body := `{"hash":"sha256:ab","version":3,"installed_at":"2026-10-09T02:12:01Z","files":{"roles/ops.yaml":"name: ops\n"}}`
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok" || r.Method != http.MethodGet {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok", nil)
+	snap, err := c.PullConfig(context.Background())
+	if err != nil || gotPath != "/v1/config" || snap.Hash != "sha256:ab" || snap.Version != 3 || snap.Files["roles/ops.yaml"] != "name: ops\n" || snap.InstalledAt.Year() != 2026 {
+		t.Fatalf("snap %+v err %v path %q", snap, err, gotPath)
+	}
+	body = `{"hash":"sha256:ab","version":3,"installed_at":"2026-10-09T02:12:01Z"}`
+	snap, err = c.ConfigHash(context.Background())
+	if err != nil || gotPath != "/v1/config/hash" || snap.Hash != "sha256:ab" || snap.Files != nil {
+		t.Fatalf("hash route: snap %+v err %v path %q", snap, err, gotPath)
+	}
+	status, body = http.StatusServiceUnavailable, PullBodyNotRecorded+"\n"
+	_, err = c.PullConfig(context.Background())
+	var se *StatusError
+	if !errors.As(err, &se) || se.Code != 503 || se.Body != PullBodyNotRecorded {
+		t.Fatalf("503 must be a StatusError with the body: %v", err)
+	}
+	status, body = http.StatusForbidden, PullBodyRefused+"\n"
+	if _, err := c.ConfigHash(context.Background()); !errors.As(err, &se) || se.Code != 403 || se.Body != PullBodyRefused {
+		t.Fatalf("403: %v", err)
+	}
+	if _, err := New(srv.URL, "wrong", nil).PullConfig(context.Background()); !errors.Is(err, ErrUnauthorized) || strings.Contains(err.Error(), "wrong") {
+		t.Fatalf("401 → ErrUnauthorized without the token: %v", err)
+	}
+}
+
+// TestPullConfigOverCapIsMalformedAnswer: a 200 body past the client's
+// 8 MiB read cap is truncated by readBody and refused as a malformed answer
+// — never a partial snapshot handed to the caller.
+func TestPullConfigOverCapIsMalformedAnswer(t *testing.T) {
+	big := strings.Repeat("a", 9<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"hash":"sha256:ab","version":1,"installed_at":"2026-10-09T02:12:01Z","files":{"roles/ops.yaml":"`+big+`"}}`)
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "tok", nil).PullConfig(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "malformed answer") {
+		t.Fatalf("over-cap body must be a malformed answer: %v", err)
+	}
+}
