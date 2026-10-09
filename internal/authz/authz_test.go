@@ -86,7 +86,7 @@ func TestControlAllows(t *testing.T) {
 }
 
 func TestControlOpsFixedSet(t *testing.T) {
-	for _, op := range []string{"apply", "enable", "disable", "repair", "provision", "prune"} {
+	for _, op := range []string{"apply", "enable", "disable", "repair", "provision", "prune", "pull"} {
 		if !KnownControlOp(op) {
 			t.Fatalf("%q must be a control op", op)
 		}
@@ -120,6 +120,40 @@ func TestControlAllowsProvisionAndPruneAreOpByOp(t *testing.T) {
 		{"non-member denied", []config.RoleDef{keys}, inv("ops"), "provision", false},
 		{"public role grants no provision", []config.RoleDef{public}, inv("platform-eng"), "provision", false},
 		{"public role grants no prune, even to a claimed *", []config.RoleDef{public}, inv("*"), "prune", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ControlAllows(tc.roles, tc.inv, tc.op); got != tc.want {
+				t.Fatalf("ControlAllows(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestControlAllowsPullIsOpByOp: pull is granted exactly like every other
+// operation — by name, to a member. At this level apply does not imply pull
+// and pull does not imply apply: the one implication (a grant of apply
+// includes pull) lives where the pull action authorizes, not here. The
+// public marker grants pull to nobody on either side.
+func TestControlAllowsPullIsOpByOp(t *testing.T) {
+	edge := config.RoleDef{Name: "edge", AllowedGroups: []string{"execution-points"}, Control: []string{"pull"}}
+	operator := config.RoleDef{Name: "operator", AllowedGroups: []string{"platform-eng"}, Control: []string{"apply"}}
+	public := config.RoleDef{Name: "open", AllowedGroups: []string{"*"}, Control: []string{"pull"}}
+	inv := func(groups ...string) identity.Invoker { return identity.Invoker{Subject: "x", Groups: groups} }
+	cases := []struct {
+		name  string
+		roles []config.RoleDef
+		inv   identity.Invoker
+		op    string
+		want  bool
+	}{
+		{"pull granted to a member", []config.RoleDef{edge}, inv("execution-points"), "pull", true},
+		{"pull does not imply apply", []config.RoleDef{edge}, inv("execution-points"), "apply", false},
+		{"apply does not imply pull here", []config.RoleDef{operator}, inv("platform-eng"), "pull", false},
+		{"non-member denied pull", []config.RoleDef{edge}, inv("finance"), "pull", false},
+		{"groupless invoker denied pull", []config.RoleDef{edge}, inv(), "pull", false},
+		{"public role grants no pull", []config.RoleDef{public}, inv("finance"), "pull", false},
+		{"public role grants no pull to a claimed *", []config.RoleDef{public}, inv("*"), "pull", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
