@@ -237,3 +237,37 @@ func (c *Client) Investigate(ctx context.Context, q InvestigateQuery) ([]byte, e
 	}
 	return body, nil
 }
+
+// PullConfig fetches the installed configuration: 200 decodes into a
+// ConfigSnapshot with Files; 401 is ErrUnauthorized; every other answer —
+// 403, 404, the 500s, the retry 503s — is a StatusError carrying the fixed
+// body (the GetRun rule: one JSON shape, on 200 only). The body is read
+// under readBody's 8 MiB cap: a snapshot larger than that is refused as a
+// malformed answer, never handed over truncated.
+func (c *Client) PullConfig(ctx context.Context) (ConfigSnapshot, error) {
+	return c.getSnapshot(ctx, "/v1/config")
+}
+
+// ConfigHash is PullConfig without Files — the cheap poll.
+func (c *Client) ConfigHash(ctx context.Context) (ConfigSnapshot, error) {
+	return c.getSnapshot(ctx, "/v1/config/hash")
+}
+
+func (c *Client) getSnapshot(ctx context.Context, path string) (ConfigSnapshot, error) {
+	resp, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return ConfigSnapshot{}, err
+	}
+	body, err := readBody(resp)
+	if err != nil {
+		return ConfigSnapshot{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return ConfigSnapshot{}, statusError(resp, body)
+	}
+	var snap ConfigSnapshot
+	if err := json.Unmarshal(body, &snap); err != nil {
+		return ConfigSnapshot{}, fmt.Errorf("server: malformed answer: %w", err)
+	}
+	return snap, nil
+}

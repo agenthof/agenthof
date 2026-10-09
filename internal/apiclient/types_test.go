@@ -77,3 +77,25 @@ func TestApplyWireTypesRoundTripAndKeys(t *testing.T) {
 		t.Fatalf("412 body = %s", data)
 	}
 }
+
+func TestConfigSnapshotRoundTripAndKeys(t *testing.T) {
+	at := time.Date(2026, 10, 9, 2, 12, 1, 0, time.UTC)
+	roundTrip(t, ConfigSnapshot{Hash: "sha256:ab", Version: 7, InstalledAt: at, Files: map[string]string{"roles/ops.yaml": "name: ops\n"}})
+	data, err := json.Marshal(ConfigSnapshot{Hash: "sha256:ab", Version: 7, InstalledAt: at})
+	if err != nil || string(data) != `{"hash":"sha256:ab","version":7,"installed_at":"2026-10-09T02:12:01Z"}` {
+		t.Fatalf("hash-route body = %s (err %v)", data, err)
+	}
+	data, err = json.Marshal(ConfigSnapshot{Hash: "sha256:ab", Version: 7, InstalledAt: at, Files: map[string]string{"gateway.yaml": "models: {}\n"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `{"hash":"sha256:ab","version":7,"installed_at":"2026-10-09T02:12:01Z","files":{"gateway.yaml":"models: {}\n"}}` {
+		t.Fatalf("full body = %s", data)
+	}
+	// The document is ApplyRequest-compatible: apply --bundle ignores the
+	// extra keys and reads files.
+	var req ApplyRequest
+	if err := json.Unmarshal(data, &req); err != nil || req.Files["gateway.yaml"] != "models: {}\n" {
+		t.Fatalf("a pulled document must decode as an ApplyRequest: %v %+v", err, req)
+	}
+}

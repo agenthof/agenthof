@@ -178,3 +178,35 @@ const (
 	ReasonLedgerDamaged = "control ledger damaged"
 	ReasonNotRecorded   = "control event could not be recorded"
 )
+
+// ConfigSnapshot answers GET /v1/config (with Files) and GET /v1/config/hash
+// (without). Hash is the installed pointer; Version is the control-ledger
+// sequence number of the event that installed it (an apply, or a kill-switch
+// flip against an installed snapshot) and InstalledAt that event's time;
+// Files is the configuration by config-relative path, the exact body
+// POST /v1/config/apply accepts. A 200 always carries all three of Hash,
+// Version and InstalledAt — the server answers 503 rather than a snapshot
+// the ledger does not vouch for — and on GET /v1/config Files is never
+// empty (every installed snapshot passed the no-apply-floor, so it holds
+// at least one roles file); omitempty exists only for the hash route.
+// Additive (Article VI): a signature over the files/v1 canon is reserved
+// as a further field named "signature"; no consumer may use that name for
+// anything else.
+type ConfigSnapshot struct {
+	Hash        string            `json:"hash"`
+	Version     int               `json:"version"`
+	InstalledAt time.Time         `json:"installed_at"`
+	Files       map[string]string `json:"files,omitempty"`
+}
+
+// Fixed text bodies on the configuration pull's non-200 answers. The
+// server writes them with http.Error and the local pull prints the same
+// words, so one condition reads the same from either side. The 404 body is
+// serve.ErrNoConfigInstalled's text; the 500 store and ledger bodies are
+// ReasonStoreUnusable and ReasonLedgerDamaged.
+const (
+	PullBodyRefused       = "not authorized: no role grants pull or apply to the invoker"
+	PullBodyNotBundleable = "snapshot cannot be distributed as a bundle"
+	PullBodyNotRecorded   = "installed configuration is not yet on record; retry"
+	PullBodyBusy          = "control ledger busy; retry"
+)
