@@ -115,7 +115,12 @@ the `control` operations a role declares — and recorded in a hash-chained
 control ledger. Reading the installed configuration out of the control plane,
 to distribute it to the execution points that enforce it, is authorized the
 same way — the `pull` operation, which a grant of `apply` includes — and, as a
-read, is not recorded.
+read, is not recorded. The operator's signature over an installed
+configuration — made by the host at install time, or again by `config sign`
+— is a derivation of the install the control ledger already records, gated by
+possession of the signing key on that host, as the key itself is; it attests
+that record, mints no policy and binds to no role, and so is neither
+authorized against a role nor separately recorded.
 
 ## Article VII — Scope discipline
 
