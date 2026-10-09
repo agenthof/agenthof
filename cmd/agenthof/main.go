@@ -39,6 +39,7 @@ const usage = `agenthof — the agents' court
 Usage:
   agenthof apply    --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-installed <sha256:hex|none>] [--server <url> [--bundle <file|->]]
   agenthof config pull [--server <url> [--token <jwt>]] [--control-log <path>] [--out <dir>] [--json]  (the installed configuration, from the server or the local store; --out writes a directory apply --config accepts)
+  agenthof config keygen [--control-log <path>]  (generates the operator's Ed25519 signing pair beside the control ledger and prints the public key to pin at every execution point; never overwrites an existing pair)
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]

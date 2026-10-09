@@ -70,7 +70,7 @@ func snapshotJSON(t *testing.T, snap apiclient.ConfigSnapshot) string {
 
 func TestConfigUsage(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := cmdConfig(nil, &out); code != 2 || !strings.Contains(out.String(), "config needs a subcommand: pull") {
+	if code := cmdConfig(nil, &out); code != 2 || !strings.Contains(out.String(), "config needs a subcommand: pull, keygen") {
 		t.Fatalf("no verb: %d %q", code, out.String())
 	}
 	out.Reset()

@@ -13,15 +13,19 @@ import (
 	"github.com/agenthof/agenthof/internal/config"
 )
 
-// cmdConfig is the `config` subcommand group; `pull` is its only verb.
+// cmdConfig is the `config` subcommand group: pull (the installed
+// configuration, from the server or the local store) and keygen (the
+// operator's signing pair).
 func cmdConfig(args []string, out io.Writer) int {
 	if len(args) < 1 {
-		_, _ = fmt.Fprintln(out, "config needs a subcommand: pull")
+		_, _ = fmt.Fprintln(out, "config needs a subcommand: pull, keygen")
 		return 2
 	}
 	switch args[0] {
 	case "pull":
 		return cmdConfigPull(args[1:], out)
+	case "keygen":
+		return cmdConfigKeygen(args[1:], out)
 	default:
 		_, _ = fmt.Fprintf(out, "unknown config subcommand %q\n", args[0])
 		return 2
