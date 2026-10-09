@@ -14,16 +14,19 @@ import (
 )
 
 // cmdConfig is the `config` subcommand group: pull (the installed
-// configuration, from the server or the local store) and keygen (the
-// operator's signing pair).
+// configuration, from the server or the local store), sign (the operator's
+// signature of the installed configuration) and keygen (the operator's
+// signing pair).
 func cmdConfig(args []string, out io.Writer) int {
 	if len(args) < 1 {
-		_, _ = fmt.Fprintln(out, "config needs a subcommand: pull, keygen")
+		_, _ = fmt.Fprintln(out, "config needs a subcommand: pull, sign, keygen")
 		return 2
 	}
 	switch args[0] {
 	case "pull":
 		return cmdConfigPull(args[1:], out)
+	case "sign":
+		return cmdConfigSign(args[1:], out)
 	case "keygen":
 		return cmdConfigKeygen(args[1:], out)
 	default:

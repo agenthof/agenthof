@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -368,4 +369,74 @@ func signRemedy(controlLog string, cause error) string {
 		return "run: agenthof config keygen --control-log " + controlLog
 	}
 	return "run: agenthof config sign --control-log " + controlLog
+}
+
+// cmdConfigSign is `config sign`: write (or confirm) the operator's
+// signature of the installed configuration — the remedy for an install
+// whose sign step failed or was interrupted, and for a configuration
+// installed before the key existed. It takes the installed-configuration
+// writer lock, as apply does, so its read-pointer → read-ledger → write
+// sequence never interleaves with an apply or a flip (an identical re-apply
+// in between would otherwise leave a stale .sig over a fresh one); then it
+// computes exactly what an install would have written and, when a
+// byte-identical .sig is already there, says so and touches nothing. Local
+// only: signing needs signing.key, which lives on the install host. No
+// identity, no control event. Exit 0; 1 for every refusal; 2 for usage.
+func cmdConfigSign(args []string, out io.Writer) int {
+	fs := flag.NewFlagSet("config sign", flag.ContinueOnError)
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; the installed configuration and the signing pair are read beside it")
+	fs.SetOutput(out)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	unlock, lockErr := ledger.LockFile(installedLock(*controlLog))
+	if lockErr != nil {
+		if errors.Is(lockErr, ledger.ErrLockHeld) {
+			_, _ = fmt.Fprintf(out, "config sign: %s\n", msgLockBusy)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "config sign: %v\n", lockErr)
+		return 1
+	}
+	defer unlock()
+	store := installedStore(*controlLog)
+	info, err := buildSignature(*controlLog)
+	switch {
+	case err == nil:
+	case errors.Is(err, errSigningOff):
+		_, _ = fmt.Fprintf(out, "config sign: no signing key; run: agenthof config keygen --control-log %s\n", *controlLog)
+		return 1
+	case errors.Is(err, errSigningKeyMissing):
+		_, _ = fmt.Fprintf(out, "config sign: %v\n", err)
+		return 1
+	case errors.Is(err, errSigningPubMissing):
+		_, _ = fmt.Fprintf(out, "config sign: %v; run: agenthof config keygen --control-log %s\n", err, *controlLog)
+		return 1
+	case errors.Is(err, errNothingInstalled):
+		_, _ = fmt.Fprintf(out, "config sign: %s under %s; run: agenthof apply --config <dir> --control-log %s\n", msgNoConfigInstalled, store, *controlLog)
+		return 1
+	case errors.Is(err, errNotOnRecord):
+		_, _ = fmt.Fprintln(out, "config sign: installed configuration is not yet on record; re-apply (or audit repair control) first")
+		return 1
+	case errors.Is(err, ledger.ErrLockHeld):
+		_, _ = fmt.Fprintf(out, "config sign: %s\n", msgLockBusy)
+		return 1
+	case errors.Is(err, errLedgerDamaged):
+		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s\n", *controlLog)
+		return 1
+	default:
+		_, _ = fmt.Fprintf(out, "config sign: %v\n", err)
+		return 1
+	}
+	want := config.SignatureFileBytes(info.Payload, info.Sig)
+	if existing, rerr := os.ReadFile(config.SignaturePath(store, info.Hash)); rerr == nil && bytes.Equal(existing, want) {
+		_, _ = fmt.Fprintf(out, "already signed: %s  version: %d  key_id: %s\n", info.Hash, info.Version, info.KeyID)
+		return 0
+	}
+	if err := config.WriteSignatureFile(store, info.Hash, info.Payload, info.Sig); err != nil {
+		_, _ = fmt.Fprintf(out, "config sign: %v\n", err)
+		return 1
+	}
+	_, _ = fmt.Fprintf(out, "signed: %s\nversion: %d  key_id: %s\n", info.Hash, info.Version, info.KeyID)
+	return 0
 }
