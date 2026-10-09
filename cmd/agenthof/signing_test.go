@@ -179,6 +179,25 @@ func TestConfigKeygenRefusesToOverwrite(t *testing.T) {
 	}
 }
 
+func TestConfigKeygenWithAnUnreadablePublicFileSparesThePrivateKey(t *testing.T) {
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	keygenAt(t, ctl)
+	before := mustRead(t, signingKeyPath(ctl))
+	if err := os.WriteFile(signingPubPath(ctl), []byte("not a pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := cmdConfigKeygen([]string{"--control-log", ctl}, &out); code != 1 ||
+		!strings.Contains(out.String(), "config keygen: "+signingPubPath(ctl)+" is unreadable") ||
+		!strings.Contains(out.String(), "re-derive it from "+signingKeyPath(ctl)) ||
+		strings.Contains(out.String(), "remove signing.key and signing.pub") {
+		t.Fatalf("%d %q", code, out.String())
+	}
+	if !bytes.Equal(before, mustRead(t, signingKeyPath(ctl))) {
+		t.Fatal("the private key must be untouched when only the public file is bad")
+	}
+}
+
 func TestConfigKeygenRefusesALonePublicFile(t *testing.T) {
 	ctl := filepath.Join(t.TempDir(), "control.jsonl")
 	keygenAt(t, ctl)

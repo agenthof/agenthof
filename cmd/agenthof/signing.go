@@ -165,11 +165,15 @@ func cmdConfigKeygen(args []string, out io.Writer) int {
 	}
 	switch state {
 	case signingOn:
-		id := "unreadable"
-		if pub, err := loadSigningPub(*controlLog); err == nil {
-			id = config.KeyID(pub) // the public key's id — the one edges pin
+		pub, perr := loadSigningPub(*controlLog)
+		if perr != nil {
+			// The public half is present but unreadable; the private key may
+			// be fine. Remove only the bad public file and re-derive it —
+			// never discard the private key the host still signs with.
+			_, _ = fmt.Fprintf(out, "config keygen: %s is unreadable (%v); remove it and run config keygen again to re-derive it from %s\n", pubPath, perr, keyPath)
+			return 1
 		}
-		_, _ = fmt.Fprintf(out, "config keygen: %s exists (key_id %s); key rotation is not supported yet — to start over, remove signing.key and signing.pub (every edge pinned to the old key must re-pin)\n", keyPath, id)
+		_, _ = fmt.Fprintf(out, "config keygen: %s exists (key_id %s); key rotation is not supported yet — to start over, remove signing.key and signing.pub (every edge pinned to the old key must re-pin)\n", keyPath, config.KeyID(pub))
 		return 1
 	case signingPubOnly:
 		_, _ = fmt.Fprintf(out, "config keygen: %s exists without its private key; remove it to generate a new pair (edges pinned to it must re-pin)\n", pubPath)
