@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
+	"github.com/agenthof/agenthof/internal/ledger"
 )
 
 // signingKeyPath and signingPubPath are the operator's signing pair for a
@@ -232,4 +234,140 @@ func keygenDone(out io.Writer, controlLog, keyPath, pubPath string, pub ed25519.
 		_, _ = fmt.Fprintf(out, "installed configuration %s is not signed yet; run: agenthof config sign --control-log %s\n", hash, controlLog)
 	}
 	return 0
+}
+
+// Every sign verdict an installer or config sign classifies by.
+var (
+	errSigningOff        = errors.New("no signing key")
+	errSigningKeyMissing = errors.New("signing.key missing")
+	errSigningPubMissing = errors.New("signing.pub missing")
+	errNothingInstalled  = errors.New(msgNoConfigInstalled)
+	errNotOnRecord       = errors.New("installed configuration is not yet on record")
+	errLedgerDamaged     = errors.New("control ledger damaged")
+)
+
+// signatureInfo is one computed signature of the current install.
+type signatureInfo struct {
+	Hash    string
+	Version int
+	KeyID   string
+	Payload []byte
+	Sig     string
+}
+
+// buildSignature computes — and does not write — the operator's signature
+// over what the control ledger vouches for. The caller holds the
+// installed-configuration writer lock. Order: the key state (off →
+// errSigningOff; public file alone → errSigningKeyMissing; private key
+// alone → errSigningPubMissing); the pointer (absent → errNothingInstalled);
+// the ledger, read and verified with exactly the pull's classification (lock
+// held → ledger.ErrLockHeld; no file → nothing on record, never damage;
+// torn or broken → errLedgerDamaged); the last installing event must name
+// the pointer (else errNotOnRecord: the install→record gap — nothing to
+// sign, and signing an unvouched pointer would make the ledger's "not yet
+// on record" into a signature that lies); the genesis log_id; the pair,
+// whose derived public key must equal signing.pub (a mismatch names both
+// ids — otherwise an install would write a signature the pull can never
+// verify); then the payload from (hash, log_id, seq, time, key_id) — where
+// the time is normalized to UTC ONCE, here, exactly as the pull normalizes
+// it before serving — and the signature. It never invents a version or a
+// time: what is signed is what the ledger vouches for, by construction.
+func buildSignature(controlLog string) (signatureInfo, error) {
+	state, err := signingStateOf(controlLog)
+	if err != nil {
+		return signatureInfo{}, err
+	}
+	switch state {
+	case signingOff:
+		return signatureInfo{}, errSigningOff
+	case signingPubOnly:
+		return signatureInfo{}, errSigningKeyMissing
+	case signingKeyOnly:
+		return signatureInfo{}, errSigningPubMissing
+	}
+	store := installedStore(controlLog)
+	hash, installed, err := config.InstalledHash(store)
+	if err != nil {
+		return signatureInfo{}, err
+	}
+	if !installed {
+		return signatureInfo{}, errNothingInstalled
+	}
+	records, _, verr := ledger.ReadVerify(controlLog, ledger.Locked)
+	switch {
+	case errors.Is(verr, ledger.ErrLockHeld):
+		return signatureInfo{}, verr
+	case errors.Is(verr, fs.ErrNotExist):
+		records = nil
+	case verr != nil:
+		return signatureInfo{}, fmt.Errorf("%w: %w", errLedgerDamaged, verr)
+	}
+	last, found := control.LastInstalling(records)
+	if !found || last.ConfigHash != hash {
+		return signatureInfo{}, errNotOnRecord
+	}
+	logID, err := control.GenesisLogID(records)
+	if err != nil {
+		return signatureInfo{}, err
+	}
+	priv, err := loadSigningKey(controlLog)
+	if err != nil {
+		return signatureInfo{}, err
+	}
+	pub, err := loadSigningPub(controlLog)
+	if err != nil {
+		return signatureInfo{}, err
+	}
+	keyID := config.KeyID(pub)
+	if derived := config.KeyID(priv.Public().(ed25519.PublicKey)); derived != keyID {
+		return signatureInfo{}, fmt.Errorf("%s (key_id %s) is not the private key of %s (key_id %s)", signingKeyPath(controlLog), derived, signingPubPath(controlLog), keyID)
+	}
+	at := last.Time.UTC()
+	payload, err := config.SignaturePayload(hash, logID, last.Seq, at, keyID)
+	if err != nil {
+		return signatureInfo{}, err
+	}
+	return signatureInfo{Hash: hash, Version: last.Seq, KeyID: keyID, Payload: payload, Sig: config.Sign(priv, payload)}, nil
+}
+
+// signInstalled is buildSignature plus the atomic write of installed/<hex>.sig.
+func signInstalled(controlLog string) (signatureInfo, error) {
+	info, err := buildSignature(controlLog)
+	if err != nil {
+		return signatureInfo{}, err
+	}
+	if err := config.WriteSignatureFile(installedStore(controlLog), info.Hash, info.Payload, info.Sig); err != nil {
+		return signatureInfo{}, err
+	}
+	return info, nil
+}
+
+// signIfConfigured is the installers' sign step: with signing off it does
+// nothing (signed false, err nil — the unsigned success); otherwise
+// signInstalled, whose failure the caller reports as installed-but-not-signed.
+//
+//nolint:unused // the shared installers' entry point; the apply path inlines it around its crash hook
+func signIfConfigured(controlLog string) (info signatureInfo, signed bool, err error) {
+	state, err := signingStateOf(controlLog)
+	if err != nil {
+		return signatureInfo{}, false, err
+	}
+	if !state.configured() {
+		return signatureInfo{}, false, nil
+	}
+	info, err = signInstalled(controlLog)
+	if err != nil {
+		return signatureInfo{}, false, err
+	}
+	return info, true, nil
+}
+
+// signRemedy names the one command that repairs a sign failure: config
+// keygen when the public file is missing (it re-derives it), config sign
+// otherwise.
+func signRemedy(controlLog string, cause error) string {
+	if errors.Is(cause, errSigningPubMissing) {
+		return "run: agenthof config keygen --control-log " + controlLog
+	}
+	return "run: agenthof config sign --control-log " + controlLog
 }

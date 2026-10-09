@@ -42,13 +42,14 @@ func controlEvents(t *testing.T, controlLog string) []control.DecodedEvent {
 	return out
 }
 
-// noStagingResidue fails if any .staging-* entry is left under the store.
+// noStagingResidue fails if any dot-prefixed entry — a .staging-* or
+// .current-* or .sig-* temp — is left under the store.
 func noStagingResidue(t *testing.T, controlLog string) {
 	t.Helper()
 	ents, _ := os.ReadDir(installedStore(controlLog))
 	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), ".staging-") {
-			t.Fatalf("staging residue: %s", e.Name())
+		if strings.HasPrefix(e.Name(), ".") {
+			t.Fatalf("temp residue: %s", e.Name())
 		}
 	}
 }

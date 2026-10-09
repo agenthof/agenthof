@@ -31,6 +31,12 @@ var hashConfigDir = config.HashDir
 // audit verify control surface the resulting pointer-vs-ledger mismatch.
 const msgInstalledNotRecorded = "installed; event NOT recorded"
 
+// msgInstalledNotSigned is the twin of msgInstalledNotRecorded for the
+// sign step: the snapshot is installed and its success recorded, but
+// signing is configured and the signature could not be written. The pull
+// answers "not yet signed" until config sign repairs it.
+const msgInstalledNotSigned = "installed; signature NOT written"
+
 // msgLockBusy is printed, after the command's own prefix, when another
 // process holds the installed-configuration writer lock (or, at the
 // ledger-writable check, the ledger's own flock) past the lock timeout.
@@ -130,6 +136,7 @@ const (
 	applyError                                 // recorded error/io_error
 	applyAppendFailed                          // a terminal append itself failed (printed, exit 1)
 	applyInstalledNotRecorded                  // committed; the success append failed
+	applyInstalledNotSigned                    // committed and recorded; signing is configured and the signature could not be written
 )
 
 // applyOutcome is what both callers read; every line the CLI prints was
@@ -145,6 +152,8 @@ type applyOutcome struct {
 	Agents      int             // installed: the registry ok counts
 	Workflows   int
 	Roles       int
+	KeyID       string // installed: the signing key's id, when a signature was written
+	SignCause   error  // installed_not_signed: why; printed by the CLI, logged by the host, never served
 }
 
 // applyRun carries one apply's state through its recording helpers.
@@ -160,7 +169,8 @@ type applyRun struct {
 // (or refuse a bootstrap the caller did not permit); (5) precondition; (6)
 // stage; (7) load; (8) build + no-apply-floor; (9) hash, and 9a for a
 // bundle: the staged copy must hash as the proposal; (10) commit; (11)
-// registry ok, the crash hook, the success append. It writes to out
+// registry ok, the crash hook, the success append; (12) sign, when a signing
+// key is configured. It writes to out
 // exactly the lines cmdApply printed before it existed; the CLI passes
 // stdout, the server io.Discard, and both read the outcome.
 func applyConfig(req applyRequest, out io.Writer) applyOutcome {
@@ -321,7 +331,45 @@ func applyConfig(req applyRequest, out io.Writer) applyOutcome {
 		_, _ = fmt.Fprintln(out, msgInstalledNotRecorded)
 		return a.done(applyInstalledNotRecorded)
 	}
-	return a.record(applyInstalled, "success", nil, h)
+	res := a.record(applyInstalled, "success", nil, h)
+	if res.Kind != applyInstalled {
+		return res
+	}
+	// 12. Sign — only a RECORDED install: the payload binds the record's seq
+	// and time, so an install whose append failed stays
+	// installed_not_recorded and is never relabelled. Opt-in: with no key
+	// file this is the unsigned success. Configured and failing, the install
+	// stands recorded; only the signature is missing, and the remedy is named.
+	return a.sign()
+}
+
+// sign is step 12. The crash hook fires only once signing is known to be
+// configured: in the unsigned case there is no step to crash before.
+func (a *applyRun) sign() applyOutcome {
+	state, err := signingStateOf(a.req.ControlLog)
+	if err != nil {
+		return a.notSigned(err)
+	}
+	if !state.configured() {
+		return a.res
+	}
+	if os.Getenv("AGENTHOF_TEST_CRASH_AT") == "after_record_before_sign" {
+		return a.notSigned(errors.New("process ended before the sign step"))
+	}
+	info, err := signInstalled(a.req.ControlLog)
+	if err != nil {
+		return a.notSigned(err)
+	}
+	a.res.KeyID = info.KeyID
+	_, _ = fmt.Fprintf(a.out, "signed: key_id %s\n", info.KeyID)
+	return a.res
+}
+
+// notSigned prints the cause and the remedy and marks the outcome.
+func (a *applyRun) notSigned(cause error) applyOutcome {
+	_, _ = fmt.Fprintf(a.out, "%s: %v; %s\n", msgInstalledNotSigned, cause, signRemedy(a.req.ControlLog, cause))
+	a.res.Kind, a.res.SignCause = applyInstalledNotSigned, cause
+	return a.res
 }
 
 // done sets the terminal kind on an unrecorded outcome.
