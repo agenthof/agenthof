@@ -293,9 +293,10 @@ func TestLockFileSharedWaitsBehindExclusiveThenTimesOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	release := unlockEx
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		unlockEx()
+		release()
 	}()
 	start := time.Now()
 	unlockSh, err := LockFileShared(p)
@@ -308,11 +309,11 @@ func TestLockFileSharedWaitsBehindExclusiveThenTimesOut(t *testing.T) {
 	}
 	unlockSh()
 
-	unlockEx, err = LockFile(p)
+	unlockLong, err := LockFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unlockEx()
+	defer unlockLong()
 	start = time.Now()
 	_, err = LockFileShared(p)
 	if !errors.Is(err, ErrLockHeld) {
