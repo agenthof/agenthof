@@ -239,3 +239,89 @@ func TestOpenWrapsErrLockHeld(t *testing.T) {
 		t.Fatalf("Open contention err = %v, want ErrLockHeld", err)
 	}
 }
+
+// TestLockFileSharedHoldersCoexist: two shared holders in one process (two
+// open file descriptions, so they contend like two processes) both acquire
+// at once; an exclusive LockFile behind them times out with ErrLockHeld and
+// acquires once both release.
+func TestLockFileSharedHoldersCoexist(t *testing.T) {
+	orig := lockTimeout
+	lockTimeout = 200 * time.Millisecond
+	defer func() { lockTimeout = orig }()
+
+	p := filepath.Join(t.TempDir(), "sub", "installed.lock")
+	unlock1, err := LockFileShared(p)
+	if err != nil {
+		t.Fatalf("first LockFileShared: %v", err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("lock file must exist: %v", err)
+	}
+	start := time.Now()
+	unlock2, err := LockFileShared(p)
+	if err != nil {
+		t.Fatalf("second LockFileShared must coexist: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= lockTimeout {
+		t.Fatalf("shared holders must not wait on each other: %v", elapsed)
+	}
+	if _, err := LockFile(p); !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("exclusive behind two shared holders: err = %v, want ErrLockHeld", err)
+	}
+	unlock1()
+	if _, err := LockFile(p); !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("exclusive behind one shared holder: err = %v, want ErrLockHeld", err)
+	}
+	unlock2()
+	unlockEx, err := LockFile(p)
+	if err != nil {
+		t.Fatalf("exclusive after both released: %v", err)
+	}
+	unlockEx()
+}
+
+// TestLockFileSharedWaitsBehindExclusiveThenTimesOut: a shared holder blocks
+// behind LockFile and acquires when it is released within lockTimeout; held
+// past the timeout it fails with ErrLockHeld.
+func TestLockFileSharedWaitsBehindExclusiveThenTimesOut(t *testing.T) {
+	orig := lockTimeout
+	lockTimeout = 300 * time.Millisecond
+	defer func() { lockTimeout = orig }()
+
+	p := filepath.Join(t.TempDir(), "installed.lock")
+	unlockEx, err := LockFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		unlockEx()
+	}()
+	start := time.Now()
+	unlockSh, err := LockFileShared(p)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("shared must acquire once the writer releases: %v", err)
+	}
+	if elapsed < 80*time.Millisecond {
+		t.Fatalf("shared returned before the writer released (%v): did it wait?", elapsed)
+	}
+	unlockSh()
+
+	unlockEx, err = LockFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlockEx()
+	start = time.Now()
+	_, err = LockFileShared(p)
+	if !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("shared behind a long writer: err = %v, want ErrLockHeld", err)
+	}
+	if !strings.Contains(err.Error(), "ledger: lock "+p) {
+		t.Fatalf("the error must name the operation and the path: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < lockTimeout {
+		t.Fatalf("returned too early: %v < %v", elapsed, lockTimeout)
+	}
+}

@@ -306,6 +306,23 @@ func (c *Chain) Close() error {
 // an error satisfying errors.Is(err, ErrLockHeld); any other error is an
 // I/O failure creating or opening the file.
 func LockFile(path string) (unlock func(), err error) {
+	return lockFile(path, syscall.LOCK_EX|syscall.LOCK_NB)
+}
+
+// LockFileShared is LockFile's shared twin: the same file, created the same
+// way, the same bounded retry and the same ErrLockHeld on contention — but a
+// LOCK_SH flock, so any number of shared holders coexist while an exclusive
+// holder (LockFile) excludes them all and they exclude it. It exists for the
+// one reader that must observe the installed configuration — pointer, control
+// ledger and signature — as the consistent triple every writer publishes
+// under LockFile, and must wait (not fail) behind a writer in progress.
+func LockFileShared(path string) (unlock func(), err error) {
+	return lockFile(path, syscall.LOCK_SH|syscall.LOCK_NB)
+}
+
+// lockFile is the one body behind LockFile and LockFileShared; how is the
+// flock(2) operation.
+func lockFile(path string, how int) (unlock func(), err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -313,7 +330,7 @@ func LockFile(path string) (unlock func(), err error) {
 	if err != nil {
 		return nil, err
 	}
-	if lerr := flockRetry(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lerr != nil {
+	if lerr := flockRetry(int(f.Fd()), how); lerr != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("ledger: lock %s: %w", path, lerr)
 	}
