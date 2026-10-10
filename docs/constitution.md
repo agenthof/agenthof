@@ -120,7 +120,15 @@ configuration — made by the host at install time, or again by `config sign`
 — is a derivation of the install the control ledger already records, gated by
 possession of the signing key on that host, as the key itself is; it attests
 that record, mints no policy and binds to no role, and so is neither
-authorized against a role nor separately recorded.
+authorized against a role nor separately recorded. Where an execution point
+pins an operator public key, it executes an installed configuration only if
+that configuration's signature verifies under the pinned key and the install is
+of the ledger, and not below the version, the point last accepted; a verdict
+against the configuration is a recorded run refusal. The point's record of the
+installs it has accepted is its own state — a derivation of verifications it
+performed — not a control-plane action: it mints no policy, binds to no role,
+and is neither authorized against a role nor recorded in the
+control ledger.
 
 ## Article VII — Scope discipline
 
