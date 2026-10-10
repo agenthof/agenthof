@@ -431,3 +431,124 @@ func TestServedSignatureVerifiesFromTheWireBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestSignatureVerdictKeepsTheV1StringsAndTruths pins the S1 refactor: every
+// not-signed cause is one typed *signatureVerdict whose Error() is BYTE-
+// IDENTICAL to the strings the pull has logged since slice 2, whose Is keeps
+// errors.Is(err, errNotSigned) true for every kind and errors.Is(err,
+// errSignatureNewer) true for sigNewer only — so pullConfig,
+// signingStartupWarning and configHost.Pull classify exactly as before.
+func TestSignatureVerdictKeepsTheV1StringsAndTruths(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, id := signedRoot(t)
+	hash := readPointer(t, ctl)
+	logID := controlLogID(t, ctl)
+	pub := signingPub(t, ctl)
+	priv := hostPriv(t, ctl)
+	store := installedStore(ctl)
+	sigPath := config.SignaturePath(store, hash)
+	valid := mustRead(t, sigPath)
+
+	// vouched install is seq 1; an identical re-apply makes it seq 2.
+	at1 := controlEvents(t, ctl)[0].Time.UTC()
+	applyAs(t, root, ctl)
+	at2 := controlEvents(t, ctl)[1].Time.UTC()
+
+	verdict := func(wantKind sigKind, wantNewer bool, wantErr string) {
+		t.Helper()
+		_, err := verifySignatureFile(store, hash, logID, 2, at2, pub)
+		var v *signatureVerdict
+		if !errors.As(err, &v) {
+			t.Fatalf("want *signatureVerdict, got %T %v", err, err)
+		}
+		if v.Kind != wantKind {
+			t.Fatalf("kind %d, want %d (%v)", v.Kind, wantKind, err)
+		}
+		if !errors.Is(err, errNotSigned) {
+			t.Fatalf("every kind must satisfy errNotSigned: %v", err)
+		}
+		if errors.Is(err, errSignatureNewer) != wantNewer {
+			t.Fatalf("errSignatureNewer = %v, want %v (%v)", !wantNewer, wantNewer, err)
+		}
+		if wantErr != "" && err.Error() != wantErr {
+			t.Fatalf("Error() = %q\nwant      %q", err.Error(), wantErr)
+		}
+		// servedSignature is the same verify: same error, same truths.
+		if _, serr := servedSignature(store, hash, logID, 2, at2, pub); serr == nil || serr.Error() != err.Error() {
+			t.Fatalf("servedSignature must surface the identical verdict: %v vs %v", serr, err)
+		}
+	}
+
+	// sigAbsent: "no signature file".
+	if err := os.Remove(sigPath); err != nil {
+		t.Fatal(err)
+	}
+	verdict(sigAbsent, false, "not signed: no signature file for "+hash)
+
+	// sigOlder: the seq-1 file against the seq-2 install.
+	if err := os.WriteFile(sigPath, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	verdict(sigOlder, false, "not signed: signature is for version 1, installed is 2")
+
+	// sigNewer: version 3 against seq 2 — the one kind that satisfies errSignatureNewer.
+	newer, _ := config.SignaturePayload(hash, logID, 3, at2, id)
+	writeSigAt(t, ctl, newer, config.Sign(priv, newer))
+	verdict(sigNewer, true, "not signed: signature is newer than the vouched install; retry")
+
+	// sigUnknownKey: named by id, before any verify.
+	foreign, _ := config.SignaturePayload(hash, logID, 2, at2, goldenKeyID)
+	writeSigAt(t, ctl, foreign, config.Sign(priv, foreign))
+	verdict(sigUnknownKey, false, "not signed: signature is by key "+goldenKeyID+"; configured key is "+id)
+
+	// sigForeign: another hash; another log_id.
+	other, _ := config.SignaturePayload("sha256:"+strings.Repeat("0", 64), logID, 2, at2, id)
+	writeSigAt(t, ctl, other, config.Sign(priv, other))
+	verdict(sigForeign, false, "not signed: signature is for hash sha256:"+strings.Repeat("0", 64)+", installed is "+hash)
+	otherLedger, _ := config.SignaturePayload(hash, strings.Repeat("f", 32), 2, at2, id)
+	writeSigAt(t, ctl, otherLedger, config.Sign(priv, otherLedger))
+	verdict(sigForeign, false, "not signed: signature is for log_id "+strings.Repeat("f", 32)+", installed is "+logID)
+
+	// sigOlder by installed_at: right hash, log_id and version, the seq-1 time.
+	wrongAt, _ := config.SignaturePayload(hash, logID, 2, at1, id)
+	writeSigAt(t, ctl, wrongAt, config.Sign(priv, wrongAt))
+	verdict(sigOlder, false, "not signed: signature is for installed_at "+at1.Format(time.RFC3339Nano)+", installed is "+at2.Format(time.RFC3339Nano))
+
+	// sigBad: a good payload under the wrong signature.
+	good, _ := config.SignaturePayload(hash, logID, 2, at2, id)
+	writeSigAt(t, ctl, good, config.Sign(priv, other))
+	verdict(sigBad, false, "not signed: signature does not verify")
+
+	// sigMalformed: the parse error verbatim after "not signed: "; the File is zero.
+	writeSigAt(t, ctl, good, config.Sign(priv, good))
+	edited := bytes.Replace(mustRead(t, sigPath), []byte("version: 2\n"), []byte("version: 02\n"), 1)
+	if err := os.WriteFile(sigPath, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	verdict(sigMalformed, false, "not signed: signature file: line 4: malformed version (want the shortest decimal)")
+	_, err := verifySignatureFile(store, hash, logID, 2, at2, pub)
+	var mal *signatureVerdict
+	if !errors.As(err, &mal) || mal.File.Sig != "" || mal.File.Payload != nil {
+		t.Fatalf("a malformed file carries no parsed File: %+v", mal)
+	}
+
+	// A valid file: no error, the parsed file.
+	writeSigAt(t, ctl, good, config.Sign(priv, good))
+	f, err := verifySignatureFile(store, hash, logID, 2, at2, pub)
+	if err != nil || f.Version != 2 || f.KeyID != id || f.LogID != logID {
+		t.Fatalf("valid: %v %+v", err, f)
+	}
+
+	// A read error other than not-exist is NOT a verdict (a store fault).
+	if err := os.Remove(sigPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = verifySignatureFile(store, hash, logID, 2, at2, pub)
+	var notVerdict *signatureVerdict
+	if err == nil || errors.As(err, &notVerdict) || errors.Is(err, errNotSigned) {
+		t.Fatalf("EISDIR must be a plain error, never a verdict: %v", err)
+	}
+}
