@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
+	"github.com/agenthof/agenthof/internal/ledger"
 )
 
 // sigKind is what verifySignatureFile found. It cannot produce stale or
@@ -176,6 +178,161 @@ func writeVerifyFloor(controlLog, logID string, version int) error {
 	if d, derr := os.Open(dir); derr == nil {
 		_ = d.Sync()
 		_ = d.Close()
+	}
+	return nil
+}
+
+// verifyKind is one outcome of the pinned verify short of a pass. The five
+// judged kinds say the installed configuration is NOT the operator's current
+// install for this root; notVerifiable says the verdict could not be reached
+// because of a permanent fault — the pinned key, the floor, the ledger or the
+// pointer — and names the cause; busy is the one transient: installed.lock
+// (or the ledger flock inside it) could not be taken within the timeout.
+// Everything but busy is recorded as a run refusal (Article III); busy is
+// answered like every other busy in this codebase — retry, nothing recorded.
+type verifyKind int
+
+const (
+	verifyUnsigned      verifyKind = iota // key pinned; no .sig, or a .sig that is not a v1 signature of THIS install
+	verifyUnknownKey                      // the .sig is by a key other than the pinned one
+	verifyBadSignature                    // Ed25519 fails over the matching payload
+	verifyStale                           // same log_id, version below the floor
+	verifyForeignLedger                   // the floor names another log_id
+	verifyNotVerifiable                   // pinned key / floor unusable or unwritable; ledger damaged, genesis without log_id, pointer not on record
+	verifyBusy                            // installed.lock or the ledger lock held past the timeout — UNRECORDED, retry
+)
+
+// verifyRefusal is the pinned verify's outcome short of a pass. Detail is
+// bounded: hex ids, decimals and this package's fixed phrases, or a parser's
+// fixed vocabulary (ParseSignatureFile, ParseSigningPub incl. x509's and a
+// %T, ParseVerifyFloor, an OS error); never a key, never file contents.
+type verifyRefusal struct {
+	Kind   verifyKind
+	Detail string
+}
+
+// notVerifiable is the permanent-fault refusal with its cause.
+func notVerifiable(detail string) *verifyRefusal {
+	return &verifyRefusal{Kind: verifyNotVerifiable, Detail: detail}
+}
+
+// Transient reports Kind == verifyBusy: not a verdict, not recorded.
+func (r *verifyRefusal) Transient() bool { return r.Kind == verifyBusy }
+
+// Headline is the fixed part a result line and an API body carry. Busy has
+// no headline: it IS the printed busy line, never recorded.
+func (r *verifyRefusal) Headline() string {
+	switch r.Kind {
+	case verifyUnsigned:
+		return "configuration not verified: unsigned"
+	case verifyUnknownKey:
+		return "configuration not verified: unknown key"
+	case verifyBadSignature:
+		return "configuration not verified: bad signature"
+	case verifyStale:
+		return "configuration not verified: stale"
+	case verifyForeignLedger:
+		return "configuration not verified: foreign ledger"
+	case verifyNotVerifiable:
+		return "configuration not verifiable"
+	}
+	return msgLockBusy
+}
+
+// Error is the recorded reason: Headline + ": " + Detail (Detail is empty
+// for bad signature, whose cause is the headline, and for busy).
+func (r *verifyRefusal) Error() string {
+	if r.Detail == "" {
+		return r.Headline()
+	}
+	return r.Headline() + ": " + r.Detail
+}
+
+// verifyMode says whether a pass advances the floor.
+type verifyMode int
+
+const (
+	verifyAndAdvance verifyMode = iota // the execution read: a verified install advances verify.floor
+	verifyOnly                         // serve startup: judge, write nothing
+)
+
+// installFacts is the control ledger's account of the install the pinned
+// verify rebuilds the payload from; At is normalized to UTC ONCE, here.
+type installFacts struct {
+	LogID   string
+	Version int
+	At      time.Time
+}
+
+// recordedInstall reads the control ledger's account of the install at hash,
+// classified exactly as buildSignature does: a held ledger flock → busy
+// (unrecorded); no file → an empty chain that vouches for nothing (the next
+// step says "not on record", never "damaged"); torn or broken → damaged with
+// the repair hint; the last installing event must name the pointer (under
+// the shared installed.lock this is definitive: a crash in the install→record
+// gap, a removed or truncated ledger, or a hand-moved pointer — never the
+// millisecond between Append and sign); then the genesis log_id. The caller
+// holds installed.lock shared; lock order is store → ledger, as for every
+// writer. A damaged ledger is a RECORDED refusal here (the pull answers an
+// unrecorded 500 for the same state): a run is a policy-bearing action an
+// invoker attempted, and Article III wants the attempt and why it did not
+// execute in the ledger.
+func recordedInstall(controlLog, hash string) (installFacts, *verifyRefusal) {
+	records, _, verr := ledger.ReadVerify(controlLog, ledger.Locked)
+	switch {
+	case errors.Is(verr, ledger.ErrLockHeld):
+		return installFacts{}, &verifyRefusal{Kind: verifyBusy}
+	case errors.Is(verr, fs.ErrNotExist):
+		records = nil
+	case verr != nil:
+		return installFacts{}, notVerifiable("control ledger damaged; run: agenthof audit repair control --control-log " + controlLog)
+	}
+	last, found := control.LastInstalling(records)
+	if !found || last.ConfigHash != hash {
+		return installFacts{}, notVerifiable("installed configuration is not on record; re-apply, or run audit repair control")
+	}
+	logID, err := control.GenesisLogID(records)
+	if err != nil {
+		return installFacts{}, notVerifiable(err.Error())
+	}
+	return installFacts{LogID: logID, Version: last.Seq, At: last.Time.UTC()}, nil
+}
+
+// judgeFloor applies the staleness floor to a signature that VERIFIED as the
+// install (logID, version) — both from the signed payload, byte-equal to the
+// ledger's. The log_id comparison comes before the version comparison (a
+// version comparison across ledgers is meaningless: seq restarts at 1 in a
+// re-created root). absent → accept, created; same ledger above → accept,
+// advanced; equal → accept, no write; below → stale; another ledger →
+// foreign ledger until the operator removes the floor (the reset gesture;
+// it re-accepts an older version too). A corrupt floor fails closed, never
+// reads as absent, and is never rewritten. Under verifyOnly nothing is
+// written. A write failure after a verified signature refuses the run: a
+// verification that cannot be remembered leaves the next rollback
+// undetectable. Called under installed.lock shared, so every shared holder
+// in the same window sees the same (logID, version) and two advancing
+// writers write the same bytes.
+func judgeFloor(controlLog, logID string, version int, mode verifyMode) *verifyRefusal {
+	floorLogID, floorVersion, present, err := readVerifyFloor(controlLog)
+	if err != nil {
+		return notVerifiable(err.Error())
+	}
+	if present {
+		if floorLogID != logID {
+			return &verifyRefusal{Kind: verifyForeignLedger, Detail: fmt.Sprintf("install is of ledger %s; this root last verified ledger %s (version %d); remove %s to accept the new ledger", logID, floorLogID, floorVersion, verifyFloorPath(controlLog))}
+		}
+		if version < floorVersion {
+			return &verifyRefusal{Kind: verifyStale, Detail: fmt.Sprintf("version %d is below this root's verified floor %d (ledger %s)", version, floorVersion, logID)}
+		}
+		if version == floorVersion {
+			return nil
+		}
+	}
+	if mode == verifyOnly {
+		return nil
+	}
+	if err := writeVerifyFloor(controlLog, logID, version); err != nil {
+		return notVerifiable(err.Error())
 	}
 	return nil
 }
