@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
@@ -91,4 +92,90 @@ func verifySignatureFile(store, hash, logID string, version int, at time.Time, p
 		return config.SignatureFile{}, &signatureVerdict{Kind: sigBad, Detail: "signature does not verify", File: f}
 	}
 	return f, nil
+}
+
+// verifyPubPath and verifyFloorPath are the execution point's pin and its
+// memory, BESIDE the control ledger exactly as installed.lock, signing.key and
+// signing.pub are: verify.pub is the operator public key this point TRUSTS
+// (PKIX PEM, the format signing.pub holds and config keygen prints — a
+// different file from signing.pub on purpose: signing.pub is the key the host
+// signs WITH), and verify.floor is the highest (log_id, version) whose
+// signature this point has verified. Agenthof never writes verify.pub —
+// pinning is a deliberate operator act, out of band. Derived here and nowhere
+// else.
+func verifyPubPath(controlLog string) string {
+	return filepath.Join(filepath.Dir(controlLog), "verify.pub")
+}
+
+func verifyFloorPath(controlLog string) string {
+	return filepath.Join(filepath.Dir(controlLog), "verify.floor")
+}
+
+// loadVerifyPub reads and parses the pinned key at path with exactly the
+// signing.pub codec; every error names the file, so a refusal reads
+// "pinned key <path>: <cause>".
+func loadVerifyPub(path string) (ed25519.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("pinned key %s: %w", path, err)
+	}
+	pub, err := config.ParseSigningPub(data)
+	if err != nil {
+		return nil, fmt.Errorf("pinned key %s: %w", path, err)
+	}
+	return pub, nil
+}
+
+// readVerifyFloor reads verify.floor beside controlLog. Absent is the one
+// "no floor" answer (present false, err nil); a corrupt or unreadable floor
+// is an error naming the file — never read as absent (that would make
+// truncating the file a rollback enabler) and never rewritten here.
+func readVerifyFloor(controlLog string) (logID string, version int, present bool, err error) {
+	data, err := os.ReadFile(verifyFloorPath(controlLog))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", 0, false, nil
+	}
+	if err != nil {
+		return "", 0, false, fmt.Errorf("verify.floor: %w", err)
+	}
+	logID, version, err = config.ParseVerifyFloor(data)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("verify.floor: %w", err)
+	}
+	return logID, version, true, nil
+}
+
+// writeVerifyFloor writes verify.floor atomically, as the pointer and the
+// .sig are written: a .verify.floor-* temp beside the ledger (0600, as
+// CreateTemp yields), fsync, rename over the final name, fsync the directory.
+// On any failure the temp is removed and whatever floor was there is left
+// untouched. The caller holds installed.lock shared; two shared holders that
+// both advance write the same bytes to the same name — an idempotent
+// duplicate, never a regression.
+func writeVerifyFloor(controlLog, logID string, version int) error {
+	dir := filepath.Dir(controlLog)
+	f, err := os.CreateTemp(dir, ".verify.floor-*")
+	if err != nil {
+		return fmt.Errorf("verify.floor: %w", err)
+	}
+	tmp := f.Name()
+	_, werr := f.Write(config.VerifyFloorBytes(logID, version))
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(tmp, verifyFloorPath(controlLog))
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("verify.floor: %w", werr)
+	}
+	if d, derr := os.Open(dir); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
