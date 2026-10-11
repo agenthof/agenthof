@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -101,12 +103,12 @@ func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
 	root := writeSample(t)
 
 	empty := filepath.Join(t.TempDir(), "control.jsonl")
-	if _, reg, hash, installed, errs := resolveRunConfig(empty); installed || reg != nil || hash != "" || len(errs) != 0 {
+	if _, reg, hash, installed, errs, _ := resolveRunConfig(empty, "", verifyAndAdvance); installed || reg != nil || hash != "" || len(errs) != 0 {
 		t.Fatalf("nothing installed: installed=%v reg=%v hash=%q errs=%v", installed, reg, hash, errs)
 	}
 
 	ctl := applied(t, root)
-	cfg, reg, hash, installed, errs := resolveRunConfig(ctl)
+	cfg, reg, hash, installed, errs, _ := resolveRunConfig(ctl, "", verifyAndAdvance)
 	if !installed || len(errs) != 0 || reg == nil || len(cfg.Agents) != 2 {
 		t.Fatalf("installed: installed=%v reg=%v errs=%v", installed, reg, errs)
 	}
@@ -118,7 +120,7 @@ func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "gateway.yaml"), []byte("models: {\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, reg, again, _, errs := resolveRunConfig(ctl); reg == nil || again != hash || len(errs) != 0 {
+	if _, reg, again, _, errs, _ := resolveRunConfig(ctl, "", verifyAndAdvance); reg == nil || again != hash || len(errs) != 0 {
 		t.Fatalf("a broken directory must not affect the installed resolution: hash=%q errs=%v", again, errs)
 	}
 
@@ -140,7 +142,7 @@ func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "installed config " + hash + ": snapshot hashes as " + got + ", not as its pointer"
-	if _, reg, _, installed, errs := resolveRunConfig(ctl); reg != nil || !installed || len(errs) != 1 || errs[0].Error() != want {
+	if _, reg, _, installed, errs, _ := resolveRunConfig(ctl, "", verifyAndAdvance); reg != nil || !installed || len(errs) != 1 || errs[0].Error() != want {
 		t.Fatalf("the mismatch must surface, alone: reg=%v installed=%v errs=%v", reg, installed, errs)
 	}
 
@@ -148,7 +150,7 @@ func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(store, config.InstalledPointer), []byte("garbage\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, reg, hash, installed, errs := resolveRunConfig(ctl); reg != nil || installed || hash != "" || len(errs) != 1 || !strings.Contains(errs[0].Error(), "malformed pointer") {
+	if _, reg, hash, installed, errs, _ := resolveRunConfig(ctl, "", verifyAndAdvance); reg != nil || installed || hash != "" || len(errs) != 1 || !strings.Contains(errs[0].Error(), "malformed pointer") {
 		t.Fatalf("malformed pointer: reg=%v installed=%v hash=%q errs=%v", reg, installed, hash, errs)
 	}
 }
@@ -257,5 +259,51 @@ func TestServeStartupWarnsAboutAnUnreadableSignatureButNotARace(t *testing.T) {
 	}
 	if strings.Contains(logs, "config sign") {
 		t.Fatalf("unreadable signature: must not offer the config sign remedy:\n%s", logs)
+	}
+}
+
+// TestServeStartupWarnsWhenThePinnedKeyDoesNotVerify (§9, S2): with a key
+// pinned and the .sig removed, serve starts, logs ONE Warn carrying the
+// reason, creates no verify.floor (verifyOnly), and sizes the shutdown
+// deadline from the LOADED configuration's step timeout — 90s here, not the
+// 5m default, which is what proves cfg was kept. With a valid pin: no new
+// Warn, still no floor at startup.
+func TestServeStartupWarnsWhenThePinnedKeyDoesNotVerify(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	keygenAt(t, ctl)
+	root := pullSample(t)
+	writeFileIn(t, root, "gateway.yaml", "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\nstep_timeout: 90s\n")
+	applyAs(t, root, ctl)
+	pinHostKey(t, ctl)
+	hash := readPointer(t, ctl)
+
+	logs := startServeOnce(t, ctl)
+	if strings.Contains(logs, "pinned key") || strings.Contains(logs, "level=WARN") {
+		t.Fatalf("valid pin: no warning:\n%s", logs)
+	}
+	if _, err := os.Stat(verifyFloorPath(ctl)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("startup is verifyOnly: no floor: %v", err)
+	}
+
+	if err := os.Remove(config.SignaturePath(installedStore(ctl), hash)); err != nil {
+		t.Fatal(err)
+	}
+	logs = startServeOnce(t, ctl)
+	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "installed configuration does not verify against the pinned key; every run will be refused until it does") ||
+		!strings.Contains(logs, "configuration not verified: unsigned: no signature file for "+hash) || !strings.Contains(logs, "pinned_key="+verifyPubPath(ctl)) {
+		t.Fatalf("unsigned under a pin:\n%s", logs)
+	}
+	if strings.Count(logs, "level=WARN") != 1 {
+		t.Fatalf("exactly one Warn:\n%s", logs)
+	}
+	if !strings.Contains(logs, "shutdown_timeout=1m30s") {
+		t.Fatalf("S2: the loaded configuration's step timeout is the deadline, not the default:\n%s", logs)
+	}
+	if _, err := os.Stat(verifyFloorPath(ctl)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("startup writes no floor even when it would pass: %v", err)
+	}
+	if !strings.Contains(logs, "serve started") {
+		t.Fatalf("serve starts in every case:\n%s", logs)
 	}
 }

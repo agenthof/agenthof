@@ -1,19 +1,30 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
+	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/obs"
+	"github.com/agenthof/agenthof/internal/registry"
+	"github.com/agenthof/agenthof/internal/serve"
 )
 
 func TestVerifyPathsAreBesideTheStore(t *testing.T) {
@@ -331,5 +342,577 @@ func TestJudgeFloorRules(t *testing.T) {
 		if r := judgeFloor(ctl, L2, 2, verifyOnly); r != nil {
 			t.Fatalf("verifyOnly never writes, so an unwritable root is no fault for it: %+v", r)
 		}
+	}
+}
+
+// pinnedRoot is signedRoot with signing.pub pinned as verify.pub: the
+// self-verification setup. It returns ctl, root, the pinned key's id.
+func pinnedRoot(t *testing.T) (ctl, root, keyID string) {
+	t.Helper()
+	ctl, root, keyID = signedRoot(t)
+	pinHostKey(t, ctl)
+	return ctl, root, keyID
+}
+
+// resolveAdvance is resolveRunConfig(ctl, "", verifyAndAdvance) with the
+// control ledger asserted byte-identical afterwards: no verify outcome ever
+// writes a control event.
+func resolveAdvance(t *testing.T, ctl string) (cfg config.Config, reg *registry.Registry, hash string, installed bool, errs []error, unverified *verifyRefusal) {
+	t.Helper()
+	before := ledgerBytes(t, ctl)
+	cfg, reg, hash, installed, errs, unverified = resolveRunConfig(ctl, "", verifyAndAdvance)
+	if after := ledgerBytes(t, ctl); !bytes.Equal(before, after) {
+		t.Fatal("the pinned verify must never write the control ledger")
+	}
+	return
+}
+
+func floorBytes(t *testing.T, ctl string) string {
+	t.Helper()
+	b, err := os.ReadFile(verifyFloorPath(ctl))
+	if errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestResolveRunConfigStateANeverTouchesTheLockOrTheFloor: with no pin the
+// function is today's body — it never opens or creates installed.lock (applyAs
+// created it; remove it and it must stay absent) and never reads or writes a
+// floor.
+func TestResolveRunConfigStateANeverTouchesTheLockOrTheFloor(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _, _ := signedRoot(t)
+	if err := os.Remove(installedLock(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	_, reg, hash, installed, errs, unverified := resolveAdvance(t, ctl)
+	if reg == nil || !installed || hash != readPointer(t, ctl) || len(errs) != 0 || unverified != nil {
+		t.Fatalf("state A: reg=%v installed=%v errs=%v unverified=%v", reg, installed, errs, unverified)
+	}
+	if _, err := os.Stat(installedLock(ctl)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("state A must never create installed.lock: %v", err)
+	}
+	if floorBytes(t, ctl) != "" {
+		t.Fatal("state A must never create verify.floor")
+	}
+	// A floor left behind by an earlier pin is inert without the pin.
+	if err := os.WriteFile(verifyFloorPath(ctl), []byte(strings.Repeat("f", 32)+" 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, reg, _, _, errs, unverified := resolveAdvance(t, ctl); reg == nil || len(errs) != 0 || unverified != nil {
+		t.Fatalf("an unpinned root ignores the floor: %v %v", errs, unverified)
+	}
+}
+
+// TestPinnedVerifyPassesAndAdvancesTheFloor: self-verification passes;
+// verifyAndAdvance creates verify.floor = "<log_id> 1\n" (0600) and a second
+// pass writes nothing; verifyOnly on a fresh pinned root creates no floor and
+// no verify outcome writes the control ledger.
+func TestPinnedVerifyPassesAndAdvancesTheFloor(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _, _ := pinnedRoot(t)
+	logID := controlLogID(t, ctl)
+
+	if _, reg, _, installed, errs, unverified := resolveRunConfig(ctl, "", verifyOnly); reg == nil || !installed || len(errs) != 0 || unverified != nil || floorBytes(t, ctl) != "" {
+		t.Fatalf("verifyOnly: reg=%v errs=%v unverified=%v floor=%q", reg, errs, unverified, floorBytes(t, ctl))
+	}
+	_, reg, hash, installed, errs, unverified := resolveAdvance(t, ctl)
+	if reg == nil || !installed || hash != readPointer(t, ctl) || len(errs) != 0 || unverified != nil {
+		t.Fatalf("pass: reg=%v errs=%v unverified=%v", reg, errs, unverified)
+	}
+	if floorBytes(t, ctl) != logID+" 1\n" {
+		t.Fatalf("floor %q", floorBytes(t, ctl))
+	}
+	if info, _ := os.Stat(verifyFloorPath(ctl)); info.Mode().Perm() != 0o600 {
+		t.Fatalf("floor mode %o", info.Mode().Perm())
+	}
+	before, _ := os.Stat(verifyFloorPath(ctl))
+	time.Sleep(20 * time.Millisecond)
+	if _, reg, _, _, _, unverified := resolveAdvance(t, ctl); reg == nil || unverified != nil {
+		t.Fatalf("second pass: %v", unverified)
+	}
+	if after, _ := os.Stat(verifyFloorPath(ctl)); !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("the steady state must write nothing")
+	}
+	for _, e := range mustReadDirNames(t, filepath.Dir(ctl)) {
+		if strings.HasPrefix(e, ".verify.floor-") {
+			t.Fatalf("temp residue: %s", e)
+		}
+	}
+	if _, err := os.Stat(installedLock(ctl)); err != nil {
+		t.Fatalf("a pinned run opens installed.lock shared: %v", err)
+	}
+}
+
+// TestPinnedVerifyJudgedKinds: each of the five judged kinds, by kind AND
+// detail text; a verdict returns cfg loaded, reg nil, hash set, installed
+// true, errs nil, and never writes the floor or the control ledger.
+func TestPinnedVerifyJudgedKinds(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, id := pinnedRoot(t)
+	hash := readPointer(t, ctl)
+	logID := controlLogID(t, ctl)
+	store := installedStore(ctl)
+	sigPath := config.SignaturePath(store, hash)
+	priv := hostPriv(t, ctl)
+	valid1 := mustRead(t, sigPath)
+	at1 := controlEvents(t, ctl)[0].Time.UTC()
+
+	expect := func(name string, kind verifyKind, detail string) {
+		t.Helper()
+		cfg, reg, h, installed, errs, unverified := resolveAdvance(t, ctl)
+		if unverified == nil {
+			t.Fatalf("%s: want a verdict, got reg=%v errs=%v", name, reg, errs)
+		}
+		if unverified.Kind != kind || unverified.Detail != detail {
+			t.Fatalf("%s: kind %d detail %q\nwant kind %d detail %q", name, unverified.Kind, unverified.Detail, kind, detail)
+		}
+		if reg != nil || h != hash || !installed || errs != nil || len(cfg.Roles) == 0 || unverified.Transient() {
+			t.Fatalf("%s: a verdict ⇒ cfg loaded, reg nil, hash set, installed, errs nil: reg=%v h=%q installed=%v errs=%v roles=%d", name, reg, h, installed, errs, len(cfg.Roles))
+		}
+	}
+
+	// unsigned: no .sig.
+	if err := os.Remove(sigPath); err != nil {
+		t.Fatal(err)
+	}
+	expect("no .sig", verifyUnsigned, "no signature file for "+hash)
+	if floorBytes(t, ctl) != "" {
+		t.Fatal("a verdict must not create the floor")
+	}
+	// unsigned: a .sig with first line foo/v9 — named as format, never as a key.
+	if err := os.WriteFile(sigPath, bytes.Replace(valid1, []byte(config.SignatureFormatV1+"\n"), []byte("foo/v9\n"), 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expect("foreign format", verifyUnsigned, `unsupported signature format "foo/v9"`)
+	// unsigned: a .sig hand-written at seq 2 against a ledger at seq 1 — the sigNewer rendering, never "retry".
+	newer, _ := config.SignaturePayload(hash, logID, 2, at1, id)
+	writeSigAt(t, ctl, newer, config.Sign(priv, newer))
+	expect("newer than the install", verifyUnsigned, "signature is for version 2, installed is 1")
+	// unknown key: the golden key's id, before any verify — and the underlying verdict still satisfies errNotSigned.
+	foreign, _ := config.SignaturePayload(hash, logID, 1, at1, goldenKeyID)
+	writeSigAt(t, ctl, foreign, config.Sign(priv, foreign))
+	expect("unknown key", verifyUnknownKey, "signature is by key "+goldenKeyID+"; configured key is "+id)
+	if _, err := verifySignatureFile(store, hash, logID, 1, at1, signingPub(t, ctl)); !errors.Is(err, errNotSigned) {
+		t.Fatalf("the verdict beneath unknown key is still not-signed: %v", err)
+	}
+	// bad signature: flip one base64 character of the valid file's trailer.
+	f, err := config.ParseSignatureFile(valid1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flipped := []byte(f.Sig)
+	if flipped[0] == 'A' {
+		flipped[0] = 'B'
+	} else {
+		flipped[0] = 'A'
+	}
+	writeSigAt(t, ctl, f.Payload, string(flipped))
+	expect("bad signature", verifyBadSignature, "")
+	// unsigned: the seq-1 .sig after an identical re-apply to seq 2.
+	applyAs(t, root, ctl)
+	if err := os.WriteFile(sigPath, valid1, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expect("stale .sig", verifyUnsigned, "signature is for version 1, installed is 2")
+	// back to valid: a further identical re-apply (seq 3) signs the current install.
+	applyAs(t, root, ctl) // seq 3, signed
+	if _, reg, _, _, errs, unverified := resolveAdvance(t, ctl); reg == nil || errs != nil || unverified != nil {
+		t.Fatalf("restored: %v %v", errs, unverified)
+	}
+	if floorBytes(t, ctl) != logID+" 3\n" {
+		t.Fatalf("floor after the pass: %q", floorBytes(t, ctl))
+	}
+	// stale: floor hand-written above the install.
+	if err := os.WriteFile(verifyFloorPath(ctl), []byte(logID+" 5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expect("stale", verifyStale, "version 3 is below this root's verified floor 5 (ledger "+logID+")")
+	if floorBytes(t, ctl) != logID+" 5\n" {
+		t.Fatal("a stale verdict leaves the floor")
+	}
+	// foreign ledger: the floor names another log_id — judged before the version.
+	if err := os.WriteFile(verifyFloorPath(ctl), []byte(strings.Repeat("f", 32)+" 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expect("foreign ledger", verifyForeignLedger, "install is of ledger "+logID+"; this root last verified ledger "+strings.Repeat("f", 32)+" (version 1); remove "+verifyFloorPath(ctl)+" to accept the new ledger")
+	// ORDER: .sig removed AND the floor foreign → unsigned (the signature is judged before the floor).
+	if err := os.Remove(sigPath); err != nil {
+		t.Fatal(err)
+	}
+	expect("unsigned before foreign", verifyUnsigned, "no signature file for "+hash)
+}
+
+// TestPinnedVerifyNotVerifiableCauses: every permanent fault is a recorded
+// "not verifiable" naming its cause — never "unsigned", never state A, never
+// a silent pass.
+func TestPinnedVerifyNotVerifiableCauses(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, _ := pinnedRoot(t)
+	logID := controlLogID(t, ctl)
+	pin := verifyPubPath(ctl)
+	pubPEM := mustRead(t, pin)
+
+	expectNV := func(name, detailPrefix string, key string) *verifyRefusal {
+		t.Helper()
+		before := ledgerBytes(t, ctl)
+		cfg, reg, h, installed, errs, unverified := resolveRunConfig(ctl, key, verifyAndAdvance)
+		if !bytes.Equal(before, ledgerBytes(t, ctl)) {
+			t.Fatalf("%s: wrote the control ledger", name)
+		}
+		if unverified == nil || unverified.Kind != verifyNotVerifiable || !strings.HasPrefix(unverified.Detail, detailPrefix) {
+			t.Fatalf("%s: want not verifiable %q…, got unverified=%v reg=%v errs=%v", name, detailPrefix, unverified, reg, errs)
+		}
+		if reg != nil || errs != nil {
+			t.Fatalf("%s: reg=%v errs=%v", name, reg, errs)
+		}
+		_, _, _ = cfg, h, installed
+		return unverified
+	}
+
+	// The pin, judged before any lock: unreadable; junk; a PRIVATE KEY block; a named path that is absent.
+	if os.Geteuid() != 0 {
+		if err := os.Chmod(pin, 0); err != nil {
+			t.Fatal(err)
+		}
+		_ = expectNV("pin unreadable", "pinned key "+pin+": ", "")
+		if err := os.Chmod(pin, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(pin, []byte("junk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = expectNV("pin junk", "pinned key "+pin+": signing public key: no PEM block", "")
+	if err := os.WriteFile(pin, mustRead(t, signingKeyPath(ctl)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = expectNV("pin is a private key", "pinned key "+pin+": signing public key: PEM block type \"PRIVATE KEY\"", "")
+	if err := os.WriteFile(pin, pubPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "absent.pub")
+	r := expectNV("--verify-key names a missing file", "pinned key "+missing+": ", missing)
+	if !strings.Contains(r.Detail, "no such file") {
+		t.Fatalf("F: %q", r.Detail)
+	}
+	// Never state A: the pass with the conventional pin, but the flag's path absent, still refuses.
+	if floorBytes(t, ctl) != "" {
+		t.Fatal("a refused pin must not advance the floor")
+	}
+
+	// The floor: garbage, 07, 0, a directory — read faults; an unwritable root — the write fault after a verified signature.
+	for _, bad := range []string{"garbage\n", logID + " 07\n", logID + " 0\n"} {
+		if err := os.WriteFile(verifyFloorPath(ctl), []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_ = expectNV("floor "+strings.TrimSpace(bad), "verify.floor: ", "")
+		if floorBytes(t, ctl) != bad {
+			t.Fatal("a corrupt floor is never rewritten")
+		}
+	}
+	if err := os.Remove(verifyFloorPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(verifyFloorPath(ctl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = expectNV("floor is a directory", "verify.floor: ", "")
+	if err := os.Remove(verifyFloorPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() != 0 {
+		if err := os.Chmod(filepath.Dir(ctl), 0o500); err != nil {
+			t.Fatal(err)
+		}
+		r := expectNV("floor unwritable", "verify.floor: ", "")
+		if err := os.Chmod(filepath.Dir(ctl), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(r.Detail, "permission denied") || floorBytes(t, ctl) != "" {
+			t.Fatalf("unwritable: %q floor=%q", r.Detail, floorBytes(t, ctl))
+		}
+	}
+
+	// The ledger: the crash hook (pointer moved, no record); the ledger removed; torn; genesis without log_id.
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_install_before_append")
+	_, _ = applyCode(t, root, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	_ = expectNV("crash in the install→record gap", "installed configuration is not on record; re-apply, or run audit repair control", "")
+	applyAs(t, root, ctl) // re-apply records and signs it; the pass advances the floor
+	if _, reg, _, _, _, unverified := resolveAdvance(t, ctl); reg == nil || unverified != nil {
+		t.Fatalf("re-apply heals: %v", unverified)
+	}
+	appendFragment(t, ctl)
+	_ = expectNV("torn ledger", "control ledger damaged; run: agenthof audit repair control --control-log "+ctl, "")
+	ledgerSaved := mustRead(t, ctl)
+	if err := os.Remove(ctl); err != nil {
+		t.Fatal(err)
+	}
+	_ = expectNV("ledger removed", "installed configuration is not on record", "")
+	// ORDER: ledger removed AND .sig removed → not on record (the ledger is read first).
+	hash := readPointer(t, ctl)
+	if err := os.Remove(config.SignaturePath(installedStore(ctl), hash)); err != nil {
+		t.Fatal(err)
+	}
+	_ = expectNV("no ledger, no .sig", "installed configuration is not on record", "")
+	if err := os.WriteFile(ctl, ledgerSaved, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Genesis without log_id, on its own pinned root.
+	ctl2 := filepath.Join(t.TempDir(), "control.jsonl")
+	keygenAt(t, ctl2)
+	pinHostKey(t, ctl2)
+	hash2 := installByHandWithPointer(t, ctl2, map[string]string{"roles/ops.yaml": "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply]\n"})
+	c, err := ledger.Open(ctl2, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"v":"control/1","seq":1,"time":"2026-10-09T02:12:01Z","action":"apply","outcome":"success","invoker":{"subject":"dana@example.com","issuer":"local","method":"asserted"},"witness":{"os_user":"dana","hostname":"h"},"config_hash":"` + hash2 + `","prev":""}`
+	if err := c.Append([]byte(line)); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	if _, _, _, _, _, unverified := resolveRunConfig(ctl2, "", verifyAndAdvance); unverified == nil || unverified.Kind != verifyNotVerifiable || unverified.Detail != "control ledger genesis has no log_id" {
+		t.Fatalf("genesis without log_id: %v", unverified)
+	}
+}
+
+// TestPinnedVerifyOrderAgainstTheStoreChecks: bytes-vs-pointer still runs
+// first (a tampered snapshot is "configuration invalid", unverified nil); a
+// corrupt pin is judged before the lock is taken (a held lock does not make
+// it wait); a .sig that cannot be read (EISDIR) is a store fault in errs,
+// never a verdict.
+func TestPinnedVerifyOrderAgainstTheStoreChecks(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _, _ := pinnedRoot(t)
+
+	// corrupt pin + held lock: returns at once with the pin fault (the lock is never taken).
+	holdLock(t, "file", installedLock(ctl), 9000)
+	pubPEM := mustRead(t, verifyPubPath(ctl))
+	if err := os.WriteFile(verifyPubPath(ctl), []byte("junk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, _, _, _, _, unverified := resolveRunConfig(ctl, "", verifyAndAdvance)
+	if unverified == nil || unverified.Kind != verifyNotVerifiable || !strings.HasPrefix(unverified.Detail, "pinned key ") {
+		t.Fatalf("pin before lock: %v", unverified)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("a pin fault must not wait on the lock")
+	}
+	if err := os.WriteFile(verifyPubPath(ctl), pubPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// (the holder keeps the lock ~9 s; the rows below need it released — use a fresh root)
+	ctl, _, _ = pinnedRoot(t)
+	hash := readPointer(t, ctl)
+	store := installedStore(ctl)
+
+	// tamper + pin: VerifyInstalled's mismatch, alone, unverified nil, no floor.
+	coder := filepath.Join(config.SnapshotDir(store, hash), "agents", "coder.yaml")
+	data := mustRead(t, coder)
+	if err := os.WriteFile(coder, append(data, []byte("enabled: false\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, reg, _, installed, errs, unverified := resolveAdvance(t, ctl); reg != nil || !installed || len(errs) != 1 || !strings.Contains(errs[0].Error(), "not as its pointer") || unverified != nil || floorBytes(t, ctl) != "" {
+		t.Fatalf("tamper: reg=%v errs=%v unverified=%v floor=%q", reg, errs, unverified, floorBytes(t, ctl))
+	}
+	if err := os.WriteFile(coder, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// .sig unreadable (a directory): a store fault, reported as LoadInstalled's I/O faults are.
+	sigPath := config.SignaturePath(store, hash)
+	if err := os.Remove(sigPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, reg, _, installed, errs, unverified := resolveAdvance(t, ctl); reg != nil || !installed || len(errs) != 1 || !strings.HasPrefix(errs[0].Error(), "installed config "+hash+": ") || unverified != nil {
+		t.Fatalf("EISDIR: reg=%v errs=%v unverified=%v", reg, errs, unverified)
+	}
+}
+
+// TestPinnedVerifyFloorRules: the floor across installs — an identical
+// re-apply advances it; a partial rollback (ledger + .sig restored, floor
+// left) is stale; removing the floor re-accepts the older install and
+// re-creates the floor at it; a re-created control root under the same key
+// is a foreign ledger until the floor is removed.
+func TestPinnedVerifyFloorRules(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, _ := pinnedRoot(t)
+	hash := readPointer(t, ctl)
+	logID := controlLogID(t, ctl)
+	sigPath := config.SignaturePath(installedStore(ctl), hash)
+	if _, reg, _, _, _, unverified := resolveAdvance(t, ctl); reg == nil || unverified != nil {
+		t.Fatal(unverified)
+	}
+	ledger1, sig1 := mustRead(t, ctl), mustRead(t, sigPath)
+
+	applyAs(t, root, ctl) // identical re-apply: seq 2, signed
+	if _, reg, _, _, _, unverified := resolveAdvance(t, ctl); reg == nil || unverified != nil || floorBytes(t, ctl) != logID+" 2\n" {
+		t.Fatalf("advance: %v floor=%q", unverified, floorBytes(t, ctl))
+	}
+	// partial rollback: the seq-1 ledger and .sig put back, floor left at 2.
+	if err := os.WriteFile(ctl, ledger1, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sigPath, sig1, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, reg, _, _, _, unverified := resolveAdvance(t, ctl)
+	if reg != nil || unverified == nil || unverified.Kind != verifyStale || unverified.Detail != "version 1 is below this root's verified floor 2 (ledger "+logID+")" {
+		t.Fatalf("stale: reg=%v %v", reg, unverified)
+	}
+	// reset: the documented gesture re-accepts the older install.
+	if err := os.Remove(verifyFloorPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	if _, reg, _, _, _, unverified := resolveAdvance(t, ctl); reg == nil || unverified != nil || floorBytes(t, ctl) != logID+" 1\n" {
+		t.Fatalf("reset: %v floor=%q", unverified, floorBytes(t, ctl))
+	}
+	// foreign ledger: a re-created control root (new genesis) under the same key.
+	if err := os.Remove(ctl); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(installedStore(ctl), config.InstalledPointer)); err != nil {
+		t.Fatal(err)
+	}
+	applyAs(t, root, ctl) // bootstrap: seq 1 of a NEW ledger, signed
+	newLogID := controlLogID(t, ctl)
+	if newLogID == logID {
+		t.Fatal("a re-created root must have a new log_id")
+	}
+	_, reg, _, _, _, unverified = resolveAdvance(t, ctl)
+	if reg != nil || unverified == nil || unverified.Kind != verifyForeignLedger || unverified.Detail != "install is of ledger "+newLogID+"; this root last verified ledger "+logID+" (version 1); remove "+verifyFloorPath(ctl)+" to accept the new ledger" {
+		t.Fatalf("foreign: reg=%v %v", reg, unverified)
+	}
+	if err := os.Remove(verifyFloorPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	if _, reg, _, _, _, unverified := resolveAdvance(t, ctl); reg == nil || unverified != nil || floorBytes(t, ctl) != newLogID+" 1\n" {
+		t.Fatalf("accept the new ledger: %v floor=%q", unverified, floorBytes(t, ctl))
+	}
+}
+
+// TestPinnedVerifyWholeRootRestoreIsNotSeen is the honest limit (B2), pinned
+// as a fact: restoring control.jsonl, the .sig AND verify.floor together as
+// of seq 1 — a whole-root restore — PASSES; the floor cannot see a rollback
+// it was rolled back with. Only the partial restore (floor left) is stale.
+func TestPinnedVerifyWholeRootRestoreIsNotSeen(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, _ := pinnedRoot(t)
+	hash := readPointer(t, ctl)
+	logID := controlLogID(t, ctl)
+	sigPath := config.SignaturePath(installedStore(ctl), hash)
+	if _, _, _, _, _, unverified := resolveAdvance(t, ctl); unverified != nil {
+		t.Fatal(unverified)
+	}
+	ledger1, sig1, floor1 := mustRead(t, ctl), mustRead(t, sigPath), mustRead(t, verifyFloorPath(ctl))
+	applyAs(t, root, ctl)
+	if _, _, _, _, _, unverified := resolveAdvance(t, ctl); unverified != nil || floorBytes(t, ctl) != logID+" 2\n" {
+		t.Fatalf("at 2: %v %q", unverified, floorBytes(t, ctl))
+	}
+	for p, b := range map[string][]byte{ctl: ledger1, sigPath: sig1, verifyFloorPath(ctl): floor1} {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, reg, _, _, errs, unverified := resolveAdvance(t, ctl)
+	if reg == nil || errs != nil || unverified != nil {
+		t.Fatalf("the whole-root restore is accepted — the documented limit: reg=%v errs=%v unverified=%v", reg, errs, unverified)
+	}
+	if floorBytes(t, ctl) != logID+" 1\n" {
+		t.Fatalf("the floor came back at 1 too: %q", floorBytes(t, ctl))
+	}
+}
+
+// TestPinnedVerifyAdvancesTheFloorEvenWhenBuildFails (S3): the floor tracks
+// verified signatures, not valid configurations — a signed kill-switch flip
+// that disables an agent a workflow needs installs a snapshot that does not
+// Build; the run is refused "configuration invalid", and the floor advanced.
+func TestPinnedVerifyAdvancesTheFloorEvenWhenBuildFails(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, _ := pinnedRoot(t)
+	logID := controlLogID(t, ctl)
+	if _, _, _, _, _, unverified := resolveAdvance(t, ctl); unverified != nil {
+		t.Fatal(unverified)
+	}
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 || !strings.Contains(out.String(), "signed: key_id") {
+		t.Fatalf("flip: %d\n%s", code, out.String())
+	}
+	_, reg, _, installed, errs, unverified := resolveAdvance(t, ctl)
+	if reg != nil || !installed || unverified != nil || len(errs) == 0 || !strings.Contains(errs[0].Error(), "disabled") {
+		t.Fatalf("flip: reg=%v errs=%v unverified=%v", reg, errs, unverified)
+	}
+	if floorBytes(t, ctl) != logID+" 2\n" {
+		t.Fatalf("the verified flip advances the floor: %q", floorBytes(t, ctl))
+	}
+}
+
+// TestRunRefusesAnUnsignedInstallWhenPinned wires cmdRun: the detail line,
+// the result line with the headline, the run ledger's run_refused.reason as
+// the full reason, exit 1, no control event.
+func TestRunRefusesAnUnsignedInstallWhenPinned(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, _ := pinnedRoot(t)
+	hash := readPointer(t, ctl)
+	if err := os.Remove(config.SignaturePath(installedStore(ctl), hash)); err != nil {
+		t.Fatal(err)
+	}
+	logs := t.TempDir()
+	events := len(controlEvents(t, ctl))
+	var out bytes.Buffer
+	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "hi", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
+	reason := "configuration not verified: unsigned: no signature file for " + hash
+	if code != 1 || !strings.Contains(out.String(), "run: "+reason+"\n") {
+		t.Fatalf("code %d\n%s", code, out.String())
+	}
+	m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: configuration not verified: unsigned\n`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("result line with the headline:\n%s", out.String())
+	}
+	ev, _, err := engine.ReadLog(logs, m[1])
+	if err != nil || len(ev) != 1 || ev[0].Type != "run_refused" || ev[0].Reason != reason {
+		t.Fatalf("ledger: %+v %v", ev, err)
+	}
+	if len(controlEvents(t, ctl)) != events {
+		t.Fatal("a refusal writes no control event")
+	}
+}
+
+// TestRunHostPrepareMapsAVerdictToTheTypedError wires serve's Prepare: a
+// verdict is *serve.ConfigNotVerifiedError{Headline, Reason}; a pass prepares.
+func TestRunHostPrepareMapsAVerdictToTheTypedError(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _, _ := pinnedRoot(t)
+	hash := readPointer(t, ctl)
+	// The real host's shape (cmdServe, serve.go:114); newRunDeps only stores the broker, but build it as serve does.
+	h := &runHost{controlLog: ctl, logDir: t.TempDir(), artifactDir: t.TempDir(), logger: obs.New(io.Discard, slog.LevelDebug, obs.FormatText), broker: newBroker(subjectTokenTypeFromEnv(os.Getenv))}
+	if _, err := h.Prepare(identity.Invoker{}, ""); err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if floorBytes(t, ctl) != controlLogID(t, ctl)+" 1\n" {
+		t.Fatalf("Prepare is an execution read: it advances the floor: %q", floorBytes(t, ctl))
+	}
+	if err := os.Remove(config.SignaturePath(installedStore(ctl), hash)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := h.Prepare(identity.Invoker{}, "")
+	var nv *serve.ConfigNotVerifiedError
+	if !errors.As(err, &nv) || nv.Headline != "configuration not verified: unsigned" || nv.Reason != "configuration not verified: unsigned: no signature file for "+hash || err.Error() != nv.Reason {
+		t.Fatalf("%T %v", err, err)
+	}
+	if errors.Is(err, serve.ErrConfigInvalid) || errors.Is(err, serve.ErrNoConfigInstalled) {
+		t.Fatal("a verdict is neither invalid nor not-installed")
 	}
 }

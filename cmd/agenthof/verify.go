@@ -336,3 +336,55 @@ func judgeFloor(controlLog, logID string, version int, mode verifyMode) *verifyR
 	}
 	return nil
 }
+
+// pinnedKeyPath decides whether verification is pinned and where the key is.
+// With --verify-key given, the flag IS the pin: the path is returned as
+// pinned whether or not it exists (an absent or unreadable named key fails
+// closed at loadVerifyPub, never state A). Without it, the conventional
+// verify.pub is stat'ed: absent ⇒ not pinned, today's behavior; any stat
+// error other than not-exist is a fault the caller reports.
+func pinnedKeyPath(controlLog, verifyKey string) (pinned bool, path string, err error) {
+	if verifyKey != "" {
+		return true, verifyKey, nil
+	}
+	path = verifyPubPath(controlLog)
+	exists, err := fileExists(path)
+	if err != nil {
+		return false, path, fmt.Errorf("pinned key %s: %w", path, err)
+	}
+	return exists, path, nil
+}
+
+// pinnedVerify is the run-side check under the shared lock the caller holds
+// (§6.4): the ledger's account of the install; the signature under the pinned
+// key, classified by kind — sigAbsent/sigMalformed/sigForeign/sigOlder →
+// unsigned with the verdict's detail; sigNewer → unsigned, rendered as
+// "signature is for version <sig>, installed is <ledger>" (under the shared
+// lock nothing is mid-install, so the pull's "retry" wording would be false
+// here); sigUnknownKey → unknown key; sigBad → bad signature; then the floor.
+// A .sig read error other than not-exist is returned as the error: a store
+// fault for the caller's errs, not a verdict.
+func pinnedVerify(controlLog, hash string, pub ed25519.PublicKey, mode verifyMode) (*verifyRefusal, error) {
+	inst, refusal := recordedInstall(controlLog, hash)
+	if refusal != nil {
+		return refusal, nil
+	}
+	f, err := verifySignatureFile(installedStore(controlLog), hash, inst.LogID, inst.Version, inst.At, pub)
+	if err != nil {
+		var v *signatureVerdict
+		if !errors.As(err, &v) {
+			return nil, err
+		}
+		switch v.Kind {
+		case sigUnknownKey:
+			return &verifyRefusal{Kind: verifyUnknownKey, Detail: v.Detail}, nil
+		case sigBad:
+			return &verifyRefusal{Kind: verifyBadSignature}, nil
+		case sigNewer:
+			return &verifyRefusal{Kind: verifyUnsigned, Detail: fmt.Sprintf("signature is for version %d, installed is %d", v.File.Version, inst.Version)}, nil
+		default:
+			return &verifyRefusal{Kind: verifyUnsigned, Detail: v.Detail}, nil
+		}
+	}
+	return judgeFloor(controlLog, f.LogID, f.Version, mode), nil
+}
