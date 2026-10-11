@@ -196,6 +196,22 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request, inv identity.I
 			s.refuse(w, inv, req, origin, ErrNoConfigInstalled.Error(), ErrNoConfigInstalled.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		var nv *ConfigNotVerifiedError
+		if errors.As(err, &nv) {
+			// The operator's verdict on the configuration: recorded like
+			// "configuration invalid" — 422, the headline in the body, the
+			// whole reason in the ledger.
+			s.refuse(w, inv, req, origin, nv.Reason, nv.Headline, http.StatusUnprocessableEntity)
+			return
+		}
+		if errors.Is(err, ErrConfigBusy) {
+			// Availability, not a verdict: nothing recorded, retry — the
+			// PullBusy shape.
+			s.logger.Info("run not started", "status", "busy")
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, ErrConfigBusy.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		s.logger.Error("run preparation failed", "err", err)
 		http.Error(w, "run could not be prepared", http.StatusInternalServerError)
 		return
@@ -239,8 +255,8 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request, inv identity.I
 // refuse records an authenticated invoker's policy refusal — the same
 // run_refused event the CLI writes, plus origin — and answers with the
 // reason the client prints. ledgerReason and bodyReason differ only for an
-// invalid config: the ledger keeps the first error, the body the fixed
-// "configuration invalid" the CLI prints.
+// invalid or unverified config: the ledger keeps the first error, the body
+// the fixed "configuration invalid" the CLI prints.
 func (s *Server) refuse(w http.ResponseWriter, inv identity.Invoker, req apiclient.RunRequest, origin *engine.Origin, ledgerReason, bodyReason string, code int) {
 	id, err := engine.RecordRefused(engine.Options{LogDir: s.cfg.LogDir, Origin: origin}, inv, req.Role, req.Workflow, ledgerReason)
 	if err != nil {
