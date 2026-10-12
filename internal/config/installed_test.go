@@ -144,8 +144,9 @@ func TestInstalledRolesFailsClosedOnUnparseableRoleFile(t *testing.T) {
 // (the pointer still names it) but has lost its roles — its roles/ directory
 // gone, or the <hex> entry replaced by a file — must fail closed with an error
 // naming the snapshot, NOT read back as an empty role list that silently
-// denies everyone. Every installed snapshot passed the no-apply-floor, so zero
-// roles is always damage.
+// denies everyone. Both fail at the verify stage (the bytes no longer hash as
+// the pointer); the no-roles branch behind it is pinned by
+// TestInstalledRolesNoRolesBranchIsReachable.
 func TestInstalledRolesFailsClosedOnDamagedSnapshot(t *testing.T) {
 	t.Run("roles directory gone", func(t *testing.T) {
 		store := filepath.Join(t.TempDir(), "installed")
@@ -157,7 +158,7 @@ func TestInstalledRolesFailsClosedOnDamagedSnapshot(t *testing.T) {
 		if err == nil || !installed || got != hash {
 			t.Fatalf("installed=%v hash=%q err=%v; want fail-closed naming the snapshot", installed, got, err)
 		}
-		if !strings.Contains(err.Error(), "installed config "+hash) || !strings.Contains(err.Error(), "no roles") {
+		if !strings.HasPrefix(err.Error(), "installed config "+hash+": snapshot hashes as ") {
 			t.Fatalf("error must name the snapshot and the fault: %v", err)
 		}
 	})
@@ -174,7 +175,7 @@ func TestInstalledRolesFailsClosedOnDamagedSnapshot(t *testing.T) {
 		if err == nil || !installed {
 			t.Fatalf("installed=%v err=%v; want fail-closed", installed, err)
 		}
-		if !strings.Contains(err.Error(), "no roles") {
+		if !strings.HasPrefix(err.Error(), "installed config "+hash+": ") {
 			t.Fatalf("error must name the fault: %v", err)
 		}
 	})
@@ -598,21 +599,72 @@ func TestLoadInstalledUnreadableFileIsTheHashStepsError(t *testing.T) {
 	}
 }
 
-// TestInstalledRolesIsNotVerified pins the boundary: the roles-only
-// authorization read does not verify the snapshot against the pointer (a
-// snapshot whose agent files were edited still decides who may act), while
-// the execution read of the same store refuses. A later change to this is
-// deliberate, not accidental.
-func TestInstalledRolesIsNotVerified(t *testing.T) {
+// TestInstalledRolesIsVerified: the roles-only authorization read verifies
+// the snapshot against the pointer before it reads anything — an edited
+// agent file (not a roles file) refuses the authorization read with the SAME
+// text the execution read refuses with. A later change to this is deliberate.
+func TestInstalledRolesIsVerified(t *testing.T) {
 	store := filepath.Join(t.TempDir(), "installed")
 	hash := installByHand(t, store, sampleConfig(t))
-	tamperSnapshot(t, store, hash, "agents/planner.yaml")
+	got := tamperSnapshot(t, store, hash, "agents/planner.yaml")
+	roles, h, installed, err := InstalledRoles(store)
+	if roles != nil || h != hash || !installed || err == nil || err.Error() != mismatchText(hash, got) {
+		t.Fatalf("roles=%v hash=%q installed=%v err=%v; want nil roles, the pointer hash, installed, the verbatim mismatch", roles, h, installed, err)
+	}
+	_, _, _, errs := LoadInstalled(store)
+	if len(errs) != 1 || errs[0].Error() != err.Error() {
+		t.Fatalf("the execution read must refuse with the same text: %v vs %v", errs, err)
+	}
+}
+
+// TestInstalledRolesRefusesAnEditedRolesFile (T1): a store-only writer who
+// edits allowed_groups in place is not the authority on who may act.
+func TestInstalledRolesRefusesAnEditedRolesFile(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	hash := installByHand(t, store, sampleConfig(t))
+	p := filepath.Join(SnapshotDir(store, hash), "roles", "ops.yaml")
+	if err := os.WriteFile(p, []byte("name: platform-admin\nallowed_groups: [finance]\ncontrol: [apply, enable, disable, repair]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := HashDir(SnapshotDir(store, hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles, h, installed, rerr := InstalledRoles(store)
+	if roles != nil || h != hash || !installed || rerr == nil || rerr.Error() != mismatchText(hash, got) {
+		t.Fatalf("roles=%v hash=%q installed=%v err=%v", roles, h, installed, rerr)
+	}
+}
+
+// TestInstalledRolesParseStaysLenient: verifying the bytes does not mean
+// Building them — a snapshot whose agents fail Build (an unknown model, a
+// disabled agent a workflow references) still yields its roles once the
+// bytes verify. This is what lets a kill-switch flip, and config vouch,
+// install a snapshot Build would reject.
+func TestInstalledRolesParseStaysLenient(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := sampleConfig(t)
+	writeCfg(t, src, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan\noutput: plan\nenabled: false\nendpoint: http://127.0.0.1:1\n")
+	hash := installByHand(t, store, src)
 	roles, h, installed, err := InstalledRoles(store)
 	if err != nil || !installed || h != hash || len(roles) != 2 {
-		t.Fatalf("the lenient read must still yield roles: roles=%d hash=%q installed=%v err=%v", len(roles), h, installed, err)
+		t.Fatalf("roles=%d hash=%q installed=%v err=%v", len(roles), h, installed, err)
 	}
-	if _, _, _, errs := LoadInstalled(store); len(errs) != 1 {
-		t.Fatalf("the execution read of the same store must refuse: %v", errs)
+}
+
+// TestInstalledRolesNoRolesBranchIsReachable: a correctly hashed role-less
+// snapshot (roles/ removed BEFORE hashing) passes the verify and fails
+// closed on the no-roles check, naming the snapshot and the hatch.
+func TestInstalledRolesNoRolesBranchIsReachable(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "installed")
+	src := sampleConfig(t)
+	if err := os.RemoveAll(filepath.Join(src, "roles")); err != nil {
+		t.Fatal(err)
+	}
+	hash := installByHand(t, store, src)
+	_, h, installed, err := InstalledRoles(store)
+	if err == nil || !installed || h != hash || !strings.Contains(err.Error(), "snapshot has no roles (remove the pointer") {
+		t.Fatalf("hash=%q installed=%v err=%v", h, installed, err)
 	}
 }
 

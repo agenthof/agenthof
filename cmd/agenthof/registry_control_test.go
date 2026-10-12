@@ -1102,6 +1102,9 @@ func TestRegistryFlipRefusesToStageATamperedSnapshot(t *testing.T) {
 	if code != 1 || !strings.Contains(out.String(), want) || strings.Contains(out.String(), "agent coder disabled") {
 		t.Fatalf("exit %d\n%s", code, out.String())
 	}
+	if !strings.Contains(out.String(), installedHatch("registry disable", "disable", store)) {
+		t.Fatalf("the kill switch prints the hatch\n%s", out.String())
+	}
 	e := lastControlEvent(t, ctl)
 	if e.Action != "disable" || e.Agent != "coder" || e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.ConfigHash != "" {
 		t.Fatalf("want disable error/io_error without a hash: %+v", e)

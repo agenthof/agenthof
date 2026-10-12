@@ -56,7 +56,8 @@ func LoadDir(root string) (Config, []error) {
 // (by slash-relative path): files keep rejects are neither read nor parsed.
 // LoadDir keeps everything; InstalledRoles keeps roles/ only, so a snapshot
 // whose agent or gateway files no longer parse under this binary still
-// yields the roles authorization needs.
+// yields the roles authorization needs — after the bytes verified against the
+// pointer.
 func loadFiles(root string, keep func(rel string) bool) (Config, []error) {
 	var cfg Config
 	var errs []error

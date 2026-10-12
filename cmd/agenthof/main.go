@@ -130,10 +130,9 @@ func buildRegistry(configRoot string, out io.Writer) *registry.Registry {
 // bootstrap over a damaged store. hash is the installed pointer's value,
 // verbatim — the hash the installer (apply, or a kill-switch flip) recorded
 // for this snapshot, and the key the audit readers join on; the bytes under
-// it are verified against it (config.VerifyInstalled) before they are parsed;
-// only the roles-only authorization read is not (docs/control-plane-lifecycle.md,
-// honest limits). It is never empty when installed and errs is nil. applyFloorErrors is
-// not run here: it is a property of what may be installed, and the snapshot
+// it are verified against it (config.VerifyInstalled) before they are parsed,
+// as the roles-only authorization read does too. It is never empty when
+// installed and errs is nil. applyFloorErrors is not run here: it is a property of what may be installed, and the snapshot
 // passed it at apply.
 //
 // verifyKey is the pinned operator public key's path; "" means
@@ -531,6 +530,7 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	installedRoles, installedHash, installed, instErr := config.InstalledRoles(installedStore(controlLog))
 	if instErr != nil {
 		_, _ = fmt.Fprintln(out, instErr)
+		_, _ = fmt.Fprint(out, installedHatch("registry "+action, action, installedStore(controlLog)))
 		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)})
 	}
 	if installed && !authz.ControlAllows(installedRoles, inv, action) {
@@ -1002,8 +1002,8 @@ const msgProvisionNotRecorded = "provision ran; event NOT recorded"
 // one result both to authorize the caller and as the roles to mint for: a
 // kill-switch flip (after which the snapshot fails Build) never blocks key
 // rotation, and the roles authorized against are, by identity, the roles
-// minted for. That read is not verified against the pointer
-// (docs/control-plane-lifecycle.md, honest limits). Order: flags; the
+// minted for. That read is verified against the pointer; the ledger's vouch
+// is checked beside it. Order: flags; the
 // master key (a usage fault, unrecorded); the invoker; ledger writable
 // (busy or damaged, unrecorded); a refused token (recorded); the installed
 // read (error recorded); nothing installed (refusal recorded, no hash);
@@ -1081,6 +1081,7 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 		// A pointer that is present but cannot be honored: nobody can be
 		// authorized. Fail closed, recorded.
 		_, _ = fmt.Fprintln(out, instErr)
+		_, _ = fmt.Fprint(out, installedHatch("gateway provision", "provision", store))
 		return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)}, "", 1)
 	}
 	if !installed {
@@ -1402,8 +1403,7 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	roles, _, installed, instErr := config.InstalledRoles(store)
 	if instErr != nil {
 		_, _ = fmt.Fprintln(out, instErr)
-		_, _ = fmt.Fprintf(out, "audit repair control: cannot read the installed configuration under %s; refusing to repair (remove %s to re-bootstrap)\n",
-			store, filepath.Join(store, config.InstalledPointer))
+		_, _ = fmt.Fprint(out, installedHatch("audit repair control", "repair", store))
 		return 1
 	}
 	if !installed {
@@ -1564,7 +1564,9 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 	store := installedStore(*controlLog)
 	installedRoles, _, installed, instErr := config.InstalledRoles(store)
 	if instErr != nil {
-		return ioError(instErr, "")
+		_, _ = fmt.Fprintln(out, instErr)
+		_, _ = fmt.Fprint(out, installedHatch("runs prune", "prune", store))
+		return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)}, "", 1)
 	}
 	if !installed {
 		_, _ = fmt.Fprintf(out, "runs prune: %s\n", msgNothingInstalled)

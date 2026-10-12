@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
 )
 
 // TestApplyRecordsSuccessEvent covers apply's happy path (spec §3.4/§3.7):
@@ -684,5 +685,56 @@ func TestApplyStoreUnwritableRecordsIOErrorInstallsNothing(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"outcome":"error"`) || !strings.Contains(string(data), `"io_error"`) || strings.Contains(string(data), `"config_hash"`) {
 		t.Fatalf("want a hash-less recorded io_error:\n%s", data)
+	}
+}
+
+// TestApplyRefusesATamperedStoreAndTheHatchRecovers (half A, test 6): an
+// in-place edit under installed/<hex>/ refuses apply before authorization,
+// recorded error/io_error with the mismatch text whole, pointer untouched;
+// rm current → apply → CommitSnapshot refuses the corrupt existing directory;
+// rm <hex> → apply → bootstrap, recorded, vouched.
+func TestApplyRefusesATamperedStoreAndTheHatchRecovers(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	before := readPointer(t, ctl)
+	store := installedStore(ctl)
+	snap := config.SnapshotDir(store, before)
+	writeFileIn(t, snap, "roles/ops.yaml", "name: platform-admin\nallowed_groups: [finance]\ncontrol: [apply, enable, disable, repair, provision, prune]\n")
+	got, err := config.HashDir(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "installed config " + before + ": snapshot hashes as " + got + ", not as its pointer"
+	args := []string{"--config", root, "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance"}
+	var out bytes.Buffer
+	if code := cmdApply(args, &out); code != 1 || !strings.Contains(out.String(), want) || !strings.Contains(out.String(), installedHatch("apply", "apply", store)) {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "apply" || e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.Reason.Message != want || e.ConfigHash != "" {
+		t.Fatalf("%+v", e)
+	}
+	if readPointer(t, ctl) != before {
+		t.Fatal("the pointer must not move")
+	}
+	noStagingResidue(t, ctl)
+	// Recovery (d): rm current → CommitSnapshot refuses the corrupt <hex>/.
+	if err := os.Remove(filepath.Join(store, config.InstalledPointer)); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 || !strings.Contains(out.String(), "is corrupt (its bytes hash as "+got+"); remove "+snap+" and re-apply") {
+		t.Fatalf("corrupt existing snapshot: %d\n%s", code, out.String())
+	}
+	if err := os.RemoveAll(snap); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("bootstrap after the hatch: %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "success" || !e.Bootstrap || e.ConfigHash != before {
+		t.Fatalf("want a bootstrap re-install of %s: %+v", before, e)
 	}
 }

@@ -170,13 +170,14 @@ func TestPullConfigOutcomeTable(t *testing.T) {
 		t.Fatalf("outsider: kind %d", out.Kind)
 	}
 
-	// Tampered agent file: the lenient authorization read still decides —
-	// an ungranted caller is refused, a granted one gets store-unusable with
-	// the mismatch text in Err, and nobody receives the bytes.
+	// Tampered agent file: the authorization read verifies the bytes first,
+	// so the store is unusable for everyone — an ungranted caller included —
+	// a granted one gets the mismatch text in Err, and nobody receives the
+	// bytes.
 	snap := filepath.Join(installedStore(ctl), strings.TrimPrefix(hash, "sha256:"))
 	writeFileIn(t, snap, "agents/coder.yaml", "name: coder\nmodel: fast\ninstruction: EVIL\noutput: patch\n")
-	if out := pullAPI(t, ctl, outsider); out.Kind != pullRefused {
-		t.Fatalf("tampered, ungranted: kind %d", out.Kind)
+	if out := pullAPI(t, ctl, outsider); out.Kind != pullStoreUnusable {
+		t.Fatalf("tampered, ungranted: the roles read fails closed before anyone is authorized: kind %d", out.Kind)
 	}
 	out := pullAPI(t, ctl, edgeInvoker)
 	if out.Kind != pullStoreUnusable || out.Err == nil || !strings.Contains(out.Err.Error(), "installed config "+hash+": snapshot hashes as ") {

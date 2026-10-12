@@ -56,15 +56,13 @@ func SnapshotDir(store, hash string) string {
 // read are the files the pointer claims (a foreign file dropped into <hex>/
 // outside the enumeration is invisible to HashDir and to loadFiles alike,
 // and is neither hashed nor read). It is the ONE definition of verify-on-
-// read, called by LoadInstalled (the execution read: run, serve) before any
-// file is parsed, and by the kill switch before it stages a copy to
-// re-install — so tampered bytes are neither executed nor re-installed under
-// a new, correct name. The distribution read (SnapshotBundle) makes the
+// read, called by LoadInstalled (the execution read: run, serve) and by
+// InstalledRoles (the authorization read every control command decides with)
+// before any file is parsed, and by the kill switch before it stages a copy
+// to re-install — so tampered bytes are neither executed nor re-installed
+// under a new, correct name. The distribution read (SnapshotBundle) makes the
 // same judgment over the bytes it returns, with the same canon, the same
-// enumeration and the same mismatch text. It is not called by
-// InstalledRoles, the lenient
-// authorization read (docs/control-plane-lifecycle.md, honest limits). An
-// unreadable snapshot is that read error; a mismatch is
+// enumeration and the same mismatch text. An unreadable snapshot is that read error; a mismatch is
 // "installed config <hash>: snapshot hashes as <got>, not as its pointer".
 func VerifyInstalled(store, hash string) error {
 	got, err := HashDir(SnapshotDir(store, hash))
@@ -77,19 +75,26 @@ func VerifyInstalled(store, hash string) error {
 	return nil
 }
 
-// InstalledRoles reads the installed snapshot's roles and nothing else — a
-// lenient, roles-only read, never Build: agent and gateway files are not even
-// parsed, so a snapshot written under older load rules still decides who may
-// change it. A roles file that cannot be read or parsed, or a pointer naming
-// a snapshot that is gone, fails closed with an error naming the snapshot;
-// the caller states the escape hatch (remove the pointer; re-bootstrap). This
-// read is not verified against the pointer (VerifyInstalled) — it is the
-// authorization read, and a snapshot whose other files were edited must still
-// decide who may change it (docs/control-plane-lifecycle.md, honest limits).
+// InstalledRoles reads the installed snapshot's roles and nothing else — the
+// authorization read every control command decides with. The pointer is read
+// once; its hash is then VERIFIED against the snapshot's bytes
+// (VerifyInstalled, the one definition of verify-on-read, exactly as
+// LoadInstalled does before parsing) so a snapshot edited in place — any
+// enumerated file, roles or not — decides nothing: the mismatch is the one
+// error returned, verbatim, and nothing is parsed. The PARSE stays lenient:
+// roles-only, never Build, so a snapshot whose agent or gateway files fail
+// Build under this binary (a kill-switch flip's snapshot; one written under
+// older load rules) still decides who may change it. A roles file that
+// cannot be parsed, or a pointer naming a snapshot that is gone, fails closed
+// with an error naming the snapshot; the caller states the escape hatch
+// (remove the pointer; re-bootstrap).
 func InstalledRoles(store string) (roles []RoleDef, hash string, installed bool, err error) {
 	hash, installed, err = InstalledHash(store)
 	if err != nil || !installed {
 		return nil, "", installed, err
+	}
+	if verr := VerifyInstalled(store, hash); verr != nil {
+		return nil, hash, true, verr
 	}
 	cfg, errs := loadFiles(SnapshotDir(store, hash), func(rel string) bool { return path.Dir(rel) == "roles" })
 	if len(errs) > 0 {
@@ -266,9 +271,9 @@ func CommitSnapshot(store, temp, hash string) error {
 		// trusting it and flipping the pointer onto it. A corrupt or
 		// partially-restored <hex>/ (a lost roles/, a bad byte) must not be
 		// silently blessed by a re-apply of the same config. This heals the
-		// re-apply path with its own remedy-bearing message; LoadInstalled and
-		// the kill switch verify a snapshot on read through VerifyInstalled,
-		// and InstalledRoles does not.
+		// re-apply path with its own remedy-bearing message; LoadInstalled,
+		// InstalledRoles and the kill switch verify a snapshot on read through
+		// VerifyInstalled.
 		existing, herr := HashDir(SnapshotDir(store, hash))
 		if herr != nil {
 			return fmt.Errorf("installed config: existing snapshot %s: %w", hash, herr)

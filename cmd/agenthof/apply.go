@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 
 	"github.com/agenthof/agenthof/internal/authz"
@@ -217,8 +216,7 @@ func applyConfig(req applyRequest, out io.Writer) applyOutcome {
 		// authorized. Fail closed, recorded, and name the one way out, which
 		// is itself recorded as a bootstrap.
 		_, _ = fmt.Fprintln(out, instErr)
-		_, _ = fmt.Fprintf(out, "apply: cannot read the installed configuration under %s; refusing to apply (remove %s to re-bootstrap)\n",
-			store, filepath.Join(store, config.InstalledPointer))
+		_, _ = fmt.Fprint(out, installedHatch("apply", "apply", store))
 		return a.ioError(instErr)
 	}
 	a.res.CurrentHash, a.res.Installed = currentHash, installed

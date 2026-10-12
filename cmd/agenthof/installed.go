@@ -47,6 +47,18 @@ const msgNoConfigInstalled = "no configuration installed"
 // --expect-head (4) verdicts.
 const exitInstalledMismatch = 5
 
+// installedHatch is the one escape-hatch line a control command prints after
+// config.InstalledRoles reports a store fault — a malformed pointer, a
+// snapshot that is gone, or bytes that do not hash as the pointer — so every
+// command names the same way out: remove the pointer and re-bootstrap. It
+// names the FULL pointer path. Never printed for a not-on-record verdict,
+// which has its own remedy (config vouch): a byte fault is never healed by
+// vouching, and naming vouch here would misdirect.
+func installedHatch(prefix, verb, store string) string {
+	return fmt.Sprintf("%s: cannot read the installed configuration under %s; refusing to %s (remove %s to re-bootstrap)\n",
+		prefix, store, verb, filepath.Join(store, config.InstalledPointer))
+}
+
 // applyFloorErrors is the no-apply-floor check: some role must grant apply
 // to a NAMED group — a configuration nobody may apply could be installed and
 // then never be changed again through the control plane, so it is rejected
