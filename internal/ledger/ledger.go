@@ -376,6 +376,14 @@ func loadChain(r io.Reader) (records []Record, head Head, seqEstablished, seqMod
 	for {
 		chunk, rerr := br.ReadBytes('\n')
 		if len(chunk) == 0 && rerr != nil {
+			// io.EOF is the clean end of the stream; any other read error
+			// (the path is a directory, an I/O fault) is real and must not
+			// be swallowed into an empty, apparently-clean chain — callers
+			// decide who may act from this, so a read they could not make
+			// is a fault to surface, never "nothing recorded".
+			if !errors.Is(rerr, io.EOF) {
+				return nil, Head{}, false, false, fmt.Errorf("read ledger: %w", rerr)
+			}
 			break
 		}
 		terminated := len(chunk) > 0 && chunk[len(chunk)-1] == '\n'

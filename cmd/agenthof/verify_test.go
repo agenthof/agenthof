@@ -362,7 +362,7 @@ func TestVouchInstalledClassifiesTheLedgerAsThePullDoes(t *testing.T) {
 	if err := os.WriteFile(ctl, clean, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// S4: unreadable (0000) — the OS error, no repair hint (skip as root).
+	// unreadable (0000) — the OS open error, no repair hint (skip as root).
 	if os.Geteuid() != 0 {
 		if err := os.Chmod(ctl, 0); err != nil {
 			t.Fatal(err)
@@ -375,17 +375,17 @@ func TestVouchInstalledClassifiesTheLedgerAsThePullDoes(t *testing.T) {
 			t.Fatalf("unreadable: %+v", r)
 		}
 	}
-	// S4: the ledger path is a directory — ReadVerify reads it as an empty
-	// chain (open succeeds, the first read yields no record and no error),
-	// so the switch, which is on ReadVerify's error alone, classifies it as
-	// not on record (an empty chain vouches for nothing), never damaged.
+	// the ledger path is a directory — the open succeeds but the first read
+	// faults (EISDIR); that is a read the caller could not make, surfaced as
+	// the OS error (verifyNotVerifiable), never swallowed into an empty chain
+	// and never the misleading "re-apply" remedy.
 	if err := os.Remove(ctl); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(ctl, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, r := vouchInstalled(ctl, hash); r == nil || r.Kind != verifyNotOnRecord || r.Detail != "no install on record; re-apply (for a torn ledger, audit repair control first)" {
+	if _, _, r := vouchInstalled(ctl, hash); r == nil || r.Kind != verifyNotVerifiable || !strings.HasPrefix(r.Detail, "control ledger "+ctl+": ") || !strings.Contains(r.Detail, "directory") || strings.Contains(r.Detail, "repair") {
 		t.Fatalf("EISDIR: %+v", r)
 	}
 	if err := os.Remove(ctl); err != nil {
