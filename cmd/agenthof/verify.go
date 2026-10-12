@@ -30,7 +30,7 @@ const (
 )
 
 // signatureVerdict is every not-signed cause as one typed error. Error() is
-// byte-identical to the strings the pull has logged since slice 2 —
+// byte-identical to the strings the pull logs —
 // "not signed: " + Detail — and Is keeps errors.Is(err, errNotSigned) true
 // for every kind and errors.Is(err, errSignatureNewer) true for sigNewer, so
 // pullConfig, signingStartupWarning and configHost.Pull classify exactly as
@@ -235,8 +235,12 @@ func (r *verifyRefusal) Headline() string {
 		return "configuration not verified: foreign ledger"
 	case verifyNotVerifiable:
 		return "configuration not verifiable"
+	case verifyBusy:
+		return msgLockBusy
 	}
-	return msgLockBusy
+	// An unhandled kind is a programming error; render it as a recorded fault,
+	// never borrow busy's unrecorded line.
+	return "configuration not verifiable"
 }
 
 // Error is the recorded reason: Headline + ": " + Detail (Detail is empty
@@ -355,8 +359,8 @@ func pinnedKeyPath(controlLog, verifyKey string) (pinned bool, path string, err 
 	return exists, path, nil
 }
 
-// pinnedVerify is the run-side check under the shared lock the caller holds
-// (§6.4): the ledger's account of the install; the signature under the pinned
+// pinnedVerify is the run-side check under the shared lock the caller holds:
+// the ledger's account of the install; the signature under the pinned
 // key, classified by kind — sigAbsent/sigMalformed/sigForeign/sigOlder →
 // unsigned with the verdict's detail; sigNewer → unsigned, rendered as
 // "signature is for version <sig>, installed is <ledger>" (under the shared

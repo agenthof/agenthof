@@ -174,15 +174,24 @@ func resolveRunConfig(controlLog, verifyKey string, mode verifyMode) (cfg config
 		}
 		return config.Config{}, nil, "", false, nil, notVerifiable(fmt.Sprintf("installed.lock: %v", err))
 	}
-	cfg, hash, installed, loadErrs := config.LoadInstalled(store)
+	// Hold the shared lock only across the reads it protects — pointer,
+	// ledger, .sig, floor — and release it on EVERY path, a panic in
+	// LoadInstalled or pinnedVerify included, via defer in this closure; Build
+	// runs after, unlocked.
+	cfg, hash, installed, loadErrs, refusal, storeErr := func() (cfg config.Config, hash string, installed bool, loadErrs []error, refusal *verifyRefusal, storeErr error) {
+		defer unlock()
+		cfg, hash, installed, loadErrs = config.LoadInstalled(store)
+		if !installed || len(loadErrs) > 0 {
+			return cfg, hash, installed, loadErrs, nil, nil
+		}
+		refusal, storeErr = pinnedVerify(controlLog, hash, pub, mode)
+		return cfg, hash, true, nil, refusal, storeErr
+	}()
 	if !installed || len(loadErrs) > 0 {
 		// No pinned verify on a damaged or absent install: "configuration
 		// invalid" / "no configuration installed" keep their meaning.
-		unlock()
 		return buildResolved(cfg, hash, installed, loadErrs)
 	}
-	refusal, storeErr := pinnedVerify(controlLog, hash, pub, mode)
-	unlock()
 	if storeErr != nil {
 		// A .sig that cannot be read: a store fault, reported as
 		// LoadInstalled's I/O faults are — never as a verdict.
