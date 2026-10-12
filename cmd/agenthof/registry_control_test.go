@@ -937,17 +937,14 @@ func TestAuditVerifyControlBootstrapFlipDoesNotVouchForUnrecordedApply(t *testin
 	if !strings.Contains(out.String(), "installed config: "+flipHash+" — no install on record: the install was not recorded, or its record was lost") {
 		t.Fatalf("output: %s", out.String())
 	}
-	// A clean apply of the same directory records it: vouched for now.
+	// A config vouch records the pointer as it stands: vouched for now.
+	vouchAs(t, ctl)
 	out.Reset()
-	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
-		t.Fatalf("apply: %d\n%s", code, out.String())
-	}
-	out.Reset()
-	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "matches the last recorded install (apply)") {
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "matches the last recorded install (vouch)") {
 		t.Fatalf("exit %d\n%s", code, out.String())
 	}
 
-	// A run under X joins to the apply (form 1), never to the flip.
+	// A run under X joins to the vouch (form 1), never to the flip.
 	logs := t.TempDir()
 	out.Reset()
 	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
@@ -963,8 +960,8 @@ func TestAuditVerifyControlBootstrapFlipDoesNotVouchForUnrecordedApply(t *testin
 	if code := cmdAudit([]string{m[1], "--log-dir", logs, "--control-log", ctl}, &out); code != 0 {
 		t.Fatalf("audit: %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "config "+flipHash+" — applied by dana@example.com (asserted)") || strings.Contains(out.String(), "kill switch") {
-		t.Fatalf("the join must name the apply, never the bootstrap-era flip:\n%s", out.String())
+	if !strings.Contains(out.String(), "config "+flipHash+" — vouched for by dana@example.com (asserted)") || strings.Contains(out.String(), "kill switch") {
+		t.Fatalf("the join must name the vouch, never the bootstrap-era flip:\n%s", out.String())
 	}
 }
 

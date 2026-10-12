@@ -293,13 +293,40 @@ func TestPullConfigSignedAvailabilityInvariant(t *testing.T) {
 	if out := pullAPI(t, ctl, opsInvoker); out.Kind != pullNotRecorded {
 		t.Fatalf("pointer moved, not recorded: %d (the signature step runs after vouching)", out.Kind)
 	}
-	applyAs(t, root, ctl)
+	vouchAs(t, ctl)
 	if out := pullAPI(t, ctl, opsInvoker); out.Kind != pulled || out.Snapshot.Version != 2 {
-		t.Fatalf("re-apply signs and vouches: %d %+v", out.Kind, out.Snapshot)
+		t.Fatalf("vouch signs and vouches: %d %+v", out.Kind, out.Snapshot)
 	}
 	appendFragment(t, ctl)
 	if out := pullAPI(t, ctl, opsInvoker); out.Kind != pullLedgerDamaged {
 		t.Fatalf("torn: %d", out.Kind)
+	}
+}
+
+// TestConfigHostPullLogsTheRemedies (OQ3): a store fault logs its cause with
+// the rm-current hatch (never the vouch remedy — vouch refuses those bytes);
+// an unvouched pointer logs the vouch remedy at Info.
+func TestConfigHostPullLogsTheRemedies(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := pullSample(t)
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	applyAs(t, root, ctl)
+	logs := &bytes.Buffer{}
+	h := &configHost{controlLog: ctl, allowBootstrap: true, logger: obs.New(logs, slog.LevelDebug, obs.FormatText)}
+	hash := crashGap(t, root, ctl)
+	if res := h.Pull(opsInvoker); res.Status != serve.PullNotRecorded {
+		t.Fatalf("status %q", res.Status)
+	}
+	if !strings.Contains(logs.String(), "level=INFO") || !strings.Contains(logs.String(), "config pull not on record; if the install is legitimate, run: agenthof config vouch --control-log "+ctl) {
+		t.Fatalf("not-on-record line:\n%s", logs.String())
+	}
+	logs.Reset()
+	writeFileIn(t, config.SnapshotDir(installedStore(ctl), hash), "agents/coder.yaml", "name: coder\nmodel: fast\ninstruction: EVIL\noutput: patch\n")
+	if res := h.Pull(opsInvoker); res.Status != serve.PullStoreUnusable {
+		t.Fatalf("status %q", res.Status)
+	}
+	if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "snapshot hashes as") || !strings.Contains(logs.String(), "; remove "+filepath.Join(installedStore(ctl), config.InstalledPointer)+" and re-apply") || strings.Contains(logs.String(), "config vouch") {
+		t.Fatalf("store-unusable line:\n%s", logs.String())
 	}
 }
 

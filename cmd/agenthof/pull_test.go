@@ -292,7 +292,7 @@ func TestPullConfigAvailabilityInvariant(t *testing.T) {
 	check(t, "pointer without a ledger", ctl, pullNotRecorded, true)
 
 	// The install→record gap: the crash hook leaves the pointer moved and
-	// nothing appended; a re-apply records the install and clears it.
+	// nothing appended; config vouch records the install and clears it.
 	ctl = filepath.Join(t.TempDir(), "control.jsonl")
 	root := pullSample(t)
 	applyAs(t, root, ctl)
@@ -303,9 +303,9 @@ func TestPullConfigAvailabilityInvariant(t *testing.T) {
 	_ = cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf)
 	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
 	check(t, "install not recorded", ctl, pullNotRecorded, true)
-	applyAs(t, root, ctl)
-	if out := check(t, "re-apply records it", ctl, pulled, false); out.Snapshot.Version != 2 || out.Snapshot.Hash != readPointer(t, ctl) {
-		t.Fatalf("re-apply: %+v", out.Snapshot)
+	vouchAs(t, ctl)
+	if out := check(t, "vouch records it", ctl, pulled, false); out.Snapshot.Version != 2 || out.Snapshot.Hash != readPointer(t, ctl) {
+		t.Fatalf("vouch: %+v", out.Snapshot)
 	}
 
 	// A pointer re-aimed by hand at an older, correctly named snapshot: the

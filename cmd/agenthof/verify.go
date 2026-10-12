@@ -277,10 +277,16 @@ type installFacts struct {
 	At      time.Time
 }
 
-// remedyReapply is the not-on-record remedy, in the order that is right
-// after a repair: re-apply heals through CommitSnapshot's identical-snapshot
-// branch; a torn ledger must be repaired BEFORE that, never instead of it.
-const remedyReapply = "re-apply (for a torn ledger, audit repair control first)"
+// remedyNotOnRecord is the not-on-record remedy. It names config vouch — the
+// in-band heal for a legitimate unvouched pointer (a crash gap, a lost record,
+// a re-aim the operator stands behind), which leaves the bytes, and any agent
+// a flip disabled, exactly as they are. It does not say "re-apply": once
+// control actions require the vouch, a re-apply of the directory is refused
+// for the very state this remedy is offered for (and would re-enable a killed
+// agent). It does not mention a torn ledger: config vouch prints the repair
+// hint itself in that state. Recorded, so sized to the cap: with an apply or
+// vouch label the whole reason is 192 bytes (maxRecordedErrLen is 200).
+const remedyNotOnRecord = "if this install is legitimate, run: agenthof config vouch"
 
 // vouchInstalled is the vouch every execution read and every control-op
 // authorization read performs, and config vouch's own check (control-ledger
@@ -328,9 +334,9 @@ func vouchInstalled(controlLog, hash string) (records []ledger.Record, last cont
 	last, found := control.LastInstalling(records)
 	switch {
 	case !found:
-		return records, control.DecodedEvent{}, &verifyRefusal{Kind: verifyNotOnRecord, Detail: "no install on record; " + remedyReapply}
+		return records, control.DecodedEvent{}, &verifyRefusal{Kind: verifyNotOnRecord, Detail: "no install on record; " + remedyNotOnRecord}
 	case last.ConfigHash != hash:
-		return records, last, &verifyRefusal{Kind: verifyNotOnRecord, Detail: fmt.Sprintf("last recorded install is %s (%s); %s", last.ConfigHash, installLabel(last), remedyReapply)}
+		return records, last, &verifyRefusal{Kind: verifyNotOnRecord, Detail: fmt.Sprintf("last recorded install is %s (%s); %s", last.ConfigHash, installLabel(last), remedyNotOnRecord)}
 	}
 	return records, last, nil
 }
