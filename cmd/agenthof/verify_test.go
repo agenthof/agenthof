@@ -724,11 +724,11 @@ func floorBytes(t *testing.T, ctl string) string {
 	return string(b)
 }
 
-// TestResolveRunConfigStateANeverTouchesTheLockOrTheFloor: with no pin the
-// function is today's body — it never opens or creates installed.lock (applyAs
-// created it; remove it and it must stay absent) and never reads or writes a
-// floor.
-func TestResolveRunConfigStateANeverTouchesTheLockOrTheFloor(t *testing.T) {
+// TestResolveRunConfigStateATakesTheSharedLockAndNeverTheFloor: with no pin
+// the function is today's body plus the shared lock and the vouch — it
+// opens (and if absent creates) installed.lock, and never reads or writes a
+// floor: none is created, and a floor left behind by an earlier pin is inert.
+func TestResolveRunConfigStateATakesTheSharedLockAndNeverTheFloor(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	ctl, _, _ := signedRoot(t)
 	if err := os.Remove(installedLock(ctl)); err != nil {
@@ -738,8 +738,8 @@ func TestResolveRunConfigStateANeverTouchesTheLockOrTheFloor(t *testing.T) {
 	if reg == nil || !installed || hash != readPointer(t, ctl) || len(errs) != 0 || unverified != nil {
 		t.Fatalf("state A: reg=%v installed=%v errs=%v unverified=%v", reg, installed, errs, unverified)
 	}
-	if _, err := os.Stat(installedLock(ctl)); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("state A must never create installed.lock: %v", err)
+	if _, err := os.Stat(installedLock(ctl)); err != nil {
+		t.Fatalf("every execution read opens installed.lock shared, creating it if absent: %v", err)
 	}
 	if floorBytes(t, ctl) != "" {
 		t.Fatal("state A must never create verify.floor")
@@ -750,6 +750,9 @@ func TestResolveRunConfigStateANeverTouchesTheLockOrTheFloor(t *testing.T) {
 	}
 	if _, reg, _, _, errs, unverified := resolveAdvance(t, ctl); reg == nil || len(errs) != 0 || unverified != nil {
 		t.Fatalf("an unpinned root ignores the floor: %v %v", errs, unverified)
+	}
+	if floorBytes(t, ctl) != strings.Repeat("f", 32)+" 9\n" {
+		t.Fatal("an unpinned read never rewrites a floor")
 	}
 }
 

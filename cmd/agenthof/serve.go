@@ -199,10 +199,12 @@ func loopbackAddr(addr string) bool {
 // locations, one broker for the process, and the supervisor the config
 // names. Prepare is `cmdRun`'s config sequence — resolveRunConfig, then the
 // supervisor — bound to one invoker's token, resolved per run so an apply
-// or a kill-switch flip takes effect on the next run with no restart. With
-// a key pinned beside the control ledger, every Prepare verifies the
-// install against it (the execution read: a pass advances verify.floor) and
-// a verdict is a recorded 422; a held lock is the unrecorded 503.
+// or a kill-switch flip takes effect on the next run with no restart.
+// Every Prepare vouches the install against the control ledger, pinned or
+// not (the execution read: the pointer must be the last recorded install;
+// with a key pinned, the signature and the floor on top, a pass advancing
+// verify.floor); a verdict is a recorded 422; a held lock is the unrecorded
+// 503.
 type runHost struct {
 	controlLog, logDir, artifactDir string
 	logger                          *slog.Logger

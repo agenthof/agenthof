@@ -155,6 +155,193 @@ func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
 	}
 }
 
+// dropInSnapshot copies the installed snapshot, changes one byte of it (a
+// YAML comment, so it still loads), writes the copy under the store under its
+// own correct hash and aims the pointer at it — a snapshot nothing applied.
+func dropInSnapshot(t *testing.T, ctl string) string {
+	t.Helper()
+	store := installedStore(ctl)
+	src := config.SnapshotDir(store, readPointer(t, ctl))
+	staged := filepath.Join(t.TempDir(), "staged")
+	if err := copyDir(src, staged); err != nil {
+		t.Fatal(err)
+	}
+	planner := filepath.Join(staged, "agents", "planner.yaml")
+	data, err := os.ReadFile(planner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planner, append(data, []byte("# dropped in\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := config.HashDir(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copyDir(staged, config.SnapshotDir(store, hash)); err != nil {
+		t.Fatal(err)
+	}
+	repointTo(t, ctl, hash)
+	return hash
+}
+
+// TestResolveRunConfigRefusesAnInstallTheLedgerDoesNotVouchFor: unpinned,
+// a hand-aimed pointer, a dropped-in snapshot and the install→record gap are
+// each a not-on-record verdict (cfg loaded, reg nil, hash the pointer,
+// installed, errs nil); a re-apply heals; a damaged ledger is not verifiable
+// with the repair hint and a repaired ledger runs.
+func TestResolveRunConfigRefusesAnInstallTheLedgerDoesNotVouchFor(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	hashA := readPointer(t, ctl)
+	expectNOR := func(name, hash, detailPrefix string) {
+		t.Helper()
+		before := ledgerBytes(t, ctl)
+		cfg, reg, h, installed, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance)
+		if !bytes.Equal(before, ledgerBytes(t, ctl)) {
+			t.Fatalf("%s: a resolve must never write the control ledger", name)
+		}
+		if unverified == nil || unverified.Kind != verifyNotOnRecord || unverified.Headline() != "configuration not on record" || !strings.HasPrefix(unverified.Detail, detailPrefix) {
+			t.Fatalf("%s: unverified=%v reg=%v errs=%v", name, unverified, reg, errs)
+		}
+		if reg != nil || h != hash || !installed || errs != nil || len(cfg.Agents) == 0 || unverified.Transient() {
+			t.Fatalf("%s: a verdict ⇒ cfg loaded, reg nil, hash the pointer, installed, errs nil: reg=%v h=%q installed=%v errs=%v", name, reg, h, installed, errs)
+		}
+	}
+
+	// hand-aimed: apply B, re-point to A.
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	applyAs(t, root, ctl)
+	hashB := readPointer(t, ctl)
+	repointTo(t, ctl, hashA)
+	expectNOR("hand-aimed", hashA, "last recorded install is "+hashB+" (apply); re-apply")
+	// re-apply heals: the directory is B; CommitSnapshot's identical branch re-points.
+	applyAs(t, root, ctl)
+	if _, reg, h, _, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance); reg == nil || h != hashB || errs != nil || unverified != nil {
+		t.Fatalf("re-apply heals: h=%q errs=%v unverified=%v", h, errs, unverified)
+	}
+
+	// dropped-in: bytes verify, no record.
+	hashX := dropInSnapshot(t, ctl)
+	expectNOR("dropped-in", hashX, "last recorded install is "+hashB+" (apply); re-apply")
+	repointTo(t, ctl, hashB)
+
+	// crash gap: the pointer moves, the append never runs.
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan hardest\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_install_before_append")
+	_, _ = applyCode(t, root, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	hashC := readPointer(t, ctl)
+	if hashC == hashB {
+		t.Fatal("the crash hook must have moved the pointer")
+	}
+	expectNOR("crash gap", hashC, "last recorded install is "+hashB+" (apply); re-apply")
+	applyAs(t, root, ctl)
+	if _, reg, _, _, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance); reg == nil || errs != nil || unverified != nil {
+		t.Fatalf("re-apply after the gap: %v %v", errs, unverified)
+	}
+
+	// damaged ledger: not verifiable with the hint; repaired → runs.
+	appendFragment(t, ctl)
+	_, reg, _, installed, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance)
+	if unverified == nil || unverified.Kind != verifyNotVerifiable || unverified.Detail != "control ledger damaged; run: agenthof audit repair control --control-log "+ctl || reg != nil || !installed || errs != nil {
+		t.Fatalf("damaged: unverified=%v reg=%v errs=%v", unverified, reg, errs)
+	}
+	repairAs(t, root, ctl)
+	if _, reg, _, _, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance); reg == nil || errs != nil || unverified != nil {
+		t.Fatalf("a repaired ledger vouches: %v %v", errs, unverified)
+	}
+	// removed ledger, pointer present: not on record, never damaged.
+	if err := os.Remove(ctl); err != nil {
+		t.Fatal(err)
+	}
+	expectNOR("removed ledger", hashC, "no install on record; re-apply")
+	if _, err := os.Stat(ctl); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("a resolve must never create the control ledger")
+	}
+}
+
+// TestResolveRunConfigPrecedenceAroundTheVouch: load errors come BEFORE the
+// vouch (an in-place edit AND a hand-aimed pointer → the mismatch alone,
+// unverified nil), and validation comes AFTER it (a hand-aimed pointer at a
+// kill-switch re-snapshot that fails Build → not on record, errs nil — Build
+// never ran on an unvouched install).
+func TestResolveRunConfigPrecedenceAroundTheVouch(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	hashA := readPointer(t, ctl)
+	store := installedStore(ctl)
+
+	// A flip against the install: snapshot F (coder disabled) does not Build.
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("flip: %d\n%s", code, out.String())
+	}
+	hashF := readPointer(t, ctl)
+	if _, reg, _, installed, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance); reg != nil || !installed || unverified != nil || len(errs) == 0 || !strings.Contains(errs[0].Error(), "disabled") {
+		t.Fatalf("the recorded flip is vouched and then fails Build: reg=%v errs=%v unverified=%v", reg, errs, unverified)
+	}
+	// Re-apply (the directory is unchanged: back to A, seq 3), then hand-aim at F.
+	applyAs(t, root, ctl)
+	if readPointer(t, ctl) != hashA {
+		t.Fatal("re-apply re-asserts A")
+	}
+	repointTo(t, ctl, hashF)
+	if _, reg, h, installed, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance); unverified == nil || unverified.Kind != verifyNotOnRecord || errs != nil || reg != nil || !installed || h != hashF {
+		t.Fatalf("validation never runs on an unvouched install: reg=%v errs=%v unverified=%v", reg, errs, unverified)
+	}
+	repointTo(t, ctl, hashA)
+
+	// Load error AND hand-aimed pointer: the mismatch alone.
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	applyAs(t, root, ctl) // B is now the last install
+	repointTo(t, ctl, hashA)
+	coder := filepath.Join(config.SnapshotDir(store, hashA), "agents", "coder.yaml")
+	data, err := os.ReadFile(coder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coder, append(data, []byte("enabled: false\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, reg, _, installed, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance); reg != nil || !installed || len(errs) != 1 || !strings.Contains(errs[0].Error(), "not as its pointer") || unverified != nil {
+		t.Fatalf("load errors first, alone: reg=%v errs=%v unverified=%v", reg, errs, unverified)
+	}
+}
+
+// TestResolveRunConfigNothingInstalledReadsNoLedger: with nothing installed
+// the answer is installed=false, errs nil, unverified nil whether or not a
+// ledger exists (the ledger is never read), but installed.lock IS created —
+// the lock precedes LoadInstalled; nothing else is written.
+func TestResolveRunConfigNothingInstalledReadsNoLedger(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := filepath.Join(t.TempDir(), "sub", "control.jsonl")
+	if _, reg, hash, installed, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance); installed || reg != nil || hash != "" || errs != nil || unverified != nil {
+		t.Fatalf("empty root: installed=%v reg=%v hash=%q errs=%v unverified=%v", installed, reg, hash, errs, unverified)
+	}
+	if _, err := os.Stat(installedLock(ctl)); err != nil {
+		t.Fatalf("the lock precedes LoadInstalled, so it is created: %v", err)
+	}
+	names := mustReadDirNames(t, filepath.Dir(ctl))
+	if len(names) != 1 || names[0] != "installed.lock" {
+		t.Fatalf("nothing else is written: %v", names)
+	}
+	// A root with a ledger but nothing installed: the same answer — the
+	// ledger is not read (a torn one changes nothing).
+	root := writeSample(t)
+	ctl2 := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl2, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("bootstrap flip: %d\n%s", code, out.String())
+	}
+	appendFragment(t, ctl2)
+	if _, reg, _, installed, errs, unverified := resolveRunConfig(ctl2, "", verifyAndAdvance); installed || reg != nil || errs != nil || unverified != nil {
+		t.Fatalf("nothing installed, torn ledger: installed=%v errs=%v unverified=%v", installed, errs, unverified)
+	}
+}
+
 // startServeOnce starts serve on ctl with a stderr buffer, waits for the
 // address file, stops it, and returns the operational log.
 func startServeOnce(t *testing.T, ctl string) string {

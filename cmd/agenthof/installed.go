@@ -20,13 +20,17 @@ func installedStore(controlLog string) string {
 	return filepath.Join(filepath.Dir(controlLog), "installed")
 }
 
-// installedLock is the installed-configuration writer lock for a control
-// ledger: "installed.lock" BESIDE the store (never inside it, so a store
-// listing holds only snapshots and the pointer). Every pointer writer —
-// apply (CLI or API) and the kill switch — takes it through
-// ledger.LockFile from its authorize-read through its success append. The
-// file is empty and never removed; a prune of this directory must not take
-// it for an orphan. Derived here, next to installedStore, and nowhere else.
+// installedLock is the installed-configuration lock for a control ledger:
+// "installed.lock" BESIDE the store (never inside it, so a store listing
+// holds only snapshots and the pointer). Every pointer writer — apply (CLI
+// or API) and the kill switch — takes it EXCLUSIVE through ledger.LockFile
+// from its authorize-read through its success append; every execution read
+// (run, serve's Prepare and startup look) takes it SHARED through
+// ledger.LockFileShared across pointer, ledger (and .sig, floor) so it sees
+// the consistent pair a writer publishes, and creates the file on a root
+// nothing has applied to yet. The file is empty and never removed; a prune
+// of this directory must not take it for an orphan. Derived here, next to
+// installedStore, and nowhere else.
 func installedLock(controlLog string) string {
 	return filepath.Join(filepath.Dir(controlLog), "installed.lock")
 }

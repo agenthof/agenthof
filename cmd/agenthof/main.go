@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -136,37 +137,43 @@ func buildRegistry(configRoot string, out io.Writer) *registry.Registry {
 // passed it at apply.
 //
 // verifyKey is the pinned operator public key's path; "" means
-// verifyPubPath(controlLog). When that file exists, the installed
-// configuration must carry a signature by that key over the install the
-// control ledger vouches for, at or above this root's staleness floor, or the
-// run is refused: unverified is that verdict, with its recorded reason, and
-// reg is nil — or it is the one unrecorded transient, busy (Transient()),
-// when installed.lock could not be taken shared within the timeout. mode says
-// whether a pass advances the floor (the execution read) or only judges
-// (serve's startup look). With no pinned key the body is exactly the one
-// before the pin existed: no lock is opened or created, no floor is read.
-// Order, pinned: the pin (a pin fault needs no lock); installed.lock SHARED,
-// so pointer, ledger and .sig are the consistent triple every writer
-// publishes under the exclusive lock and no in-flight install is observable;
+// verifyPubPath(controlLog).
+//
+// Every execution read vouches the install against the control ledger: under
+// installed.lock taken SHARED — so pointer and ledger (and, pinned, the .sig)
+// are the consistent pair every writer publishes under the exclusive lock, and
+// no in-flight install is observable — the pointer must be the LAST install
+// the ledger records (vouchInstalled), or the run is refused: unverified is
+// that verdict with its recorded reason and reg is nil. A damaged or
+// unreadable ledger is the same class of refusal, named. The one unrecorded
+// transient is busy (Transient()): installed.lock, or the ledger flock inside
+// it, could not be taken within the timeout. When a key is pinned (the file
+// exists, or --verify-key names one), the installed configuration must
+// additionally carry a signature by that key over the vouched install, at or
+// above this root's staleness floor (pinnedVerify); mode says whether a pass
+// advances the floor (the execution read) or only judges (serve's startup
+// look). With no pin the floor is never read or written.
+// Order: the pin (a pin fault needs no lock); installed.lock SHARED;
 // LoadInstalled (bytes-vs-pointer first, as always — a damaged or absent
-// install is reported as today and never verified); the pinned verify and
-// the floor; unlock; Build. Invariants: at most one of errs and unverified is
-// set; a verdict (unverified != nil && !Transient()) ⇒ installed && hash !=
-// "" && cfg loaded && reg == nil; busy ⇒ nothing else is set.
+// install is reported as today and never vouched); the vouch, pinned or not
+// — pinned, with the signature and the floor layered on it; unlock; Build,
+// only after a vouched install. Invariants: at most one of errs and
+// unverified is set; a verdict (unverified != nil && !Transient()) ⇒
+// installed && hash != "" && cfg loaded && reg == nil; busy ⇒ nothing else is
+// set.
 func resolveRunConfig(controlLog, verifyKey string, mode verifyMode) (cfg config.Config, reg *registry.Registry, hash string, installed bool, errs []error, unverified *verifyRefusal) {
 	pinned, keyPath, err := pinnedKeyPath(controlLog, verifyKey)
 	if err != nil {
 		return config.Config{}, nil, "", false, nil, notVerifiable(err.Error())
 	}
+	var pub ed25519.PublicKey
+	if pinned {
+		pub, err = loadVerifyPub(keyPath)
+		if err != nil {
+			return config.Config{}, nil, "", false, nil, notVerifiable(err.Error())
+		}
+	}
 	store := installedStore(controlLog)
-	if !pinned {
-		cfg, hash, installed, loadErrs := config.LoadInstalled(store)
-		return buildResolved(cfg, hash, installed, loadErrs)
-	}
-	pub, err := loadVerifyPub(keyPath)
-	if err != nil {
-		return config.Config{}, nil, "", false, nil, notVerifiable(err.Error())
-	}
 	unlock, err := ledger.LockFileShared(installedLock(controlLog))
 	if err != nil {
 		if errors.Is(err, ledger.ErrLockHeld) {
@@ -176,7 +183,7 @@ func resolveRunConfig(controlLog, verifyKey string, mode verifyMode) (cfg config
 	}
 	// Hold the shared lock only across the reads it protects — pointer,
 	// ledger, .sig, floor — and release it on EVERY path, a panic in
-	// LoadInstalled or pinnedVerify included, via defer in this closure; Build
+	// LoadInstalled or the verify included, via defer in this closure; Build
 	// runs after, unlocked.
 	cfg, hash, installed, loadErrs, refusal, storeErr := func() (cfg config.Config, hash string, installed bool, loadErrs []error, refusal *verifyRefusal, storeErr error) {
 		defer unlock()
@@ -184,12 +191,18 @@ func resolveRunConfig(controlLog, verifyKey string, mode verifyMode) (cfg config
 		if !installed || len(loadErrs) > 0 {
 			return cfg, hash, installed, loadErrs, nil, nil
 		}
-		refusal, storeErr = pinnedVerify(controlLog, hash, pub, mode)
+		if pinned {
+			// The vouch, then the signature and the floor over the install
+			// it returned — one ledger read.
+			refusal, storeErr = pinnedVerify(controlLog, hash, pub, mode)
+		} else {
+			_, _, refusal = vouchInstalled(controlLog, hash)
+		}
 		return cfg, hash, true, nil, refusal, storeErr
 	}()
 	if !installed || len(loadErrs) > 0 {
-		// No pinned verify on a damaged or absent install: "configuration
-		// invalid" / "no configuration installed" keep their meaning.
+		// No vouch on a damaged or absent install: "configuration invalid" /
+		// "no configuration installed" keep their meaning.
 		return buildResolved(cfg, hash, installed, loadErrs)
 	}
 	if storeErr != nil {
@@ -207,8 +220,10 @@ func resolveRunConfig(controlLog, verifyKey string, mode verifyMode) (cfg config
 }
 
 // buildResolved is resolveRunConfig's tail after LoadInstalled — Build and
-// collect — exactly as it ran before the pinned verify existed, so the
-// unpinned path and every damaged-install answer are byte-for-byte unchanged.
+// collect — exactly as it ran before any verify existed, so every
+// damaged-install answer ("configuration invalid", "no configuration
+// installed") is byte-for-byte unchanged. It is reached for a vouched install
+// only.
 func buildResolved(cfg config.Config, hash string, installed bool, loadErrs []error) (config.Config, *registry.Registry, string, bool, []error, *verifyRefusal) {
 	var errs []error
 	errs = append(errs, loadErrs...)
