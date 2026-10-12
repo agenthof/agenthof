@@ -27,7 +27,8 @@ func installedStore(controlLog string) string {
 // the pointer — config sign, config vouch — takes it EXCLUSIVE through
 // ledger.LockFile
 // from its authorize-read through its success append; every execution read
-// (run, serve's Prepare and startup look) takes it SHARED through
+// (run, serve's Prepare and startup look) and the authorization reads of
+// gateway provision and runs prune take it SHARED through
 // ledger.LockFileShared across pointer, ledger (and .sig, floor) so it sees
 // the consistent pair a writer publishes, and creates the file on a root
 // nothing has applied to yet. The file is empty and never removed; a prune

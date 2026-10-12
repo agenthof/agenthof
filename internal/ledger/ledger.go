@@ -313,9 +313,10 @@ func LockFile(path string) (unlock func(), err error) {
 // way, the same bounded retry and the same ErrLockHeld on contention — but a
 // LOCK_SH flock, so any number of shared holders coexist while an exclusive
 // holder (LockFile) excludes them all and they exclude it. It exists for the
-// one reader that must observe the installed configuration — pointer, control
-// ledger and signature — as the consistent triple every writer publishes
-// under LockFile, and must wait (not fail) behind a writer in progress.
+// readers that must observe the installed configuration — pointer, control
+// ledger and signature — as the consistent set every writer publishes under
+// LockFile (the execution read; the control commands that authorize without
+// writing the pointer), and must wait (not fail) behind a writer in progress.
 func LockFileShared(path string) (unlock func(), err error) {
 	return lockFile(path, syscall.LOCK_SH|syscall.LOCK_NB)
 }

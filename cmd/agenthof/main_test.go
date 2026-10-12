@@ -1246,6 +1246,72 @@ func adminMock(t *testing.T, failAt int, sentinel string) (*httptest.Server, *at
 	return srv, &generated
 }
 
+// TestGatewayProvisionAndRunsPruneRefuseAnUnvouchedPointer (spec test 14):
+// on the T2 fixture both are refused not_on_record — provision recorded with
+// the pointer hash, prune hash-less — nothing minted, nothing pruned.
+func TestGatewayProvisionAndRunsPruneRefuseAnUnvouchedPointer(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := applied(t, root)
+	original := readPointer(t, ctl)
+	hex2 := dropInGrantingOutsider(t, ctl)
+	want := "configuration not on record: last recorded install is " + original + " (apply); " + remedyNotOnRecord
+	srv, generated := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	if code := cmdGateway(append(provisionArgs(ctl, srv.URL), "--as", "mallory@example.com", "--groups", "finance"), &out); code != 1 || !strings.Contains(out.String(), "gateway provision: "+want) {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "provision" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotOnRecord || e.ConfigHash != hex2 {
+		t.Fatalf("%+v", e)
+	}
+	if generated.Load() != 0 {
+		t.Fatal("nothing may be minted")
+	}
+	logs := t.TempDir()
+	aged := agedRun(t, logs, "r-0000000000000001.jsonl")
+	out.Reset()
+	if code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", logs, "--artifact-dir", t.TempDir(), "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance"}, &out); code != 1 || !strings.Contains(out.String(), "runs prune: "+want) {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "prune" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotOnRecord || e.ConfigHash != "" {
+		t.Fatalf("%+v", e)
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatal("nothing may be pruned")
+	}
+}
+
+// TestGatewayProvisionAndRunsPruneAreBusyUnderAHeldWriterLock (spec tests
+// 20, 21): with installed.lock held EXCLUSIVE elsewhere both print the busy
+// line, exit 1, record nothing — the shared take is bounded, never a hang.
+func TestGatewayProvisionAndRunsPruneAreBusyUnderAHeldWriterLock(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := applied(t, root)
+	unlock, err := ledger.LockFile(installedLock(ctl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	before := ledgerBytes(t, ctl)
+	srv, _ := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 1 || !strings.Contains(out.String(), "gateway provision: "+msgLockBusy+"\n") {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir(), "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 || !strings.Contains(out.String(), "runs prune: "+msgLockBusy+"\n") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !bytes.Equal(before, ledgerBytes(t, ctl)) {
+		t.Fatal("busy records nothing")
+	}
+}
+
 // provisionArgs is a gateway provision invocation by the platform-eng
 // group against ctl and the mock admin API.
 func provisionArgs(ctl, adminBase string) []string {

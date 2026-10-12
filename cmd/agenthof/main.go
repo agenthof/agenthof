@@ -1024,11 +1024,14 @@ const msgProvisionNotRecorded = "provision ran; event NOT recorded"
 // one result both to authorize the caller and as the roles to mint for: a
 // kill-switch flip (after which the snapshot fails Build) never blocks key
 // rotation, and the roles authorized against are, by identity, the roles
-// minted for. That read is verified against the pointer; the ledger's vouch
-// is checked beside it. Order: flags; the
+// minted for. That read verifies the bytes against the pointer and requires
+// the ledger's vouch, under installed.lock shared across the two reads
+// (lifecycle). Order: flags; the
 // master key (a usage fault, unrecorded); the invoker; ledger writable
 // (busy or damaged, unrecorded); a refused token (recorded); the installed
-// read (error recorded); nothing installed (refusal recorded, no hash);
+// read under the shared lock (error recorded; busy or damaged ledger
+// unrecorded; not on record refused, recorded with the hash); nothing
+// installed (refusal recorded, no hash);
 // authorize (refusal recorded with the installed hash); mint, the first
 // failing role stopping the loop (error recorded with a fixed message and
 // the hash — the upstream error is printed, never ledgered); success
@@ -1094,14 +1097,33 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 		return record("refused", &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"}, "", 1)
 	}
 
-	// The one and only read of the installed configuration: the roles below
-	// are both what the caller is authorized against and what keys are
-	// minted for.
+	// The one and only read of the installed configuration — pointer, roles,
+	// and the ledger's vouch — under installed.lock SHARED, so it sees the
+	// consistent pair a writer publishes and never an in-flight install.
+	// Released before anything is recorded or minted: provision writes
+	// nothing under the store. Lock order store → ledger, as every reader.
 	store := installedStore(*controlLog)
-	installedRoles, hash, installed, instErr := config.InstalledRoles(store)
+	unlock, lockErr := ledger.LockFileShared(installedLock(*controlLog))
+	if lockErr != nil {
+		if errors.Is(lockErr, ledger.ErrLockHeld) {
+			_, _ = fmt.Fprintf(out, "gateway provision: %s\n", msgLockBusy)
+			return 1
+		}
+		_, _ = fmt.Fprintln(out, lockErr)
+		return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(lockErr)}, "", 1)
+	}
+	installedRoles, hash, installed, refusal, instErr := func() (roles []config.RoleDef, hash string, installed bool, refusal *verifyRefusal, err error) {
+		defer unlock()
+		roles, hash, installed, err = config.InstalledRoles(store)
+		if err != nil || !installed {
+			return roles, hash, installed, nil, err
+		}
+		_, _, refusal = vouchInstalled(*controlLog, hash)
+		return roles, hash, installed, refusal, nil
+	}()
 	if instErr != nil {
 		// A pointer that is present but cannot be honored: nobody can be
-		// authorized. Fail closed, recorded.
+		// authorized. Fail closed, recorded, the hatch named.
 		_, _ = fmt.Fprintln(out, instErr)
 		_, _ = fmt.Fprint(out, installedHatch("gateway provision", "provision", store))
 		return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)}, "", 1)
@@ -1112,6 +1134,18 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintf(out, "gateway provision: %s\n", msgNothingInstalled)
 		_, _ = fmt.Fprintf(out, "%s under %s; run: agenthof apply --config <dir> --control-log %s\n", msgNoConfigInstalled, store, *controlLog)
 		return record("refused", &control.Reason{Code: control.CodeNotAuthorized, Message: msgNothingInstalled}, "", 1)
+	}
+	if refusal != nil {
+		switch {
+		case refusal.Transient():
+			_, _ = fmt.Fprintf(out, "gateway provision: %s\n", msgLockBusy)
+			return 1
+		case refusal.Kind != verifyNotOnRecord:
+			_, _ = fmt.Fprintf(out, "gateway provision: %s\n", refusal.Error())
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "gateway provision: %s\n", refusal.Error())
+		return record("refused", vouchRefused(refusal), hash, 1)
 	}
 	if !authz.ControlAllows(installedRoles, inv, "provision") {
 		reason := control.NotAuthorized("provision")
@@ -1516,9 +1550,12 @@ const msgPrunedNotRecorded = "runs pruned; event NOT recorded"
 // the control ledger with a one-line summary of what it removed. Order: the
 // --older-than usage checks first (exit 2, before identity and before the
 // ledger is touched); the invoker; ledger writable (busy or damaged,
-// unrecorded); a refused token (recorded); the installed read (error
-// recorded); nothing installed (refusal recorded — prune reads no directory,
-// so there are no roles to fall back to); authorize (refusal recorded); the
+// unrecorded); a refused token (recorded); the installed read, pointer and
+// the ledger's vouch, under installed.lock shared across the two reads
+// (error recorded; busy or damaged ledger unrecorded; not on record refused,
+// recorded without a hash); nothing installed (refusal recorded — prune reads
+// no directory, so there are no roles to fall back to); authorize (refusal
+// recorded); the
 // run sweep (error recorded, nothing deleted); the artifact sweep (error
 // recorded with the runs already removed in its detail); success recorded
 // with the printed line as its detail. No record ever carries a
@@ -1583,8 +1620,30 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintf(out, "runs prune: token authentication failed: %v\n", verifyErr)
 		return record("refused", &control.Reason{Code: control.CodeTokenVerificationFailed, Message: "token verification failed"}, "", 1)
 	}
+	// The one and only read of the installed configuration — pointer, roles,
+	// and the ledger's vouch — under installed.lock SHARED, so it sees the
+	// consistent pair a writer publishes and never an in-flight install.
+	// Released before anything is recorded or removed: prune writes nothing
+	// under the store. Lock order store → ledger, as every reader.
 	store := installedStore(*controlLog)
-	installedRoles, _, installed, instErr := config.InstalledRoles(store)
+	unlock, lockErr := ledger.LockFileShared(installedLock(*controlLog))
+	if lockErr != nil {
+		if errors.Is(lockErr, ledger.ErrLockHeld) {
+			_, _ = fmt.Fprintf(out, "runs prune: %s\n", msgLockBusy)
+			return 1
+		}
+		_, _ = fmt.Fprintln(out, lockErr)
+		return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(lockErr)}, "", 1)
+	}
+	installedRoles, _, installed, refusal, instErr := func() (roles []config.RoleDef, hash string, installed bool, refusal *verifyRefusal, err error) {
+		defer unlock()
+		roles, hash, installed, err = config.InstalledRoles(store)
+		if err != nil || !installed {
+			return roles, hash, installed, nil, err
+		}
+		_, _, refusal = vouchInstalled(*controlLog, hash)
+		return roles, hash, installed, refusal, nil
+	}()
 	if instErr != nil {
 		_, _ = fmt.Fprintln(out, instErr)
 		_, _ = fmt.Fprint(out, installedHatch("runs prune", "prune", store))
@@ -1594,6 +1653,18 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintf(out, "runs prune: %s\n", msgNothingInstalled)
 		_, _ = fmt.Fprintf(out, "%s under %s; run: agenthof apply --config <dir> --control-log %s\n", msgNoConfigInstalled, store, *controlLog)
 		return record("refused", &control.Reason{Code: control.CodeNotAuthorized, Message: msgNothingInstalled}, "", 1)
+	}
+	if refusal != nil {
+		switch {
+		case refusal.Transient():
+			_, _ = fmt.Fprintf(out, "runs prune: %s\n", msgLockBusy)
+			return 1
+		case refusal.Kind != verifyNotOnRecord:
+			_, _ = fmt.Fprintf(out, "runs prune: %s\n", refusal.Error())
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "runs prune: %s\n", refusal.Error())
+		return record("refused", vouchRefused(refusal), "", 1)
 	}
 	if !authz.ControlAllows(installedRoles, inv, "prune") {
 		reason := control.NotAuthorized("prune")
