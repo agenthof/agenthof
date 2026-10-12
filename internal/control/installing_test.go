@@ -33,6 +33,11 @@ func TestInstallingAxes(t *testing.T) {
 		{"repair success", control.DecodedEvent{Action: "repair", Outcome: "success"}, false},
 		{"provision success with hash is not an install", control.DecodedEvent{Action: "provision", Outcome: "success", ConfigHash: h}, false},
 		{"prune success is not an install", control.DecodedEvent{Action: "prune", Outcome: "success"}, false},
+		{"vouch success", control.DecodedEvent{Action: "vouch", Outcome: "success", ConfigHash: h}, true},
+		{"vouch success is an install whatever Bootstrap says", control.DecodedEvent{Action: "vouch", Outcome: "success", ConfigHash: h, Bootstrap: true}, true},
+		{"vouch refused", control.DecodedEvent{Action: "vouch", Outcome: "refused", ConfigHash: h}, false},
+		{"vouch rejected", control.DecodedEvent{Action: "vouch", Outcome: "rejected", ConfigHash: h}, false},
+		{"vouch success without hash", control.DecodedEvent{Action: "vouch", Outcome: "success"}, false},
 	}
 	for _, c := range cases {
 		if got := control.Installing(c.e); got != c.want {
@@ -138,6 +143,12 @@ func TestLastInstallingPicksTheLastInstallingEvent(t *testing.T) {
 	}
 	if last, _ := control.LastInstalling(recs); !last.Time.Equal(d.Time) {
 		t.Fatalf("Time must be the chosen record's own: %v vs %v", last.Time, d.Time)
+	}
+
+	vouch := control.Event{Action: "vouch", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:ddd", Detail: "previously on record: sha256:ccc, disable agent coder"}
+	recs = ledgerOf(t, []control.Event{apply, flip, vouch})
+	if last, ok := control.LastInstalling(recs); !ok || last.Seq != 3 || last.Action != "vouch" || last.ConfigHash != "sha256:ddd" {
+		t.Fatalf("a vouch is the last install: ok=%v %+v", ok, last)
 	}
 }
 

@@ -46,7 +46,7 @@ type Witness struct {
 // Event is a control/1 record. Callers set Action, Agent, Outcome, Reason,
 // Invoker, AssertedAs, Witness, ConfigHash, Bootstrap (apply and
 // enable/disable), Origin (an API-recorded action; nil from the CLI),
-// Detail (runs prune only), and (repair only) FragmentLen/FragmentSHA. V,
+// Detail (runs prune and vouch), and (repair only) FragmentLen/FragmentSHA. V,
 // and the seq/time/prev/log_id fields on the wire, are set by Append;
 // callers never set them.
 type Event struct {
@@ -81,7 +81,8 @@ type Event struct {
 	// partially-successful action did, for the audit reader — "pruned 3 run(s)
 	// and 1 artifact(s) older than 180d". It is forensic prose, not a join key:
 	// nothing decides anything from it, and no reader parses it. Set by runs
-	// prune; empty on every other record. Sanitized by Append (origin.Clean:
+	// prune and by vouch (what the ledger vouched for before); empty on every
+	// other record. Sanitized by Append (origin.Clean:
 	// printable runes only, at most 200). Additive and omitempty (Article VI):
 	// absent on every record written before it existed and on every record
 	// that does not set it.

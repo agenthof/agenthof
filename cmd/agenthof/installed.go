@@ -42,8 +42,8 @@ const msgNoConfigInstalled = "no configuration installed"
 
 // exitInstalledMismatch is audit verify control's exit code when the
 // installed pointer does not name the last recorded install — the last
-// event control.Installing accepts: an apply, or a kill-switch flip against
-// an installed snapshot — checked after the chain (1), taint (3) and
+// event control.Installing accepts: an apply, a vouch, or a kill-switch flip
+// against an installed snapshot — checked after the chain (1), taint (3) and
 // --expect-head (4) verdicts.
 const exitInstalledMismatch = 5
 
@@ -96,8 +96,8 @@ func applyFloorErrors(cfg config.Config) []registry.ValidationError {
 // installed pointer: nothing when no store exists (nothing has ever been
 // installed under this control root), otherwise whether the pointer names
 // the LAST install the ledger recorded — the last event control.Installing
-// accepts, so a kill-switch flip (which installs a re-snapshot) counts and a
-// bootstrap-era flip (which edited the directory and installed nothing) does
+// accepts, so a vouch (which makes the ledger stand behind the pointer) and a
+// kill-switch flip (which installs a re-snapshot) count and a bootstrap-era flip (which edited the directory and installed nothing) does
 // not. mismatch is true for a pointer the ledger cannot vouch for: the
 // install→record gap, a lost tail, or a damaged pointer. The verdict is
 // pointer-vouched at check time, not history-complete: a later recorded
@@ -120,11 +120,12 @@ func installedPointerLine(controlLog string, records []ledger.Record) (line stri
 	return fmt.Sprintf("installed config: %s — matches the last recorded install (%s)\n", hash, installLabel(last)), false
 }
 
-// installLabel names an installing event for the audit readers: "apply", or
-// "<disable|enable> agent <name>" for a kill-switch flip.
+// installLabel names an installing event for the audit readers: "apply",
+// "vouch", or "<disable|enable> agent <name>" for a kill-switch flip.
 func installLabel(d control.DecodedEvent) string {
-	if d.Action == "apply" {
-		return "apply"
+	switch d.Action {
+	case "apply", "vouch":
+		return d.Action
 	}
 	return d.Action + " agent " + d.Agent
 }

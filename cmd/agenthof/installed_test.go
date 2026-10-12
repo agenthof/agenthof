@@ -107,6 +107,7 @@ func TestInstalledPointerLine(t *testing.T) {
 	const x = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	apply := func(h string) fixtureEvent { return fixtureEvent{action: "apply", hash: h} }
 	disable := func(h string) fixtureEvent { return fixtureEvent{action: "disable", agent: "coder", hash: h} }
+	vouch := func(h string) fixtureEvent { return fixtureEvent{action: "vouch", hash: h} }
 	bootFlip := func(h string) fixtureEvent {
 		return fixtureEvent{action: "enable", agent: "coder", hash: h, bootstrap: true}
 	}
@@ -137,6 +138,10 @@ func TestInstalledPointerLine(t *testing.T) {
 			"installed config: " + d + " — matches the last recorded install (disable agent coder)\n", false},
 		{"flip recorded before flips installed snapshots (upgrade wrinkle: exit 5 until the next apply)", []fixtureEvent{apply(a), disable(x)}, a + "\n",
 			"installed config: " + a + " — does NOT match the last recorded install (" + x + ", disable agent coder)" + mismatchTail, true},
+		{"vouch matches", []fixtureEvent{apply(a), vouch(b)}, b + "\n",
+			"installed config: " + b + " — matches the last recorded install (vouch)\n", false},
+		{"pointer behind a vouch", []fixtureEvent{apply(a), vouch(b)}, a + "\n",
+			"installed config: " + a + " — does NOT match the last recorded install (" + b + ", vouch)" + mismatchTail, true},
 		{"no events", nil, a + "\n",
 			"installed config: " + a + " — no install on record" + mismatchTail, true},
 		{"no store prints nothing", []fixtureEvent{apply(a)}, "", "", false},
@@ -152,5 +157,19 @@ func TestInstalledPointerLine(t *testing.T) {
 	controlLog, recs := pointerFixture(t, []fixtureEvent{apply(a)}, "garbage\n")
 	if line, mismatch := installedPointerLine(controlLog, recs); !mismatch || !strings.HasPrefix(line, "installed config: ") || !strings.Contains(line, "malformed pointer") {
 		t.Fatalf("malformed pointer: mismatch=%v line=%q", mismatch, line)
+	}
+}
+
+// TestInstallLabelVouch: a vouch event labels as exactly "vouch" — never
+// "vouch agent " (the flip shape with an empty agent).
+func TestInstallLabelVouch(t *testing.T) {
+	if got := installLabel(control.DecodedEvent{Action: "vouch", Outcome: "success", ConfigHash: "sha256:abc"}); got != "vouch" {
+		t.Fatalf("installLabel(vouch) = %q", got)
+	}
+	if got := installLabel(control.DecodedEvent{Action: "apply"}); got != "apply" {
+		t.Fatalf("installLabel(apply) = %q", got)
+	}
+	if got := installLabel(control.DecodedEvent{Action: "disable", Agent: "coder"}); got != "disable agent coder" {
+		t.Fatalf("installLabel(disable) = %q", got)
 	}
 }

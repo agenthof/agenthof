@@ -122,7 +122,7 @@ func TestConfigJoinBootstrapFlipIsNotAnInstall(t *testing.T) {
 func TestConfigJoinLaterOnlyIsForm3(t *testing.T) {
 	runStart := time.Now()
 	time.Sleep(2 * time.Millisecond)
-	const want = "config sha256:aaa — no install on record at the run's start (matches a later apply or kill-switch flip)"
+	const want = "config sha256:aaa — no install on record at the run's start (matches a later apply, kill-switch flip or vouch)"
 	ev := joinFixture(t, control.Event{Action: "apply", Outcome: "success", ConfigHash: "sha256:aaa"})
 	if line := ConfigJoin(ev, "verified", "sha256:aaa", runStart); line != want {
 		t.Fatalf("later apply: line=%q", line)
@@ -188,5 +188,32 @@ func TestConfigJoinIgnoresProvisionAndPrune(t *testing.T) {
 	line := ConfigJoin(ev, verdict, "sha256:aaa", time.Now())
 	if !strings.Contains(line, "applied by dana@example.com") || strings.Contains(line, "mallory") {
 		t.Fatalf("the join must name the apply, never the provision: %q", line)
+	}
+}
+
+// TestConfigJoinVouchInstall: a run whose hash the ledger vouched for (a
+// vouch event, no apply row) joins to the sixth form — never the flip form
+// with an empty agent.
+func TestConfigJoinVouchInstall(t *testing.T) {
+	ev := joinFixture(t,
+		control.Event{Action: "apply", Outcome: "success", ConfigHash: "sha256:aaa"},
+		control.Event{Action: "vouch", Outcome: "success", ConfigHash: "sha256:fff", Detail: "previously on record: sha256:aaa, apply"})
+	line := ConfigJoin(ev, "verified", "sha256:fff", time.Now())
+	want := "config sha256:fff — vouched for by dana@example.com (asserted) at " + ev[1].Time.Format(time.RFC3339)
+	if line != want {
+		t.Fatalf("line=%q\nwant=%q", line, want)
+	}
+	if strings.Contains(line, "kill switch") || strings.Contains(line, "agent ") {
+		t.Fatalf("never the flip form: %q", line)
+	}
+}
+
+// TestConfigJoinLaterFormNamesVouch: the later-install form's parenthetical
+// names all three installing actions.
+func TestConfigJoinLaterFormNamesVouch(t *testing.T) {
+	ev := joinFixture(t, control.Event{Action: "vouch", Outcome: "success", ConfigHash: "sha256:aaa"})
+	line := ConfigJoin(ev, "verified", "sha256:aaa", ev[0].Time.Add(-time.Hour))
+	if line != "config sha256:aaa — no install on record at the run's start (matches a later apply, kill-switch flip or vouch)" {
+		t.Fatalf("line=%q", line)
 	}
 }

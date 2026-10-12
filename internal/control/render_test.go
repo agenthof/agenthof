@@ -266,3 +266,26 @@ func TestControlRenderProvisionAndPruneLabels(t *testing.T) {
 		t.Fatalf("a provision label must not claim keys were minted:\n%s", out)
 	}
 }
+
+// TestControlRenderVouch: a vouch success renders "vouched for installed
+// config <hash>" and, with the writer's Detail appended by Render, reads
+// "(previously on record: <h2>, apply)" — one pair of parentheses, never
+// nested; a refused vouch renders "vouch refused".
+func TestControlRenderVouch(t *testing.T) {
+	ok := ledger.Record{Raw: []byte(`{"v":"control/1","seq":2,"time":"2026-10-12T10:02:00Z","action":"vouch","outcome":"success",` +
+		`"invoker":{"subject":"dana@example.com","issuer":"local","method":"asserted"},"witness":{"os_user":"dana","hostname":"host"},` +
+		`"config_hash":"sha256:bbb","detail":"previously on record: sha256:aaa, apply","prev":"x"}`)}
+	refused := ledger.Record{Raw: []byte(`{"v":"control/1","seq":3,"time":"2026-10-12T10:03:00Z","action":"vouch","outcome":"refused",` +
+		`"reason":{"code":"token_verification_failed","message":"token verification failed"},` +
+		`"invoker":{"subject":"(unverified)","issuer":"https://idp","method":"oidc-rejected"},"witness":{"os_user":"dana","hostname":"host"},"prev":"y"}`)}
+	out := control.Render([]ledger.Record{rec(1, "apply", "", "success", "dana@example.com", "asserted"), ok, refused}, ledger.Head{Hash: "z", Count: 3}, nil)
+	if !strings.Contains(out, "seq 2  2026-10-12 10:02:00  vouched for installed config sha256:bbb (previously on record: sha256:aaa, apply) — dana@example.com (asserted)") {
+		t.Fatalf("vouch success line:\n%s", out)
+	}
+	if strings.Contains(out, "((") || strings.Contains(out, "))") {
+		t.Fatalf("nested parentheses:\n%s", out)
+	}
+	if !strings.Contains(out, "vouch refused — (unverified) (oidc-rejected)") {
+		t.Fatalf("vouch refused line:\n%s", out)
+	}
+}
