@@ -15,11 +15,12 @@ import (
 
 // cmdConfig is the `config` subcommand group: pull (the installed
 // configuration, from the server or the local store), sign (the operator's
-// signature of the installed configuration) and keygen (the operator's
-// signing pair).
+// signature of the installed configuration), keygen (the operator's
+// signing pair) and vouch (make the control ledger vouch for the snapshot
+// already installed — the recovery for an unrecorded install).
 func cmdConfig(args []string, out io.Writer) int {
 	if len(args) < 1 {
-		_, _ = fmt.Fprintln(out, "config needs a subcommand: pull, sign, keygen")
+		_, _ = fmt.Fprintln(out, "config needs a subcommand: pull, sign, keygen, vouch")
 		return 2
 	}
 	switch args[0] {
@@ -29,6 +30,8 @@ func cmdConfig(args []string, out io.Writer) int {
 		return cmdConfigSign(args[1:], out)
 	case "keygen":
 		return cmdConfigKeygen(args[1:], out)
+	case "vouch":
+		return cmdConfigVouch(args[1:], out)
 	default:
 		_, _ = fmt.Fprintf(out, "unknown config subcommand %q\n", args[0])
 		return 2

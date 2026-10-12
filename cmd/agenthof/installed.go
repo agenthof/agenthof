@@ -23,7 +23,9 @@ func installedStore(controlLog string) string {
 // installedLock is the installed-configuration lock for a control ledger:
 // "installed.lock" BESIDE the store (never inside it, so a store listing
 // holds only snapshots and the pointer). Every pointer writer — apply (CLI
-// or API) and the kill switch — takes it EXCLUSIVE through ledger.LockFile
+// or API) and the kill switch — and every writer of the ledger's account of
+// the pointer — config sign, config vouch — takes it EXCLUSIVE through
+// ledger.LockFile
 // from its authorize-read through its success append; every execution read
 // (run, serve's Prepare and startup look) takes it SHARED through
 // ledger.LockFileShared across pointer, ledger (and .sig, floor) so it sees

@@ -283,9 +283,12 @@ func TestVouchInstalledIsLastInstallingPlusHashEquality(t *testing.T) {
 		t.Fatalf("B vouches: %v", refusal)
 	}
 	repointTo(t, ctl, hashA)
-	_, _, refusal = vouchInstalled(ctl, hashA)
+	_, lastB, refusal := vouchInstalled(ctl, hashA)
 	if refusal == nil || refusal.Kind != verifyNotOnRecord || refusal.Detail != "last recorded install is "+hashB+" (apply); re-apply (for a torn ledger, audit repair control first)" {
 		t.Fatalf("re-aimed: %+v", refusal)
+	}
+	if lastB.ConfigHash != hashB || lastB.Action != "apply" {
+		t.Fatalf("a not-on-record verdict names the last install: %+v", lastB)
 	}
 	if refusal.Headline() != "configuration not on record" || refusal.Error() != "configuration not on record: "+refusal.Detail {
 		t.Fatalf("texts: %q %q", refusal.Headline(), refusal.Error())

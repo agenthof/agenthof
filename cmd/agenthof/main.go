@@ -42,6 +42,7 @@ Usage:
   agenthof config pull [--server <url> [--token <jwt>]] [--control-log <path>] [--out <dir>] [--json]  (the installed configuration, from the server or the local store; --out writes a directory apply --config accepts)
   agenthof config keygen [--control-log <path>]  (generates the operator's Ed25519 signing pair beside the control ledger and prints the public key to pin at every execution point; never overwrites an existing pair)
   agenthof config sign   [--control-log <path>]  (signs the installed configuration with the signing pair beside the control ledger — the remedy when an install reports "signature NOT written"; never recorded)
+  agenthof config vouch  [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]  (records the install event the control ledger lacks for the snapshot already at installed/current, after verifying its bytes — the recovery for an unrecorded install; any identity the host resolves, always recorded)
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--control-log <path>] [--verify-key <path>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]

@@ -282,8 +282,11 @@ type installFacts struct {
 // branch; a torn ledger must be repaired BEFORE that, never instead of it.
 const remedyReapply = "re-apply (for a torn ledger, audit repair control first)"
 
-// vouchInstalled is the vouch every execution read performs, pinned or not,
-// under the shared installed.lock the caller holds: the control ledger must
+// vouchInstalled is the vouch every execution read and every control-op
+// authorization read performs, and config vouch's own check (control-ledger
+// repair excepted by design), under the installed.lock the caller holds —
+// SHARED (run, serve, provision, prune) or EXCLUSIVE (apply, the kill switch,
+// config vouch): the control ledger must
 // record hash as the LAST install — control.LastInstalling(records).ConfigHash
 // == hash, and NOTHING ELSE. Classified exactly as the pull is (pull.go): a
 // held ledger flock → busy (unrecorded); no file → an empty chain that vouches
@@ -304,7 +307,10 @@ const remedyReapply = "re-apply (for a torn ledger, audit repair control first)"
 // root older than the log_id must still run unpinned. A damaged ledger is a
 // RECORDED refusal here (the pull answers an unrecorded 500 for the same
 // state): a run is a policy-bearing action an invoker attempted, and Article
-// III wants the attempt and why it did not execute in the ledger.
+// III wants the attempt and why it did not execute in the ledger. On a
+// not-on-record verdict records and last are returned too (last is zero when
+// nothing is on record), so config vouch can name the install it supersedes;
+// on busy or not-verifiable they are zero.
 func vouchInstalled(controlLog, hash string) (records []ledger.Record, last control.DecodedEvent, refusal *verifyRefusal) {
 	records, _, verr := ledger.ReadVerify(controlLog, ledger.Locked)
 	var torn *ledger.TornError
@@ -322,9 +328,9 @@ func vouchInstalled(controlLog, hash string) (records []ledger.Record, last cont
 	last, found := control.LastInstalling(records)
 	switch {
 	case !found:
-		return nil, control.DecodedEvent{}, &verifyRefusal{Kind: verifyNotOnRecord, Detail: "no install on record; " + remedyReapply}
+		return records, control.DecodedEvent{}, &verifyRefusal{Kind: verifyNotOnRecord, Detail: "no install on record; " + remedyReapply}
 	case last.ConfigHash != hash:
-		return nil, control.DecodedEvent{}, &verifyRefusal{Kind: verifyNotOnRecord, Detail: fmt.Sprintf("last recorded install is %s (%s); %s", last.ConfigHash, installLabel(last), remedyReapply)}
+		return records, last, &verifyRefusal{Kind: verifyNotOnRecord, Detail: fmt.Sprintf("last recorded install is %s (%s); %s", last.ConfigHash, installLabel(last), remedyReapply)}
 	}
 	return records, last, nil
 }
