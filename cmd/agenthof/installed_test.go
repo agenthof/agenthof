@@ -24,27 +24,39 @@ func TestInstalledStoreIsBesideTheControlLog(t *testing.T) {
 	}
 }
 
+// TestApplyFloorErrors: the floor is "some role grants apply to a NAMED
+// group" — exactly the two rules Build already enforces for apply
+// (no-access-floor, public-control-role), restated so config vouch, which
+// never runs Build, cannot bless a control-plane lockout. No empty-string
+// rule: Validate has none, so the floor must not invent an apply rejection.
 func TestApplyFloorErrors(t *testing.T) {
-	ok := config.Config{Roles: []config.RoleDef{
-		{Name: "se", Workflows: []string{"w"}, AllowedGroups: []string{"*"}},
-		{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"enable", "apply"}},
-	}}
-	if errs := applyFloorErrors(ok); len(errs) != 0 {
-		t.Fatalf("a config granting apply must pass: %v", errs)
+	const wantMsg = "roles: (config): no role grants apply to a named group: a configuration nobody may apply could never be changed again; grant control: [apply] to at least one role whose allowed_groups names a real group"
+	role := func(groups ...string) config.Config {
+		return config.Config{Roles: []config.RoleDef{
+			{Name: "se", Workflows: []string{"w"}, AllowedGroups: []string{"*"}},
+			{Name: "ops", AllowedGroups: groups, Control: []string{"enable", "apply"}},
+		}}
 	}
-	bad := config.Config{Roles: []config.RoleDef{
-		{Name: "se", Workflows: []string{"w"}, AllowedGroups: []string{"*"}},
-		{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"enable", "disable", "repair"}},
-	}}
-	errs := applyFloorErrors(bad)
-	if len(errs) != 1 || errs[0].Code != "no-apply-floor" {
-		t.Fatalf("want one no-apply-floor error, got %+v", errs)
-	}
-	if got := errs[0].Error(); got != "roles: (config): no role grants apply: a configuration nobody may apply could never be changed again; grant control: [apply] to at least one role" {
-		t.Fatalf("message = %q", got)
-	}
-	if errs := applyFloorErrors(config.Config{}); len(errs) != 1 {
-		t.Fatalf("an empty config grants apply to nobody: %+v", errs)
+	for _, c := range []struct {
+		name string
+		cfg  config.Config
+		pass bool
+	}{
+		{"named group", role("platform-eng"), true},
+		{"public marker beside a named group", role("*", "ops"), true},
+		{"empty-string group passes exactly as Build does", role(""), true},
+		{"no groups (lockout shape)", role(), false},
+		{"public marker only (lockout shape)", role("*"), false},
+		{"apply granted to no role", config.Config{Roles: []config.RoleDef{{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"enable", "disable", "repair"}}}}, false},
+		{"empty config", config.Config{}, false},
+	} {
+		errs := applyFloorErrors(c.cfg)
+		if c.pass && len(errs) != 0 {
+			t.Fatalf("%s: must pass: %v", c.name, errs)
+		}
+		if !c.pass && (len(errs) != 1 || errs[0].Code != "no-apply-floor" || errs[0].Error() != wantMsg) {
+			t.Fatalf("%s: want one no-apply-floor error %q, got %+v", c.name, wantMsg, errs)
+		}
 	}
 }
 

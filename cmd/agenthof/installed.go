@@ -47,24 +47,36 @@ const msgNoConfigInstalled = "no configuration installed"
 // --expect-head (4) verdicts.
 const exitInstalledMismatch = 5
 
-// applyFloorErrors is the no-apply-floor check: a configuration that grants
-// apply to no role could be installed and then never be changed again
-// through the control plane, so it is rejected at the apply boundary. It
-// lives here and NOT in registry.Validate on purpose — Validate also serves
-// run, serve and registry list, which must keep accepting a run-only
-// configuration that grants nothing. It is a property of what may be
-// installed, so it sits on the install path.
+// applyFloorErrors is the no-apply-floor check: some role must grant apply
+// to a NAMED group — a configuration nobody may apply could be installed and
+// then never be changed again through the control plane, so it is rejected
+// at the install boundary. "Named" means a literal group, never the "*"
+// marker, which authz.ControlAllows does not honour: it restates exactly the
+// two rules registry.Validate already enforces for apply (no-access-floor,
+// public-control-role), so for apply the check is redundant — Build runs
+// first — and for config vouch, which never runs Build, it is the ONE
+// validation the roles alone can answer: without it a correctly hashed
+// snapshot could be vouched into a lockout no apply could install. There is
+// deliberately no empty-string rule: Validate has none, and the floor must
+// not be a new apply rejection. It lives here and NOT in registry.Validate on
+// purpose — Validate also serves run, serve and registry list, which must
+// keep accepting a run-only configuration that grants nothing.
 func applyFloorErrors(cfg config.Config) []registry.ValidationError {
 	for _, r := range cfg.Roles {
-		if slices.Contains(r.Control, "apply") {
-			return nil
+		if !slices.Contains(r.Control, "apply") {
+			continue
+		}
+		for _, g := range r.AllowedGroups {
+			if g != "*" {
+				return nil
+			}
 		}
 	}
 	return []registry.ValidationError{{
 		File:   "roles",
 		Entity: "(config)",
 		Code:   "no-apply-floor",
-		Msg:    "no role grants apply: a configuration nobody may apply could never be changed again; grant control: [apply] to at least one role",
+		Msg:    "no role grants apply to a named group: a configuration nobody may apply could never be changed again; grant control: [apply] to at least one role whose allowed_groups names a real group",
 	}}
 }
 
