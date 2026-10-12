@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -1108,5 +1109,67 @@ func TestRunRefusalMatrixWhenPinned(t *testing.T) {
 	}
 	if floorBytes(t, ctl) != logID+" 1\n" {
 		t.Fatalf("floor %q", floorBytes(t, ctl))
+	}
+}
+
+// TestRunVerifyKeyFlag: --verify-key reads the pin from the named path (the
+// floor stays beside --control-log); a named path that is absent fails closed
+// — never state A; with --server the flag is ignored and said so on stderr
+// only when it was given.
+func TestRunVerifyKeyFlag(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("AGENTHOF_SERVER", "")
+	ctl, root, _ := signedRoot(t) // signed, NOT pinned at the conventional path
+	keyDir := t.TempDir()
+	key := filepath.Join(keyDir, "operator.pub")
+	if err := os.WriteFile(key, mustRead(t, signingPubPath(ctl)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := func(extra ...string) []string {
+		return append([]string{"software-engineer", "fix-bug", "--input", "hi", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir()}, extra...)
+	}
+	var out, stderr bytes.Buffer
+	if code := cmdRun(args("--verify-key", key), &out, &stderr); code != 0 || !strings.Contains(out.String(), "finished: succeeded") {
+		t.Fatalf("pinned by flag: %d\n%s", code, out.String())
+	}
+	if floorBytes(t, ctl) != controlLogID(t, ctl)+" 1\n" {
+		t.Fatalf("the floor lives beside --control-log, wherever the key is: %q", floorBytes(t, ctl))
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, "verify.floor")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("no floor beside the key")
+	}
+	if _, err := os.Stat(verifyPubPath(ctl)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("agenthof never writes verify.pub")
+	}
+
+	// State F: the flag names a missing file — refused, recorded; never today's unverified run.
+	out.Reset()
+	missing := filepath.Join(keyDir, "nowhere.pub")
+	code := cmdRun(args("--verify-key", missing), &out, &stderr)
+	if code != 1 || !strings.Contains(out.String(), "run: configuration not verifiable: pinned key "+missing+": ") || !strings.Contains(out.String(), "no such file") || !strings.Contains(out.String(), "refused: configuration not verifiable\n") {
+		t.Fatalf("F: %d\n%s", code, out.String())
+	}
+
+	// --server: the flag is ignored, said on stderr only when given.
+	out.Reset()
+	stderr.Reset()
+	_ = cmdRun([]string{"software-engineer", "fix-bug", "--input", "hi", "--server", "http://127.0.0.1:1", "--token", "x", "--verify-key", key}, &out, &stderr)
+	if !strings.Contains(stderr.String(), "run: --verify-key is ignored with --server") {
+		t.Fatalf("stderr:\n%s", stderr.String())
+	}
+	stderr.Reset()
+	_ = cmdRun([]string{"software-engineer", "fix-bug", "--input", "hi", "--server", "http://127.0.0.1:1", "--token", "x"}, &out, &stderr)
+	if strings.Contains(stderr.String(), "verify-key") {
+		t.Fatalf("the default prints nothing:\n%s", stderr.String())
+	}
+
+	// usage names the flag on the run line; serve has no such flag.
+	if !strings.Contains(usage, "agenthof run <role> <workflow> --input <text>") || !strings.Contains(usage, "[--verify-key <path>]") {
+		t.Fatalf("usage:\n%s", usage)
+	}
+	var sout bytes.Buffer
+	t.Setenv("AGENTHOF_OIDC_ISSUER", "https://idp.test")
+	if code := cmdServe(context.Background(), []string{"--verify-key", key}, &sout, io.Discard); code != 2 || !strings.Contains(sout.String(), "flag provided but not defined: -verify-key") {
+		t.Fatalf("serve must not grow the flag: %d\n%s", code, sout.String())
 	}
 }

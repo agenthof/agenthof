@@ -43,7 +43,7 @@ Usage:
   agenthof config sign   [--control-log <path>]  (signs the installed configuration with the signing pair beside the control ledger — the remedy when an install reports "signature NOT written"; never recorded)
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
-  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
+  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--control-log <path>] [--verify-key <path>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
   agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--allow-api-bootstrap] [--addr-file <path>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--max-concurrent-runs <n>] [--shutdown-timeout <dur>] [--log-level ...] [--log-format ...]  (AGENTHOF_OIDC_ISSUER required)
   agenthof audit <run-id> [--log-dir <dir>] [--server <url>] [--token <jwt>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
@@ -784,6 +784,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	server := fs.String("server", "", "run over an agenthof serve API at this base URL (env AGENTHOF_SERVER); needs --token/AGENTHOF_TOKEN")
 	cfgDir := fs.String("config", "./config", "configuration directory you apply from; run executes the INSTALLED configuration (see --control-log), not this directory")
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; the installed configuration is read from installed/ beside it")
+	verifyKey := fs.String("verify-key", "", "path of the pinned operator public key (PKIX PEM, as config keygen prints and signing.pub holds); default verify.pub beside --control-log. When the file exists, the installed configuration must be signed by this key, over the install the control ledger records, at or above verify.floor beside --control-log, or the run is refused")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
 	// Accepted for forward-compat: the tool proxy always binds 127.0.0.1:0
@@ -822,6 +823,9 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		if *as != "" || *groups != "" {
 			_, _ = fmt.Fprintln(stderr, "run: --as/--groups are ignored with --server; the server authenticates your --token")
 		}
+		if *verifyKey != "" {
+			_, _ = fmt.Fprintln(stderr, "run: --verify-key is ignored with --server; the server verifies the installed configuration against the key pinned beside its control ledger")
+		}
 		return runViaServer(base, tok, role, workflow, *input, out)
 	}
 
@@ -845,7 +849,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, reg, h, installed, cfgErrs, unverified := resolveRunConfig(*controlLog, "", verifyAndAdvance)
+	cfg, reg, h, installed, cfgErrs, unverified := resolveRunConfig(*controlLog, *verifyKey, verifyAndAdvance)
 	for _, e := range cfgErrs {
 		_, _ = fmt.Fprintln(out, e.Error())
 	}
