@@ -1524,3 +1524,170 @@ func TestRunVerifyKeyFlag(t *testing.T) {
 		t.Fatalf("serve must not grow the flag: %d\n%s", code, sout.String())
 	}
 }
+
+// TestRunRefusesAnInstallTheLedgerDoesNotVouchFor wires cmdRun, unpinned:
+// a hand-aimed pointer, a dropped-in snapshot, the pre-R1.4 flip root and a
+// damaged ledger each exit 1 with "run: <reason>" then "run r-… refused:
+// <headline>", the run ledger's run_refused.reason the full reason, and no
+// control event; Prepare maps the same states to *serve.ConfigNotVerifiedError
+// with the headline; a re-apply heals both.
+func TestRunRefusesAnInstallTheLedgerDoesNotVouchFor(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	hashA := readPointer(t, ctl)
+	h := &runHost{controlLog: ctl, logDir: t.TempDir(), artifactDir: t.TempDir(), logger: obs.New(io.Discard, slog.LevelDebug, obs.FormatText), broker: newBroker(subjectTokenTypeFromEnv(os.Getenv))}
+
+	run := func(name, wantReason, wantHeadline string) {
+		t.Helper()
+		events := ledgerBytes(t, ctl)
+		logs := t.TempDir()
+		var out bytes.Buffer
+		code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "hi", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
+		if code != 1 || !strings.Contains(out.String(), "run: "+wantReason+"\n") {
+			t.Fatalf("%s: code %d\n%s", name, code, out.String())
+		}
+		m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: ` + regexp.QuoteMeta(wantHeadline) + `\n`).FindStringSubmatch(out.String())
+		if m == nil {
+			t.Fatalf("%s: result line with the headline:\n%s", name, out.String())
+		}
+		ev, _, err := engine.ReadLog(logs, m[1])
+		if err != nil || len(ev) != 1 || ev[0].Type != "run_refused" || ev[0].Reason != wantReason {
+			t.Fatalf("%s: ledger %+v %v", name, ev, err)
+		}
+		if !bytes.Equal(events, ledgerBytes(t, ctl)) {
+			t.Fatalf("%s: a refusal writes no control event", name)
+		}
+		_, perr := h.Prepare(identity.Invoker{}, "")
+		var nv *serve.ConfigNotVerifiedError
+		if !errors.As(perr, &nv) || nv.Headline != wantHeadline || nv.Reason != wantReason {
+			t.Fatalf("%s: Prepare %T %v", name, perr, perr)
+		}
+		if errors.Is(perr, serve.ErrConfigInvalid) || errors.Is(perr, serve.ErrNoConfigInstalled) || errors.Is(perr, serve.ErrConfigBusy) {
+			t.Fatalf("%s: a verdict is neither invalid, nor not-installed, nor busy", name)
+		}
+	}
+
+	// hand-aimed. The second install changes only the instruction: the stub
+	// endpoint must stay reachable, because the heal below runs the workflow.
+	planner := mustRead(t, filepath.Join(root, "agents", "planner.yaml"))
+	writeFileIn(t, root, "agents/planner.yaml", strings.Replace(string(planner), "instruction: plan\n", "instruction: plan harder\n", 1))
+	applyAs(t, root, ctl)
+	hashB := readPointer(t, ctl)
+	repointTo(t, ctl, hashA)
+	run("hand-aimed", "configuration not on record: last recorded install is "+hashB+" (apply); re-apply (for a torn ledger, audit repair control first)", "configuration not on record")
+
+	// dropped-in
+	dropInSnapshot(t, ctl)
+	run("dropped-in", "configuration not on record: last recorded install is "+hashB+" (apply); re-apply (for a torn ledger, audit repair control first)", "configuration not on record")
+	repointTo(t, ctl, hashB)
+
+	// pre-R1.4 flip root: a directory-hash flip record with no Bootstrap marker is the last install.
+	dirHash := "sha256:" + strings.Repeat("d", 64)
+	if _, err := control.Append(ctl, control.Event{Action: "disable", Agent: "coder", Outcome: "success", Invoker: admin, Witness: control.CaptureWitness(), ConfigHash: dirHash}); err != nil {
+		t.Fatal(err)
+	}
+	run("pre-R1.4 flip root", "configuration not on record: last recorded install is "+dirHash+" (disable agent coder); re-apply (for a torn ledger, audit repair control first)", "configuration not on record")
+	applyAs(t, root, ctl) // one apply heals
+	var out bytes.Buffer
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "hi", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 || !strings.Contains(out.String(), "finished: succeeded") {
+		t.Fatalf("after apply: %d\n%s", code, out.String())
+	}
+	if _, err := h.Prepare(identity.Invoker{}, ""); err != nil {
+		t.Fatalf("Prepare after apply: %v", err)
+	}
+
+	// damaged ledger
+	appendFragment(t, ctl)
+	run("damaged ledger", "configuration not verifiable: control ledger damaged; run: agenthof audit repair control --control-log "+ctl, "configuration not verifiable")
+	repairAs(t, root, ctl)
+	out.Reset()
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "hi", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 || !strings.Contains(out.String(), "finished: succeeded") {
+		t.Fatalf("a repaired ledger runs: %d\n%s", code, out.String())
+	}
+	if floorBytes(t, ctl) != "" {
+		t.Fatal("no floor is ever written unpinned")
+	}
+}
+
+// TestUnpinnedRunBusyIsUnrecordedAndWaitsBehindAShortHold: the shared lock's
+// consistency, unpinned. A writer holding installed.lock exclusively for LESS
+// than lockTimeout with the pointer mid-change (aimed at a hash the ledger
+// does not name) and restored before release → the run WAITS and passes,
+// nothing recorded — never a spurious not-on-record. For LONGER (installed.lock,
+// or only the ledger flock) → busy: resolveRunConfig sets nothing else; cmdRun
+// prints the busy line, exits 1, mints no run id, writes no run ledger file,
+// leaves the control ledger byte-identical; Prepare → serve.ErrConfigBusy. One
+// parent sets the env; the ~5 s rows run in parallel.
+func TestUnpinnedRunBusyIsUnrecordedAndWaitsBehindAShortHold(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+
+	t.Run("short hold: wait and pass", func(t *testing.T) {
+		t.Parallel()
+		root := writeSample(t)
+		ctl := applied(t, root)
+		hashA := readPointer(t, ctl)
+		writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+		applyAs(t, root, ctl)
+		hashB := readPointer(t, ctl)
+		unlock, err := ledger.LockFile(installedLock(ctl))
+		if err != nil {
+			t.Fatal(err)
+		}
+		repointTo(t, ctl, hashA) // mid-write: the pointer names an install that is not the last recorded
+		go func() {
+			time.Sleep(1500 * time.Millisecond)
+			repointTo(t, ctl, hashB)
+			unlock()
+		}()
+		start := time.Now()
+		_, reg, h, _, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance)
+		if elapsed := time.Since(start); elapsed < time.Second {
+			t.Fatalf("the run must wait behind the writer, not read through it (%v)", elapsed)
+		}
+		if reg == nil || h != hashB || errs != nil || unverified != nil {
+			t.Fatalf("after the writer released, the consistent pair passes: h=%q errs=%v unverified=%v", h, errs, unverified)
+		}
+	})
+
+	for _, c := range []struct{ name, kind string }{{"installed.lock held", "file"}, {"ledger lock held", "ledger"}} {
+		t.Run("long hold: "+c.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeSample(t)
+			ctl := applied(t, root)
+			path := installedLock(ctl)
+			if c.kind == "ledger" {
+				path = ctl
+			}
+			ledgerBefore := mustRead(t, ctl)
+			// Three reads follow, each waiting out the lock timeout.
+			holdLock(t, c.kind, path, 20000)
+
+			cfg, reg, hash, installed, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance)
+			if unverified == nil || !unverified.Transient() || reg != nil || hash != "" || installed || errs != nil || len(cfg.Roles) != 0 {
+				t.Fatalf("busy: unverified=%v reg=%v hash=%q installed=%v errs=%v", unverified, reg, hash, installed, errs)
+			}
+
+			logs := t.TempDir()
+			var out bytes.Buffer
+			code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "hi", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
+			if code != 1 || out.String() != "run: "+msgLockBusy+"\n" {
+				t.Fatalf("code %d out %q", code, out.String())
+			}
+			if entries, _ := os.ReadDir(logs); len(entries) != 0 {
+				t.Fatalf("busy mints no run and writes no run ledger: %v", entries)
+			}
+			if !bytes.Equal(ledgerBefore, mustRead(t, ctl)) {
+				t.Fatal("busy writes no control event")
+			}
+
+			h := &runHost{controlLog: ctl, logDir: t.TempDir(), artifactDir: t.TempDir(), logger: obs.New(io.Discard, slog.LevelDebug, obs.FormatText), broker: newBroker(subjectTokenTypeFromEnv(os.Getenv))}
+			if _, err := h.Prepare(identity.Invoker{}, ""); !errors.Is(err, serve.ErrConfigBusy) {
+				t.Fatalf("Prepare under a held lock: %v", err)
+			}
+			if floorBytes(t, ctl) != "" {
+				t.Fatal("busy must not touch the floor")
+			}
+		})
+	}
+}
