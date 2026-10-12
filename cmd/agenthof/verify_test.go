@@ -916,3 +916,197 @@ func TestRunHostPrepareMapsAVerdictToTheTypedError(t *testing.T) {
 		t.Fatal("a verdict is neither invalid nor not-installed")
 	}
 }
+
+// TestPinnedRunBusyIsUnrecordedAndWaitsBehindAShortHold (S7a, S7b): a writer
+// holding installed.lock exclusively for LESS than lockTimeout → the run
+// waits, sees the consistent triple the writer published, and passes
+// (nothing recorded); for LONGER → busy: cmdRun prints the busy line, exits
+// 1, mints no run id, writes no run ledger file and no control event; the
+// holder of only the ledger flock → the same busy from the inner ReadVerify;
+// Prepare → serve.ErrConfigBusy. One parent sets the env; the 5 s rows run in
+// parallel.
+func TestPinnedRunBusyIsUnrecordedAndWaitsBehindAShortHold(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+
+	t.Run("short hold: wait and pass", func(t *testing.T) {
+		t.Parallel()
+		ctl, _, _ := pinnedRoot(t)
+		hash := readPointer(t, ctl)
+		logID := controlLogID(t, ctl)
+		// Simulate a writer: under the exclusive lock, swap in a .sig for a
+		// version the ledger does not vouch for yet, then (still under the
+		// lock) put the valid one back — the run must never see the middle.
+		valid := mustRead(t, config.SignaturePath(installedStore(ctl), hash))
+		unlock, err := ledger.LockFile(installedLock(ctl))
+		if err != nil {
+			t.Fatal(err)
+		}
+		priv := hostPriv(t, ctl)
+		newer, _ := config.SignaturePayload(hash, logID, 2, controlEvents(t, ctl)[0].Time.UTC(), config.KeyID(signingPub(t, ctl)))
+		writeSigAt(t, ctl, newer, config.Sign(priv, newer))
+		go func() {
+			time.Sleep(1500 * time.Millisecond)
+			if err := os.WriteFile(config.SignaturePath(installedStore(ctl), hash), valid, 0o600); err != nil {
+				panic(err)
+			}
+			unlock()
+		}()
+		start := time.Now()
+		_, reg, _, _, errs, unverified := resolveAdvance(t, ctl)
+		if elapsed := time.Since(start); elapsed < time.Second {
+			t.Fatalf("the run must wait behind the writer, not read through it (%v)", elapsed)
+		}
+		if reg == nil || errs != nil || unverified != nil {
+			t.Fatalf("after the writer released, the consistent triple passes: errs=%v unverified=%v", errs, unverified)
+		}
+		if floorBytes(t, ctl) != logID+" 1\n" {
+			t.Fatalf("floor %q", floorBytes(t, ctl))
+		}
+	})
+
+	for _, c := range []struct{ name, kind string }{{"installed.lock held", "file"}, {"ledger lock held", "ledger"}} {
+		t.Run("long hold: "+c.name, func(t *testing.T) {
+			t.Parallel()
+			ctl, root, _ := pinnedRoot(t)
+			path := installedLock(ctl)
+			if c.kind == "ledger" {
+				path = ctl
+			}
+			ledgerBefore := mustRead(t, ctl)
+			// Three reads follow, and each waits out the lock timeout, so the
+			// hold has to outlast all of them.
+			holdLock(t, c.kind, path, 20000)
+
+			// The resolution itself: busy ⇒ nothing else is set.
+			cfg, reg, hash, installed, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance)
+			if unverified == nil || !unverified.Transient() || reg != nil || hash != "" || installed || errs != nil || len(cfg.Roles) != 0 {
+				t.Fatalf("busy: unverified=%v reg=%v hash=%q installed=%v errs=%v", unverified, reg, hash, installed, errs)
+			}
+			if floorBytes(t, ctl) != "" {
+				t.Fatal("busy must not touch the floor")
+			}
+
+			// cmdRun: the busy line, exit 1, no run id, no run ledger file.
+			logs := t.TempDir()
+			var out bytes.Buffer
+			code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "hi", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
+			if code != 1 || out.String() != "run: "+msgLockBusy+"\n" {
+				t.Fatalf("code %d out %q", code, out.String())
+			}
+			if entries, _ := os.ReadDir(logs); len(entries) != 0 {
+				t.Fatalf("busy mints no run and writes no run ledger: %v", entries)
+			}
+			if !bytes.Equal(ledgerBefore, mustRead(t, ctl)) {
+				t.Fatal("busy writes no control event")
+			}
+
+			// Prepare: the busy sentinel.
+			h := &runHost{controlLog: ctl, logDir: t.TempDir(), artifactDir: t.TempDir(), logger: obs.New(io.Discard, slog.LevelDebug, obs.FormatText), broker: newBroker(subjectTokenTypeFromEnv(os.Getenv))}
+			if _, err := h.Prepare(identity.Invoker{}, ""); !errors.Is(err, serve.ErrConfigBusy) {
+				t.Fatalf("Prepare under a held lock: %v", err)
+			}
+		})
+	}
+}
+
+// TestServeStartupSaysNothingWhenTheLockIsHeld: a lock held past the timeout
+// at startup is not a verdict — no Warn about the pinned key, serve starts,
+// no floor. (Startup waits out lockTimeout first, so the address-file
+// deadline is widened.)
+func TestServeStartupSaysNothingWhenTheLockIsHeld(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _, _ := pinnedRoot(t)
+	holdLock(t, "file", installedLock(ctl), 9000)
+	logs := startServeOnceWithin(t, ctl, 12*time.Second)
+	if strings.Contains(logs, "pinned key") || strings.Contains(logs, "level=WARN") {
+		t.Fatalf("busy at startup says nothing:\n%s", logs)
+	}
+	if !strings.Contains(logs, "serve started") {
+		t.Fatalf("serve starts:\n%s", logs)
+	}
+	if _, err := os.Stat(verifyFloorPath(ctl)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("no floor at startup")
+	}
+}
+
+// TestRunRefusalMatrixWhenPinned: every recorded kind through cmdRun — exit
+// 1, "run: <reason>" then "run r-… refused: <headline>", the run ledger's
+// run_refused.reason the full reason, and no control event. (Unsigned is
+// pinned in TestRunRefusesAnUnsignedInstallWhenPinned.)
+func TestRunRefusalMatrixWhenPinned(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, id := pinnedRoot(t)
+	hash := readPointer(t, ctl)
+	logID := controlLogID(t, ctl)
+	store := installedStore(ctl)
+	sigPath := config.SignaturePath(store, hash)
+	priv := hostPriv(t, ctl)
+	at := controlEvents(t, ctl)[0].Time.UTC()
+	valid := mustRead(t, sigPath)
+	events := len(controlEvents(t, ctl))
+
+	run := func(name, wantReason, wantHeadline string) {
+		t.Helper()
+		logs := t.TempDir()
+		var out bytes.Buffer
+		code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "hi", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", logs}, &out, io.Discard)
+		if code != 1 || !strings.Contains(out.String(), "run: "+wantReason+"\n") {
+			t.Fatalf("%s: code %d\n%s", name, code, out.String())
+		}
+		m := regexp.MustCompile(`run (r-[0-9a-f]{16}) refused: ` + regexp.QuoteMeta(wantHeadline) + `\n`).FindStringSubmatch(out.String())
+		if m == nil {
+			t.Fatalf("%s: result line:\n%s", name, out.String())
+		}
+		ev, _, err := engine.ReadLog(logs, m[1])
+		if err != nil || len(ev) != 1 || ev[0].Type != "run_refused" || ev[0].Reason != wantReason {
+			t.Fatalf("%s: ledger %+v %v", name, ev, err)
+		}
+		if len(controlEvents(t, ctl)) != events {
+			t.Fatalf("%s: wrote a control event", name)
+		}
+	}
+
+	foreign, _ := config.SignaturePayload(hash, logID, 1, at, goldenKeyID)
+	writeSigAt(t, ctl, foreign, config.Sign(priv, foreign))
+	run("unknown key", "configuration not verified: unknown key: signature is by key "+goldenKeyID+"; configured key is "+id, "configuration not verified: unknown key")
+
+	good, _ := config.SignaturePayload(hash, logID, 1, at, id)
+	writeSigAt(t, ctl, good, config.Sign(priv, foreign))
+	run("bad signature", "configuration not verified: bad signature", "configuration not verified: bad signature")
+
+	if err := os.WriteFile(sigPath, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyFloorPath(ctl), []byte(logID+" 5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("stale", "configuration not verified: stale: version 1 is below this root's verified floor 5 (ledger "+logID+")", "configuration not verified: stale")
+
+	if err := os.WriteFile(verifyFloorPath(ctl), []byte(strings.Repeat("f", 32)+" 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("foreign ledger", "configuration not verified: foreign ledger: install is of ledger "+logID+"; this root last verified ledger "+strings.Repeat("f", 32)+" (version 1); remove "+verifyFloorPath(ctl)+" to accept the new ledger", "configuration not verified: foreign ledger")
+
+	if err := os.WriteFile(verifyFloorPath(ctl), []byte("garbage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("not verifiable: floor", "configuration not verifiable: verify.floor: 1 fields; want <log_id> <version>", "configuration not verifiable")
+	if err := os.Remove(verifyFloorPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(verifyPubPath(ctl), []byte("junk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("not verifiable: pin", "configuration not verifiable: pinned key "+verifyPubPath(ctl)+": signing public key: no PEM block", "configuration not verifiable")
+	pinHostKey(t, ctl)
+
+	// And the pass, for the matrix's sake: exit 0, floor created.
+	var out bytes.Buffer
+	if code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "hi", "--as", "dana@example.com", "--config", root, "--control-log", ctl, "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir()}, &out, io.Discard); code != 0 || !strings.Contains(out.String(), "finished: succeeded") {
+		t.Fatalf("pass: %d\n%s", code, out.String())
+	}
+	if floorBytes(t, ctl) != logID+" 1\n" {
+		t.Fatalf("floor %q", floorBytes(t, ctl))
+	}
+}

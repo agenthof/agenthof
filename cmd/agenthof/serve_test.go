@@ -155,12 +155,17 @@ func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
 	}
 }
 
-// startServeOnce starts serve on ctl with a stderr buffer, waits for the
-// address file, stops it, and returns the operational log.
 func startServeOnce(t *testing.T, ctl string) string {
 	t.Helper()
-	t.Chdir(t.TempDir())                                 // serve's relative defaults land here, never in the repo
-	t.Setenv("AGENTHOF_OIDC_ISSUER", "https://idp.test") // never dialed
+	return startServeOnceWithin(t, ctl, 5*time.Second)
+}
+
+// startServeOnceWithin is startServeOnce with a chosen deadline for the
+// address file — for a startup that must first wait out lockTimeout.
+func startServeOnceWithin(t *testing.T, ctl string, within time.Duration) string {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_OIDC_ISSUER", "https://idp.test")
 	addrFile := filepath.Join(t.TempDir(), "addr")
 	ctx, cancel := context.WithCancel(context.Background())
 	var out, logs bytes.Buffer
@@ -168,7 +173,7 @@ func startServeOnce(t *testing.T, ctl string) string {
 	go func() {
 		done <- cmdServe(ctx, []string{"--addr", "127.0.0.1:0", "--addr-file", addrFile, "--control-log", ctl, "--log-dir", t.TempDir()}, &out, &logs)
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		if b, err := os.ReadFile(addrFile); err == nil && strings.TrimSpace(string(b)) != "" {
 			break
@@ -181,7 +186,7 @@ func startServeOnce(t *testing.T, ctl string) string {
 		if code != 0 {
 			t.Fatalf("serve exited %d\n%s", code, out.String())
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(within):
 		t.Fatal("serve did not stop")
 	}
 	return logs.String()
