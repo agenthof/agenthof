@@ -501,3 +501,58 @@ func TestServeStartupWarnsWhenThePinnedKeyDoesNotVerify(t *testing.T) {
 		t.Fatalf("serve starts in every case:\n%s", logs)
 	}
 }
+
+// TestServeStartupWarnsWhenTheInstallIsNotOnRecord: unpinned, a hand-aimed
+// pointer → serve starts, logs exactly one Warn with the not-on-record line
+// and the reason, names NO key, keeps the loaded configuration's step timeout
+// as the shutdown deadline; a damaged ledger → one Warn with the
+// cannot-be-vouched line (never "not on record", never a key); a vouched
+// root → zero Warn. Nothing is written under the store or beside the ledger
+// except installed.lock.
+func TestServeStartupWarnsWhenTheInstallIsNotOnRecord(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	writeFileIn(t, root, "gateway.yaml", "models:\n  fast:\n    endpoint: https://example.test/v1\n    model: m\n    api_key_env: K\nstep_timeout: 90s\n")
+	ctl := applied(t, root)
+	hashA := readPointer(t, ctl)
+	if logs := startServeOnce(t, ctl); strings.Contains(logs, "level=WARN") {
+		t.Fatalf("vouched root: no warning:\n%s", logs)
+	}
+
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	applyAs(t, root, ctl)
+	hashB := readPointer(t, ctl)
+	repointTo(t, ctl, hashA)
+	logs := startServeOnce(t, ctl)
+	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "installed configuration is not on record in the control ledger; every run will be refused until it is") ||
+		!strings.Contains(logs, "configuration not on record: last recorded install is "+hashB+" (apply); re-apply (for a torn ledger, audit repair control first)") {
+		t.Fatalf("not on record:\n%s", logs)
+	}
+	if strings.Contains(logs, "pinned_key=") || strings.Contains(logs, "pinned key") {
+		t.Fatalf("no key is pinned, so none is named:\n%s", logs)
+	}
+	if strings.Count(logs, "level=WARN") != 1 {
+		t.Fatalf("exactly one Warn:\n%s", logs)
+	}
+	if !strings.Contains(logs, "shutdown_timeout=1m30s") || !strings.Contains(logs, "serve started") {
+		t.Fatalf("cfg is kept for the deadline and serve starts:\n%s", logs)
+	}
+	if _, err := os.Stat(verifyFloorPath(ctl)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("unpinned startup writes no floor: %v", err)
+	}
+
+	// damaged ledger: the neutral line, the reason carries the repair hint.
+	repointTo(t, ctl, hashB)
+	appendFragment(t, ctl)
+	logs = startServeOnce(t, ctl)
+	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "installed configuration cannot be vouched for; every run will be refused until the cause is fixed") ||
+		!strings.Contains(logs, "configuration not verifiable: control ledger damaged; run: agenthof audit repair control --control-log "+ctl) {
+		t.Fatalf("damaged:\n%s", logs)
+	}
+	if strings.Contains(logs, "not on record") || strings.Contains(logs, "pinned_key=") {
+		t.Fatalf("a damaged ledger is not a not-on-record verdict and names no key:\n%s", logs)
+	}
+	if strings.Count(logs, "level=WARN") != 1 || !strings.Contains(logs, "serve started") {
+		t.Fatalf("one Warn, serve starts:\n%s", logs)
+	}
+}

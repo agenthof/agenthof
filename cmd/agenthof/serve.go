@@ -74,10 +74,11 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 		// With nothing usable installed the zero GatewayConfig's default
 		// applies, and serve says so once — it starts either way, because
 		// apply is a separate command and every run is refused until one
-		// lands. With a key pinned beside the control ledger the read judges
-		// the install too (verifyOnly: it writes no floor) and warns once
-		// when it does not verify; serve starts either way, since every run
-		// verifies for itself. The timeout is read once: a later apply with
+		// lands. The read vouches the install against the control ledger (and,
+		// with a key pinned beside it, verifies the signature too —
+		// verifyOnly: it writes no floor) and warns once when it cannot;
+		// serve starts either way, since every run vouches for itself in
+		// Prepare. The timeout is read once: a later apply with
 		// a longer step_timeout does not move this deadline
 		// (--shutdown-timeout does).
 		cfg, _, _, installed, errs, unverified := resolveRunConfig(*controlLog, "", verifyOnly)
@@ -92,9 +93,22 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 		case unverified != nil:
 			// The reason carries its own remedy where one exists; the
 			// startup line adds none. cfg loaded fine: its step timeout is
-			// the right deadline — startup executes nothing under it.
-			logger.Warn("installed configuration does not verify against the pinned key; every run will be refused until it does",
-				"store", installedStore(*controlLog), "reason", unverified.Error(), "pinned_key", verifyPubPath(*controlLog))
+			// the right deadline — startup executes nothing under it. The
+			// kind is the honest discriminator: not-on-record names no key;
+			// a pin (or a pin fault — that fault IS the verdict) takes the
+			// pinned line; anything else unpinned is a lock or ledger fault.
+			pinned, _, pinErr := pinnedKeyPath(*controlLog, "")
+			switch {
+			case unverified.Kind == verifyNotOnRecord:
+				logger.Warn("installed configuration is not on record in the control ledger; every run will be refused until it is",
+					"store", installedStore(*controlLog), "reason", unverified.Error())
+			case pinned || pinErr != nil:
+				logger.Warn("installed configuration does not verify against the pinned key; every run will be refused until it does",
+					"store", installedStore(*controlLog), "reason", unverified.Error(), "pinned_key", verifyPubPath(*controlLog))
+			default:
+				logger.Warn("installed configuration cannot be vouched for; every run will be refused until the cause is fixed",
+					"store", installedStore(*controlLog), "reason", unverified.Error())
+			}
 		case !installed:
 			logger.Warn("no configuration installed; every run will be refused until apply", "store", installedStore(*controlLog))
 		default:
