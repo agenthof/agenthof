@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/ledger"
@@ -226,7 +227,7 @@ func TestRecordedInstall(t *testing.T) {
 		t.Fatalf("%+v %v", facts, refusal)
 	}
 	// Not the recorded hash → not on record (definitive under the shared lock).
-	if _, r := recordedInstall(ctl, "sha256:"+strings.Repeat("0", 64)); r == nil || r.Kind != verifyNotVerifiable || r.Detail != "installed configuration is not on record; re-apply, or run audit repair control" {
+	if _, r := recordedInstall(ctl, "sha256:"+strings.Repeat("0", 64)); r == nil || r.Kind != verifyNotOnRecord || r.Detail != "last recorded install is "+hash+" (apply); re-apply (for a torn ledger, audit repair control first)" {
 		t.Fatalf("other hash: %+v", r)
 	}
 	// Torn tail → damaged, with the repair hint naming the ledger.
@@ -238,7 +239,7 @@ func TestRecordedInstall(t *testing.T) {
 	if err := os.Remove(ctl); err != nil {
 		t.Fatal(err)
 	}
-	if _, r := recordedInstall(ctl, hash); r == nil || r.Kind != verifyNotVerifiable || !strings.HasPrefix(r.Detail, "installed configuration is not on record") {
+	if _, r := recordedInstall(ctl, hash); r == nil || r.Kind != verifyNotOnRecord || r.Detail != "no install on record; re-apply (for a torn ledger, audit repair control first)" {
 		t.Fatalf("no ledger: %+v", r)
 	}
 	// Genesis without log_id → not verifiable, named.
@@ -256,6 +257,348 @@ func TestRecordedInstall(t *testing.T) {
 	if _, r := recordedInstall(ctl2, hash2); r == nil || r.Kind != verifyNotVerifiable || r.Detail != "control ledger genesis has no log_id" {
 		t.Fatalf("no log_id: %+v", r)
 	}
+}
+
+// TestVouchInstalledIsLastInstallingPlusHashEquality: the vouch every
+// execution read performs — a clean ledger vouches the pointer and returns
+// the install; a re-aimed pointer is not on record with the last install
+// named and labelled; after a flip the label is the flip's.
+func TestVouchInstalledIsLastInstallingPlusHashEquality(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, _ := signedRoot(t)
+	hashA := readPointer(t, ctl)
+	records, last, refusal := vouchInstalled(ctl, hashA)
+	if refusal != nil || len(records) != 1 || last.ConfigHash != hashA || last.Seq != 1 || last.Action != "apply" {
+		t.Fatalf("clean: refusal=%v records=%d last=%+v", refusal, len(records), last)
+	}
+	// apply B (a different directory), then re-aim the pointer at A: A's
+	// bytes still hash as A, the ledger's last install is B.
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	applyAs(t, root, ctl)
+	hashB := readPointer(t, ctl)
+	if hashB == hashA {
+		t.Fatal("B must differ from A")
+	}
+	if _, _, refusal := vouchInstalled(ctl, hashB); refusal != nil {
+		t.Fatalf("B vouches: %v", refusal)
+	}
+	repointTo(t, ctl, hashA)
+	_, _, refusal = vouchInstalled(ctl, hashA)
+	if refusal == nil || refusal.Kind != verifyNotOnRecord || refusal.Detail != "last recorded install is "+hashB+" (apply); re-apply (for a torn ledger, audit repair control first)" {
+		t.Fatalf("re-aimed: %+v", refusal)
+	}
+	if refusal.Headline() != "configuration not on record" || refusal.Error() != "configuration not on record: "+refusal.Detail {
+		t.Fatalf("texts: %q %q", refusal.Headline(), refusal.Error())
+	}
+	// A flip against the installed B is an install; re-aim at B afterwards
+	// and the label names the flip.
+	repointTo(t, ctl, hashB)
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("flip: %d\n%s", code, out.String())
+	}
+	hashF := readPointer(t, ctl)
+	if _, last, refusal := vouchInstalled(ctl, hashF); refusal != nil || last.Action != "disable" || last.Agent != "coder" {
+		t.Fatalf("flip vouches: %v %+v", refusal, last)
+	}
+	repointTo(t, ctl, hashB)
+	if _, _, refusal := vouchInstalled(ctl, hashB); refusal == nil || refusal.Kind != verifyNotOnRecord || refusal.Detail != "last recorded install is "+hashF+" (disable agent coder); re-apply (for a torn ledger, audit repair control first)" {
+		t.Fatalf("re-aimed after a flip: %+v", refusal)
+	}
+}
+
+// repointTo hand-aims installed/current at hash — the pointer write a
+// hostile or careless hand makes, with no lock and no record.
+func repointTo(t *testing.T, ctl, hash string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(installedStore(ctl), config.InstalledPointer), []byte(hash+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestVouchInstalledClassifiesTheLedgerAsThePullDoes: the switch is on
+// ReadVerify's error alone — no file → not on record (never damaged); torn →
+// damaged with the repair hint; a mid-file chain break → damaged; an
+// unreadable file → not verifiable naming the OS error, NO repair hint; the
+// ledger flock held → busy; and a torn ledger REPAIRED → tainted, chain
+// verifies, vouches (IsTainted is a verdict about history, not the pointer).
+func TestVouchInstalledClassifiesTheLedgerAsThePullDoes(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, _ := signedRoot(t)
+	hash := readPointer(t, ctl)
+	clean := mustRead(t, ctl)
+
+	// torn tail after the install record: damaged, with the hint.
+	appendFragment(t, ctl)
+	if _, _, r := vouchInstalled(ctl, hash); r == nil || r.Kind != verifyNotVerifiable || r.Detail != "control ledger damaged; run: agenthof audit repair control --control-log "+ctl {
+		t.Fatalf("torn: %+v", r)
+	}
+	// repaired: tainted, verifies, vouches.
+	repairAs(t, root, ctl)
+	records, _, r := vouchInstalled(ctl, hash)
+	if r != nil {
+		t.Fatalf("repaired must vouch: %+v", r)
+	}
+	if tainted, _ := control.IsTainted(records); !tainted {
+		t.Fatal("the fixture must be tainted for this to prove anything")
+	}
+	// broken mid-file: flip one byte of the genesis record's hash chain.
+	if err := os.WriteFile(ctl, clean, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	applyAs(t, root, ctl) // seq 2, so a break at seq 1 is mid-file
+	broken := mustRead(t, ctl)
+	i := bytes.Index(broken, []byte(`"outcome":"success"`))
+	if i < 0 {
+		t.Fatal("fixture")
+	}
+	broken[i+len(`"outcome":"`)] = 'S'
+	if err := os.WriteFile(ctl, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, r := vouchInstalled(ctl, hash); r == nil || r.Kind != verifyNotVerifiable || !strings.HasPrefix(r.Detail, "control ledger damaged; run: agenthof audit repair control") {
+		t.Fatalf("broken: %+v", r)
+	}
+	if err := os.WriteFile(ctl, clean, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// S4: unreadable (0000) — the OS error, no repair hint (skip as root).
+	if os.Geteuid() != 0 {
+		if err := os.Chmod(ctl, 0); err != nil {
+			t.Fatal(err)
+		}
+		_, _, r := vouchInstalled(ctl, hash)
+		if err := os.Chmod(ctl, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if r == nil || r.Kind != verifyNotVerifiable || !strings.HasPrefix(r.Detail, "control ledger "+ctl+": ") || !strings.Contains(r.Detail, "permission denied") || strings.Contains(r.Detail, "repair") {
+			t.Fatalf("unreadable: %+v", r)
+		}
+	}
+	// S4: the ledger path is a directory — ReadVerify reads it as an empty
+	// chain (open succeeds, the first read yields no record and no error),
+	// so the switch, which is on ReadVerify's error alone, classifies it as
+	// not on record (an empty chain vouches for nothing), never damaged.
+	if err := os.Remove(ctl); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(ctl, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, r := vouchInstalled(ctl, hash); r == nil || r.Kind != verifyNotOnRecord || r.Detail != "no install on record; re-apply (for a torn ledger, audit repair control first)" {
+		t.Fatalf("EISDIR: %+v", r)
+	}
+	if err := os.Remove(ctl); err != nil {
+		t.Fatal(err)
+	}
+	// no file, pointer present: an empty chain vouches for nothing — not on record, never damaged.
+	if _, _, r := vouchInstalled(ctl, hash); r == nil || r.Kind != verifyNotOnRecord || r.Detail != "no install on record; re-apply (for a torn ledger, audit repair control first)" {
+		t.Fatalf("no ledger: %+v", r)
+	}
+}
+
+// TestVouchInstalledRepairedInstallRecordNeedsReapply: the torn fragment
+// WAS the install's own success record. Damaged first; after repair the
+// chain verifies but the last install is the PREVIOUS one, so the verdict is
+// not on record with the remedy in the right order (re-apply; repair first
+// only for a torn ledger — which the operator just did); a re-apply heals it
+// through CommitSnapshot's identical-snapshot branch, and the ledger stays
+// tainted while it vouches.
+func TestVouchInstalledRepairedInstallRecordNeedsReapply(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, _ := signedRoot(t)
+	hashA := readPointer(t, ctl)
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	applyAs(t, root, ctl)
+	hashB := readPointer(t, ctl)
+	// Tear B's own record: drop the trailing bytes of the last line.
+	raw := mustRead(t, ctl)
+	if err := os.WriteFile(ctl, raw[:len(raw)-10], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, r := vouchInstalled(ctl, hashB); r == nil || r.Kind != verifyNotVerifiable || !strings.HasPrefix(r.Detail, "control ledger damaged") {
+		t.Fatalf("torn install record: %+v", r)
+	}
+	repairAs(t, root, ctl)
+	_, _, r := vouchInstalled(ctl, hashB)
+	if r == nil || r.Kind != verifyNotOnRecord || r.Detail != "last recorded install is "+hashA+" (apply); re-apply (for a torn ledger, audit repair control first)" {
+		t.Fatalf("after repair the install is not on record: %+v", r)
+	}
+	applyAs(t, root, ctl) // identical snapshot B: re-points, records
+	if _, last, r := vouchInstalled(ctl, hashB); r != nil || last.ConfigHash != hashB {
+		t.Fatalf("re-apply heals: %v %+v", r, last)
+	}
+	if recs, _, err := ledger.ReadVerify(ctl, ledger.Locked); err != nil {
+		t.Fatal(err)
+	} else if tainted, _ := control.IsTainted(recs); !tainted {
+		t.Fatal("still tainted, still vouches")
+	}
+}
+
+// TestVouchInstalledGenesisWithoutLogIDVouchesUnpinned: a control root
+// older than the genesis log_id vouches (the vouch stops at LastInstalling);
+// the pinned layer still refuses it by name.
+func TestVouchInstalledGenesisWithoutLogIDVouchesUnpinned(t *testing.T) {
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	hash := installByHandWithPointer(t, ctl, map[string]string{"roles/ops.yaml": "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply]\n"})
+	c, err := ledger.Open(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"v":"control/1","seq":1,"time":"2026-10-09T02:12:01Z","action":"apply","outcome":"success","invoker":{"subject":"dana@example.com","issuer":"local","method":"asserted"},"witness":{"os_user":"dana","hostname":"h"},"config_hash":"` + hash + `","prev":""}`
+	if err := c.Append([]byte(line)); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	if _, last, r := vouchInstalled(ctl, hash); r != nil || last.ConfigHash != hash {
+		t.Fatalf("unpinned vouches: %v %+v", r, last)
+	}
+	if _, r := recordedInstall(ctl, hash); r == nil || r.Kind != verifyNotVerifiable || r.Detail != "control ledger genesis has no log_id" {
+		t.Fatalf("pinned layer: %+v", r)
+	}
+}
+
+// TestVouchInstalledPreR14FlipRootRefusesUntilApply pins the one admitted
+// behavior change: a root whose last installing event is a kill-switch record
+// carrying a directory hash with no Bootstrap marker (the shape written
+// before flips re-snapshotted the install) refuses every run as not on
+// record — labelled with the flip — until one apply.
+func TestVouchInstalledPreR14FlipRootRefusesUntilApply(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, _ := signedRoot(t)
+	hash := readPointer(t, ctl)
+	dirHash := "sha256:" + strings.Repeat("d", 64)
+	if _, err := control.Append(ctl, control.Event{Action: "disable", Agent: "coder", Outcome: "success", Invoker: admin, Witness: control.CaptureWitness(), ConfigHash: dirHash}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, r := vouchInstalled(ctl, hash)
+	if r == nil || r.Kind != verifyNotOnRecord || r.Detail != "last recorded install is "+dirHash+" (disable agent coder); re-apply (for a torn ledger, audit repair control first)" {
+		t.Fatalf("pre-R1.4 root: %+v", r)
+	}
+	if _, mismatch := installedPointerLine(ctl, controlRecords(t, ctl)); !mismatch {
+		t.Fatal("the audit readers must say the same")
+	}
+	applyAs(t, root, ctl)
+	if _, _, r := vouchInstalled(ctl, readPointer(t, ctl)); r != nil {
+		t.Fatalf("one apply heals: %v", r)
+	}
+}
+
+// controlRecords is the verified chain, for the audit readers' line.
+func controlRecords(t *testing.T, ctl string) []ledger.Record {
+	t.Helper()
+	recs, _, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return recs
+}
+
+// TestVouchInstalledAgreesWithTheAuditReaders is the seam pin: over every
+// fixture ReadVerify accepts, vouchInstalled refuses ⇔ installedPointerLine
+// reports mismatch — the vouch is a pure consumer of control.Installing, so a
+// future Installing change (an adopted record) propagates with no edit here.
+// Fixtures: bootstrap apply; a bootstrap-era flip then the first apply; a flip
+// against the install; rm current + re-bootstrap; a hand-aimed pointer; a
+// dropped-in snapshot; the crash gap and its re-apply; a removed ledger.
+func TestVouchInstalledAgreesWithTheAuditReaders(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	agree := func(name, ctl string) {
+		t.Helper()
+		hash := readPointer(t, ctl)
+		_, _, r := vouchInstalled(ctl, hash)
+		_, mismatch := installedPointerLine(ctl, controlRecords(t, ctl))
+		if (r == nil) == mismatch {
+			t.Fatalf("%s: vouch refusal=%v, audit mismatch=%v — one judgment", name, r, mismatch)
+		}
+		if r != nil && r.Kind != verifyNotOnRecord {
+			t.Fatalf("%s: over an accepted chain the only refusal is not on record: %+v", name, r)
+		}
+	}
+
+	// bootstrap apply: vouched.
+	root := writeSample(t)
+	ctl := applied(t, root)
+	agree("bootstrap apply", ctl)
+	if _, _, r := vouchInstalled(ctl, readPointer(t, ctl)); r != nil {
+		t.Fatalf("a bootstrap apply IS an install: %v", r)
+	}
+
+	// bootstrap-era flip (nothing installed: edits the directory, records
+	// the directory's hash, Bootstrap: true) then the first apply: vouched.
+	root2 := writeSample(t)
+	ctl2 := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root2, "--control-log", ctl2, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("bootstrap flip: %d\n%s", code, out.String())
+	}
+	if code := cmdRegistry([]string{"enable", "coder", "--config", root2, "--control-log", ctl2, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("bootstrap flip back: %d\n%s", code, out.String())
+	}
+	applyAs(t, root2, ctl2)
+	agree("bootstrap-era flips then first apply", ctl2)
+	if _, _, r := vouchInstalled(ctl2, readPointer(t, ctl2)); r != nil {
+		t.Fatalf("first apply after bootstrap flips vouches: %v", r)
+	}
+
+	// flip against the install: vouched (the flip is the install).
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("flip: %d\n%s", code, out.String())
+	}
+	agree("flip against the install", ctl)
+	if _, _, r := vouchInstalled(ctl, readPointer(t, ctl)); r != nil {
+		t.Fatalf("a flip against the install vouches: %v", r)
+	}
+
+	// rm current + re-bootstrap: vouched.
+	if err := os.Remove(filepath.Join(installedStore(ctl), config.InstalledPointer)); err != nil {
+		t.Fatal(err)
+	}
+	applyAs(t, root, ctl)
+	agree("rm current + re-bootstrap", ctl)
+	if _, _, r := vouchInstalled(ctl, readPointer(t, ctl)); r != nil {
+		t.Fatalf("re-bootstrap vouches: %v", r)
+	}
+
+	// hand-aimed: apply B, repoint A.
+	hashA := readPointer(t, ctl)
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	applyAs(t, root, ctl)
+	repointTo(t, ctl, hashA)
+	agree("hand-aimed", ctl)
+	if _, _, r := vouchInstalled(ctl, hashA); r == nil {
+		t.Fatal("a hand-aimed pointer must be refused")
+	}
+
+	// dropped-in: a snapshot nothing applied.
+	installByHandWithPointer(t, ctl, map[string]string{"roles/ops.yaml": "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply]\n"})
+	agree("dropped-in", ctl)
+	if _, _, r := vouchInstalled(ctl, readPointer(t, ctl)); r == nil {
+		t.Fatal("a dropped-in snapshot must be refused")
+	}
+
+	// crash gap: pointer moved, no record; then the re-apply heals.
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan hardest\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_install_before_append")
+	if code, s := applyCode(t, root, ctl); code != 1 || !strings.Contains(s, msgInstalledNotRecorded) {
+		t.Fatalf("crash hook: %d\n%s", code, s)
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	agree("crash gap", ctl)
+	if _, _, r := vouchInstalled(ctl, readPointer(t, ctl)); r == nil {
+		t.Fatal("the install→record gap must be refused")
+	}
+	applyAs(t, root, ctl)
+	agree("re-apply after the gap", ctl)
+	if _, _, r := vouchInstalled(ctl, readPointer(t, ctl)); r != nil {
+		t.Fatalf("re-apply heals: %v", r)
+	}
+
+	// removed ledger, pointer present: not on record.
+	if err := os.Remove(ctl); err != nil {
+		t.Fatal(err)
+	}
+	agree("removed ledger", ctl)
 }
 
 func TestJudgeFloorRules(t *testing.T) {
@@ -559,21 +902,25 @@ func TestPinnedVerifyNotVerifiableCauses(t *testing.T) {
 	pin := verifyPubPath(ctl)
 	pubPEM := mustRead(t, pin)
 
-	expectNV := func(name, detailPrefix string, key string) *verifyRefusal {
+	expectRefusal := func(name string, kind verifyKind, detailPrefix string, key string) *verifyRefusal {
 		t.Helper()
 		before := ledgerBytes(t, ctl)
 		cfg, reg, h, installed, errs, unverified := resolveRunConfig(ctl, key, verifyAndAdvance)
 		if !bytes.Equal(before, ledgerBytes(t, ctl)) {
 			t.Fatalf("%s: wrote the control ledger", name)
 		}
-		if unverified == nil || unverified.Kind != verifyNotVerifiable || !strings.HasPrefix(unverified.Detail, detailPrefix) {
-			t.Fatalf("%s: want not verifiable %q…, got unverified=%v reg=%v errs=%v", name, detailPrefix, unverified, reg, errs)
+		if unverified == nil || unverified.Kind != kind || !strings.HasPrefix(unverified.Detail, detailPrefix) {
+			t.Fatalf("%s: want kind %d %q…, got unverified=%v reg=%v errs=%v", name, kind, detailPrefix, unverified, reg, errs)
 		}
 		if reg != nil || errs != nil {
 			t.Fatalf("%s: reg=%v errs=%v", name, reg, errs)
 		}
 		_, _, _ = cfg, h, installed
 		return unverified
+	}
+	expectNV := func(name, detailPrefix string, key string) *verifyRefusal {
+		t.Helper()
+		return expectRefusal(name, verifyNotVerifiable, detailPrefix, key)
 	}
 
 	// The pin, judged before any lock: unreadable; junk; a PRIVATE KEY block; a named path that is absent.
@@ -645,7 +992,7 @@ func TestPinnedVerifyNotVerifiableCauses(t *testing.T) {
 	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_install_before_append")
 	_, _ = applyCode(t, root, ctl)
 	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
-	_ = expectNV("crash in the install→record gap", "installed configuration is not on record; re-apply, or run audit repair control", "")
+	_ = expectRefusal("crash in the install→record gap", verifyNotOnRecord, "last recorded install is ", "")
 	applyAs(t, root, ctl) // re-apply records and signs it; the pass advances the floor
 	if _, reg, _, _, _, unverified := resolveAdvance(t, ctl); reg == nil || unverified != nil {
 		t.Fatalf("re-apply heals: %v", unverified)
@@ -656,13 +1003,13 @@ func TestPinnedVerifyNotVerifiableCauses(t *testing.T) {
 	if err := os.Remove(ctl); err != nil {
 		t.Fatal(err)
 	}
-	_ = expectNV("ledger removed", "installed configuration is not on record", "")
+	_ = expectRefusal("ledger removed", verifyNotOnRecord, "no install on record", "")
 	// ORDER: ledger removed AND .sig removed → not on record (the ledger is read first).
 	hash := readPointer(t, ctl)
 	if err := os.Remove(config.SignaturePath(installedStore(ctl), hash)); err != nil {
 		t.Fatal(err)
 	}
-	_ = expectNV("no ledger, no .sig", "installed configuration is not on record", "")
+	_ = expectRefusal("no ledger, no .sig", verifyNotOnRecord, "no install on record", "")
 	if err := os.WriteFile(ctl, ledgerSaved, 0o600); err != nil {
 		t.Fatal(err)
 	}

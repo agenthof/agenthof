@@ -277,32 +277,67 @@ type installFacts struct {
 	At      time.Time
 }
 
-// recordedInstall reads the control ledger's account of the install at hash,
-// classified exactly as buildSignature does: a held ledger flock → busy
-// (unrecorded); no file → an empty chain that vouches for nothing (the next
-// step says "not on record", never "damaged"); torn or broken → damaged with
-// the repair hint; the last installing event must name the pointer (under
-// the shared installed.lock this is definitive: a crash in the install→record
-// gap, a removed or truncated ledger, or a hand-moved pointer — never the
-// millisecond between Append and sign); then the genesis log_id. The caller
-// holds installed.lock shared; lock order is store → ledger, as for every
-// writer. A damaged ledger is a RECORDED refusal here (the pull answers an
-// unrecorded 500 for the same state): a run is a policy-bearing action an
-// invoker attempted, and Article III wants the attempt and why it did not
-// execute in the ledger.
-func recordedInstall(controlLog, hash string) (installFacts, *verifyRefusal) {
+// remedyReapply is the not-on-record remedy, in the order that is right
+// after a repair: re-apply heals through CommitSnapshot's identical-snapshot
+// branch; a torn ledger must be repaired BEFORE that, never instead of it.
+const remedyReapply = "re-apply (for a torn ledger, audit repair control first)"
+
+// vouchInstalled is the vouch every execution read performs, pinned or not,
+// under the shared installed.lock the caller holds: the control ledger must
+// record hash as the LAST install — control.LastInstalling(records).ConfigHash
+// == hash, and NOTHING ELSE. Classified exactly as the pull is (pull.go): a
+// held ledger flock → busy (unrecorded); no file → an empty chain that vouches
+// for nothing (the next step says "not on record", never "damaged"); torn or
+// broken → not verifiable, damaged, with the repair hint (the valid prefix is
+// not used to vouch); any other read error → not verifiable, the OS error, no
+// hint (a permission fault is not a damaged chain); then the last installing
+// event must name the pointer, or the verdict is not on record. Under the
+// shared lock that verdict is definitive — a crash in the install→record gap,
+// a removed or truncated ledger, a hand-moved pointer or a dropped-in snapshot —
+// never the millisecond between CommitSnapshot and Append, which every writer
+// publishes under the exclusive lock. It is ONE judgment with
+// installedPointerLine (the audit readers) and pullConfig's step 6: vouched
+// here ⇔ installedPointerLine reports mismatch == false there. A tainted
+// (repaired) ledger that verifies vouches; IsTainted is a verdict about
+// history, not about the pointer. The genesis log_id is NOT read here: it is
+// the signature's concern (recordedInstall / pinnedVerify), and a control
+// root older than the log_id must still run unpinned. A damaged ledger is a
+// RECORDED refusal here (the pull answers an unrecorded 500 for the same
+// state): a run is a policy-bearing action an invoker attempted, and Article
+// III wants the attempt and why it did not execute in the ledger.
+func vouchInstalled(controlLog, hash string) (records []ledger.Record, last control.DecodedEvent, refusal *verifyRefusal) {
 	records, _, verr := ledger.ReadVerify(controlLog, ledger.Locked)
+	var torn *ledger.TornError
+	var broken *ledger.ChainBrokenError
 	switch {
 	case errors.Is(verr, ledger.ErrLockHeld):
-		return installFacts{}, &verifyRefusal{Kind: verifyBusy}
+		return nil, control.DecodedEvent{}, &verifyRefusal{Kind: verifyBusy}
 	case errors.Is(verr, fs.ErrNotExist):
 		records = nil
+	case errors.As(verr, &torn) || errors.As(verr, &broken):
+		return nil, control.DecodedEvent{}, notVerifiable("control ledger damaged; run: agenthof audit repair control --control-log " + controlLog)
 	case verr != nil:
-		return installFacts{}, notVerifiable("control ledger damaged; run: agenthof audit repair control --control-log " + controlLog)
+		return nil, control.DecodedEvent{}, notVerifiable(fmt.Sprintf("control ledger %s: %v", controlLog, verr))
 	}
 	last, found := control.LastInstalling(records)
-	if !found || last.ConfigHash != hash {
-		return installFacts{}, notVerifiable("installed configuration is not on record; re-apply, or run audit repair control")
+	switch {
+	case !found:
+		return nil, control.DecodedEvent{}, &verifyRefusal{Kind: verifyNotOnRecord, Detail: "no install on record; " + remedyReapply}
+	case last.ConfigHash != hash:
+		return nil, control.DecodedEvent{}, &verifyRefusal{Kind: verifyNotOnRecord, Detail: fmt.Sprintf("last recorded install is %s (%s); %s", last.ConfigHash, installLabel(last), remedyReapply)}
+	}
+	return records, last, nil
+}
+
+// recordedInstall is the pinned layer's account of the install at hash: the
+// vouch, then the genesis log_id the signature payload binds — read from the
+// records the vouch returned, so the ledger is read once per resolve. A
+// genesis without a log_id is not verifiable, named: no ledger this package
+// wrote looks like that, and a signature must not bind to a guessed identity.
+func recordedInstall(controlLog, hash string) (installFacts, *verifyRefusal) {
+	records, last, refusal := vouchInstalled(controlLog, hash)
+	if refusal != nil {
+		return installFacts{}, refusal
 	}
 	logID, err := control.GenesisLogID(records)
 	if err != nil {
