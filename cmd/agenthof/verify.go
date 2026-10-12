@@ -182,14 +182,17 @@ func writeVerifyFloor(controlLog, logID string, version int) error {
 	return nil
 }
 
-// verifyKind is one outcome of the pinned verify short of a pass. The five
-// judged kinds say the installed configuration is NOT the operator's current
-// install for this root; notVerifiable says the verdict could not be reached
-// because of a permanent fault — the pinned key, the floor, the ledger or the
-// pointer — and names the cause; busy is the one transient: installed.lock
-// (or the ledger flock inside it) could not be taken within the timeout.
-// Everything but busy is recorded as a run refusal (Article III); busy is
-// answered like every other busy in this codebase — retry, nothing recorded.
+// verifyKind is one outcome of the execution read's verify short of a pass.
+// The six judged kinds say the installed configuration is NOT the install
+// this root should execute: the five pinned verdicts (the signature or the
+// floor), and notOnRecord — the control ledger was read and its last install
+// is not the pointer, reachable with or without a pin; notVerifiable says the
+// verdict could not be reached because of a permanent fault — the pinned key,
+// the floor, or a ledger that cannot be read — and names the cause; busy is
+// the one transient: installed.lock (or the ledger flock inside it) could not
+// be taken within the timeout. Everything but busy is recorded as a run
+// refusal (Article III); busy is answered like every other busy in this
+// codebase — retry, nothing recorded.
 type verifyKind int
 
 const (
@@ -198,14 +201,18 @@ const (
 	verifyBadSignature                    // Ed25519 fails over the matching payload
 	verifyStale                           // same log_id, version below the floor
 	verifyForeignLedger                   // the floor names another log_id
-	verifyNotVerifiable                   // pinned key / floor unusable or unwritable; ledger damaged, genesis without log_id, pointer not on record
+	verifyNotOnRecord                     // the ledger was read and its last install is not the pointer: hand-aimed, dropped-in, or the install→record gap
+	verifyNotVerifiable                   // pinned key / floor unusable or unwritable; ledger damaged or unreadable; genesis without log_id (pinned)
 	verifyBusy                            // installed.lock or the ledger lock held past the timeout — UNRECORDED, retry
 )
 
-// verifyRefusal is the pinned verify's outcome short of a pass. Detail is
-// bounded: hex ids, decimals and this package's fixed phrases, or a parser's
-// fixed vocabulary (ParseSignatureFile, ParseSigningPub incl. x509's and a
-// %T, ParseVerifyFloor, an OS error); never a key, never file contents.
+// verifyRefusal is the execution read's outcome short of a pass. Detail is
+// bounded: hex ids, decimals and this package's fixed phrases, an agent name
+// from installLabel (a kill-switch flip's target — a name the run ledger
+// already carries via "configuration invalid: … depends on agent …"), or a
+// parser's fixed vocabulary (ParseSignatureFile, ParseSigningPub incl.
+// x509's and a %T, ParseVerifyFloor, an OS error); never a key, never file
+// contents.
 type verifyRefusal struct {
 	Kind   verifyKind
 	Detail string
@@ -233,6 +240,8 @@ func (r *verifyRefusal) Headline() string {
 		return "configuration not verified: stale"
 	case verifyForeignLedger:
 		return "configuration not verified: foreign ledger"
+	case verifyNotOnRecord:
+		return "configuration not on record"
 	case verifyNotVerifiable:
 		return "configuration not verifiable"
 	case verifyBusy:

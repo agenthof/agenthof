@@ -203,6 +203,7 @@ func TestVerifyRefusalStrings(t *testing.T) {
 		{verifyRefusal{Kind: verifyBadSignature}, "configuration not verified: bad signature", "configuration not verified: bad signature", false},
 		{verifyRefusal{Kind: verifyStale, Detail: "version 3 is below this root's verified floor 5 (ledger ab)"}, "configuration not verified: stale", "configuration not verified: stale: version 3 is below this root's verified floor 5 (ledger ab)", false},
 		{verifyRefusal{Kind: verifyForeignLedger, Detail: "install is of ledger a; this root last verified ledger b (version 5); remove /x/verify.floor to accept the new ledger"}, "configuration not verified: foreign ledger", "configuration not verified: foreign ledger: install is of ledger a; this root last verified ledger b (version 5); remove /x/verify.floor to accept the new ledger", false},
+		{verifyRefusal{Kind: verifyNotOnRecord, Detail: "last recorded install is sha256:ab (apply); re-apply (for a torn ledger, audit repair control first)"}, "configuration not on record", "configuration not on record: last recorded install is sha256:ab (apply); re-apply (for a torn ledger, audit repair control first)", false},
 		{*notVerifiable("pinned key /x/verify.pub: signing public key: no PEM block"), "configuration not verifiable", "configuration not verifiable: pinned key /x/verify.pub: signing public key: no PEM block", false},
 		{verifyRefusal{Kind: verifyBusy}, msgLockBusy, msgLockBusy, true},
 	} {
