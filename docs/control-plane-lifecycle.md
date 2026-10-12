@@ -458,6 +458,29 @@ With no key, nothing is signed and the transport and the token are the trust,
 exactly as before. The signature is as strong as the custody of that private
 key on the install host: it is evidence of origin, not a vault.
 
+Where an execution point pins that public key — at `verify.pub` beside the
+control ledger, or `agenthof run --verify-key <path>` — `run` and `serve` gate
+on it: they verify the installed configuration's signature against the pinned
+key **before executing it**, and refuse an unsigned, wrong-key, tampered,
+replayed, or rolled-back install. A persisted `verify.floor` remembers the
+highest `(log_id, version)` this point has verified, so an older signed install
+cannot be rolled back under it (refused *stale*) and a different control ledger
+is refused *foreign* until the floor is reset. The verify reads the pointer,
+the ledger and the signature under one shared hold of the configuration lock, so
+it never catches an install mid-write; a lock held past the timeout is a
+retryable *busy*, not a refusal, and is not recorded. Pinning is opt-in and
+fail-closed: with a key pinned, verification is mandatory. This is
+tamper-evidence at the point of execution, with the same honest bound as the
+ledger — it catches a tampered or partially-restored installed store, but a
+restore of the whole control root carries the floor with it, so exclude
+`verify.floor` from the backup set if it must survive one. The signature stays
+with the root that made the install: `config pull` names the signer but writes
+no signature, and an edge's own `apply` signs with the edge's key over the
+edge's ledger — so today a point verifies installs made on its own root, and a
+central operator key pinned at a pulling edge would refuse them. Carrying the
+operator's signature to a pulled configuration, so the edge verifies *the
+operator's* key, is reserved.
+
 ## 6. Reading it back
 
 ```
@@ -504,7 +527,8 @@ adopted. Because both carry the same key:
 | Shipped today | Reserved for later |
 |---|---|
 | `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune` | policy-as-config approval workflows |
-| operator signing of the installed snapshot: `config keygen` mints the Ed25519 pair on the host, every install signs (opt-in), and `serve` returns the signature on the pull and verifies it as it serves — 200 only when the ledger vouches **and** a matching signature verifies, else a retryable *not yet signed*; `config sign` (re)signs an install; the public key is pinned at the edge | verifying the signature on the `run` read with a staleness bound; a recorded key-lifecycle event for rotation and revocation |
+| operator signing of the installed snapshot: `config keygen` mints the Ed25519 pair on the host, every install signs (opt-in), and `serve` returns the signature on the pull and verifies it as it serves — 200 only when the ledger vouches **and** a matching signature verifies, else a retryable *not yet signed*; `config sign` (re)signs an install; the public key is pinned at the edge | a recorded key-lifecycle event for rotation and revocation |
+| `run` and `serve` verify the installed configuration against a pinned key (`verify.pub` / `run --verify-key`) before executing — unsigned/wrong-key/tampered/stale/foreign refused and recorded, a held lock a retryable busy, a persisted `verify.floor` bounding rollback; opt-in and fail-closed; Article VI names it | carrying the operator's signature with a pulled configuration so a consuming edge verifies the operator's key (today a point verifies only installs made on its own root); `--verify-floor` to relocate the floor outside a backup set; a `--max-age` bound on `installed_at` |
 | `apply` over the API (`POST /v1/config/apply`) with a required compare-and-swap on the installed hash, authorization at the API against the installed roles, one writer lock across apply and the kill switch, and `origin` on the record; pulling the installed configuration over the API (`GET /v1/config`, `GET /v1/config/hash`, `config pull`), authorized by `pull` (or `apply`, which includes it), content-addressed, unrecorded | `registry enable\|disable` and `audit repair control` over the API; `audit control --server` |
 | default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; pruning and tamper-evidence of the snapshot store; verifying the roles-only authorization read |
 | `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read and on the kill switch's re-snapshot read | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |

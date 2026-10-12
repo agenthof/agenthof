@@ -903,6 +903,33 @@ installed snapshot and writes `installed/<hash>.sig`. They are credentials, not
 configuration — they are never part of a snapshot and never pulled. With
 neither file, signing is off and installs are unsigned.
 
+The **pinned verification key** turns that signature into a gate on execution.
+Place the public key the installs on this root are signed with at
+`<dir>/verify.pub` — a separate file from `signing.pub` on purpose: `verify.pub`
+is the key this point *trusts*, `signing.pub` the key it signs *with* — or pass
+`agenthof run --verify-key <path>` (ignored with `--server`, where the server
+verifies against the key beside *its* control ledger). When a pinned key is
+present, `run` and `serve` verify the installed configuration's signature
+against it **before executing** and refuse otherwise: a run exits non-zero and
+records the refusal (`serve` answers `422`); a configuration lock held past the
+timeout is a retryable busy instead (`serve` `503`). Verification is mandatory
+once a key is pinned (fail-closed) and absent entirely otherwise (unchanged). A
+sibling `<dir>/verify.floor` records the highest `(log_id, version)` this point
+has verified, so a replayed or rolled-back older install is refused as *stale*,
+and a different control ledger as *foreign* (reset by removing `verify.floor`).
+A pinned key or floor that cannot be read, a damaged ledger, or a pointer the
+ledger does not record is refused the same way (*not verifiable*) and recorded;
+a corrupt `verify.floor` is refused, not treated as absent — `rm` it to reset.
+`verify.pub`/`verify.floor` are this point's own state, never part of a snapshot
+and never pulled. The floor is restored with the root: a restore of the whole
+control root from backup brings back the older floor too, and that rollback is
+accepted — exclude `verify.floor` from the backup set if it must survive one.
+On a single host, `cp signing.pub verify.pub` turns on self-verification against
+your own key. The signature is bound to this root's ledger and does not travel
+with `config pull`; a configuration pulled and applied on another host is signed
+there with that host's key, so the key to pin on a host is the one its own
+installs carry.
+
 ### `--config`
 
 `apply` validates and installs it. `run` accepts it but executes the installed
