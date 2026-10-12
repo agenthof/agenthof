@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"time"
 	"unicode/utf8"
 
@@ -187,57 +185,17 @@ func pullConfig(req pullRequest) pullOutcome {
 	return pullOutcome{Kind: pulled, Snapshot: snap}
 }
 
-// servedSignature reads installed/<hex>.sig and decides whether it is THE
-// signature of the vouched install — existence is never enough, since the
-// file is overwritten on every install of <hex> and a stale one would make
-// every edge see "bad signature" with nothing telling either side to retry.
-// The order mirrors what an execution point does: the file's format line
-// first (a future format is named as such, never as a wrong key); then its
-// key id against the configured key (a rotated or foreign key is "by key",
-// before any verify); then the first six lines must be byte-identical to
-// the payload rebuilt from the vouched fields — and when they are not, WHICH
-// field differs decides the verdict, in this order: another hash or another
-// log_id is a foreign file, whatever its version; with hash and log_id
-// matching, a version above the vouched seq means this read raced an
-// identical re-apply (errSignatureNewer: benign, retry) and a version below
-// is a stale file;
-// then the Ed25519 verify. Every not-signed cause wraps errNotSigned; a
-// read failure other than not-exist is store damage.
+// servedSignature is verifySignatureFile for the pull: THE signature of the
+// vouched install under the host's own signing.pub — existence is never
+// enough, since the file is overwritten on every install of <hex> and a stale
+// one would make every edge see "bad signature" with nothing telling either
+// side to retry — converted to the wire shape. Every not-signed cause is a
+// *signatureVerdict (errors.Is(err, errNotSigned)); a read failure other than
+// not-exist is store damage.
 func servedSignature(store, hash, logID string, version int, at time.Time, pub ed25519.PublicKey) (*apiclient.ConfigSignature, error) {
-	data, err := os.ReadFile(config.SignaturePath(store, hash))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("%w: no signature file for %s", errNotSigned, hash)
-	}
+	f, err := verifySignatureFile(store, hash, logID, version, at, pub)
 	if err != nil {
 		return nil, err
-	}
-	f, err := config.ParseSignatureFile(data)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errNotSigned, err)
-	}
-	keyID := config.KeyID(pub)
-	if f.KeyID != keyID {
-		return nil, fmt.Errorf("%w: signature is by key %s; configured key is %s", errNotSigned, f.KeyID, keyID)
-	}
-	expected, err := config.SignaturePayload(hash, logID, version, at, keyID)
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(f.Payload, expected) {
-		switch {
-		case f.Hash != hash:
-			return nil, fmt.Errorf("%w: signature is for hash %s, installed is %s", errNotSigned, f.Hash, hash)
-		case f.LogID != logID:
-			return nil, fmt.Errorf("%w: signature is for log_id %s, installed is %s", errNotSigned, f.LogID, logID)
-		case f.Version > version:
-			return nil, fmt.Errorf("%w: %w", errNotSigned, errSignatureNewer)
-		case f.Version < version:
-			return nil, fmt.Errorf("%w: signature is for version %d, installed is %d", errNotSigned, f.Version, version)
-		}
-		return nil, fmt.Errorf("%w: signature is for installed_at %s, installed is %s", errNotSigned, f.InstalledAt, at.Format(time.RFC3339Nano))
-	}
-	if !config.Verify(pub, f.Payload, f.Sig) {
-		return nil, fmt.Errorf("%w: signature does not verify", errNotSigned)
 	}
 	return &apiclient.ConfigSignature{Format: config.SignatureFormatV1, LogID: f.LogID, KeyID: f.KeyID, Sig: f.Sig}, nil
 }

@@ -35,8 +35,11 @@ type Authenticator interface {
 // run` does, bound to the invoker's verified token for on-behalf-of
 // exchange. It is read per run, so an apply or a kill-switch flip takes
 // effect on the next run with no restart. A load or validation failure
-// wraps ErrConfigInvalid; nothing installed is ErrNoConfigInstalled;
-// anything else is the host's own failure.
+// wraps ErrConfigInvalid; nothing installed is ErrNoConfigInstalled; a
+// configuration that does not verify against the key the host pins is a
+// *ConfigNotVerifiedError; a host that could not read the configuration
+// consistently because another process holds its lock returns
+// ErrConfigBusy; anything else is the host's own failure.
 type RunHost interface {
 	Prepare(inv identity.Invoker, subjectToken string) (Prepared, error)
 }
@@ -100,6 +103,22 @@ var ErrConfigInvalid = errors.New("configuration invalid")
 // the control root: the run is refused (recorded, 422) with the fixed
 // reason "no configuration installed", the same text the CLI ledgers.
 var ErrNoConfigInstalled = errors.New("no configuration installed")
+
+// ConfigNotVerifiedError marks a Prepare failure that is the installed
+// configuration's operator signature, judged against the key this host pins:
+// the run is refused (recorded, 422) with Reason in the ledger — the same
+// text the CLI ledgers — and Headline, the reason without its detail, in the
+// body, as the CLI prints it. serve carries the two strings; it does not know
+// the host's kinds.
+type ConfigNotVerifiedError struct{ Headline, Reason string }
+
+func (e *ConfigNotVerifiedError) Error() string { return e.Reason }
+
+// ErrConfigBusy marks a Prepare that could not read the installed
+// configuration consistently because another process holds its lock: the
+// run is not a refusal and not recorded — 503 with Retry-After, as a busy
+// pull or an apply's 409.
+var ErrConfigBusy = errors.New("installed configuration is busy; retry")
 
 // Config is everything a Server needs. MaxConcurrentRuns is required —
 // there is no unbounded default.

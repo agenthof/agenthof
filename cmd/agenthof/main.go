@@ -43,7 +43,7 @@ Usage:
   agenthof config sign   [--control-log <path>]  (signs the installed configuration with the signing pair beside the control ledger — the remedy when an install reports "signature NOT written"; never recorded)
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
-  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
+  agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--control-log <path>] [--verify-key <path>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
   agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--allow-api-bootstrap] [--addr-file <path>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--max-concurrent-runs <n>] [--shutdown-timeout <dur>] [--log-level ...] [--log-format ...]  (AGENTHOF_OIDC_ISSUER required)
   agenthof audit <run-id> [--log-dir <dir>] [--server <url>] [--token <jwt>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
@@ -134,20 +134,95 @@ func buildRegistry(configRoot string, out io.Writer) *registry.Registry {
 // honest limits). It is never empty when installed and errs is nil. applyFloorErrors is
 // not run here: it is a property of what may be installed, and the snapshot
 // passed it at apply.
-func resolveRunConfig(controlLog string) (cfg config.Config, reg *registry.Registry, hash string, installed bool, errs []error) {
-	cfg, hash, installed, loadErrs := config.LoadInstalled(installedStore(controlLog))
+//
+// verifyKey is the pinned operator public key's path; "" means
+// verifyPubPath(controlLog). When that file exists, the installed
+// configuration must carry a signature by that key over the install the
+// control ledger vouches for, at or above this root's staleness floor, or the
+// run is refused: unverified is that verdict, with its recorded reason, and
+// reg is nil — or it is the one unrecorded transient, busy (Transient()),
+// when installed.lock could not be taken shared within the timeout. mode says
+// whether a pass advances the floor (the execution read) or only judges
+// (serve's startup look). With no pinned key the body is exactly the one
+// before the pin existed: no lock is opened or created, no floor is read.
+// Order, pinned: the pin (a pin fault needs no lock); installed.lock SHARED,
+// so pointer, ledger and .sig are the consistent triple every writer
+// publishes under the exclusive lock and no in-flight install is observable;
+// LoadInstalled (bytes-vs-pointer first, as always — a damaged or absent
+// install is reported as today and never verified); the pinned verify and
+// the floor; unlock; Build. Invariants: at most one of errs and unverified is
+// set; a verdict (unverified != nil && !Transient()) ⇒ installed && hash !=
+// "" && cfg loaded && reg == nil; busy ⇒ nothing else is set.
+func resolveRunConfig(controlLog, verifyKey string, mode verifyMode) (cfg config.Config, reg *registry.Registry, hash string, installed bool, errs []error, unverified *verifyRefusal) {
+	pinned, keyPath, err := pinnedKeyPath(controlLog, verifyKey)
+	if err != nil {
+		return config.Config{}, nil, "", false, nil, notVerifiable(err.Error())
+	}
+	store := installedStore(controlLog)
+	if !pinned {
+		cfg, hash, installed, loadErrs := config.LoadInstalled(store)
+		return buildResolved(cfg, hash, installed, loadErrs)
+	}
+	pub, err := loadVerifyPub(keyPath)
+	if err != nil {
+		return config.Config{}, nil, "", false, nil, notVerifiable(err.Error())
+	}
+	unlock, err := ledger.LockFileShared(installedLock(controlLog))
+	if err != nil {
+		if errors.Is(err, ledger.ErrLockHeld) {
+			return config.Config{}, nil, "", false, nil, &verifyRefusal{Kind: verifyBusy}
+		}
+		return config.Config{}, nil, "", false, nil, notVerifiable(fmt.Sprintf("installed.lock: %v", err))
+	}
+	// Hold the shared lock only across the reads it protects — pointer,
+	// ledger, .sig, floor — and release it on EVERY path, a panic in
+	// LoadInstalled or pinnedVerify included, via defer in this closure; Build
+	// runs after, unlocked.
+	cfg, hash, installed, loadErrs, refusal, storeErr := func() (cfg config.Config, hash string, installed bool, loadErrs []error, refusal *verifyRefusal, storeErr error) {
+		defer unlock()
+		cfg, hash, installed, loadErrs = config.LoadInstalled(store)
+		if !installed || len(loadErrs) > 0 {
+			return cfg, hash, installed, loadErrs, nil, nil
+		}
+		refusal, storeErr = pinnedVerify(controlLog, hash, pub, mode)
+		return cfg, hash, true, nil, refusal, storeErr
+	}()
+	if !installed || len(loadErrs) > 0 {
+		// No pinned verify on a damaged or absent install: "configuration
+		// invalid" / "no configuration installed" keep their meaning.
+		return buildResolved(cfg, hash, installed, loadErrs)
+	}
+	if storeErr != nil {
+		// A .sig that cannot be read: a store fault, reported as
+		// LoadInstalled's I/O faults are — never as a verdict.
+		return buildResolved(cfg, hash, true, []error{fmt.Errorf("installed config %s: %w", hash, storeErr)})
+	}
+	if refusal != nil {
+		if refusal.Transient() {
+			return config.Config{}, nil, "", false, nil, refusal
+		}
+		return cfg, nil, hash, true, nil, refusal
+	}
+	return buildResolved(cfg, hash, true, nil)
+}
+
+// buildResolved is resolveRunConfig's tail after LoadInstalled — Build and
+// collect — exactly as it ran before the pinned verify existed, so the
+// unpinned path and every damaged-install answer are byte-for-byte unchanged.
+func buildResolved(cfg config.Config, hash string, installed bool, loadErrs []error) (config.Config, *registry.Registry, string, bool, []error, *verifyRefusal) {
+	var errs []error
 	errs = append(errs, loadErrs...)
 	if !installed {
-		return cfg, nil, "", false, errs
+		return cfg, nil, "", false, errs, nil
 	}
 	reg, valErrs := registry.Build(cfg)
 	for _, e := range valErrs {
 		errs = append(errs, e)
 	}
 	if len(errs) > 0 {
-		return cfg, nil, hash, true, errs
+		return cfg, nil, hash, true, errs, nil
 	}
-	return cfg, reg, hash, true, nil
+	return cfg, reg, hash, true, nil, nil
 }
 
 // cmdApply is `apply`: flags, the invoker, the ledger-writable check and
@@ -718,6 +793,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 	server := fs.String("server", "", "run over an agenthof serve API at this base URL (env AGENTHOF_SERVER); needs --token/AGENTHOF_TOKEN")
 	cfgDir := fs.String("config", "./config", "configuration directory you apply from; run executes the INSTALLED configuration (see --control-log), not this directory")
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; the installed configuration is read from installed/ beside it")
+	verifyKey := fs.String("verify-key", "", "path of the pinned operator public key (PKIX PEM, as config keygen prints and signing.pub holds); default verify.pub beside --control-log. When the file exists, the installed configuration must be signed by this key, over the install the control ledger records, at or above verify.floor beside --control-log, or the run is refused")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	artifactDir := fs.String("artifact-dir", ".agenthof/artifacts", "artifact store directory")
 	// Accepted for forward-compat: the tool proxy always binds 127.0.0.1:0
@@ -756,6 +832,9 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		if *as != "" || *groups != "" {
 			_, _ = fmt.Fprintln(stderr, "run: --as/--groups are ignored with --server; the server authenticates your --token")
 		}
+		if *verifyKey != "" {
+			_, _ = fmt.Fprintln(stderr, "run: --verify-key is ignored with --server; the server verifies the installed configuration against the key pinned beside its control ledger")
+		}
 		return runViaServer(base, tok, role, workflow, *input, out)
 	}
 
@@ -779,7 +858,7 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, reg, h, installed, cfgErrs := resolveRunConfig(*controlLog)
+	cfg, reg, h, installed, cfgErrs, unverified := resolveRunConfig(*controlLog, *verifyKey, verifyAndAdvance)
 	for _, e := range cfgErrs {
 		_, _ = fmt.Fprintln(out, e.Error())
 	}
@@ -796,6 +875,26 @@ func cmdRun(args []string, out, stderr io.Writer) int {
 			return 1
 		}
 		_, _ = fmt.Fprintf(out, "run %s refused: configuration invalid\n", runID)
+		return 1
+	}
+	if unverified != nil {
+		if unverified.Transient() {
+			// Another process holds the installed-configuration lock past
+			// the timeout: availability, not a verdict — apply's own busy
+			// shape. No run id, no run ledger, no control event.
+			_, _ = fmt.Fprintf(out, "run: %s\n", msgLockBusy)
+			return 1
+		}
+		// The operator's verdict on the installed configuration: the whole
+		// reason in the ledger (as "configuration invalid: …" is), the
+		// headline on the result line.
+		_, _ = fmt.Fprintf(out, "run: %s\n", unverified.Error())
+		runID, refErr := engine.Refuse(*logDir, role, workflow, inv, unverified.Error(), nil)
+		if refErr != nil {
+			_, _ = fmt.Fprintln(out, refErr)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "run %s refused: %s\n", runID, unverified.Headline())
 		return 1
 	}
 	if !installed {

@@ -74,13 +74,27 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 		// With nothing usable installed the zero GatewayConfig's default
 		// applies, and serve says so once — it starts either way, because
 		// apply is a separate command and every run is refused until one
-		// lands. The timeout is read once: a later apply with a longer
-		// step_timeout does not move this deadline (--shutdown-timeout does).
-		cfg, _, _, installed, errs := resolveRunConfig(*controlLog)
+		// lands. With a key pinned beside the control ledger the read judges
+		// the install too (verifyOnly: it writes no floor) and warns once
+		// when it does not verify; serve starts either way, since every run
+		// verifies for itself. The timeout is read once: a later apply with
+		// a longer step_timeout does not move this deadline
+		// (--shutdown-timeout does).
+		cfg, _, _, installed, errs, unverified := resolveRunConfig(*controlLog, "", verifyOnly)
 		switch {
 		case len(errs) > 0:
 			logger.Warn("installed configuration unusable; every run will be refused until apply", "store", installedStore(*controlLog), "err", errs[0].Error())
 			cfg = config.Config{}
+		case unverified != nil && unverified.Transient():
+			// Another process holds the lock at this instant: not a verdict,
+			// say nothing (as signingStartupWarning says nothing on a busy
+			// ledger). Every run verifies for itself.
+		case unverified != nil:
+			// The reason carries its own remedy where one exists; the
+			// startup line adds none. cfg loaded fine: its step timeout is
+			// the right deadline — startup executes nothing under it.
+			logger.Warn("installed configuration does not verify against the pinned key; every run will be refused until it does",
+				"store", installedStore(*controlLog), "reason", unverified.Error(), "pinned_key", verifyPubPath(*controlLog))
 		case !installed:
 			logger.Warn("no configuration installed; every run will be refused until apply", "store", installedStore(*controlLog))
 		default:
@@ -185,7 +199,10 @@ func loopbackAddr(addr string) bool {
 // locations, one broker for the process, and the supervisor the config
 // names. Prepare is `cmdRun`'s config sequence — resolveRunConfig, then the
 // supervisor — bound to one invoker's token, resolved per run so an apply
-// or a kill-switch flip takes effect on the next run with no restart.
+// or a kill-switch flip takes effect on the next run with no restart. With
+// a key pinned beside the control ledger, every Prepare verifies the
+// install against it (the execution read: a pass advances verify.floor) and
+// a verdict is a recorded 422; a held lock is the unrecorded 503.
 type runHost struct {
 	controlLog, logDir, artifactDir string
 	logger                          *slog.Logger
@@ -193,11 +210,19 @@ type runHost struct {
 }
 
 func (h *runHost) Prepare(_ identity.Invoker, subjectToken string) (serve.Prepared, error) {
-	cfg, reg, hash, installed, errs := resolveRunConfig(h.controlLog)
+	cfg, reg, hash, installed, errs, unverified := resolveRunConfig(h.controlLog, "", verifyAndAdvance)
 	if len(errs) > 0 {
 		// Before the installed flag, as in cmdRun: a damaged install is
 		// "configuration invalid", never "nothing installed".
 		return nil, fmt.Errorf("%w: %s", serve.ErrConfigInvalid, errs[0].Error())
+	}
+	if unverified != nil {
+		// Before the installed flag too: busy carries installed=false. serve
+		// stays taxonomy-agnostic — two strings, or the busy sentinel.
+		if unverified.Transient() {
+			return nil, serve.ErrConfigBusy
+		}
+		return nil, &serve.ConfigNotVerifiedError{Headline: unverified.Headline(), Reason: unverified.Error()}
 	}
 	if !installed {
 		return nil, serve.ErrNoConfigInstalled

@@ -213,3 +213,22 @@ func TestPullConfigOverCapIsMalformedAnswer(t *testing.T) {
 		t.Fatalf("over-cap body must be a malformed answer: %v", err)
 	}
 }
+
+// TestClientStartRunBusy503IsAStatusError: StartRun decodes only 202/403/422;
+// a 503 — the server's busy answer — is a *StatusError the CLI prints as
+// "server answered 503: installed configuration is busy; retry".
+func TestClientStartRunBusy503IsAStatusError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "installed configuration is busy; retry", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "tok", nil).StartRun(context.Background(), RunRequest{Role: "se", Workflow: "w", Input: "x"})
+	var se *StatusError
+	if !errors.As(err, &se) || se.Code != 503 || se.Body != "installed configuration is busy; retry" {
+		t.Fatalf("503 must be a StatusError with the body: %v", err)
+	}
+	if err.Error() != "server answered 503: installed configuration is busy; retry" {
+		t.Fatalf("printed form: %q", err.Error())
+	}
+}

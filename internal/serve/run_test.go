@@ -349,3 +349,60 @@ func TestValidName(t *testing.T) {
 		}
 	}
 }
+
+// TestStartRunConfigNotVerifiedIs422WithHeadlineBodyAndFullLedgerReason: a
+// Prepare that returns *ConfigNotVerifiedError is a recorded refusal like
+// "configuration invalid" — 422, the headline in the body, the whole reason
+// in the ledger, one Warn.
+func TestStartRunConfigNotVerifiedIs422WithHeadlineBodyAndFullLedgerReason(t *testing.T) {
+	reason := "configuration not verified: unknown key: signature is by key aaaa; configured key is bbbb"
+	ts := newTestServer(t, &fakeHost{prepErr: &ConfigNotVerifiedError{Headline: "configuration not verified: unknown key", Reason: reason}}, fakeAuth{}, 1)
+	resp, body := ts.do(t, http.MethodPost, "/v1/runs", goodToken, runReq)
+	acc := decode[apiclient.RunAccepted](t, body)
+	if resp.StatusCode != http.StatusUnprocessableEntity || acc.Status != apiclient.StatusRefused || acc.Reason != "configuration not verified: unknown key" {
+		t.Fatalf("%d %+v", resp.StatusCode, acc)
+	}
+	events, _, err := engine.ReadLog(ts.logDir, acc.RunID)
+	if err != nil || len(events) != 1 || events[0].Type != "run_refused" || events[0].Reason != reason {
+		t.Fatalf("ledger = %+v err=%v", events, err)
+	}
+	if l := ts.logs.String(); !strings.Contains(l, "level=WARN") || !strings.Contains(l, "run refused") || !strings.Contains(l, "unknown key") {
+		t.Fatalf("one Warn with the reason:\n%s", l)
+	}
+}
+
+// TestStartRunConfigBusyIs503RetryAfterAndUnrecorded: a Prepare that returns
+// ErrConfigBusy is availability, not a verdict — 503 with Retry-After: 1, the
+// sentinel's text as the body, NO run_refused, logged at Info.
+func TestStartRunConfigBusyIs503RetryAfterAndUnrecorded(t *testing.T) {
+	ts := newTestServer(t, &fakeHost{prepErr: ErrConfigBusy}, fakeAuth{}, 1)
+	resp, body := ts.do(t, http.MethodPost, "/v1/runs", goodToken, runReq)
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") != "1" || string(body) != ErrConfigBusy.Error()+"\n" {
+		t.Fatalf("%d %q retry-after=%q", resp.StatusCode, body, resp.Header.Get("Retry-After"))
+	}
+	if entries, _ := os.ReadDir(ts.logDir); len(entries) != 0 {
+		t.Fatalf("busy must record nothing: %v", entries)
+	}
+	if l := ts.logs.String(); !strings.Contains(l, "level=INFO") || !strings.Contains(l, "status=busy") || strings.Contains(l, "level=WARN") || strings.Contains(l, "level=ERROR") {
+		t.Fatalf("busy is an Info, never a Warn or Error:\n%s", l)
+	}
+	// The slot was released: the next POST is not a 429.
+	ts.host.prepErr = nil
+	if resp, _ := ts.do(t, http.MethodPost, "/v1/runs", goodToken, runReq); resp.StatusCode == http.StatusTooManyRequests {
+		t.Fatal("the busy answer must release its slot")
+	}
+}
+
+// TestStartRunUnknownPrepareErrorIs500AndUnrecorded pins the fallthrough the
+// two new branches sit above: anything Prepare returns that is neither of the
+// typed outcomes is the host's own failure — 500, nothing recorded.
+func TestStartRunUnknownPrepareErrorIs500AndUnrecorded(t *testing.T) {
+	ts := newTestServer(t, &fakeHost{prepErr: errors.New("supervisor unreachable")}, fakeAuth{}, 1)
+	resp, body := ts.do(t, http.MethodPost, "/v1/runs", goodToken, runReq)
+	if resp.StatusCode != http.StatusInternalServerError || string(body) != "run could not be prepared\n" {
+		t.Fatalf("%d %q", resp.StatusCode, body)
+	}
+	if entries, _ := os.ReadDir(ts.logDir); len(entries) != 0 {
+		t.Fatalf("an unknown Prepare error records nothing: %v", entries)
+	}
+}
