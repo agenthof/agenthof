@@ -290,3 +290,84 @@ func TestConfigVouchBusyUnderAHeldWriterLock(t *testing.T) {
 		t.Fatal("busy records nothing")
 	}
 }
+
+// TestConfigVouchHealsAKillSwitchCrashGapAndTheAgentStaysDisabled (spec
+// test 25 — the reason config vouch exists): registry disable coder dies
+// after the pointer moved to F and before the append. Re-running the flip
+// is refused not_on_record; a run is refused not_on_record. config vouch
+// vouches F in one command: coder stays disabled on disk, the pointer stays
+// F, no apply row and no enable row exist at any point, a run of the
+// workflow that references coder is refused "configuration invalid" (the
+// kill switch's intended effect) and never executes; audit control reads
+// "(vouch)".
+func TestConfigVouchHealsAKillSwitchCrashGapAndTheAgentStaysDisabled(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	applyHash := readPointer(t, ctl)
+	flip := []string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_state_before_append")
+	var out bytes.Buffer
+	if code := cmdRegistry(flip, &out); code != 1 || !strings.Contains(out.String(), "state changed; event NOT recorded") {
+		t.Fatalf("crash hook: %d\n%s", code, out.String())
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	f := readPointer(t, ctl)
+	if f == applyHash {
+		t.Fatal("fixture: the flip must have moved the pointer")
+	}
+	coder := filepath.Join(config.SnapshotDir(installedStore(ctl), f), "agents", "coder.yaml")
+	if data := mustRead(t, coder); !strings.Contains(string(data), "enabled: false") {
+		t.Fatalf("fixture: F holds coder disabled:\n%s", data)
+	}
+
+	// Before the heal: the flip's re-run and a run are both refused not on record.
+	out.Reset()
+	if code := cmdRegistry(flip, &out); code != 1 || !strings.Contains(out.String(), "registry disable: configuration not on record: last recorded install is "+applyHash+" (apply)") {
+		t.Fatalf("re-run: %d\n%s", code, out.String())
+	}
+	if code, s := runFixBug(t, root, ctl); code != 1 || !strings.Contains(s, "configuration not on record") {
+		t.Fatalf("run before heal: %d\n%s", code, s)
+	}
+
+	// The heal.
+	code, s := vouchCode(t, ctl)
+	if code != 0 || !strings.Contains(s, "vouched: "+f+"\n") {
+		t.Fatalf("config vouch: %d\n%s", code, s)
+	}
+	if readPointer(t, ctl) != f {
+		t.Fatal("the pointer must stay F")
+	}
+	if data := mustRead(t, coder); !strings.Contains(string(data), "enabled: false") {
+		t.Fatalf("coder must STAY disabled:\n%s", data)
+	}
+	applies, enables := 0, 0
+	for _, e := range controlEvents(t, ctl) {
+		if e.Action == "apply" && e.Outcome == "success" {
+			applies++
+		}
+		if e.Action == "enable" {
+			enables++
+		}
+	}
+	if applies != 1 || enables != 0 {
+		t.Fatalf("exactly the first apply and no enable row: applies=%d enables=%d", applies, enables)
+	}
+	last := lastControlEvent(t, ctl)
+	if last.Action != "vouch" || last.ConfigHash != f || last.Detail != "previously on record: "+applyHash+", apply" {
+		t.Fatalf("%+v", last)
+	}
+	// After the heal: the run is refused for the RIGHT reason — the kill
+	// switch's — and never executes.
+	if code, s := runFixBug(t, root, ctl); code != 1 || !strings.Contains(s, "configuration invalid") || !strings.Contains(s, `depends on agent "coder", which is disabled`) || strings.Contains(s, "finished") {
+		t.Fatalf("run after heal: %d\n%s", code, s)
+	}
+	out.Reset()
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "installed config: "+f+" — matches the last recorded install (vouch)") {
+		t.Fatalf("audit verify control: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "vouched for installed config "+f+" (previously on record: "+applyHash+", apply) — dana@example.com (asserted)") {
+		t.Fatalf("audit control: %d\n%s", code, out.String())
+	}
+}

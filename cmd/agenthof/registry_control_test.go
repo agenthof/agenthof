@@ -1220,3 +1220,30 @@ func TestRegistryFlipUnrecordedNeverSigns(t *testing.T) {
 	}
 	noSig(t, ctl)
 }
+
+// TestRegistryFlipRefusesAnUnvouchedPointer (spec test 13): on the T2 fixture
+// the flip is refused not_on_record for the outsider AND for a granted
+// caller — recorded disable/refused hash-less, pointer unmoved, no staging.
+func TestRegistryFlipRefusesAnUnvouchedPointer(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	original := readPointer(t, ctl)
+	hex2 := dropInGrantingOutsider(t, ctl)
+	want := "registry disable: configuration not on record: last recorded install is " + original + " (apply); " + remedyNotOnRecord + "\n"
+	for _, who := range [][]string{{"--as", "mallory@example.com", "--groups", "finance"}, {"--as", "dana@example.com", "--groups", "platform-eng"}} {
+		var out bytes.Buffer
+		code := cmdRegistry(append([]string{"disable", "coder", "--config", root, "--control-log", ctl}, who...), &out)
+		if code != 1 || !strings.Contains(out.String(), want) || strings.Contains(out.String(), "agent coder disabled") {
+			t.Fatalf("%v: exit %d\n%s", who, code, out.String())
+		}
+		e := lastControlEvent(t, ctl)
+		if e.Action != "disable" || e.Agent != "coder" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotOnRecord || e.ConfigHash != "" {
+			t.Fatalf("%v: %+v", who, e)
+		}
+		if readPointer(t, ctl) != hex2 {
+			t.Fatal("the pointer must not move")
+		}
+		noStagingResidue(t, ctl)
+	}
+}

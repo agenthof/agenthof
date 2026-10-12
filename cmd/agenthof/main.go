@@ -521,7 +521,8 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 
 	// Authorize before loading --config whenever a snapshot is installed: the
 	// invoker is checked against the INSTALLED configuration's roles — what a
-	// previous apply approved — so an unauthorized caller learns one refusal
+	// previous apply approved — and the ledger must vouch for the installed
+	// pointer those roles came from; so an unauthorized caller learns one refusal
 	// and never makes this command read --config at all (mirroring the apply
 	// path, which records one refusal and never the config's own parse errors).
 	// Only the bootstrap-era fallback — nothing installed yet — needs
@@ -533,6 +534,25 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 		_, _ = fmt.Fprintln(out, instErr)
 		_, _ = fmt.Fprint(out, installedHatch("registry "+action, action, installedStore(controlLog)))
 		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(instErr)})
+	}
+	// The ledger must vouch for the pointer those roles came from (the same
+	// judgment apply and the execution read make; definitive under the
+	// exclusive lock). Busy and a damaged ledger are unrecorded, as at the
+	// writable check; not on record is a recorded refusal, before
+	// authorization — no vouched roles exist until the vouch passes.
+	if installed {
+		if _, _, refusal := vouchInstalled(controlLog, installedHash); refusal != nil {
+			switch {
+			case refusal.Transient():
+				_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, msgLockBusy)
+				return 1
+			case refusal.Kind != verifyNotOnRecord:
+				_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, refusal.Error())
+				return 1
+			}
+			_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, refusal.Error())
+			return recordExit("refused", vouchRefused(refusal))
+		}
 	}
 	if installed && !authz.ControlAllows(installedRoles, inv, action) {
 		reason := control.NotAuthorized(action)
@@ -655,10 +675,11 @@ func flipInstalled(action, target, store, hash, controlLog string, inv identity.
 	// Verify before staging: a snapshot whose bytes no longer hash to the
 	// pointer must not be copied, flipped and installed under the copy's own,
 	// correct hash — that would launder tampered bytes into a legitimately
-	// named, legitimately recorded snapshot. The same helper and the same
-	// message as the execution read; nothing is staged, so there is no
-	// .staging-* residue, and the recorded message (200 bytes for two
-	// sha256 hashes) fits truncateErr's cap whole.
+	// named, legitimately recorded snapshot. The authorization read verified
+	// and vouched this hash under the same lock; this is the function's own
+	// guard before StageSnapshot re-reads the bytes. Nothing is staged, so
+	// there is no .staging-* residue, and the recorded message (200 bytes for
+	// two sha256 hashes) fits truncateErr's cap whole.
 	if verr := config.VerifyInstalled(store, hash); verr != nil {
 		_, _ = fmt.Fprintln(out, verr)
 		return recordExit("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(verr)})
