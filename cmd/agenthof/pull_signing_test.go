@@ -432,9 +432,9 @@ func TestServedSignatureVerifiesFromTheWireBytes(t *testing.T) {
 	}
 }
 
-// TestSignatureVerdictKeepsTheV1StringsAndTruths pins the S1 refactor: every
+// TestSignatureVerdictKeepsTheV1StringsAndTruths pins the refactor: every
 // not-signed cause is one typed *signatureVerdict whose Error() is BYTE-
-// IDENTICAL to the strings the pull has logged since slice 2, whose Is keeps
+// IDENTICAL to the strings the pull logs, whose Is keeps
 // errors.Is(err, errNotSigned) true for every kind and errors.Is(err,
 // errSignatureNewer) true for sigNewer only — so pullConfig,
 // signingStartupWarning and configHost.Pull classify exactly as before.

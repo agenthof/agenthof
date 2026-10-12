@@ -804,7 +804,7 @@ func TestPinnedVerifyFloorRules(t *testing.T) {
 	}
 }
 
-// TestPinnedVerifyWholeRootRestoreIsNotSeen is the honest limit (B2), pinned
+// TestPinnedVerifyWholeRootRestoreIsNotSeen is the honest limit, pinned
 // as a fact: restoring control.jsonl, the .sig AND verify.floor together as
 // of seq 1 — a whole-root restore — PASSES; the floor cannot see a rollback
 // it was rolled back with. Only the partial restore (floor left) is stale.
@@ -836,7 +836,7 @@ func TestPinnedVerifyWholeRootRestoreIsNotSeen(t *testing.T) {
 	}
 }
 
-// TestPinnedVerifyAdvancesTheFloorEvenWhenBuildFails (S3): the floor tracks
+// TestPinnedVerifyAdvancesTheFloorEvenWhenBuildFails: the floor tracks
 // verified signatures, not valid configurations — a signed kill-switch flip
 // that disables an agent a workflow needs installs a snapshot that does not
 // Build; the run is refused "configuration invalid", and the floor advanced.
@@ -918,7 +918,7 @@ func TestRunHostPrepareMapsAVerdictToTheTypedError(t *testing.T) {
 	}
 }
 
-// TestPinnedRunBusyIsUnrecordedAndWaitsBehindAShortHold (S7a, S7b): a writer
+// TestPinnedRunBusyIsUnrecordedAndWaitsBehindAShortHold: a writer
 // holding installed.lock exclusively for LESS than lockTimeout → the run
 // waits, sees the consistent triple the writer published, and passes
 // (nothing recorded); for LONGER → busy: cmdRun prints the busy line, exits

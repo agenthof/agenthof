@@ -155,6 +155,8 @@ func TestResolveRunConfigReadsTheInstalledSnapshot(t *testing.T) {
 	}
 }
 
+// startServeOnce starts serve on ctl with a stderr buffer, waits for the
+// address file, stops it, and returns the operational log.
 func startServeOnce(t *testing.T, ctl string) string {
 	t.Helper()
 	return startServeOnceWithin(t, ctl, 5*time.Second)
@@ -164,8 +166,8 @@ func startServeOnce(t *testing.T, ctl string) string {
 // address file — for a startup that must first wait out lockTimeout.
 func startServeOnceWithin(t *testing.T, ctl string, within time.Duration) string {
 	t.Helper()
-	t.Chdir(t.TempDir())
-	t.Setenv("AGENTHOF_OIDC_ISSUER", "https://idp.test")
+	t.Chdir(t.TempDir())                                 // serve's relative defaults land here, never in the repo
+	t.Setenv("AGENTHOF_OIDC_ISSUER", "https://idp.test") // never dialed
 	addrFile := filepath.Join(t.TempDir(), "addr")
 	ctx, cancel := context.WithCancel(context.Background())
 	var out, logs bytes.Buffer
@@ -267,7 +269,7 @@ func TestServeStartupWarnsAboutAnUnreadableSignatureButNotARace(t *testing.T) {
 	}
 }
 
-// TestServeStartupWarnsWhenThePinnedKeyDoesNotVerify (§9, S2): with a key
+// TestServeStartupWarnsWhenThePinnedKeyDoesNotVerify: with a key
 // pinned and the .sig removed, serve starts, logs ONE Warn carrying the
 // reason, creates no verify.floor (verifyOnly), and sizes the shutdown
 // deadline from the LOADED configuration's step timeout — 90s here, not the
@@ -303,7 +305,7 @@ func TestServeStartupWarnsWhenThePinnedKeyDoesNotVerify(t *testing.T) {
 		t.Fatalf("exactly one Warn:\n%s", logs)
 	}
 	if !strings.Contains(logs, "shutdown_timeout=1m30s") {
-		t.Fatalf("S2: the loaded configuration's step timeout is the deadline, not the default:\n%s", logs)
+		t.Fatalf("the loaded configuration's step timeout is the deadline, not the default:\n%s", logs)
 	}
 	if _, err := os.Stat(verifyFloorPath(ctl)); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("startup writes no floor even when it would pass: %v", err)
