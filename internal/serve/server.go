@@ -36,8 +36,9 @@ type Authenticator interface {
 // exchange. It is read per run, so an apply or a kill-switch flip takes
 // effect on the next run with no restart. A load or validation failure
 // wraps ErrConfigInvalid; nothing installed is ErrNoConfigInstalled; a
-// configuration that does not verify against the key the host pins is a
-// *ConfigNotVerifiedError; a host that could not read the configuration
+// configuration the host's control ledger does not vouch for — or that does
+// not verify against the key the host pins — is a *ConfigNotVerifiedError;
+// a host that could not read the configuration
 // consistently because another process holds its lock returns
 // ErrConfigBusy; anything else is the host's own failure.
 type RunHost interface {

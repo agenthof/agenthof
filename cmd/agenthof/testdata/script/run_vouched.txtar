@@ -1,0 +1,112 @@
+# run and serve execute only a configuration the control ledger vouches for:
+# the installed pointer must name the LAST recorded install. A bootstrap apply
+# vouches for itself; a hand-aimed pointer, a torn ledger and a held lock are
+# refused in the same words the pull and the audit readers use; a repaired
+# ledger still vouches; busy is unrecorded.
+
+# bootstrap apply → the run is vouched by the bootstrap record itself
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+cp installed/current current.A
+
+# a second, different install (B)
+exec sh -c 'printf ''\n# B\n'' >> examples/config/agents/planner.yaml'
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'control head: seq=2'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+cp installed/current current.B
+! cmp current.A current.B
+
+# hand-aim the pointer back at A: A's bytes still hash as A, but the ledger's
+# last install is B — refused, recorded, and all three readers say so
+cp current.A installed/current
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: configuration not on record: last recorded install is sha256:[0-9a-f]{64} \(apply\); re-apply \(for a torn ledger, audit repair control first\)'
+stdout 'run r-[0-9a-f]{16} refused: configuration not on record$'
+lastrun logs
+grep '"reason":"configuration not on record: last recorded install is sha256:' logs/$RUNID.jsonl
+! exec agenthof audit verify control --control-log control.jsonl
+stdout 'does NOT match the last recorded install'
+! exec agenthof config pull --control-log control.jsonl
+stdout 'config pull: installed configuration is not yet on record; retry'
+
+# re-apply heals: the directory is B, so the identical snapshot is re-pointed and recorded
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'control head: seq=3'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded install \(apply\)'
+
+# a kill-switch flip is a recorded install: the run is refused for what the
+# flip did ("configuration invalid"), never as not on record
+exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'agent coder disabled'
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'depends on agent "coder", which is disabled in the registry'
+stdout 'run r-[0-9a-f]{16} refused: configuration invalid'
+! stdout 'not on record'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded install \(disable agent coder\)'
+
+# hand-aim at B while the flip is the last install: not on record, labelled with the flip
+cp current.B installed/current
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: configuration not on record: last recorded install is sha256:[0-9a-f]{64} \(disable agent coder\); re-apply'
+stdout 'run r-[0-9a-f]{16} refused: configuration not on record$'
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'control head: seq=5'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+
+# a damaged ledger refuses every run, recorded, with the repair hint; after
+# repair the ledger is tainted and still vouches
+exec sh -c 'printf ''{"v":"control/1","seq":9,"partial'' >> control.jsonl'
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: configuration not verifiable: control ledger damaged; run: agenthof audit repair control --control-log control.jsonl'
+stdout 'run r-[0-9a-f]{16} refused: configuration not verifiable$'
+exec agenthof audit repair control --control-log control.jsonl --config examples/config --as ops@example.com --groups platform-eng
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+! exec agenthof audit verify control --control-log control.jsonl
+stdout 'TAINTED'
+stdout 'matches the last recorded install \(apply\)'
+
+# busy: another process holds installed.lock past the timeout — unrecorded:
+# the busy line, no "refused", no run id, no new run ledger file, the control
+# ledger byte-identical (~5 s)
+exec ls logs
+cp stdout logs.before
+cp control.jsonl ledger.before
+holdlock control.jsonl 9000
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: another agenthof process holds the installed-configuration lock; retry'
+! stdout 'refused'
+! stdout 'r-[0-9a-f]{16}'
+exec ls logs
+cmp stdout logs.before
+cmp control.jsonl ledger.before
+
+# serve: a hand-aimed pointer makes every run a recorded 422 with the headline
+# — never "not verifiable" — until an apply lands; the next run then executes
+# with no restart. (The 9 s holder may still be alive: startup's shared lock
+# waits behind it and acquires within its own bound, as in run_verify_pinned.)
+cp current.A installed/current
+env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER
+env AGENTHOF_OIDC_CLIENT_ID=agenthof
+exec agenthof serve --addr 127.0.0.1:0 --addr-file addr.txt --log-dir logs --artifact-dir artifacts --control-log control.jsonl &
+waitaddr addr.txt
+! exec agenthof run software-engineer fix-bug --input hi --server $SERVER --token $OIDC_TOKEN
+stdout 'run r-[0-9a-f]{16} refused: configuration not on record$'
+! stdout 'not verifiable'
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+exec agenthof run software-engineer fix-bug --input hi --server $SERVER --token $OIDC_TOKEN
+stdout 'run r-[0-9a-f]{16} finished: succeeded'
+
+# no verify ever wrote the control ledger: applies, the flip and the repair only
+exec agenthof audit control --control-log control.jsonl
+! stdout 'verify'
+! exists verify.floor
