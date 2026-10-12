@@ -290,8 +290,13 @@ mid-step; its ledger then has no final event and reads back as
   transient on its own — `config sign` writes the signature and clears it.
   A public key pinned at the execution point is what lets it prove the
   configuration is the one the operator installed, not just one a server
-  stated; `config pull` names the signer today, and verifying there against a
-  pinned key is reserved. With no key
+  stated. The root that installed and signed the configuration verifies it that
+  way already: `run` and `serve` check the installed signature against a pinned
+  key before executing, refusing a tampered or rolled-back install (see
+  [`reference/config.md`](config.md) — `run --verify-key` and `verify.pub`).
+  `config pull` names the signer but does not carry the signature, so an edge
+  that pulls and applies signs afresh with its own key; verifying the
+  **operator's** signature at a consuming edge is reserved. With no key
   configured nothing is signed, the puller's check is a content address against
   a hash the server stated, and the authenticated channel is the trust — so put
   TLS in front of `serve` (above). A broken key state fails closed with `500`
