@@ -1,0 +1,170 @@
+# A pinned operator key makes run and serve refuse any installed configuration
+# the operator did not sign, as a specific install of a specific ledger, at or
+# above the floor this execution point last verified. Without the pin nothing
+# changes; busy is unrecorded; a whole-root restore (ledger + .sig + floor
+# together) is NOT seen — the documented limit; no verify ever writes the
+# control ledger.
+
+# state A: unsigned, unpinned — today's behavior; no floor exists
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+! exists verify.floor
+
+# sign, then pin the host's own key: self-verification
+exec agenthof config keygen --control-log control.jsonl
+exec agenthof config sign --control-log control.jsonl
+stdout 'signed: sha256:'
+cp signing.pub verify.pub
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+exists verify.floor
+grep '^[0-9a-f]{32} 1$' verify.floor
+sigfile control.jsonl
+cp control.jsonl ledger.v1
+cp $SIG sig.v1
+cp verify.floor floor.v1
+
+# unknown key: a valid signature by another pair over the same install
+badsig control.jsonl otherkey
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: configuration not verified: unknown key: signature is by key [0-9a-f]{64}; configured key is [0-9a-f]{64}'
+stdout 'run r-[0-9a-f]{16} refused: configuration not verified: unknown key'
+lastrun logs
+grep '"reason":"configuration not verified: unknown key: signature is by key' logs/$RUNID.jsonl
+cp sig.v1 $SIG
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+
+# unsigned: the .sig removed
+rm $SIG
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: configuration not verified: unsigned: no signature file for sha256:[0-9a-f]{64}'
+stdout 'run r-[0-9a-f]{16} refused: configuration not verified: unsigned'
+exec agenthof config sign --control-log control.jsonl
+stdout 'signed: sha256:'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+
+# bad signature: one base64 character of the trailer flipped
+badsig control.jsonl flip
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: configuration not verified: bad signature$'
+stdout 'run r-[0-9a-f]{16} refused: configuration not verified: bad signature'
+exec agenthof config sign --control-log control.jsonl
+stdout 'signed: sha256:'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+
+# advance: an identical re-apply (seq 2) signs; the run passes; the floor follows
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'control head: seq=2'
+stdout 'signed: key_id [0-9a-f]{64}'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+grep ' 2$' verify.floor
+
+# the honest limit: a WHOLE-root restore (ledger + .sig + floor together, as of
+# seq 1) is accepted — the floor cannot see a rollback it was rolled back with
+cp ledger.v1 control.jsonl
+cp sig.v1 $SIG
+cp floor.v1 verify.floor
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+grep ' 1$' verify.floor
+
+# re-advance to 2 (the restored ledger has one record, so the identical re-apply is seq 2 again)
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'control head: seq=2'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+grep ' 2$' verify.floor
+
+# a PARTIAL rollback — ledger and .sig restored, floor left at 2 — is stale
+cp ledger.v1 control.jsonl
+cp sig.v1 $SIG
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: configuration not verified: stale: version 1 is below this root.s verified floor 2 \(ledger [0-9a-f]{32}\)'
+stdout 'run r-[0-9a-f]{16} refused: configuration not verified: stale'
+grep ' 2$' verify.floor
+
+# the reset gesture re-accepts the older install and re-creates the floor at it
+rm verify.floor
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+grep ' 1$' verify.floor
+
+# foreign ledger: a re-created control root (new genesis) under the same key
+rm control.jsonl installed/current
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'control head: seq=1'
+stdout 'signed: key_id'
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: configuration not verified: foreign ledger: install is of ledger [0-9a-f]{32}; this root last verified ledger [0-9a-f]{32} \(version 1\); remove .*verify.floor to accept the new ledger'
+stdout 'run r-[0-9a-f]{16} refused: configuration not verified: foreign ledger'
+rm verify.floor
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+grep ' 1$' verify.floor
+
+# not verifiable: the pin corrupt — refused, recorded, never silently unverified
+cp control.jsonl verify.pub
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: configuration not verifiable: pinned key .*verify.pub: signing public key: no PEM block'
+stdout 'run r-[0-9a-f]{16} refused: configuration not verifiable$'
+cp signing.pub verify.pub
+
+# busy: another process holds installed.lock past the timeout — unrecorded:
+# the busy line, no "refused", no run id, no new run ledger file (~5 s)
+exec ls logs
+cp stdout logs.before
+holdlock control.jsonl 9000
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'run: another agenthof process holds the installed-configuration lock; retry'
+! stdout 'refused'
+! stdout 'r-[0-9a-f]{16}'
+exec ls logs
+cmp stdout logs.before
+
+# unpin: today's behavior returns; the floor is inert and not re-created
+rm verify.pub verify.floor
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+! exists verify.floor
+
+# serve: the pin present and the .sig removed — every run is a recorded 422
+# until config sign; then 202 and the floor is created by Prepare; a held lock
+# is an unrecorded 503 (~5 s). The earlier 9 s holder may still be alive when
+# serve starts: startup's shared lock then waits behind it, and acquires within
+# its own 5 s bound by construction — serve starts no earlier than T0+5 (after
+# the local busy wait above) and the holder ends at T0+9.
+env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER
+env AGENTHOF_OIDC_CLIENT_ID=agenthof
+cp signing.pub verify.pub
+sigfile control.jsonl
+rm $SIG
+exec agenthof serve --addr 127.0.0.1:0 --addr-file addr.txt --log-dir logs --artifact-dir artifacts --control-log control.jsonl &
+waitaddr addr.txt
+! exec agenthof run software-engineer fix-bug --input hi --server $SERVER --token $OIDC_TOKEN
+stdout 'run r-[0-9a-f]{16} refused: configuration not verified: unsigned'
+! exists verify.floor
+exec agenthof config sign --control-log control.jsonl
+stdout 'signed: sha256:'
+exec agenthof run software-engineer fix-bug --input hi --server $SERVER --token $OIDC_TOKEN
+stdout 'run r-[0-9a-f]{16} finished: succeeded'
+grep ' 1$' verify.floor
+holdlock control.jsonl 9000
+! exec agenthof run software-engineer fix-bug --input hi --server $SERVER --token $OIDC_TOKEN
+stdout 'run: server answered 503: installed configuration is busy; retry'
+! stdout 'refused'
+
+# the control ledger carries the one bootstrap apply and nothing from any verify, sign or keygen
+exec agenthof audit control --control-log control.jsonl
+stdout 'seq 1 .*config applied \(bootstrap\)'
+! stdout 'seq 2 '
+! stdout 'verify'
+! stdout 'sign'
+! stdout 'keygen'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded install \(apply\)'

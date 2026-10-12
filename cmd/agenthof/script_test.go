@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -251,6 +254,67 @@ func TestScript(t *testing.T) {
 				_, werr := f.WriteString(args[2] + "\n")
 				ts.Check(f.Close())
 				ts.Check(werr)
+			},
+			// badsig <control-log> otherkey|flip: replaces the live .sig of
+			// the current pointer with one that is wrong in exactly one way —
+			// otherkey: a VALID signature by a fresh pair over the same
+			// (hash, log_id, version, installed_at), so the key is the only
+			// difference ("unknown key", judged before any verify); flip: the
+			// live file with one base64 character of its trailer changed
+			// ("bad signature"). Neither can be written inline: the payload
+			// changes with every install's seq.
+			"badsig": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 2 || (args[1] != "otherkey" && args[1] != "flip") {
+					ts.Fatalf("usage: badsig <control-log> otherkey|flip")
+				}
+				store := installedStore(ts.MkAbs(args[0]))
+				hash, installed, err := config.InstalledHash(store)
+				ts.Check(err)
+				if !installed {
+					ts.Fatalf("nothing installed under %s", args[0])
+				}
+				data, err := os.ReadFile(config.SignaturePath(store, hash))
+				ts.Check(err)
+				f, err := config.ParseSignatureFile(data)
+				ts.Check(err)
+				switch args[1] {
+				case "otherkey":
+					pub, priv, err := ed25519.GenerateKey(rand.Reader)
+					ts.Check(err)
+					at, err := time.Parse(time.RFC3339Nano, f.InstalledAt)
+					ts.Check(err)
+					payload, err := config.SignaturePayload(f.Hash, f.LogID, f.Version, at.UTC(), config.KeyID(pub))
+					ts.Check(err)
+					ts.Check(config.WriteSignatureFile(store, hash, payload, config.Sign(priv, payload)))
+				case "flip":
+					sig := []byte(f.Sig)
+					if sig[0] == 'A' {
+						sig[0] = 'B'
+					} else {
+						sig[0] = 'A'
+					}
+					ts.Check(config.WriteSignatureFile(store, hash, f.Payload, string(sig)))
+				}
+			},
+			// holdlock <control-log> <ms>: a helper process (TestMain's
+			// AGENTHOF_TEST_HOLD_LOCK) takes installed.lock beside the
+			// control log exclusively and holds it for <ms> milliseconds, so
+			// the next run or serve Prepare waits out lockTimeout and answers
+			// busy. The holder is killed when the script ends.
+			"holdlock": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 2 {
+					ts.Fatalf("usage: holdlock <control-log> <ms>")
+				}
+				cmd := exec.Command(os.Args[0], "-test.run=TestNothing")
+				cmd.Env = append(os.Environ(), "AGENTHOF_TEST_HOLD_LOCK="+installedLock(ts.MkAbs(args[0])), "AGENTHOF_TEST_HOLD_KIND=file", "AGENTHOF_TEST_HOLD_MS="+args[1])
+				stdout, err := cmd.StdoutPipe()
+				ts.Check(err)
+				ts.Check(cmd.Start())
+				ts.Defer(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+				var line [5]byte
+				if _, err := io.ReadFull(stdout, line[:]); err != nil || string(line[:]) != "held\n" {
+					ts.Fatalf("lock holder never reported held: %q %v", line[:], err)
+				}
 			},
 		},
 	})
