@@ -601,6 +601,10 @@ func TestVouchInstalledAgreesWithTheAuditReaders(t *testing.T) {
 	if _, _, r := vouchInstalled(ctl, readPointer(t, ctl)); r == nil {
 		t.Fatal("a dropped-in snapshot must be refused")
 	}
+	// An apply now lands only over a vouched pointer, so vouch the dropped-in
+	// snapshot before the crash-gap apply below (which would otherwise be
+	// refused at step 3b, before the crash hook).
+	vouchAs(t, ctl)
 
 	// crash gap: pointer moved, no record; then config vouch heals.
 	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan hardest\noutput: plan\nendpoint: http://127.0.0.1:1\n")

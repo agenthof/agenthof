@@ -21,6 +21,9 @@ const (
 	CodeAgentNotFound           = "agent_not_found"
 	CodeIOError                 = "io_error"
 	CodeNotAuthorized           = "not_authorized"
+	// CodeNotOnRecord is the reason the control ledger does not vouch for the
+	// installed pointer the action would be authorized against.
+	CodeNotOnRecord = "not_on_record"
 )
 
 // Reason explains a non-success outcome.

@@ -179,6 +179,10 @@ const (
 	ReasonStoreUnusable = "store unusable"
 	ReasonLedgerDamaged = "control ledger damaged"
 	ReasonNotRecorded   = "control event could not be recorded"
+	// ReasonNotOnRecord is the 403 body when the installed configuration is
+	// not the control ledger's last recorded install: a client cannot fix it,
+	// and the body names no hash and no path.
+	ReasonNotOnRecord = "installed configuration is not on record; an operator must vouch for or re-apply it on the host"
 )
 
 // ConfigSnapshot answers GET /v1/config (with Files) and GET /v1/config/hash

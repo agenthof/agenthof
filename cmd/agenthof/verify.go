@@ -341,6 +341,15 @@ func vouchInstalled(controlLog, hash string) (records []ledger.Record, last cont
 	return records, last, nil
 }
 
+// vouchRefused is the recorded reason for a control action refused because
+// the ledger does not vouch for the installed pointer. The caller prints
+// r.Error() whole FIRST; the recorded message is capped by truncateErr (an
+// apply or vouch label fits whole; a flip label is truncated — the
+// terminal/ledger difference the run refusals already have).
+func vouchRefused(r *verifyRefusal) *control.Reason {
+	return &control.Reason{Code: control.CodeNotOnRecord, Message: truncateErr(r)}
+}
+
 // recordedInstall is the pinned layer's account of the install at hash: the
 // vouch, then the genesis log_id the signature payload binds — read from the
 // records the vouch returned, so the ledger is read once per resolve. A

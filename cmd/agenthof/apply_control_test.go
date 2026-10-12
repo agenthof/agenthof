@@ -738,3 +738,110 @@ func TestApplyRefusesATamperedStoreAndTheHatchRecovers(t *testing.T) {
 		t.Fatalf("want a bootstrap re-install of %s: %+v", before, e)
 	}
 }
+
+// dropInGrantingOutsider (the T2 fixture): a second, correctly hashed
+// snapshot whose roles grant the outsider's group everything, with current
+// re-aimed at it by hand — bytes verify, the ledger does not vouch.
+func dropInGrantingOutsider(t *testing.T, ctl string) string {
+	t.Helper()
+	store := installedStore(ctl)
+	staged := filepath.Join(t.TempDir(), "staged")
+	if err := copyDir(config.SnapshotDir(store, readPointer(t, ctl)), staged); err != nil {
+		t.Fatal(err)
+	}
+	writeFileIn(t, staged, "roles/ops.yaml", "name: platform-admin\nallowed_groups: [finance]\ncontrol: [apply, enable, disable, repair, provision, prune, pull]\n")
+	hash, err := config.HashDir(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copyDir(staged, config.SnapshotDir(store, hash)); err != nil {
+		t.Fatal(err)
+	}
+	repointTo(t, ctl, hash)
+	return hash
+}
+
+// TestApplyRefusesAnUnvouchedPointer (spec test 12): on the T2 fixture the
+// outsider's apply is refused not_on_record BEFORE authorization — recorded
+// with the proposal's hash, the message whole, the pointer unmoved, nothing
+// staged; rm current + a bootstrap apply of the original directory heals.
+func TestApplyRefusesAnUnvouchedPointer(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	original := readPointer(t, ctl)
+	hex2 := dropInGrantingOutsider(t, ctl)
+	proposal, err := config.HashDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "configuration not on record: last recorded install is " + original + " (apply); " + remedyNotOnRecord
+	var out bytes.Buffer
+	code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance"}, &out)
+	if code != 1 || !strings.Contains(out.String(), "apply: "+want+"\n") || strings.Contains(out.String(), "registry ok") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "apply" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotOnRecord || e.Reason.Message != want || len(e.Reason.Message) != 192 || e.ConfigHash != proposal {
+		t.Fatalf("%+v", e)
+	}
+	if readPointer(t, ctl) != hex2 {
+		t.Fatal("the pointer must not move")
+	}
+	noStagingResidue(t, ctl)
+	// The pull on the same fixture (spec test 15; order unchanged, §6.6): a
+	// caller the dropped-in roles grant answers 503 not recorded; a caller no
+	// role names answers 403 — the vouch is judged at step 6, after authz.
+	if p := pullAPI(t, ctl, outsider); p.Kind != pullNotRecorded {
+		t.Fatalf("granted by the drop-in: kind %d", p.Kind)
+	}
+	if p := pullAPI(t, ctl, edgeInvoker); p.Kind != pullRefused {
+		t.Fatalf("ungranted: kind %d", p.Kind)
+	}
+	// A granted caller is refused the same way: the vouch precedes authorization.
+	out.Reset()
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 || !strings.Contains(out.String(), "apply: "+want) {
+		t.Fatalf("granted caller: %d\n%s", code, out.String())
+	}
+	// The hatch: rm current → bootstrap apply of the original directory → vouched.
+	if err := os.Remove(filepath.Join(installedStore(ctl), config.InstalledPointer)); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("bootstrap: %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); !e.Bootstrap || e.ConfigHash != original {
+		t.Fatalf("%+v", e)
+	}
+	if _, mismatch := installedPointerLine(ctl, mustRecords(t, ctl)); mismatch {
+		t.Fatal("vouched after the bootstrap")
+	}
+}
+
+// TestApplyPreconditionIsJudgedAfterTheVouch (spec test 18, the named shift):
+// a stale --if-installed on an UNVOUCHED pointer is 403 not_on_record,
+// recorded — not 412; on a vouched pointer 412 is unchanged and unrecorded.
+func TestApplyPreconditionIsJudgedAfterTheVouch(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	original := readPointer(t, ctl)
+	stale := "sha256:" + strings.Repeat("0", 64)
+	events := len(controlEvents(t, ctl))
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng", "--if-installed", stale}, &out); code != 1 || !strings.Contains(out.String(), "apply: precondition failed: installed configuration is "+original+", not "+stale) {
+		t.Fatalf("vouched pointer: %d\n%s", code, out.String())
+	}
+	if len(controlEvents(t, ctl)) != events {
+		t.Fatal("412 records nothing")
+	}
+	dropInGrantingOutsider(t, ctl)
+	out.Reset()
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng", "--if-installed", stale}, &out); code != 1 || strings.Contains(out.String(), "precondition failed") || !strings.Contains(out.String(), "configuration not on record") {
+		t.Fatalf("unvouched pointer: %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotOnRecord {
+		t.Fatalf("%+v", e)
+	}
+}

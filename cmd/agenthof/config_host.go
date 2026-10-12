@@ -9,6 +9,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/origin"
@@ -55,6 +56,10 @@ func applyResult(o applyOutcome) apiclient.ApplyResult {
 	}
 	if o.Reason != nil {
 		res.Reason = o.Reason.Message
+		if o.Reason.Code == control.CodeNotOnRecord {
+			// The recorded message names two hashes; the wire carries a fixed body.
+			res.Reason = apiclient.ReasonNotOnRecord
+		}
 	}
 	switch o.Kind {
 	case applyInstalled:
