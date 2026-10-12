@@ -86,8 +86,15 @@ The governed core is real and runnable today:
   configuration with the one bit flipped — the directory is untouched, and an
   `apply` re-asserts what the directory declares. `audit <run-id>` names the
   install a run executed under, `apply` or flip. The installed bytes are verified
-  against the pointer before a run or a kill-switch flip reads them; the
-  store's pointer is not yet chained into the ledger.
+  against the pointer before a run or a kill-switch flip reads them, and `run`
+  and `serve` execute only a snapshot the control ledger records as its last
+  install — a pointer the ledger does not vouch for (re-aimed by hand, a
+  dropped-in snapshot, an install whose record never landed) is a recorded
+  refusal, and a damaged ledger refuses runs until it is repaired. What remains
+  undefended is a consistent rewrite of both the pointer and the ledger, which
+  a head saved off the machine catches today (`audit verify control
+  --expect-head`), a pinned key refuses unless the writer also holds the
+  signing key, and external anchoring (reserved) would prove to a third party.
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
   reach declared MCP tool resources only through Agenthof, which mirrors a
   whole resource (written `tools: ["*"], mode: read-write` — every-tool
@@ -189,15 +196,17 @@ The governed core is real and runnable today:
   the command line today; the same two operations over the API, under the same
   default-deny `control:` authorization, and a structured record of what a
   prune removed, are still to come.
-- **A tamper-evident pointer, and the operator's signature at the edge** — the
-  installed-config pointer is chained into the control ledger; and a consuming
-  edge that obtains a configuration by `config pull` verifies the *operator's*
-  signature against its pinned key before running it — whether it executes the
-  pulled bytes directly or applies them to its own root (today the signature
-  stays with the signing root: `config pull` names the signer but does not carry
-  the signature, an edge's own `apply` signs with the edge's key, and so an
-  execution point verifies only installs made on its own root) — so the edge
-  distribution path is provably the operator's, end to end.
+- **The operator's signature at the edge** — a consuming edge that obtains a
+  configuration by `config pull` verifies the *operator's* signature against its
+  pinned key before running it — whether it executes the pulled bytes directly
+  or applies them to its own root (today the signature stays with the signing
+  root: `config pull` names the signer but does not carry the signature, an
+  edge's own `apply` signs with the edge's key, and so an execution point
+  verifies only installs made on its own root) — so the edge distribution path
+  is provably the operator's, end to end. On its own root an execution point
+  already executes only the install its control ledger records (above); what
+  that cannot catch — a consistent rewrite of pointer and ledger together — is
+  what the external anchoring under *Exploring* is for.
 - **More confinement backends** — the reference runtime's confinement becomes a
   selection seam with OS-native backends beyond rootless podman (for example
   macOS Seatbelt, Linux Landlock), chosen per host with a fail-closed default

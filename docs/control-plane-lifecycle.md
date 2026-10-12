@@ -194,13 +194,22 @@ files. `run` and `serve` verify the installed snapshot's bytes against the
 pointer before reading them, and the kill switch verifies them before it
 stages a copy to re-install; both stop on a mismatch (`installed config
 <hash>: snapshot hashes as <got>, not as its pointer`), so tampered bytes
-are neither executed nor re-installed under a new name. One read does not
-verify: the roles-only read that decides who may act — and, for `gateway
-provision`, which roles get keys. And the pointer itself is not chained
-into the ledger. So the store is tamper-evident only as far as the
-pointer's name; whoever can write the store can still install, re-point,
-or edit the roles the control plane decides from — the same writer who
-can edit the ledger. Neither `gateway provision` nor `runs prune` takes
+are neither executed nor re-installed under a new name. The pointer itself is
+held to the ledger on the execution read: `run` and `serve` execute only a
+snapshot the control ledger records as its **last install**, and refuse —
+recorded, `configuration not on record` — a pointer re-aimed by hand, a
+dropped-in snapshot, or an install whose record never landed; a damaged
+ledger refuses runs, recorded with the repair hint, until it is repaired. One
+read does not verify: the roles-only read that decides who may act — and, for
+`gateway provision`, which roles get keys. So the store is tamper-evident, not
+tamper-proof: whoever can write the store *alone* can no longer make a run
+execute a re-pointed, dropped-in, or edited snapshot — though they can still
+edit the roles that unverified roles-only read decides from — and whoever can
+rewrite the store and the ledger together, consistently, can still install or
+re-point at will: the ledger's own writer. That consistent rewrite is what a
+head saved off the machine catches today (`audit verify control
+--expect-head`) and what external anchoring (reserved) would prove to a third
+party. Neither `gateway provision` nor `runs prune` takes
 the installed-configuration writer lock (they write nothing to the
 store), so an `apply` that lands concurrently and revokes the invoker's
 grant may be a few milliseconds too late — the same window a run's
@@ -328,13 +337,16 @@ NOT recorded` and exits non-zero. `audit control` and `audit verify control`
 compare the installed pointer with the last recorded **install** — the last
 successful `apply` or kill-switch flip on record — and say when the two
 disagree (`verify control` exits 5), so an unrecorded install is
-visible rather than silent. Both are surfaced loudly; neither is glossed over.
+visible rather than silent — and `run` and `serve` refuse every run under it,
+recorded as `configuration not on record`, until an `apply` puts an install
+on record again. Both are surfaced loudly; neither is glossed over.
 
 **Upgrading.** A control root written before this behavior whose last successful
-control event is a kill-switch flip reports `audit verify control` exit 5 until
-the next `apply` (the flip recorded a directory hash that was never installed),
-and its earlier bootstrap-era flips carry no marker; run `apply` once after
-upgrading.
+control event is a kill-switch flip over a configuration directory reports
+`audit verify control` exit 5, and refuses every run (`configuration not on
+record`, recorded), until the next `apply` (the flip recorded a directory hash
+that was never installed), and its earlier bootstrap-era flips carry no marker;
+run `apply` once after upgrading.
 
 ## 5. Return the head
 
@@ -421,9 +433,17 @@ ledger does not vouch for — three situations produce it: the moment inside
 every apply between the pointer moving and its record landing
 (milliseconds); an install whose record was never appended (`installed;
 event NOT recorded` — re-apply to clear it); and a pointer re-aimed by hand
-at some other snapshot. A ledger that was repaired still vouches: the taint
-is the audit readers' verdict about history, not about whether the current
-pointer is on record.
+at some other snapshot. The execution read holds the same line, but
+definitively: `run` and `serve` read the pointer and the ledger under a shared
+hold of the configuration lock, so they never meet the first situation (an
+install in flight is waited for, or — past the lock timeout — answered as a
+retryable busy, `serve` `503`, nothing recorded) and refuse the other two as a
+**recorded** run refusal, `configuration not on record`, until a re-apply puts
+the install on record; a torn or broken ledger refuses runs the same way,
+recorded with the repair hint, until it is repaired. A ledger that was
+repaired still vouches — for the pull and for runs: the taint is the audit
+readers' verdict about history, not about whether the current pointer is on
+record.
 
 A pull is a read: it is not recorded, and the server's log is the only
 trace of who read the policy. What the puller then does is theirs: `config
@@ -465,10 +485,15 @@ key **before executing it**, and refuse an unsigned, wrong-key, tampered,
 replayed, or rolled-back install. A persisted `verify.floor` remembers the
 highest `(log_id, version)` this point has verified, so an older signed install
 cannot be rolled back under it (refused *stale*) and a different control ledger
-is refused *foreign* until the floor is reset. The verify reads the pointer,
-the ledger and the signature under one shared hold of the configuration lock, so
-it never catches an install mid-write; a lock held past the timeout is a
-retryable *busy*, not a refusal, and is not recorded. Pinning is opt-in and
+is refused *foreign* until the floor is reset. The pinned check is layered on
+the vouch every execution read performs: the pointer must first be the install
+the control ledger records last (above), and only then are the signature and
+the floor judged. The verify reads the pointer, the ledger and the signature
+under one shared hold of the configuration lock — `installed.lock`, beside the
+control ledger; a local `run` and `serve` open it, and on a fresh root create
+it, so the control root must be writable by the user they run as — so it never
+catches an install mid-write; a lock held past the timeout is a retryable
+*busy*, not a refusal, and is not recorded. Pinning is opt-in and
 fail-closed: with a key pinned, verification is mandatory. This is
 tamper-evidence at the point of execution, with the same honest bound as the
 ledger — it catches a tampered or partially-restored installed store, but a
@@ -531,7 +556,7 @@ adopted. Because both carry the same key:
 | `run` and `serve` verify the installed configuration against a pinned key (`verify.pub` / `run --verify-key`) before executing — unsigned/wrong-key/tampered/stale/foreign refused and recorded, a held lock a retryable busy, a persisted `verify.floor` bounding rollback; opt-in and fail-closed; Article VI names it | carrying the operator's signature with a pulled configuration so a consuming edge verifies the operator's key (today a point verifies only installs made on its own root); `--verify-floor` to relocate the floor outside a backup set; a `--max-age` bound on `installed_at` |
 | `apply` over the API (`POST /v1/config/apply`) with a required compare-and-swap on the installed hash, authorization at the API against the installed roles, one writer lock across apply and the kill switch, and `origin` on the record; pulling the installed configuration over the API (`GET /v1/config`, `GET /v1/config/hash`, `config pull`), authorized by `pull` (or `apply`, which includes it), content-addressed, unrecorded | `registry enable\|disable` and `audit repair control` over the API; `audit control --server` |
 | default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; pruning and tamper-evidence of the snapshot store; verifying the roles-only authorization read |
-| `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read and on the kill switch's re-snapshot read | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
+| `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read and on the kill switch's re-snapshot read; the execution read executes only an install the control ledger records as its last — a pointer it does not vouch for is a recorded refusal, a damaged ledger refuses runs until repaired, a held configuration lock a retryable busy | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
 | `gateway provision` and `runs prune` authorized against the installed roles (`provision`, `prune`) and recorded; prune spares the control ledger by name and by identity | `provision`/`prune` over the API; a structured prune record; `detail` in `investigate/1` |
 | hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts | external anchoring / write-once sink for the ledger |
 | three identities per action (invoker / asserted_as / witness) | agent-to-IdP federation for the invoker's authority |

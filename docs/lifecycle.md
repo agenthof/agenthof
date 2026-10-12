@@ -129,7 +129,9 @@ The config must also be valid — `apply`-style validation runs first — and it
 the **installed** configuration that is validated and executed: the run resolves
 the snapshot beside its control ledger (`--control-log`), never the `--config`
 directory, verifies its bytes against the pointer's hash before reading them,
-and stamps that hash on `workflow_started`; with nothing
+checks that the pointer is the install the control ledger records last — a
+pointer the ledger does not vouch for is refused, recorded — and stamps that
+hash on `workflow_started`; with nothing
 installed the run is refused, recorded, and told which `apply` to run. Invalid
 config is itself a refusal. Any "no" produces a single **`run_refused`**
 event and the run stops. Refusals are audit events, not silent exits: a denial
