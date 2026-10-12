@@ -158,9 +158,11 @@ func buildRegistry(configRoot string, out io.Writer) *registry.Registry {
 // install is reported as today and never vouched); the vouch, pinned or not
 // — pinned, with the signature and the floor layered on it; unlock; Build,
 // only after a vouched install. Invariants: at most one of errs and
-// unverified is set; a verdict (unverified != nil && !Transient()) ⇒
-// installed && hash != "" && cfg loaded && reg == nil; busy ⇒ nothing else is
-// set.
+// unverified is set; any non-transient unverified return has reg == nil (the
+// run never executes) — a vouch/signature verdict additionally carries
+// installed && hash != "" && cfg loaded, while a pre-read fault (an unreadable
+// pinned key, a non-busy lock error) returns before the pointer is read, with
+// installed == false and hash == ""; busy ⇒ nothing else is set.
 func resolveRunConfig(controlLog, verifyKey string, mode verifyMode) (cfg config.Config, reg *registry.Registry, hash string, installed bool, errs []error, unverified *verifyRefusal) {
 	pinned, keyPath, err := pinnedKeyPath(controlLog, verifyKey)
 	if err != nil {
