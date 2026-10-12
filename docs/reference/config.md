@@ -891,9 +891,21 @@ only way `run` finds what to execute. `run` finds that snapshot under the same
 `--control-log` you applied to; if you passed `--control-log` to `apply`, pass
 the same path to `run`. `audit control` and `audit verify
 control` report whether it matches the last recorded install (an `apply` or a
-kill-switch flip). Snapshots are never pruned by any command today; removing
-`current` makes the next `apply` a bootstrap — permitted for any identity and
-recorded as such.
+kill-switch flip) — and `run` and `serve` **execute only when it does**: the
+execution read checks the pointer against the control ledger and refuses,
+recorded, a pointer that is not the last recorded install (`configuration not
+on record`) or a ledger it cannot read (`configuration not verifiable: control
+ledger …`); the remedy is to `apply` again (after `audit repair control` if
+the ledger is torn). The pointer, the ledger (and, with a key pinned, the
+signature) are read under one shared hold of the configuration lock,
+`<dir>/installed.lock` beside the ledger — a local `run` and `serve` open it,
+and on a fresh root create it, so the control root must be writable by the user
+they run as, as it already must be by default for the run logs and artifacts
+under `--log-dir` and `--artifact-dir`; a fresh root touched only by `run`
+holds an empty `installed.lock`. (`run --server` reads no local root; the
+server does this on its own.) Snapshots are never pruned by any command today;
+removing `current` makes the next `apply` a bootstrap — permitted for any
+identity and recorded as such.
 
 The **operator signing pair**, when present, lives beside the ledger too:
 `<dir>/signing.key` (the Ed25519 private key, `0600` — keep it on this host)
@@ -911,14 +923,19 @@ is the key this point *trusts*, `signing.pub` the key it signs *with* — or pas
 verifies against the key beside *its* control ledger). When a pinned key is
 present, `run` and `serve` verify the installed configuration's signature
 against it **before executing** and refuse otherwise: a run exits non-zero and
-records the refusal (`serve` answers `422`); a configuration lock held past the
-timeout is a retryable busy instead (`serve` `503`). Verification is mandatory
-once a key is pinned (fail-closed) and absent entirely otherwise (unchanged). A
+records the refusal (`serve` answers `422`). Verification is mandatory
+once a key is pinned (fail-closed) and absent entirely otherwise. It is layered
+on the check every execution read makes, pinned or not: the pointer must be the
+install the control ledger records last, or the run is refused as
+`configuration not on record` (recorded), and a ledger that is damaged or
+cannot be read refuses it as `configuration not verifiable: control ledger …`
+(recorded) — neither needs a pin; a configuration lock held past the timeout is
+a retryable busy instead (`serve` `503`), pinned or not. A
 sibling `<dir>/verify.floor` records the highest `(log_id, version)` this point
 has verified, so a replayed or rolled-back older install is refused as *stale*,
 and a different control ledger as *foreign* (reset by removing `verify.floor`).
-A pinned key or floor that cannot be read, a damaged ledger, or a pointer the
-ledger does not record is refused the same way (*not verifiable*) and recorded;
+A pinned key or floor that cannot be read is refused the same way (*not
+verifiable*) and recorded;
 a corrupt `verify.floor` is refused, not treated as absent — `rm` it to reset.
 `verify.pub`/`verify.floor` are this point's own state, never part of a snapshot
 and never pulled. The floor is restored with the root: a restore of the whole
@@ -1110,7 +1127,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
-| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install); or (`--if-installed`) the precondition did not hold, printed and **not** recorded; or another process holds the installed-configuration writer lock (`another agenthof process holds the installed-configuration lock; retry`), not recorded; or (`--server`) any answer other than installed, and every transport error |
+| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run — recorded, `configuration not on record` — until an `apply` lands; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run — recorded, `configuration not on record` — until a re-apply); or (`--if-installed`) the precondition did not hold, printed and **not** recorded; or another process holds the installed-configuration writer lock (`another agenthof process holds the installed-configuration lock; retry`), not recorded; or (`--server`) any answer other than installed, and every transport error |
 | `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set; `--if-installed` not `sha256:<hex>` or `none`; `--server` without a token or without `--if-installed`; `--bundle` without `--server` |
 
 `agenthof config pull`:
@@ -1125,7 +1142,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 
 | Exit | Meaning |
 |---|---|
-| `1` | A recorded refusal: `no configuration installed` (nothing is installed under `--control-log`'s root; the hint names the `apply` to run), or `configuration invalid: …` (the installed configuration fails validation — or the store itself is damaged: a malformed pointer, a missing snapshot, or a snapshot whose bytes no longer hash to the pointer — the label is generic, the text names the cause), or the registry gate's own reasons |
+| `1` | A recorded refusal: `no configuration installed` (nothing is installed under `--control-log`'s root; the hint names the `apply` to run), or `configuration invalid: …` (the installed configuration fails validation — or the store itself is damaged: a malformed pointer, a missing snapshot, or a snapshot whose bytes no longer hash to the pointer — the label is generic, the text names the cause), or `configuration not on record: …` (the pointer is not the install the control ledger records last — re-aimed by hand, a dropped-in snapshot, or an install whose record never landed; the text names the last recorded install, or that there is none, and the remedy, re-apply — this holds with or without a pinned key), or `configuration not verifiable: control ledger …` (the ledger is torn or broken — the text names the `audit repair control` to run — or cannot be read; also without a pin) or, with a key pinned, `configuration not verifiable: …` (the pinned key or floor cannot be read) and the `configuration not verified: …` verdicts (`unsigned`, `unknown key`, `bad signature`, `stale`, `foreign ledger`), or the registry gate's own reasons; or — **not** recorded, no run id — another process holds the configuration lock past the timeout (`run: another agenthof process holds the installed-configuration lock; retry`) |
 
 `agenthof audit control`:
 

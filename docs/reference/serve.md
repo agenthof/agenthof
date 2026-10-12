@@ -44,7 +44,7 @@ All bodies are JSON except `/audit`, which is plain text.
 
 | Method and path | What it does |
 |---|---|
-| `POST /v1/runs` `{"role","workflow","input"}` | Starts a run. Answers `202` `{run_id, status:"running"}` with a `Location` header, or a **recorded refusal**: `403` `{run_id, status:"refused", reason}` when the role, workflow, ownership or groups say no (the same reasons `run` prints), `422` when nothing is installed under the control root (`reason: no configuration installed`) or the installed configuration does not validate. A refusal is a run: it has an id and a ledger. A body missing a field is `400` and a body over 1 MiB is `413`, neither of them a run. `429` with `Retry-After` when `--max-concurrent-runs` are in flight; `503` while shutting down. |
+| `POST /v1/runs` `{"role","workflow","input"}` | Starts a run. Answers `202` `{run_id, status:"running"}` with a `Location` header, or a **recorded refusal**: `403` `{run_id, status:"refused", reason}` when the role, workflow, ownership or groups say no (the same reasons `run` prints), `422` when nothing is installed under the control root (`reason: no configuration installed`), the installed configuration does not validate, the installed pointer is not the install the control ledger records last (`configuration not on record`), the ledger is damaged or unreadable (`configuration not verifiable`), or — with a key pinned beside the control ledger — the signature does not verify (`configuration not verified: …`). A refusal is a run: it has an id and a ledger. A body missing a field is `400` and a body over 1 MiB is `413`, neither of them a run. `429` with `Retry-After` when `--max-concurrent-runs` are in flight; `503` with `Retry-After: 1` when another process holds the configuration lock past the timeout (`installed configuration is busy; retry` — no run id, nothing recorded); `503` while shutting down. |
 | `GET /v1/runs/{id}` | `{run_id, status, reason, started, finished, output_sha, output_preview}`. `status` is `running`, `succeeded`, `failed`, `refused`, `cancelled`, or `incomplete` (a ledger with no final event — the process ended before the run did). `reason` is the recorded reason for a refused, failed or cancelled run. Runs this process did not start are read from their ledger on disk. |
 | `GET /v1/runs/{id}/events` | The run's ledger: `{events, head, integrity, broken_line}`. `integrity` is `verified`, `torn`, `broken` (with the 1-based `broken_line`), or `in_flight` — a record caught mid-write on a run that is still running here, which the next read will see whole. The verified prefix is always returned. |
 | `GET /v1/runs/{id}/audit` | Exactly what `agenthof audit <id>` prints, rendered by the server — including the line that names the install that put the run's config in place, which needs the control ledger the server has. The verdict also travels in the `Agenthof-Integrity` header so `audit --server` can exit as the local command does. |
@@ -188,11 +188,13 @@ mid-step; its ledger then has no final event and reads back as
 ## Honest limits
 
 - The installed configuration is read per run: an `apply` or kill-switch
-  flip takes effect on the next run, with no restart; with nothing installed
+  flip takes effect on the next run, with no restart; with nothing installed,
+  or with a pointer the control ledger does not record as its last install,
   every run is refused (422) until an `apply` lands — `serve` starts
-  regardless. The shutdown deadline's default is read once at startup, so a
-  server started with nothing installed keeps the default step timeout as its
-  drain deadline after a later apply; `--shutdown-timeout` sets it explicitly.
+  regardless and says so once at startup. The shutdown deadline's default is
+  read once at startup, so a server started with nothing installed keeps the
+  default step timeout as its drain deadline after a later apply;
+  `--shutdown-timeout` sets it explicitly.
 - The invoker's token is also the subject token for on-behalf-of tool
   calls; a run longer than the token's lifetime can fail such a call
   mid-run. There is no refresh.
@@ -258,13 +260,15 @@ mid-step; its ledger then has no final event and reads back as
   the install→record window inside every apply (milliseconds), an install
   whose record was never appended (`installed; event NOT recorded` — re-apply
   to clear it), and a pointer re-aimed by hand. `run` and `serve` on the host
-  execute such a pointer; an execution point is not handed it. Two of those
-  three clear only when an operator acts, so a poller should back off rather
-  than honor `Retry-After: 1` forever.
+  refuse such a pointer too — definitively and recorded (`422`, `configuration
+  not on record`), since they read pointer and ledger under the configuration
+  lock and so never meet the in-flight window; an execution point is not
+  handed it. Two of those three clear only when an operator acts, so a poller
+  should back off rather than honor `Retry-After: 1` forever.
 - A repaired ledger still vouches: after `audit repair control` the chain
-  verifies and the pull answers `200` when the pointer matches the last
-  recorded install; the taint stays visible to `audit verify control` (exit
-  3) and `investigate`, not to the puller.
+  verifies, the pull answers `200` and runs execute when the pointer matches
+  the last recorded install; the taint stays visible to `audit verify control`
+  (exit 3) and `investigate`, not to the puller or the run.
 - Who may pull is decided from the installed `roles/` as the pointer names
   them, unverified; the bytes served are verified whole, `roles/` included,
   so a tampered snapshot authorizes nobody to receive anything but is refused
