@@ -15,8 +15,9 @@ a later version, it says so — only shipped behavior is a guarantee.
 
 ## The commands
 
-Five commands write to the control plane — and one of them, `apply`, can
-also arrive over the network:
+Six commands write to the control plane — one of them, `apply`, can
+also arrive over the network, and one, `config vouch`, is a recovery act rather
+than a change:
 
 ```
 agenthof apply --config ./config --as dana@example.com --groups platform-eng                   # adopt a configuration
@@ -25,6 +26,7 @@ agenthof registry enable  coder --config ./config --as dana@example.com --groups
 agenthof audit repair control --config ./config --as dana@example.com --groups platform-eng    # repair a torn ledger tail
 agenthof gateway provision --as dana@example.com --groups platform-eng                           # mint provider keys for the installed roles
 agenthof runs prune --older-than 180d --as dana@example.com --groups platform-eng               # remove aged run ledgers and artifact bodies
+agenthof config vouch --control-log .agenthof/control.jsonl --as dana@example.com              # record the install event the ledger lacks for the snapshot already installed (recovery)
 agenthof apply --server https://agenthof.example --token $TOKEN --if-installed sha256:…  # the same apply, over the API (serve)
 agenthof config pull --server https://agenthof.example --token $TOKEN --out ./pulled           # read the installed configuration back, for an execution point (a read: not recorded)
 ```
@@ -36,7 +38,10 @@ promise is not that nothing bad can happen; it is that **nothing happens without
 a record you can later verify**. One command reads the control plane without
 writing it: `config pull` hands an execution point the installed
 configuration, authorized like every control action and — because it changes
-nothing — not recorded.
+nothing — not recorded. And one writes a record without changing any
+configuration: `config vouch` makes the ledger stand behind a snapshot that is
+already installed but whose install event never landed — see "Recovering an
+unrecorded install" below.
 
 ## The journey at a glance
 
@@ -47,8 +52,11 @@ nothing — not recorded.
   1. Who is changing it?   authenticate  ──►  Invoker {subject, issuer, method}
       │                                        + asserted_as (claimed) + witness (machine)
       ▼
-  2. May they change it?    authorize  ──►  no ──►  refused / not_authorized (recorded*, then stop)
-      │ yes                                           *repair: printed, not recorded (see below)
+  2. May they change it?    the installed snapshot's bytes must hash as its pointer, the control
+      │                     ledger must record that pointer as its last install (not → refused /
+      │                     not_on_record, recorded*), then authorize ──► no ──► refused / not_authorized (recorded*, then stop)
+      │ yes                                           *repair: printed, not recorded; it verifies the bytes but does
+      │                                                not consult the ledger it repairs (see below)
       ▼
   3. Is the change valid?  validate  ──►  no ──►  rejected / refused  (recorded, then stop)
       │ yes   (apply: the validated copy is installed as the current snapshot)
@@ -133,6 +141,11 @@ point so it can enforce it. It is authorized against the installed roles like
 every other action and, as a read, records nothing — see "Pulling the
 configuration" below.
 
+One command is deliberately outside this gate: `config vouch` is authorized
+against no role (`vouch` is not an operation a role can grant). It is a
+bootstrap-class recovery act, permitted for any identity the host resolves and
+always recorded — see "Recovering an unrecorded install" below.
+
 What each command authorizes against — the **installed** configuration:
 
 `apply` does more than validate. A configuration that passes is **installed**:
@@ -168,89 +181,132 @@ the directory on disk — is what every later control action authorizes against:
   snapshot — the first apply after this behavior arrives — is treated the same
   way: that apply bootstraps, whoever asks, and installs the snapshot the root
   then authorizes against.
-- **The floor.** A configuration that grants `apply` to no role is rejected
+- **The floor.** A configuration that grants `apply` to no role — or only to
+  roles whose `allowed_groups` name no real group — is rejected
   (`no-apply-floor`): installed, it could never be changed again.
 
-The authorizing roles are read from the snapshot without validation — roles
-only — so an installed configuration written under older rules still decides
-who may change it. The control plane reads the snapshot's roles to authorize;
-`run` and `serve` read the whole snapshot to execute — the data plane now runs
-the installed configuration too, not the `--config` directory.
+The authorizing roles are read from the snapshot in three steps, and it is
+worth keeping them apart. First the snapshot's **bytes are verified** against
+the pointer's hash — every enumerated file, not only `roles/` — before any of
+them is parsed; a mismatch (`installed config <hash>: snapshot hashes as
+<got>, not as its pointer`) authorizes nobody, so an edited snapshot decides
+nothing. Second, the **pointer must be the install the control ledger records
+last** — the last successful `apply`, kill-switch flip, or `config vouch` on
+record — or the action is refused, recorded, `configuration not on record`;
+this is the same vouch the execution read performs, and `apply`, the kill
+switch, `gateway provision` and `runs prune` all require it. `audit repair
+control` is the one exception: it verifies the bytes but does not consult the
+ledger, because the ledger it would consult is the one it exists to repair.
+Third, the roles are **parsed leniently** — roles only, never the full
+validation `apply` runs — so an installed configuration written under older
+rules, or a kill-switch snapshot that references a disabled agent, still
+decides who may change it. The control plane reads the snapshot's roles to
+authorize; `run` and `serve` read the whole snapshot to execute — the data
+plane runs the installed configuration too, not the `--config` directory.
 
 A refused `apply`, `enable`, or `disable` is recorded like every other
 turned-away attempt — outcome `refused`, reason `not_authorized`, a fixed
 message that names the operation and nothing else (never the caller's claimed
 groups), and for `apply` the hash of the configuration they tried to apply.
-A refused **repair is printed, not recorded**: the only ledger it could be
+A pointer the ledger does not vouch for is refused before authorization is
+even attempted — reason `not_on_record`, the text naming the last recorded
+install (or that there is none) and the remedy — so a caller no role grants
+learns that the pointer is unvouched, never the pointer's own hash. A
+refused **repair is printed, not recorded**: the only ledger it could be
 written to is the damaged one being repaired. The same holds when the roles
-cannot be read at all — repair refuses, prints why, and touches nothing.
+cannot be read or verified at all — repair refuses, prints why, and touches
+nothing.
 
 **Honest limits.** In CLI mode the filesystem is the root of trust. Anyone who
 can edit the configuration directory can edit `control:` too, so this gate is
 a *recorded default-deny decision* on the invoker's identity — meaningful
 under `--token`, where the groups are verified; self-asserted under `--as
 --groups` — not a wall against someone who already holds write access to the
-files. `run` and `serve` verify the installed snapshot's bytes against the
-pointer before reading them, and the kill switch verifies them before it
-stages a copy to re-install; both stop on a mismatch (`installed config
-<hash>: snapshot hashes as <got>, not as its pointer`), so tampered bytes
-are neither executed nor re-installed under a new name. The pointer itself is
-held to the ledger on the execution read: `run` and `serve` execute only a
-snapshot the control ledger records as its **last install**, and refuse —
-recorded, `configuration not on record` — a pointer re-aimed by hand, a
-dropped-in snapshot, or an install whose record never landed; a damaged
-ledger refuses runs, recorded with the repair hint, until it is repaired. One
-read does not verify: the roles-only read that decides who may act — and, for
-`gateway provision`, which roles get keys. So the store is tamper-evident, not
-tamper-proof: whoever can write the store *alone* can no longer make a run
-execute a re-pointed, dropped-in, or edited snapshot — though they can still
-edit the roles that unverified roles-only read decides from — and whoever can
-rewrite the store and the ledger together, consistently, can still install or
-re-point at will: the ledger's own writer. That consistent rewrite is what a
-head saved off the machine catches today (`audit verify control
---expect-head`) and what external anchoring (reserved) would prove to a third
-party. Neither `gateway provision` nor `runs prune` takes
-the installed-configuration writer lock (they write nothing to the
-store), so an `apply` that lands concurrently and revokes the invoker's
-grant may be a few milliseconds too late — the same window a run's
-per-run read has; provision reads the roles once and mints for exactly
-the roles it authorized against, so there is no second window. The
-remedy for a mismatch is a control-plane one:
-`apply` again (a fresh, correct snapshot if the bytes differ; if the
-directory already exists under that name, `apply` refuses with a removal
-hint), or remove `installed/<hex>` and `apply`. The
-kill switch is a break-glass override of the **installed** configuration and is
-temporary by design (see below). A `run` executes a snapshot that either the
-old or the new install put in place, whole — the pointer is renamed atomically
-— so an `apply` racing a served run is safe; a flip racing an `apply` is two
-writers, last pointer wins, both recorded. What the gate
-buys now is that an unauthorized change attempt yields a `refused` row instead
-of a silent change — and that a change cannot smuggle in its own permission.
-The proposed configuration is read once: it is copied into the store first,
-and the copy is what is validated, hashed, and installed, so the recorded hash
-is the hash of exactly what was checked. Two applies racing on one machine are
-not serialized against each other — the last pointer written wins (single-
-operator use; a compare-and-swap arrives with the API). And the store is a
-logic gate, not a vault: whoever can write `.agenthof/installed/` can remove
-`current`, and the next apply is a bootstrap again for any identity — the only
-trace is a second `config applied (bootstrap)` row in the audit trail, which is
-exactly why it is recorded distinctly. That same removal is the deliberate way
-out when an installed configuration locks out its own control (it grants
-`apply` or `repair` only to a group no verified token carries): re-bootstrap,
-and the record shows it. The gate is per control root, not per store: the
-installed snapshot is found beside the `--control-log` in use, so pointing a
-command at a fresh `--control-log` reaches the bootstrap / `--config` fallback
-with no write to any store at all. That grants nothing an operator did not
-already have, but it is why the control root, not the store directory alone, is
-the boundary to reason about. Over the API that limit falls away for the
-caller: there is no filesystem, so the token-and-roles check is the only way
-in, and the first apply while nothing is installed is refused unless the server
-was started with `--allow-api-bootstrap`. What remains is the host: whoever can
-write `.agenthof/installed/` on the serving host can still remove the pointer.
-A pull reads the installed snapshot whole and verifies every byte against the
-pointer before serving any of it, so it never distributes a tampered
-snapshot — but who may pull is decided from the same roles-only read, and no
-ledger line records that a pull happened.
+files. Every read of the installed snapshot's bytes verifies them against the
+pointer before parsing them: the execution read (`run`, `serve`), the
+authorization read every control command decides with, the kill switch before
+it stages a copy to re-install, and the pull before it serves a byte. All stop
+on a mismatch (`installed config <hash>: snapshot hashes as <got>, not as its
+pointer`), so tampered bytes are neither executed, nor authorized from, nor
+re-installed under a new name, nor distributed. The pointer itself is held to
+the ledger: `run` and `serve` execute, and `apply`, the kill switch, `gateway
+provision` and `runs prune` authorize against, only a snapshot the control
+ledger records as its **last install**, and refuse — recorded, `configuration
+not on record` — a pointer re-aimed by hand, a dropped-in snapshot, or an
+install whose record never landed; a damaged ledger refuses runs and control
+actions, with the repair hint, until it is repaired (`audit repair control` is
+the one command that does not consult the ledger — it repairs it). The
+ledger's account of what is installed therefore changes only by a recorded
+`apply`, kill-switch flip, or `config vouch`. So the store is tamper-evident,
+not tamper-proof: whoever can write the store *alone* can no longer make a
+run execute, or a control command authorize from, a re-pointed, dropped-in,
+or edited snapshot — and whoever can rewrite the store and the ledger
+together, consistently, can still install or re-point at will: the ledger's
+own writer. That consistent rewrite is what a head saved off the machine
+catches today (`audit verify control --expect-head`) and what external
+anchoring (reserved) would prove to a third party. Two narrower limits are
+worth naming. `audit control` and `audit verify control` compare the pointer
+with the ledger and never hash the snapshot's bytes, so a store whose bytes
+were edited in place reads "matches the last recorded install" there while
+every control command and every run refuses it. And `gateway provision` and
+`runs prune` hold the configuration lock only *shared*, across their one read
+of pointer, roles and ledger, and release it before they mint or remove
+anything, so an `apply` that lands concurrently and revokes the invoker's
+grant may be a few milliseconds too late — the same window a run's per-run
+read has; provision reads the roles once and mints for exactly the roles it
+authorized against, so there is no second window. Two remedies, for two
+different faults. A pointer the ledger does **not vouch for**, whose bytes
+verify, is healed by `agenthof config vouch --control-log <path>` — the
+recovery described below, which leaves the bytes exactly as they are. Bytes
+that do **not hash as the pointer** (or a pointer that is malformed, or names
+a snapshot that is gone) are never vouched; the remedy is to remove
+`installed/current` and `apply` again — a fresh, correct snapshot if the bytes
+differ; if a corrupt directory already exists under that name, `apply` refuses
+with a removal hint, so remove `installed/<hex>` too and `apply`. Re-applying
+the directory re-asserts its declared state, so it re-enables any agent a
+kill-switch flip had disabled. The kill switch is a break-glass override of
+the **installed** configuration and is temporary by design (see below). A
+`run` executes a snapshot that either the old or the new install put in
+place, whole — the pointer is renamed atomically — so an `apply` racing a
+served run is safe; a flip racing an `apply` is two writers under one lock,
+one after the other, both recorded. What the gate buys now is that an
+unauthorized change attempt yields a `refused` row instead of a silent change
+— and that a change cannot smuggle in its own permission. The proposed
+configuration is read once: it is copied into the store first, and the copy is
+what is validated, hashed, and installed, so the recorded hash is the hash of
+exactly what was checked. And the store is a logic gate, not a vault: it has
+two doors that no role guards, both open to whoever has the host's filesystem
+and its CLI. Whoever can write `.agenthof/installed/` can remove `current`,
+and the next apply is a bootstrap again for any identity — the only trace is a
+second `config applied (bootstrap)` row in the audit trail, which is exactly
+why it is recorded distinctly. And whoever can run `config vouch` can make the
+ledger stand behind whatever snapshot `current` names, provided its bytes
+verify and its roles still let someone apply — the only trace is a distinct
+`vouch` row, under the invoker's three identities, naming what the ledger
+vouched for before. Both doors are recovery acts, not authorization gates:
+their safety is attribution and visibility, not prevention, and the second is
+no weaker than the first — anyone who can place a snapshot to vouch for could
+already obtain the same authority through the bootstrap door, by installing a
+configuration with the same roles. That first door is also the
+deliberate way out when an installed configuration locks out its own control
+(it grants `apply` or `repair` only to a group no verified token carries):
+re-bootstrap, and the record shows it. The gate is per control root, not per
+store: the installed snapshot is found beside the `--control-log` in use, so
+pointing a command at a fresh `--control-log` reaches the bootstrap /
+`--config` fallback with no write to any store at all. That grants nothing an
+operator did not already have, but it is why the control root, not the store
+directory alone, is the boundary to reason about. Over the API that limit
+falls away for the caller: there is no filesystem, so the token-and-roles
+check is the only way in, the first apply while nothing is installed is
+refused unless the server was started with `--allow-api-bootstrap`, and
+`config vouch` is not offered at all. What remains is the host: whoever can
+write `.agenthof/installed/` on the serving host can still remove the pointer,
+and whoever can run the CLI there can vouch. A pull reads the installed
+snapshot whole and verifies every byte against the pointer before serving any
+of it, so it never distributes a tampered snapshot; who may pull is decided
+from the same byte-verified roles, and nothing is served unless the ledger
+vouches for that same hash — but the pull checks the ledger after it
+authorizes, not before, and no ledger line records that a pull happened.
 
 ## 3. Is the change valid?
 
@@ -260,8 +316,8 @@ What "valid" means depends on the action:
   agents, gateway) before adopting it. A configuration that fails validation is
   recorded as **`rejected`** (reason `validation_failed`) — together with the
   hash of the config that was rejected, so you can see exactly *what* was turned
-  away. It also checks that at least one role grants `apply` (`no-apply-floor`).
-  A configuration that passes is installed — see §2.
+  away. It also checks that at least one role grants `apply` to a named group
+  (`no-apply-floor`). A configuration that passes is installed — see §2.
 - **`registry enable|disable`** checks that the named agent exists — looked up
   in the installed snapshot once something is installed, so an agent added to
   the directory but not yet applied is `agent_not_found`; an unknown
@@ -285,7 +341,14 @@ not an error swallowed at the door.
 > `audit control` shows the flip and the apply that superseded it, each
 > attributed.
 >
-> A flip first verifies the installed snapshot's bytes against the pointer; a mismatch stops the flip and is recorded as an `error` before anything is staged, so a tampered snapshot is never re-installed under a correct name.
+> A flip first verifies the installed snapshot's bytes against the pointer and
+> requires the ledger to vouch for that pointer; a byte mismatch stops the flip
+> and is recorded as an `error`, an unvouched pointer as a `refused`
+> (`not_on_record`), both before anything is staged, so a tampered or unrecorded
+> snapshot is never re-installed under a correct name. If the flip itself lands
+> but its record does not (`state changed; event NOT recorded`), `config vouch`
+> puts the flipped snapshot on record with the agent still disabled — see
+> "Recovering an unrecorded install".
 
 The sequence is short. A `disable coder` re-installs the configuration with
 `coder` disabled; a `run` of any workflow is then refused `configuration
@@ -335,18 +398,96 @@ it. An `apply` has the same shape: once its snapshot is installed and the
 pointer switched, a recording append that then fails prints `installed; event
 NOT recorded` and exits non-zero. `audit control` and `audit verify control`
 compare the installed pointer with the last recorded **install** — the last
-successful `apply` or kill-switch flip on record — and say when the two
-disagree (`verify control` exits 5), so an unrecorded install is
+successful `apply`, kill-switch flip, or `config vouch` on record — and say
+when the two disagree (`verify control` exits 5), so an unrecorded install is
 visible rather than silent — and `run` and `serve` refuse every run under it,
-recorded as `configuration not on record`, until an `apply` puts an install
-on record again. Both are surfaced loudly; neither is glossed over.
+and every control action is refused too, recorded as `configuration not on
+record`, until `config vouch` puts the install on record (a re-apply is
+refused the same way, because it too must authorize against a vouched
+pointer). Both are surfaced loudly; neither is glossed over.
 
 **Upgrading.** A control root written before this behavior whose last successful
 control event is a kill-switch flip over a configuration directory reports
-`audit verify control` exit 5, and refuses every run (`configuration not on
-record`, recorded), until the next `apply` (the flip recorded a directory hash
-that was never installed), and its earlier bootstrap-era flips carry no marker;
-run `apply` once after upgrading.
+`audit verify control` exit 5, and refuses every run and every control action
+(`configuration not on record`, recorded) — the flip recorded a directory hash
+that was never installed — and its earlier bootstrap-era flips carry no marker.
+Run `config vouch` once after upgrading (or remove `installed/current` and
+`apply`); `apply` alone is refused until the pointer is vouched for.
+
+### Recovering an unrecorded install
+
+The gap above — a snapshot in place whose install event never landed — has one
+in-band remedy that leaves the configuration untouched:
+
+```
+agenthof config vouch --control-log <path> [--as <user> --groups <a,b> | --token <jwt>]
+```
+
+Pass the same `--control-log` the install used: the store is found beside it,
+and vouching against the wrong control root records nothing useful. The
+command reads the pointer, **verifies the snapshot's bytes** against it,
+checks that its roles still grant `apply` to a named group (the same floor
+`apply` enforces, so a vouched snapshot is never one that nobody may apply),
+and — if and only if the ledger does not already record that hash as its last
+install — appends one `vouch` event for it, then signs the install when a
+signing key is configured. It prints `vouched: <hash>` and the new chain head.
+That is all it does. It moves no pointer, copies no bytes, builds nothing, and
+never touches the configuration directory: an agent a kill-switch flip disabled
+stays disabled, which is why a flip's crash gap is healed this way and not by
+re-applying the directory (which would re-enable it, and is refused on an
+unvouched pointer anyway).
+
+What it refuses, and what it does not do:
+
+- **Bytes that do not hash as the pointer**, a malformed pointer, or a snapshot
+  that is gone are never vouched for: the command prints the fault and the
+  hatch (remove `installed/current` and re-bootstrap), and records an `error`.
+- **A torn or broken ledger** is not appended to: run `audit repair control`
+  first.
+- **Already on record** does nothing: it prints that the hash is on record,
+  exits 0, appends nothing and writes no signature — so it is safe to run twice
+  or from a script.
+- **Nothing installed** is not a vouch: there is nothing to stand behind.
+- A roles file whose `apply` grant names no real group is `rejected`
+  (`no-apply-floor`), recorded.
+
+It is authorized against no role — `vouch` is not an operation a role can
+grant — because the question it answers is whether the roles themselves are on
+record. Like the first `apply`, it is permitted for any identity the host
+resolves, and like every control action it is **always recorded** under the
+three identities, with a `detail` naming what the ledger vouched for before
+(`previously on record: <hash>, apply`, or `no install on record`). Its safety
+is that attribution and visibility, not prevention: whoever can run it can
+bless whatever `current` names — and could already have obtained the same
+authority through the `rm current` + bootstrap `apply` door, so it widens
+nothing. A
+`--token` that fails verification is refused and recorded, as everywhere.
+
+When to prefer the other door: `rm installed/current` followed by `apply
+--config <dir>` is right when you want the *directory's* declared state back,
+knowing it re-enables anything a flip disabled; `config vouch` is right when
+you want exactly what is installed to stand.
+
+Three consequences to know before running it:
+
+- **Upgrade every binary that shares the control root first.** An older
+  `agenthof` does not recognise a `vouch` event as an install: its `run` and
+  `serve` keep refusing the healed pointer as `configuration not on record`,
+  its `audit control` reports a mismatch, and its `config sign` reports "not
+  yet on record". The record is additive and harmless; the older binaries
+  simply fail closed until upgraded.
+- **After a repair, a pinned execution point may read *stale*.** If `audit
+  repair control` truncated a torn tail that a pinned point had already
+  verified past, the vouch (like any install after that repair) lands at a
+  sequence number below that point's `verify.floor`; it is refused *stale*
+  there until the operator removes `verify.floor` on that point. That is the
+  repair's consequence, not the vouch's.
+- **The ledger's account is the vouch's.** After a vouch, the install's
+  `version` and `installed_at` (on the pull, and in the signed payload) are
+  the vouch event's sequence and time, not the unrecorded moment the pointer
+  moved; and a healed kill-switch gap keeps the agent disabled but loses the
+  flip's own record — `audit <run-id>` says "vouched for by", not "kill
+  switch: disabled agent …". Keep your own note of what the flip was for.
 
 ## 5. Return the head
 
@@ -370,8 +511,10 @@ step with respect to every other writer:
   1. Who?         the bearer token is verified → Invoker {subject, issuer, groups}
       │              (401 and nothing written if it is not; the witness is the server's)
       ▼
-  2. May they?    take the writer lock; read the INSTALLED roles; default-deny
-      │              no → refused / not_authorized (recorded, with the proposal's hash, 403)
+  2. May they?    take the writer lock; read the INSTALLED roles, bytes verified against the pointer;
+      │              the ledger must vouch for that pointer
+      │              not vouched → refused / not_on_record (recorded, with the proposal's hash, 403)
+      │              then default-deny: no → refused / not_authorized (recorded, with the proposal's hash, 403)
       │              nothing installed and bootstrap not enabled → refused (recorded, 403)
       ▼
   3. Still true?  compare the installed hash to If-Match / If-None-Match
@@ -393,10 +536,14 @@ Everything the record carries is what a command-line apply records, plus
 user and hostname — it corroborates nothing about the caller; the token
 does that. Two outcomes are deliberately **not** recorded: a failed
 precondition (`412`) and a busy lock (`409`) — in both, nothing was decided
-and nothing was looked at. A kill-switch flip on the host takes the same
+and nothing was looked at. The vouch comes before the precondition, so a
+caller whose `If-Match` is stale *and* whose server has an unvouched pointer
+is answered `403` `not_on_record`, recorded — not `412`; `412` is reachable
+only on a vouched pointer. A kill-switch flip on the host takes the same
 lock, so an apply and a flip never interleave: the flip re-snapshots
 whatever the apply installed, or the apply authorizes against whatever the
-flip installed.
+flip installed. `config vouch` takes it too, so a reader never sees a pointer
+and ledger mid-vouch.
 
 ## Pulling the configuration
 
@@ -413,8 +560,8 @@ ledger:
   1. Who?         the bearer token is verified → Invoker {subject, issuer, groups}
       │              (401 and nothing read if it is not)
       ▼
-  2. May they?    read the INSTALLED roles; default-deny: pull, or apply, which includes it
-      │              nothing installed → 404 · roles unreadable → 500 · not granted → 403
+  2. May they?    read the INSTALLED roles, bytes verified against the pointer; default-deny: pull, or apply, which includes it
+      │              nothing installed → 404 · roles unreadable or bytes do not hash as the pointer → 500 · not granted → 403
       ▼
   3. The bytes    read the snapshot the pointer names and hash what was read:
       │              it must hash as the pointer, or nothing is served (500)
@@ -427,23 +574,23 @@ ledger:
 ```
 
 `version` and `installed_at` are the ledger's own account of the install:
-the sequence number and time of the last `apply` or kill-switch flip that
-put a snapshot in place. The server answers `503` rather than a snapshot the
-ledger does not vouch for — three situations produce it: the moment inside
-every apply between the pointer moving and its record landing
-(milliseconds); an install whose record was never appended (`installed;
-event NOT recorded` — re-apply to clear it); and a pointer re-aimed by hand
-at some other snapshot. The execution read holds the same line, but
-definitively: `run` and `serve` read the pointer and the ledger under a shared
-hold of the configuration lock, so they never meet the first situation (an
-install in flight is waited for, or — past the lock timeout — answered as a
-retryable busy, `serve` `503`, nothing recorded) and refuse the other two as a
-**recorded** run refusal, `configuration not on record`, until a re-apply puts
-the install on record; a torn or broken ledger refuses runs the same way,
-recorded with the repair hint, until it is repaired. A ledger that was
-repaired still vouches — for the pull and for runs: the taint is the audit
-readers' verdict about history, not about whether the current pointer is on
-record.
+the sequence number and time of the last `apply`, kill-switch flip, or
+`config vouch` that put a snapshot on record. The server answers `503` rather
+than a snapshot the ledger does not vouch for — three situations produce it:
+the moment inside every apply between the pointer moving and its record
+landing (milliseconds); an install whose record was never appended
+(`installed; event NOT recorded` — `config vouch` on the host clears it); and
+a pointer re-aimed by hand at some other snapshot. The execution read holds
+the same line, but definitively: `run` and `serve` read the pointer and the
+ledger under a shared hold of the configuration lock, so they never meet the
+first situation (an install in flight is waited for, or — past the lock
+timeout — answered as a retryable busy, `serve` `503`, nothing recorded) and
+refuse the other two as a **recorded** run refusal, `configuration not on
+record`, until `config vouch` puts the install on record; a torn or broken
+ledger refuses runs the same way, recorded with the repair hint, until it is
+repaired. A ledger that was repaired still vouches — for the pull and for
+runs: the taint is the audit readers' verdict about history, not about whether
+the current pointer is on record.
 
 A pull is a read: it is not recorded, and the server's log is the only
 trace of who read the policy. What the puller then does is theirs: `config
@@ -513,6 +660,7 @@ agenthof audit control                          # render the chain + an integrit
 agenthof config pull [--control-log <path>] [--out <dir>] [--json]   # the installed configuration, as it would be served
 agenthof audit verify control [--expect-head H] # verify, and optionally check the head
 agenthof audit repair control [--config <dir>]  # repair a torn tail (see below)
+agenthof config vouch [--control-log <path>]    # put an unrecorded install on record (see "Recovering an unrecorded install")
 ```
 
 Integrity is always stated, never assumed. Every read ends with a verdict:
@@ -540,8 +688,9 @@ installer recorded it; a control `apply` stamps the hash of the configuration it
 adopted. Because both carry the same key:
 
 - `agenthof audit <run-id>` prints a **config-join** line naming the install —
-  the `apply`, or the kill-switch flip — that put the config a given run ran
-  under — who applied it, how, and when.
+  the `apply`, the kill-switch flip, or the `config vouch` — that put the
+  config a given run ran under on record — who applied (or vouched for) it,
+  how, and when.
 - `agenthof investigate` merges control actions and runs into one time-ordered
   timeline, so "someone disabled `coder`, then this run refused" reads as a
   single story. See [`reference/config.md`](reference/config.md) for the flags,
@@ -551,12 +700,12 @@ adopted. Because both carry the same key:
 
 | Shipped today | Reserved for later |
 |---|---|
-| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune` | policy-as-config approval workflows |
+| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune`, `config vouch` | policy-as-config approval workflows |
 | operator signing of the installed snapshot: `config keygen` mints the Ed25519 pair on the host, every install signs (opt-in), and `serve` returns the signature on the pull and verifies it as it serves — 200 only when the ledger vouches **and** a matching signature verifies, else a retryable *not yet signed*; `config sign` (re)signs an install; the public key is pinned at the edge | a recorded key-lifecycle event for rotation and revocation |
 | `run` and `serve` verify the installed configuration against a pinned key (`verify.pub` / `run --verify-key`) before executing — unsigned/wrong-key/tampered/stale/foreign refused and recorded, a held lock a retryable busy, a persisted `verify.floor` bounding rollback; opt-in and fail-closed; Article VI names it | carrying the operator's signature with a pulled configuration so a consuming edge verifies the operator's key (today a point verifies only installs made on its own root); `--verify-floor` to relocate the floor outside a backup set; a `--max-age` bound on `installed_at` |
 | `apply` over the API (`POST /v1/config/apply`) with a required compare-and-swap on the installed hash, authorization at the API against the installed roles, one writer lock across apply and the kill switch, and `origin` on the record; pulling the installed configuration over the API (`GET /v1/config`, `GET /v1/config/hash`, `config pull`), authorized by `pull` (or `apply`, which includes it), content-addressed, unrecorded | `registry enable\|disable` and `audit repair control` over the API; `audit control --server` |
-| default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); refusals recorded (repair: printed) | per-object ownership; pruning and tamper-evidence of the snapshot store; verifying the roles-only authorization read |
-| `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read and on the kill switch's re-snapshot read; the execution read executes only an install the control ledger records as its last — a pointer it does not vouch for is a recorded refusal, a damaged ledger refuses runs until repaired, a held configuration lock a retryable busy | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
+| default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); the authorization read verifies the snapshot's bytes against the pointer and requires the control ledger to vouch for that pointer as its last install — an unvouched pointer is a recorded `not_on_record` refusal (`audit repair control` excepted: bytes verified, ledger not consulted); refusals recorded (repair: printed); `config vouch` puts an unrecorded install on record — bytes untouched, any identity, always recorded | per-object ownership; pruning of the snapshot store; a byte-verification verdict in `audit control` / `audit verify control` (today they compare pointer and ledger, never bytes); `config vouch` over the API |
+| `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read, on the authorization read, and on the kill switch's re-snapshot read; the execution read executes only an install the control ledger records as its last (an `apply`, a kill-switch flip, or a `config vouch`) — a pointer it does not vouch for is a recorded refusal, a damaged ledger refuses runs until repaired, a held configuration lock a retryable busy | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
 | `gateway provision` and `runs prune` authorized against the installed roles (`provision`, `prune`) and recorded; prune spares the control ledger by name and by identity | `provision`/`prune` over the API; a structured prune record; `detail` in `investigate/1` |
 | hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts | external anchoring / write-once sink for the ledger |
 | three identities per action (invoker / asserted_as / witness) | agent-to-IdP federation for the invoker's authority |

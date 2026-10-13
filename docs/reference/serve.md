@@ -51,8 +51,8 @@ All bodies are JSON except `/audit`, which is plain text.
 | `GET /v1/runs` | `{runs: [{run_id, status}]}` — hosted runs and every run log on disk. |
 | `GET /v1/investigate?since&until&invoker&agent&outcome&run&config_hash` | The `investigate/1` document over both ledgers; `since`/`until` are RFC3339. |
 | `POST /v1/runs/{id}/cancel` | Cancels a run this process is hosting; `202`. **Any** authenticated invoker may cancel a run this process is hosting, not only the one who started it. The engine records `cancelled` at or after the current step. A run this process does not host is `404` (there is nothing to cancel), one that is already over is `409`. |
-| `POST /v1/config/apply` `{"files": {"roles/ops.yaml": "<yaml>", …}}` with `If-Match: sha256:<hex>` or `If-None-Match: *` | Applies a configuration — the same `apply` the command line runs, over the server's control root. The body is the configuration's files by config-relative path (`agents/`, `workflows/`, `roles/`, `gateway.yaml`), as text, at most 1 MiB and 1000 files. Exactly one precondition header is required: `If-Match` names the installed configuration's hash the caller believes is current; `If-None-Match: *` means "only if nothing is installed" (a bootstrap, permitted only with `--allow-api-bootstrap`). Answers `200` `{status:"installed", config_hash, bootstrap, head, agents, workflows, roles, key_id?}` with an `ETag` — a **recorded** `success`; `key_id` is present when a signing key was configured and the install was signed; `403` `{status:"refused", reason, config_hash, head}` — a **recorded** refusal when the installed configuration's roles grant the caller no `apply` (or nothing is installed and bootstrap is off); `422` `{status:"rejected", reason, errors, config_hash, head}` — a **recorded** rejection with every load and validation line; `412` `{status:"precondition_failed", current_hash}` (and an `ETag`) when the pointer is not what `If-Match` said — nothing recorded, retry with `current_hash`; `409` `{status:"busy"}` with `Retry-After` while another apply holds the writer lock — nothing recorded. A malformed body or key is `400`, over the cap `413`, neither recorded. `500` carries `{status:"error", reason:"store unusable"}` (a **recorded** `error`), `{status:"ledger_damaged"}` (nothing can be recorded), `{status:"installed_not_recorded"}` (the install landed, its record did not) or `{status:"installed_not_signed"}` (a signing key is configured, the install recorded, its signature did not — `config sign` repairs it); the server never returns its own paths. `503` while shutting down. |
-| `GET /v1/config` | The installed configuration, for the execution points that enforce it: `200` `{hash, version, installed_at, files, signature?}` with an `ETag` (the hash, quoted) — `files` is the exact `{path: text}` body `POST /v1/config/apply` accepts, `hash` is the installed pointer, `version` is the control-ledger sequence number of the event that installed it (an apply, or a kill-switch flip) and `installed_at` that event's time. `signature` is present only when a signing key is configured: `{format, log_id, key_id, sig}`, the operator's signature over the install, which the server has verified against the served bytes. Authorized against the installed roles: a role granting `pull`, or `apply`, which includes it; otherwise `403` `not authorized: no role grants pull or apply to the invoker`. `404` `no configuration installed`. `503` with `Retry-After: 1` when the ledger does not yet vouch for the pointer (`installed configuration is not yet on record; retry`), a signing key is configured and the matching signature is not yet written (`installed configuration is not yet signed; retry` — `config sign` writes it), or another process holds the ledger lock (`control ledger busy; retry`). `500` `store unusable` (the pointer or roles cannot be read, the snapshot is gone, its bytes do not hash as the pointer — tampered bytes are never served — or a signing key is configured but its public half is missing or unreadable: signing fails closed, never a silent drop to unsigned), `control ledger damaged`, or `snapshot cannot be distributed as a bundle` (a file name or encoding a bundle cannot carry). Non-`200` bodies are plain text. **A read — nothing is recorded.** |
+| `POST /v1/config/apply` `{"files": {"roles/ops.yaml": "<yaml>", …}}` with `If-Match: sha256:<hex>` or `If-None-Match: *` | Applies a configuration — the same `apply` the command line runs, over the server's control root. The body is the configuration's files by config-relative path (`agents/`, `workflows/`, `roles/`, `gateway.yaml`), as text, at most 1 MiB and 1000 files. Exactly one precondition header is required: `If-Match` names the installed configuration's hash the caller believes is current; `If-None-Match: *` means "only if nothing is installed" (a bootstrap, permitted only with `--allow-api-bootstrap`). Answers `200` `{status:"installed", config_hash, bootstrap, head, agents, workflows, roles, key_id?}` with an `ETag` — a **recorded** `success`; `key_id` is present when a signing key was configured and the install was signed; `403` `{status:"refused", reason, config_hash, head}` — a **recorded** refusal when the installed configuration's roles grant the caller no `apply` (or nothing is installed and bootstrap is off), or when the installed pointer is not the install the control ledger records last (`reason: installed configuration is not on record; an operator must vouch for or re-apply it on the host` — a fixed body; the recorded reason names the hashes; this check comes before the precondition, so a stale `If-Match` on an unvouched pointer is this `403`, not `412`); `422` `{status:"rejected", reason, errors, config_hash, head}` — a **recorded** rejection with every load and validation line; `412` `{status:"precondition_failed", current_hash}` (and an `ETag`) when the pointer is not what `If-Match` said — nothing recorded, retry with `current_hash`; `409` `{status:"busy"}` with `Retry-After` while another apply holds the writer lock — nothing recorded. A malformed body or key is `400`, over the cap `413`, neither recorded. `500` carries `{status:"error", reason:"store unusable"}` (a **recorded** `error`), `{status:"ledger_damaged"}` (nothing can be recorded), `{status:"installed_not_recorded"}` (the install landed, its record did not) or `{status:"installed_not_signed"}` (a signing key is configured, the install recorded, its signature did not — `config sign` repairs it); the server never returns its own paths. `503` while shutting down. |
+| `GET /v1/config` | The installed configuration, for the execution points that enforce it: `200` `{hash, version, installed_at, files, signature?}` with an `ETag` (the hash, quoted) — `files` is the exact `{path: text}` body `POST /v1/config/apply` accepts, `hash` is the installed pointer, `version` is the control-ledger sequence number of the event that put it on record (an apply, a kill-switch flip, or a `config vouch`) and `installed_at` that event's time. `signature` is present only when a signing key is configured: `{format, log_id, key_id, sig}`, the operator's signature over the install, which the server has verified against the served bytes. Authorized against the installed roles: a role granting `pull`, or `apply`, which includes it; otherwise `403` `not authorized: no role grants pull or apply to the invoker`. `404` `no configuration installed`. `503` with `Retry-After: 1` when the ledger does not yet vouch for the pointer (`installed configuration is not yet on record; retry`), a signing key is configured and the matching signature is not yet written (`installed configuration is not yet signed; retry` — `config sign` writes it), or another process holds the ledger lock (`control ledger busy; retry`). `500` `store unusable` (the pointer or roles cannot be read, the snapshot is gone, its bytes do not hash as the pointer — tampered bytes are never served — or a signing key is configured but its public half is missing or unreadable: signing fails closed, never a silent drop to unsigned), `control ledger damaged`, or `snapshot cannot be distributed as a bundle` (a file name or encoding a bundle cannot carry). Non-`200` bodies are plain text. **A read — nothing is recorded.** |
 | `GET /v1/config/hash` | The same answer without `files` (the `signature`, when present, still travels) — the poll. It runs the same authorization, the same verification and the same ledger check, so it never names a hash the full pull would then refuse, nor a signature the full pull would not carry. **A read — nothing is recorded.** |
 | `GET /healthz` | Liveness, unauthenticated, `ok`. Nothing else. |
 
@@ -110,7 +110,10 @@ line as `dana@example.com (oidc, via api)`.
 `POST /v1/config/apply` is the one write to the control plane the API
 offers, and it is the same `apply`: the verified token is the invoker; it
 is authorized against the `control:` grants of the configuration already
-**installed** (never the one being proposed); the proposal is staged,
+**installed** (never the one being proposed) — read with its bytes verified
+against the pointer, and only once the control ledger vouches for that
+pointer as its last install (otherwise `403`, recorded, `not on record`; the
+heal is `config vouch` on the host); the proposal is staged,
 loaded, validated and installed as a content-addressed snapshot; the
 outcome is recorded in the hash-chained control ledger with its `origin`;
 and the next `POST /v1/runs` executes it — no restart.
@@ -128,7 +131,8 @@ correct `If-Match` records a `success` and changes nothing; a retry of a
 says so.
 
 **One writer at a time.** Every writer of the installed pointer — an API
-apply, a command-line apply on the same host, and the kill switch — takes
+apply, a command-line apply on the same host, and the kill switch — and
+every writer of the ledger's account of it (`config vouch`) takes
 one lock beside the store (`installed.lock`) from the moment it reads the
 installed roles until its record is appended, so the roles that
 authorized a change are the roles of the configuration it replaces. A
@@ -190,8 +194,10 @@ mid-step; its ledger then has no final event and reads back as
 - The installed configuration is read per run: an `apply` or kill-switch
   flip takes effect on the next run, with no restart; with nothing installed,
   or with a pointer the control ledger does not record as its last install,
-  every run is refused (422) until an `apply` lands — `serve` starts
-  regardless and says so once at startup. The shutdown deadline's default is
+  every run is refused (422) until an `apply` lands — or, for the unrecorded
+  pointer, until `config vouch` on the host puts it on record, since an apply
+  against it is refused too — `serve` starts regardless and says so once at
+  startup. The shutdown deadline's default is
   read once at startup, so a server started with nothing installed keeps the
   default step timeout as its drain deadline after a later apply;
   `--shutdown-timeout` sets it explicitly.
@@ -250,33 +256,40 @@ mid-step; its ledger then has no final event and reads back as
   hashes as the proposal, and the apply is recorded as an error with
   nothing installed. APFS and ext4 preserve names and are unaffected.
 - `apply` and `config pull` are the control commands over the API;
-  `registry enable|disable`, `audit repair control` and `audit control` stay
-  local.
+  `registry enable|disable`, `audit repair control`, `audit control` and
+  `config vouch` stay local — a crash gap behind `serve` is a host fault, and
+  its recovery is a host act (the `403` body says so; the server's log names
+  the command when a pull meets the unrecorded pointer).
 - No record says who pulled. Reads do not write the control ledger; a
   refused pull is a `403` in the server log, a successful one an Info line.
   Centrally, an execution point's use of the configuration shows only as the
   config hash its runs stamp. Recording pulls is reserved.
 - `503` is the honest answer for a pointer the ledger does not vouch for:
   the install→record window inside every apply (milliseconds), an install
-  whose record was never appended (`installed; event NOT recorded` — re-apply
-  to clear it), and a pointer re-aimed by hand. `run` and `serve` on the host
-  refuse such a pointer too — definitively and recorded (`422`, `configuration
-  not on record`), since they read pointer and ledger under the configuration
-  lock and so never meet the in-flight window; an execution point is not
-  handed it. Two of those three clear only when an operator acts, so a poller
-  should back off rather than honor `Retry-After: 1` forever.
+  whose record was never appended (`installed; event NOT recorded` — `config
+  vouch` on the host clears it; a re-apply is refused `403` until then), and a
+  pointer re-aimed by hand. `run` and `serve` on the host refuse such a pointer
+  too — definitively and recorded (`422`, `configuration not on record`), as
+  does every control action authorized against it (`403` on an API apply),
+  since they read pointer and ledger under the configuration lock and so never
+  meet the in-flight window; an execution point is not handed it. Two of those
+  three clear only when an operator acts, so a poller should back off rather
+  than honor `Retry-After: 1` forever.
 - A repaired ledger still vouches: after `audit repair control` the chain
   verifies, the pull answers `200` and runs execute when the pointer matches
   the last recorded install; the taint stays visible to `audit verify control`
   (exit 3) and `investigate`, not to the puller or the run.
-- Who may pull is decided from the installed `roles/` as the pointer names
-  them, unverified; the bytes served are verified whole, `roles/` included,
-  so a tampered snapshot authorizes nobody to receive anything but is refused
-  for everyone (`500 store unusable`), and the host's log names the cause.
+- Who may pull is decided from the installed `roles/` after the whole
+  snapshot's bytes are verified against the pointer, and the bytes served are
+  verified again as they are read, so a tampered snapshot authorizes nobody
+  and is refused for everyone (`500 store unusable`), with the host's log
+  naming the cause. The ledger's vouch is checked after authorization, over
+  the same hash: nothing is served unless the ledger vouches for it, but a
+  refused pull never reads the ledger.
 - Two answers precede authorization and disclose store state to any
   authenticated invoker: `404` (nothing is installed) and `500 store unusable`
-  (the pointer or the roles file cannot be read) — there are no roles to
-  decide with. `POST /v1/runs` already answers `422` for both states.
+  (the pointer or the roles file cannot be read, or the snapshot's bytes do
+  not hash as the pointer) — there are no roles to decide with. `POST /v1/runs` already answers `422` for both states.
 - Two snapshot classes cannot be distributed: a config file whose name is
   non-printable or over 200 characters, or whose bytes are not valid UTF-8 —
   `500 snapshot cannot be distributed as a bundle`. They run locally; rename
