@@ -1721,7 +1721,7 @@ func TestUnpinnedRunBusyIsUnrecordedAndWaitsBehindAShortHold(t *testing.T) {
 	}
 }
 
-// TestPinnedEdgeAfterAVouch (spec tests 33, 29b): on a pinned root a vouch
+// TestPinnedEdgeAfterAVouch: on a pinned root a vouch
 // of a crash gap signs the vouch's version and the floor advances to it; a
 // vouch that lands BELOW a floor pinned before a repair truncated the tail
 // is refused stale until rm verify.floor — repair's consequence, not vouch's.

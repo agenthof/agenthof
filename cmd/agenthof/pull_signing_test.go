@@ -303,7 +303,7 @@ func TestPullConfigSignedAvailabilityInvariant(t *testing.T) {
 	}
 }
 
-// TestConfigHostPullLogsTheRemedies (OQ3): a store fault logs its cause with
+// TestConfigHostPullLogsTheRemedies: a store fault logs its cause with
 // the rm-current hatch (never the vouch remedy — vouch refuses those bytes);
 // an unvouched pointer logs the vouch remedy at Info.
 func TestConfigHostPullLogsTheRemedies(t *testing.T) {

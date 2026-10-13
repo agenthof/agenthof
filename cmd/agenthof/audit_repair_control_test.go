@@ -437,7 +437,7 @@ func TestAuditRepairControlMalformedPointerFailsClosed(t *testing.T) {
 	}
 }
 
-// TestAuditRepairControlPrintsTheHatchOnATamperedStore (half A, test 9): a
+// TestAuditRepairControlPrintsTheHatchOnATamperedStore: a
 // tampered snapshot + torn ledger → printed hatch, no append; rm current →
 // the --config fallback authorizes and repairs.
 func TestAuditRepairControlPrintsTheHatchOnATamperedStore(t *testing.T) {
@@ -465,8 +465,8 @@ func TestAuditRepairControlPrintsTheHatchOnATamperedStore(t *testing.T) {
 	}
 }
 
-// TestAuditRepairControlAuthorizesFromByteVerifiedRolesWithoutVouching (spec
-// test 17 — the exemption, pinned deliberately): on the T2 fixture with a
+// TestAuditRepairControlAuthorizesFromByteVerifiedRolesWithoutVouching (the
+// exemption, pinned deliberately): on the T2 fixture with a
 // torn ledger, repair authorizes from the dropped-in (byte-verified) roles
 // and repairs; the taint row is under the invoker; it installs nothing and
 // the pointer is still not on record afterwards.

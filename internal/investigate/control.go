@@ -62,9 +62,9 @@ func LoadControl(path string) (events []control.DecodedEvent, verdict string, ok
 // successful kill-switch flip against an installed snapshot, or a successful
 // vouch) in ledger order whose hash equals the run's and whose time is not
 // after the run's start — events is in seq order, so the last qualifying
-// event is the latest install with no clock comparison. Six forms, verbatim
-// in docs/reference/config.md: applied by (an apply); installed by … (kill
-// switch: …) (a flip); vouched for by … (a vouch); no install on record at
+// event is the latest install with no clock comparison. The forms rendered
+// here: applied by (an apply); installed by … (kill switch: …) (a flip);
+// vouched for by … (a vouch); no install on record at
 // the run's start (the hash matches only later installs — the install→record
 // gap re-installed later, or clock skew — known but not vouched for at run
 // time); no install on record; control ledger unavailable.

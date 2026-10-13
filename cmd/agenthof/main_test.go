@@ -1246,7 +1246,7 @@ func adminMock(t *testing.T, failAt int, sentinel string) (*httptest.Server, *at
 	return srv, &generated
 }
 
-// TestGatewayProvisionAndRunsPruneRefuseAnUnvouchedPointer (spec test 14):
+// TestGatewayProvisionAndRunsPruneRefuseAnUnvouchedPointer:
 // on the T2 fixture both are refused not_on_record — provision recorded with
 // the pointer hash, prune hash-less — nothing minted, nothing pruned.
 func TestGatewayProvisionAndRunsPruneRefuseAnUnvouchedPointer(t *testing.T) {
@@ -1283,8 +1283,7 @@ func TestGatewayProvisionAndRunsPruneRefuseAnUnvouchedPointer(t *testing.T) {
 	}
 }
 
-// TestGatewayProvisionAndRunsPruneAreBusyUnderAHeldWriterLock (spec tests
-// 20, 21): with installed.lock held EXCLUSIVE elsewhere both print the busy
+// TestGatewayProvisionAndRunsPruneAreBusyUnderAHeldWriterLock: with installed.lock held EXCLUSIVE elsewhere both print the busy
 // line, exit 1, record nothing — the shared take is bounded, never a hang.
 func TestGatewayProvisionAndRunsPruneAreBusyUnderAHeldWriterLock(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
@@ -1651,7 +1650,7 @@ func TestGatewayProvisionRefusesATamperedSnapshot(t *testing.T) {
 	}
 }
 
-// TestRunsPruneRefusesATamperedSnapshot (half A, test 10): retention is
+// TestRunsPruneRefusesATamperedSnapshot: retention is
 // blocked on a corrupt store — recorded error/io_error, hatch printed,
 // nothing pruned.
 func TestRunsPruneRefusesATamperedSnapshot(t *testing.T) {

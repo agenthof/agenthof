@@ -177,7 +177,7 @@ func TestApplyHashFailureOnRejectedConfigRecordsIOErrorNotRejected(t *testing.T)
 }
 
 // TestApplyUnparseableConfigRecordsRejectedNotIOError covers the
-// final-review fix (M3): a config directory whose agent YAML is present
+// case where a config directory whose agent YAML is present
 // and READABLE but fails to parse must be recorded as outcome "rejected" /
 // reason validation_failed, with a config_hash over the unparseable bytes —
 // not outcome "error" / io_error with no hash. LoadDir reports a parse
@@ -593,6 +593,73 @@ func TestApplyNoApplyFloorRejected(t *testing.T) {
 			t.Fatalf("control log missing %q:\n%s", want, data)
 		}
 	}
+	// With nothing else wrong, the floor is the first (and only) validation
+	// error, so it is the message the ledger records.
+	if e := lastControlEvent(t, controlLog); e.Reason == nil || !strings.Contains(e.Reason.Message, "no role grants apply to a named group") {
+		t.Fatalf("recorded reason must name the floor: %+v", e.Reason)
+	}
+}
+
+// TestApplyLockoutShapesAreRejectedAndRecorded: the two shapes that would
+// strand a control root — apply granted to a role with no groups, and to a
+// role whose only group is the public marker — are rejected at apply, print
+// the floor line, install nothing, and record validation_failed whose
+// message is the FIRST validation error (Build's, ahead of the floor's:
+// every error is printed, only the first is recorded).
+func TestApplyLockoutShapesAreRejectedAndRecorded(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	for name, c := range map[string]struct{ roles, recorded string }{
+		"no groups":          {"name: platform-admin\nallowed_groups: []\ncontrol: [apply]\n", "role has no allowed_groups"},
+		"public marker only": {"name: platform-admin\nallowed_groups: [\"*\"]\ncontrol: [apply]\n", "must name real groups in allowed_groups"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := writeSample(t)
+			if err := os.WriteFile(filepath.Join(root, "roles", "ops.yaml"), []byte(c.roles), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+			var out bytes.Buffer
+			code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+			if code != 1 || !strings.Contains(out.String(), "no role grants apply to a named group") || strings.Contains(out.String(), "registry ok") {
+				t.Fatalf("exit %d\n%s", code, out.String())
+			}
+			if _, err := os.Stat(filepath.Join(installedStore(controlLog), config.InstalledPointer)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("nothing may be installed (err=%v)", err)
+			}
+			e := lastControlEvent(t, controlLog)
+			if e.Action != "apply" || e.Outcome != "rejected" || e.Reason == nil || e.Reason.Code != control.CodeValidationFailed {
+				t.Fatalf("%+v", e)
+			}
+			if !strings.Contains(e.Reason.Message, c.recorded) || strings.Contains(e.Reason.Message, "no role grants apply to a named group") {
+				t.Fatalf("recorded reason must be Build's error, not the floor's: %q", e.Reason.Message)
+			}
+		})
+	}
+}
+
+// TestApplyRejectsAGrantOfVouch: vouch is not a grantable control operation
+// (the host's own authority gates config vouch), so a role listing it is
+// rejected at apply as control-bad-op, recorded as validation_failed, and
+// nothing is installed.
+func TestApplyRejectsAGrantOfVouch(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	if err := os.WriteFile(filepath.Join(root, "roles", "ops.yaml"), []byte("name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, vouch]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	controlLog := filepath.Join(t.TempDir(), "control.jsonl")
+	var out bytes.Buffer
+	code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	if code != 1 || !strings.Contains(out.String(), `control names "vouch", which is not a control operation`) || strings.Contains(out.String(), "registry ok") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(installedStore(controlLog), config.InstalledPointer)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nothing may be installed (err=%v)", err)
+	}
+	e := lastControlEvent(t, controlLog)
+	if e.Outcome != "rejected" || e.Reason == nil || e.Reason.Code != control.CodeValidationFailed || !strings.Contains(e.Reason.Message, `control names "vouch"`) {
+		t.Fatalf("%+v", e)
+	}
 }
 
 // TestApplyInstallThenRecordGapPrintsAndExitsNonzero: the crash hook fires
@@ -688,7 +755,7 @@ func TestApplyStoreUnwritableRecordsIOErrorInstallsNothing(t *testing.T) {
 	}
 }
 
-// TestApplyRefusesATamperedStoreAndTheHatchRecovers (half A, test 6): an
+// TestApplyRefusesATamperedStoreAndTheHatchRecovers: an
 // in-place edit under installed/<hex>/ refuses apply before authorization,
 // recorded error/io_error with the mismatch text whole, pointer untouched;
 // rm current → apply → CommitSnapshot refuses the corrupt existing directory;
@@ -761,7 +828,7 @@ func dropInGrantingOutsider(t *testing.T, ctl string) string {
 	return hash
 }
 
-// TestApplyRefusesAnUnvouchedPointer (spec test 12): on the T2 fixture the
+// TestApplyRefusesAnUnvouchedPointer: on the T2 fixture the
 // outsider's apply is refused not_on_record BEFORE authorization — recorded
 // with the proposal's hash, the message whole, the pointer unmoved, nothing
 // staged; rm current + a bootstrap apply of the original directory heals.
@@ -789,7 +856,7 @@ func TestApplyRefusesAnUnvouchedPointer(t *testing.T) {
 		t.Fatal("the pointer must not move")
 	}
 	noStagingResidue(t, ctl)
-	// Reason-code additivity (spec test 22): the refusal reads through the
+	// Reason-code additivity: the refusal reads through the
 	// existing renderers and filters with no new verb.
 	var audit bytes.Buffer
 	if code := cmdAuditControl([]string{"--control-log", ctl}, &audit); code != 0 || !strings.Contains(audit.String(), "config apply refused — mallory@example.com (asserted)") {
@@ -799,7 +866,7 @@ func TestApplyRefusesAnUnvouchedPointer(t *testing.T) {
 	if code := cmdInvestigate([]string{"--control-log", ctl, "--outcome", "refused"}, &inv); code != 0 {
 		t.Fatalf("investigate: %d\n%s", code, inv.String())
 	}
-	// The pull on the same fixture (spec test 15; order unchanged, §6.6): a
+	// The pull on the same fixture (order unchanged): a
 	// caller the dropped-in roles grant answers 503 not recorded; a caller no
 	// role names answers 403 — the vouch is judged at step 6, after authz.
 	if p := pullAPI(t, ctl, outsider); p.Kind != pullNotRecorded {
@@ -829,7 +896,7 @@ func TestApplyRefusesAnUnvouchedPointer(t *testing.T) {
 	}
 }
 
-// TestApplyPreconditionIsJudgedAfterTheVouch (spec test 18, the named shift):
+// TestApplyPreconditionIsJudgedAfterTheVouch:
 // a stale --if-installed on an UNVOUCHED pointer is 403 not_on_record,
 // recorded — not 412; on a vouched pointer 412 is unchanged and unrecorded.
 func TestApplyPreconditionIsJudgedAfterTheVouch(t *testing.T) {

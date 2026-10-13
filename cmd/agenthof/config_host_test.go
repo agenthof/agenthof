@@ -329,7 +329,7 @@ func TestConfigHostApplyInstalledNotSignedAndKeyID(t *testing.T) {
 	}
 }
 
-// TestConfigHostApplyNotOnRecordIsAFixedBody (spec §5.6): over the API an
+// TestConfigHostApplyNotOnRecordIsAFixedBody: over the API an
 // unvouched pointer answers refused with the fixed ReasonNotOnRecord — never
 // a hash, never a path — and no config_hash.
 func TestConfigHostApplyNotOnRecordIsAFixedBody(t *testing.T) {

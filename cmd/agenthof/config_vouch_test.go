@@ -36,7 +36,7 @@ func vouchCode(t *testing.T, ctl string, extra ...string) (int, string) {
 func crashGap(t *testing.T, root, ctl string) string {
 	t.Helper()
 	// Keep the planner's live endpoint so the HEALED configuration still
-	// runs (test 24 re-runs after the vouch); change only the instruction so
+	// runs after the vouch; change only the instruction so
 	// the pointer moves to a new snapshot.
 	prev, err := os.ReadFile(filepath.Join(root, "agents", "planner.yaml"))
 	if err != nil {
@@ -55,7 +55,7 @@ func crashGap(t *testing.T, root, ctl string) string {
 	return readPointer(t, ctl)
 }
 
-// TestConfigVouchHealsAnApplyCrashGap (spec test 24): run refused not on
+// TestConfigVouchHealsAnApplyCrashGap: run refused not on
 // record; config vouch → exit 0, a vouch/success row naming the pointer with
 // the superseded install in detail and the three identities; audit verify
 // control exit 0 "(vouch)"; run executes; pull version = the vouch's seq.
@@ -92,7 +92,7 @@ func TestConfigVouchHealsAnApplyCrashGap(t *testing.T) {
 	}
 }
 
-// TestConfigVouchRefusesAByteCorruptPointer (test 26): bytes that do not hash
+// TestConfigVouchRefusesAByteCorruptPointer: bytes that do not hash
 // as the pointer are never blessed — exit 1, the mismatch text and the rm
 // current hatch, recorded vouch/error/io_error hash-less, pointer untouched.
 func TestConfigVouchRefusesAByteCorruptPointer(t *testing.T) {
@@ -120,7 +120,7 @@ func TestConfigVouchRefusesAByteCorruptPointer(t *testing.T) {
 	}
 }
 
-// TestConfigVouchAlreadyOnRecordIsIdempotent (test 27, OQ5 ruled): a vouched
+// TestConfigVouchAlreadyOnRecordIsIdempotent: a vouched
 // pointer → exit 0, a clear line, nothing appended; twice is a no-op.
 func TestConfigVouchAlreadyOnRecordIsIdempotent(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
@@ -138,7 +138,7 @@ func TestConfigVouchAlreadyOnRecordIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestConfigVouchNothingInstalled (test 28): exit 1, a clear line, no record.
+// TestConfigVouchNothingInstalled: exit 1, a clear line, no record.
 func TestConfigVouchNothingInstalled(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	ctl := filepath.Join(t.TempDir(), "control.jsonl")
@@ -153,7 +153,7 @@ func TestConfigVouchNothingInstalled(t *testing.T) {
 	}
 }
 
-// TestConfigVouchRefusesALockoutFloor (test 29, M1): three correctly hashed,
+// TestConfigVouchRefusesALockoutFloor: three correctly hashed,
 // hand-aimed snapshots whose roles could never authorize an apply → exit 1,
 // recorded vouch/rejected/validation_failed with the pointer hash, not
 // vouched; rm current escapes.
@@ -188,7 +188,7 @@ func TestConfigVouchRefusesALockoutFloor(t *testing.T) {
 	}
 }
 
-// TestConfigVouchAnyIdentityIsRecorded (test 30): an identity no role names
+// TestConfigVouchAnyIdentityIsRecorded: an identity no role names
 // vouches a legitimate gap and is recorded as the invoker with the host's
 // witness; a token that fails verification is refused and recorded.
 func TestConfigVouchAnyIdentityIsRecorded(t *testing.T) {
@@ -224,7 +224,7 @@ func TestConfigVouchAnyIdentityIsRecorded(t *testing.T) {
 	}
 }
 
-// TestConfigVouchSignsWhenConfigured (test 32): the vouch's record is what
+// TestConfigVouchSignsWhenConfigured: the vouch's record is what
 // gets signed; the pull serves 200 with it; config sign afterwards is
 // "already signed".
 func TestConfigVouchSignsWhenConfigured(t *testing.T) {
@@ -247,7 +247,7 @@ func TestConfigVouchSignsWhenConfigured(t *testing.T) {
 	}
 }
 
-// TestConfigVouchTornLedgerRefusesThenHealsAfterRepair (test 34): a torn
+// TestConfigVouchTornLedgerRefusesThenHealsAfterRepair: a torn
 // ledger → exit 1 with the repair hint, unrecorded; after repair → heals.
 func TestConfigVouchTornLedgerRefusesThenHealsAfterRepair(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
@@ -270,7 +270,7 @@ func TestConfigVouchTornLedgerRefusesThenHealsAfterRepair(t *testing.T) {
 	}
 }
 
-// TestConfigVouchBusyUnderAHeldWriterLock (test 35): installed.lock held
+// TestConfigVouchBusyUnderAHeldWriterLock: installed.lock held
 // elsewhere → busy, exit 1, unrecorded. Waits the real lock timeout.
 func TestConfigVouchBusyUnderAHeldWriterLock(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
@@ -291,8 +291,8 @@ func TestConfigVouchBusyUnderAHeldWriterLock(t *testing.T) {
 	}
 }
 
-// TestConfigVouchHealsAKillSwitchCrashGapAndTheAgentStaysDisabled (spec
-// test 25 — the reason config vouch exists): registry disable coder dies
+// TestConfigVouchHealsAKillSwitchCrashGapAndTheAgentStaysDisabled (the
+// reason config vouch exists): registry disable coder dies
 // after the pointer moved to F and before the append. Re-running the flip
 // is refused not_on_record; a run is refused not_on_record. config vouch
 // vouches F in one command: coder stays disabled on disk, the pointer stays
@@ -372,7 +372,7 @@ func TestConfigVouchHealsAKillSwitchCrashGapAndTheAgentStaysDisabled(t *testing.
 	}
 }
 
-// TestTaintedLedgerVouchesOrRefusesByWhatSurvived (spec test 19): after a
+// TestTaintedLedgerVouchesOrRefusesByWhatSurvived: after a
 // tear + repair, control ops succeed when the install record survived and
 // refuse not_on_record when the torn tail WAS the record — until config
 // vouch, which heals and leaves the ledger tainted.
@@ -404,7 +404,7 @@ func TestTaintedLedgerVouchesOrRefusesByWhatSurvived(t *testing.T) {
 	}
 }
 
-// TestFreshLedgerGenesisAfterTheFileIsLost (spec test 23, recovery (e)): the
+// TestFreshLedgerGenesisAfterTheFileIsLost (recovery (e)): the
 // ledger file gone, pointer present — a recording command creates the ledger
 // and its first record is a genesis with a fresh log_id (here the refused
 // apply); config vouch then heals.

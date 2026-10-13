@@ -1221,7 +1221,7 @@ func TestRegistryFlipUnrecordedNeverSigns(t *testing.T) {
 	noSig(t, ctl)
 }
 
-// TestRegistryFlipRefusesAnUnvouchedPointer (spec test 13): on the T2 fixture
+// TestRegistryFlipRefusesAnUnvouchedPointer: on the T2 fixture
 // the flip is refused not_on_record for the outsider AND for a granted
 // caller — recorded disable/refused hash-less, pointer unmoved, no staging.
 func TestRegistryFlipRefusesAnUnvouchedPointer(t *testing.T) {
