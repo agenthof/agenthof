@@ -250,6 +250,14 @@ it somewhere off-machine (a CI log, a git note, a message) is what makes
 [`docs/reference/config.md`](reference/config.md#control-plane-cli) for the
 exact flags and exit codes.
 
+The control log's integrity posture — where its bytes live, and whether its
+head is pinned to an off-machine anchor — is declared in an `integrity.yaml`
+beside the control log (not a run's log); absent means the default. The only
+posture this build honours is the local hash-chained file described here (sink
+`local`, anchor `none`); the stronger external tiers are named but reserved —
+refused when a control write or `serve` startup reads them, never silently
+treated as this floor.
+
 The default path is `.agenthof/control.jsonl`, resolved relative to the
 current working directory — run
 these commands from the repository root, or pass `--control-log`

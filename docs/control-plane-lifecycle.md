@@ -414,6 +414,21 @@ that was never installed — and its earlier bootstrap-era flips carry no marker
 Run `config vouch` once after upgrading (or remove `installed/current` and
 `apply`); `apply` alone is refused until the pointer is vouched for.
 
+**The integrity posture.** Where the ledger's bytes live, and whether its head
+is pinned to an off-machine anchor, is declared in an `integrity.yaml` beside
+the ledger (absent means the default). The only posture this build honours is
+the local hash-chained file this section describes — sink `local`, anchor
+`none`. A posture naming any reserved sink or anchor is one the build cannot
+honour, so every control write — `apply`, a `registry` flip, `config vouch`,
+`gateway provision`, `runs prune`, `audit repair control` — refuses before it
+opens the ledger, rather than appending under a guarantee it does not provide;
+`serve` reads the posture once at startup and refuses to start on one it cannot
+honour, so a running server keeps the posture it read and a change to the file
+takes effect on restart. The schema reserves one further shape it never writes
+yet: an `anchor` record — a control-ledger record kind the readers already
+understand, reserved for a future external-anchoring tier to pin the head,
+written by nothing today.
+
 ### Recovering an unrecorded install
 
 The gap above — a snapshot in place whose install event never landed — has one
@@ -707,7 +722,7 @@ adopted. Because both carry the same key:
 | default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); the authorization read verifies the snapshot's bytes against the pointer and requires the control ledger to vouch for that pointer as its last install — an unvouched pointer is a recorded `not_on_record` refusal (`audit repair control` excepted: bytes verified, ledger not consulted); refusals recorded (repair: printed); `config vouch` puts an unrecorded install on record — bytes untouched, any identity, always recorded | per-object ownership; pruning of the snapshot store; a byte-verification verdict in `audit control` / `audit verify control` (today they compare pointer and ledger, never bytes); `config vouch` over the API |
 | `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read, on the authorization read, and on the kill switch's re-snapshot read; the execution read executes only an install the control ledger records as its last (an `apply`, a kill-switch flip, or a `config vouch`) — a pointer it does not vouch for is a recorded refusal, a damaged ledger refuses runs until repaired, a held configuration lock a retryable busy | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
 | `gateway provision` and `runs prune` authorized against the installed roles (`provision`, `prune`) and recorded; prune spares the control ledger by name and by identity | `provision`/`prune` over the API; a structured prune record; `detail` in `investigate/1` |
-| hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts | external anchoring / write-once sink for the ledger |
+| hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts; the `integrity.yaml` posture seam (floor only — a reserved posture is refused, never honoured) | external anchoring / write-once sink for the ledger (the seam ships; both tiers reserved) |
 | three identities per action (invoker / asserted_as / witness) | agent-to-IdP federation for the invoker's authority |
 | `--expect-head` off-machine head check | continuous/remote attestation of the head |
 | `config_hash` join to runs (`audit <run-id>`, `investigate`) | SIEM export / multi-org investigation at scale |

@@ -201,6 +201,14 @@ mid-step; its ledger then has no final event and reads back as
   read once at startup, so a server started with nothing installed keeps the
   default step timeout as its drain deadline after a later apply;
   `--shutdown-timeout` sets it explicitly.
+- The control ledger's integrity posture is read once at startup, from an
+  `integrity.yaml` beside the ledger. The only posture this build honours is
+  the local hash-chained file (sink `local`, anchor `none` — the default when
+  the file is absent). A posture naming any reserved sink or anchor is one the
+  build cannot honour, so `serve` refuses to start rather than run under a
+  guarantee it does not provide: it exits non-zero and nothing is listening.
+  This is the reserved seam for stronger tamper-evidence, not a feature that
+  strengthens the ledger yet.
 - The invoker's token is also the subject token for on-behalf-of tool
   calls; a run longer than the token's lifetime can fail such a call
   mid-run. There is no refresh.
