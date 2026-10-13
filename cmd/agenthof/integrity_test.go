@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeIntegrity writes body as integrity.yaml beside ctl and returns its path.
@@ -171,5 +174,76 @@ func TestControlWritersRefuseAReservedPosture(t *testing.T) {
 		if readPointer(t, ctl) != pointer {
 			t.Fatalf("%s: the pointer must not move", c.name)
 		}
+	}
+}
+
+// TestAuditRepairControlRefusesAReservedPostureAfterAuthz: an authorized
+// caller on a torn ledger under a reserved posture is refused with exit 2,
+// the torn tail is left exactly as it was, and no fragment is written.
+func TestAuditRepairControlRefusesAReservedPostureAfterAuthz(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t) // nothing installed: repair authorizes against --config's roles
+	ctl, torn := tornLedger(t)
+	p := writeIntegrity(t, ctl, reservedPosture)
+	var out bytes.Buffer
+	code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	if code != 2 || !strings.Contains(out.String(), "audit repair control: "+reservedFault(p)+"\n") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	after, err := os.ReadFile(ctl)
+	if err != nil || !bytes.Equal(after, torn) {
+		t.Fatalf("the torn tail must be untouched: %v\n%s", err, after)
+	}
+	if matches, _ := filepath.Glob(ctl + ".torn-*"); len(matches) != 0 {
+		t.Fatalf("no fragment may be written: %v", matches)
+	}
+}
+
+// TestAuditRepairControlDisclosesNoPostureBeforeAuthz: the posture is read
+// only after authorization succeeds. A caller no role grants repair gets the
+// existing not-authorized line and exit 1; a refused token gets the existing
+// token line and exit 1; neither output mentions the posture or names the
+// root directory, and nothing on disk changes.
+func TestAuditRepairControlDisclosesNoPostureBeforeAuthz(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl, torn := tornLedger(t)
+	writeIntegrity(t, ctl, reservedPosture)
+	dir := filepath.Dir(ctl)
+
+	var out bytes.Buffer
+	code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--as", "mallory@example.com", "--groups", "finance"}, &out)
+	if code != 1 || !strings.Contains(out.String(), "audit repair control: not authorized: no role grants repair to the invoker") {
+		t.Fatalf("unauthorized: exit %d\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "integrity") || strings.Contains(out.String(), dir) {
+		t.Fatalf("an unauthorized caller must learn nothing about the root:\n%s", out.String())
+	}
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := cmdTestOIDCServer(t, key)
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badToken := cmdMintToken(t, otherKey, map[string]any{
+		"iss": srv.URL, "aud": "agenthof", "exp": time.Now().Add(time.Hour).Unix(), "sub": "u-123", "email": "ops@example.com",
+	})
+	t.Setenv("AGENTHOF_OIDC_ISSUER", srv.URL)
+	t.Setenv("AGENTHOF_OIDC_CLIENT_ID", "agenthof")
+	out.Reset()
+	code = cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--token", badToken}, &out)
+	if code != 1 || !strings.Contains(out.String(), "token authentication failed") {
+		t.Fatalf("refused token: exit %d\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "integrity") || strings.Contains(out.String(), dir) {
+		t.Fatalf("an unauthenticated caller must learn nothing about the root:\n%s", out.String())
+	}
+	after, err := os.ReadFile(ctl)
+	if err != nil || !bytes.Equal(after, torn) {
+		t.Fatalf("nothing may change: %v", err)
 	}
 }

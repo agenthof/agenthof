@@ -1477,7 +1477,8 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	// or roles that cannot be read, installed or not — is printed and exits
 	// nonzero, fail-closed, because the one ledger to record it in is the
 	// damaged one. The check runs before the ledger is even looked at, so a
-	// refused caller learns nothing about it.
+	// refused caller learns nothing about it. The integrity posture is read
+	// after this check for the same reason.
 	store := installedStore(*controlLog)
 	roles, _, installed, instErr := config.InstalledRoles(store)
 	if instErr != nil {
@@ -1499,6 +1500,16 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	if !authz.ControlAllows(roles, inv, "repair") {
 		_, _ = fmt.Fprintf(out, "audit repair control: %s\n", control.NotAuthorized("repair").Message)
 		return 1
+	}
+
+	// The root's integrity posture — read only now, after authorization and
+	// before the ledger is looked at: loading it earlier would print the
+	// root's posture and a root-local path to a caller who is not allowed to
+	// learn either. Nothing between the check above and the Stat below
+	// writes, so no repair ever runs on a root this build cannot honour.
+	if _, err := loadIntegrity(*controlLog); err != nil {
+		_, _ = fmt.Fprintf(out, "audit repair control: %v\n", err)
+		return 2
 	}
 
 	if _, statErr := os.Stat(*controlLog); statErr != nil {
