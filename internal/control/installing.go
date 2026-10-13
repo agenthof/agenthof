@@ -2,19 +2,23 @@ package control
 
 import "github.com/agenthof/agenthof/internal/ledger"
 
-// Installing reports whether e put a snapshot in place: a successful apply,
-// or a successful kill-switch flip that ran against an installed snapshot.
-// A flip marked Bootstrap ran while nothing was installed — it edited the
-// configuration directory and recorded that directory's hash, installing
-// nothing — so it is not an install, whatever its hash. This is the ONE
-// definition the three readers use: cmd/agenthof's installed-pointer
-// verdict (audit control / audit verify control exit 5), the configuration
-// pull's version and vouching (through LastInstalling), and
-// internal/investigate's run config-join; they must never drift from each
-// other.
+// Installing reports whether e put a snapshot in place — or, for a vouch,
+// made the ledger stand behind the snapshot already in place: a successful
+// apply, a successful kill-switch flip that ran against an installed
+// snapshot, or a successful vouch (config vouch: the pointer named the hash
+// and its bytes verified; the ledger lacked the record). A flip marked
+// Bootstrap ran while nothing was installed — it edited the configuration
+// directory and recorded that directory's hash, installing nothing — so it
+// is not an install, whatever its hash. This is the ONE definition every
+// reader uses: cmd/agenthof's installed-pointer verdict (audit control /
+// audit verify control exit 5), the configuration pull's version and
+// vouching (through LastInstalling), the execution read's and every control
+// command's vouch, the signature payload, and internal/investigate's run
+// config-join; they must never drift from each other. A future record for a
+// consuming edge that adopts a signed snapshot would be one more clause here.
 func Installing(e DecodedEvent) bool {
 	return e.Outcome == "success" && e.ConfigHash != "" &&
-		(e.Action == "apply" || ((e.Action == "enable" || e.Action == "disable") && !e.Bootstrap))
+		(e.Action == "apply" || e.Action == "vouch" || ((e.Action == "enable" || e.Action == "disable") && !e.Bootstrap))
 }
 
 // LastInstalling returns the last record in records that Installing

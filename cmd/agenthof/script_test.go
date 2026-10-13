@@ -255,6 +255,16 @@ func TestScript(t *testing.T) {
 				ts.Check(f.Close())
 				ts.Check(werr)
 			},
+			// repoint <control-log> <hash>: writes installed/current beside the
+			// control log by hand — the re-aim a hostile or careless hand makes,
+			// with no lock and no record.
+			"repoint": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 2 {
+					ts.Fatalf("usage: repoint <control-log> <hash>")
+				}
+				store := installedStore(ts.MkAbs(args[0]))
+				ts.Check(os.WriteFile(filepath.Join(store, config.InstalledPointer), []byte(args[1]+"\n"), 0o600))
+			},
 			// badsig <control-log> otherkey|flip: replaces the live .sig of
 			// the current pointer with one that is wrong in exactly one way —
 			// otherkey: a VALID signature by a fresh pair over the same

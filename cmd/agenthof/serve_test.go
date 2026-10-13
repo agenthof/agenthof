@@ -188,7 +188,7 @@ func dropInSnapshot(t *testing.T, ctl string) string {
 // TestResolveRunConfigRefusesAnInstallTheLedgerDoesNotVouchFor: unpinned,
 // a hand-aimed pointer, a dropped-in snapshot and the install→record gap are
 // each a not-on-record verdict (cfg loaded, reg nil, hash the pointer,
-// installed, errs nil); a re-apply heals; a damaged ledger is not verifiable
+// installed, errs nil); config vouch heals; a damaged ledger is not verifiable
 // with the repair hint and a repaired ledger runs.
 func TestResolveRunConfigRefusesAnInstallTheLedgerDoesNotVouchFor(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
@@ -215,16 +215,19 @@ func TestResolveRunConfigRefusesAnInstallTheLedgerDoesNotVouchFor(t *testing.T) 
 	applyAs(t, root, ctl)
 	hashB := readPointer(t, ctl)
 	repointTo(t, ctl, hashA)
-	expectNOR("hand-aimed", hashA, "last recorded install is "+hashB+" (apply); re-apply")
-	// re-apply heals: the directory is B; CommitSnapshot's identical branch re-points.
-	applyAs(t, root, ctl)
-	if _, reg, h, _, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance); reg == nil || h != hashB || errs != nil || unverified != nil {
-		t.Fatalf("re-apply heals: h=%q errs=%v unverified=%v", h, errs, unverified)
+	expectNOR("hand-aimed", hashA, "last recorded install is "+hashB+" (apply); if this install")
+	// config vouch heals the pointer as it stands: A, now the last install.
+	vouchAs(t, ctl)
+	if _, reg, h, _, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance); reg == nil || h != hashA || errs != nil || unverified != nil {
+		t.Fatalf("vouch heals: h=%q errs=%v unverified=%v", h, errs, unverified)
 	}
+	// B is no longer the last install (A's vouch is): apply the directory (B),
+	// authorized against A's vouched roles, so B is on record again.
+	applyAs(t, root, ctl)
 
 	// dropped-in: bytes verify, no record.
 	hashX := dropInSnapshot(t, ctl)
-	expectNOR("dropped-in", hashX, "last recorded install is "+hashB+" (apply); re-apply")
+	expectNOR("dropped-in", hashX, "last recorded install is "+hashB+" (apply); if this install")
 	repointTo(t, ctl, hashB)
 
 	// crash gap: the pointer moves, the append never runs.
@@ -236,10 +239,10 @@ func TestResolveRunConfigRefusesAnInstallTheLedgerDoesNotVouchFor(t *testing.T) 
 	if hashC == hashB {
 		t.Fatal("the crash hook must have moved the pointer")
 	}
-	expectNOR("crash gap", hashC, "last recorded install is "+hashB+" (apply); re-apply")
-	applyAs(t, root, ctl)
+	expectNOR("crash gap", hashC, "last recorded install is "+hashB+" (apply); if this install")
+	vouchAs(t, ctl)
 	if _, reg, _, _, errs, unverified := resolveRunConfig(ctl, "", verifyAndAdvance); reg == nil || errs != nil || unverified != nil {
-		t.Fatalf("re-apply after the gap: %v %v", errs, unverified)
+		t.Fatalf("vouch after the gap: %v %v", errs, unverified)
 	}
 
 	// damaged ledger: not verifiable with the hint; repaired → runs.
@@ -256,7 +259,7 @@ func TestResolveRunConfigRefusesAnInstallTheLedgerDoesNotVouchFor(t *testing.T) 
 	if err := os.Remove(ctl); err != nil {
 		t.Fatal(err)
 	}
-	expectNOR("removed ledger", hashC, "no install on record; re-apply")
+	expectNOR("removed ledger", hashC, "no install on record; if this install")
 	if _, err := os.Stat(ctl); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("a resolve must never create the control ledger")
 	}
@@ -525,7 +528,7 @@ func TestServeStartupWarnsWhenTheInstallIsNotOnRecord(t *testing.T) {
 	repointTo(t, ctl, hashA)
 	logs := startServeOnce(t, ctl)
 	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "installed configuration is not on record in the control ledger; every run will be refused until it is") ||
-		!strings.Contains(logs, "configuration not on record: last recorded install is "+hashB+" (apply); re-apply (for a torn ledger, audit repair control first)") {
+		!strings.Contains(logs, "configuration not on record: last recorded install is "+hashB+" (apply); if this install is legitimate, run: agenthof config vouch") {
 		t.Fatalf("not on record:\n%s", logs)
 	}
 	if strings.Contains(logs, "pinned_key=") || strings.Contains(logs, "pinned key") {

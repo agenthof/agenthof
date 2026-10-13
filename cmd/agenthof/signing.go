@@ -426,7 +426,7 @@ func cmdConfigSign(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintf(out, "config sign: %s under %s; run: agenthof apply --config <dir> --control-log %s\n", msgNoConfigInstalled, store, *controlLog)
 		return 1
 	case errors.Is(err, errNotOnRecord):
-		_, _ = fmt.Fprintln(out, "config sign: installed configuration is not yet on record; re-apply (or audit repair control) first")
+		_, _ = fmt.Fprintf(out, "config sign: installed configuration is not yet on record; if it is legitimate, run: agenthof config vouch --control-log %s (a torn ledger: audit repair control first)\n", *controlLog)
 		return 1
 	case errors.Is(err, ledger.ErrLockHeld):
 		_, _ = fmt.Fprintf(out, "config sign: %s\n", msgLockBusy)

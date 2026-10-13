@@ -123,7 +123,22 @@ that record, mints no policy and binds to no role, and so is neither
 authorized against a role nor separately recorded. The engine executes an
 installed configuration only when the control ledger vouches for it — the last
 install the ledger records is that configuration; a verdict that the ledger does
-not vouch for it is a recorded run refusal. Where an execution point
+not vouch for it is a recorded run refusal. Where a control-plane action is
+authorized against an installed configuration, that configuration must be one
+the control ledger vouches for — the same vouch — and a verdict that the
+ledger does not vouch for it is a refusal, recorded wherever the action itself
+is recorded; control-ledger repair is the one exception: it is authorized
+against the installed configuration's byte-verified roles without consulting
+the ledger it exists to repair, and its refusal is printed, not recorded.
+Vouching for the installed configuration — recording, for the snapshot the
+pointer already names and whose bytes verify, the install event the control
+ledger lacks — is a host-local recovery act of the same class as the first
+apply: permitted without a role grant, for any identity the host resolves,
+and always recorded as its own event under the invoker, so that the ledger's
+account of what is installed is restored only by a visible, attributable
+act; it validates nothing beyond the bytes and that some role still grants
+`apply` to a named group, and the default-deny control gate is what bounds a
+configuration no apply validated. Where an execution point
 pins an operator public key, it executes an installed configuration only if
 that configuration's signature verifies under the pinned key and the install is
 of the ledger, and not below the version, the point last accepted; a verdict

@@ -937,17 +937,14 @@ func TestAuditVerifyControlBootstrapFlipDoesNotVouchForUnrecordedApply(t *testin
 	if !strings.Contains(out.String(), "installed config: "+flipHash+" — no install on record: the install was not recorded, or its record was lost") {
 		t.Fatalf("output: %s", out.String())
 	}
-	// A clean apply of the same directory records it: vouched for now.
+	// A config vouch records the pointer as it stands: vouched for now.
+	vouchAs(t, ctl)
 	out.Reset()
-	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
-		t.Fatalf("apply: %d\n%s", code, out.String())
-	}
-	out.Reset()
-	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "matches the last recorded install (apply)") {
+	if code := cmdAuditVerify([]string{"control", "--control-log", ctl}, &out); code != 0 || !strings.Contains(out.String(), "matches the last recorded install (vouch)") {
 		t.Fatalf("exit %d\n%s", code, out.String())
 	}
 
-	// A run under X joins to the apply (form 1), never to the flip.
+	// A run under X joins to the vouch (form 1), never to the flip.
 	logs := t.TempDir()
 	out.Reset()
 	code := cmdRun([]string{"software-engineer", "fix-bug", "--input", "x", "--as", "dana@example.com",
@@ -963,8 +960,8 @@ func TestAuditVerifyControlBootstrapFlipDoesNotVouchForUnrecordedApply(t *testin
 	if code := cmdAudit([]string{m[1], "--log-dir", logs, "--control-log", ctl}, &out); code != 0 {
 		t.Fatalf("audit: %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "config "+flipHash+" — applied by dana@example.com (asserted)") || strings.Contains(out.String(), "kill switch") {
-		t.Fatalf("the join must name the apply, never the bootstrap-era flip:\n%s", out.String())
+	if !strings.Contains(out.String(), "config "+flipHash+" — vouched for by dana@example.com (asserted)") || strings.Contains(out.String(), "kill switch") {
+		t.Fatalf("the join must name the vouch, never the bootstrap-era flip:\n%s", out.String())
 	}
 }
 
@@ -1102,6 +1099,9 @@ func TestRegistryFlipRefusesToStageATamperedSnapshot(t *testing.T) {
 	if code != 1 || !strings.Contains(out.String(), want) || strings.Contains(out.String(), "agent coder disabled") {
 		t.Fatalf("exit %d\n%s", code, out.String())
 	}
+	if !strings.Contains(out.String(), installedHatch("registry disable", "disable", store)) {
+		t.Fatalf("the kill switch prints the hatch\n%s", out.String())
+	}
 	e := lastControlEvent(t, ctl)
 	if e.Action != "disable" || e.Agent != "coder" || e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.ConfigHash != "" {
 		t.Fatalf("want disable error/io_error without a hash: %+v", e)
@@ -1219,4 +1219,31 @@ func TestRegistryFlipUnrecordedNeverSigns(t *testing.T) {
 		t.Fatalf("%d\n%s", code, out.String())
 	}
 	noSig(t, ctl)
+}
+
+// TestRegistryFlipRefusesAnUnvouchedPointer: on the T2 fixture
+// the flip is refused not_on_record for the outsider AND for a granted
+// caller — recorded disable/refused hash-less, pointer unmoved, no staging.
+func TestRegistryFlipRefusesAnUnvouchedPointer(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	original := readPointer(t, ctl)
+	hex2 := dropInGrantingOutsider(t, ctl)
+	want := "registry disable: configuration not on record: last recorded install is " + original + " (apply); " + remedyNotOnRecord + "\n"
+	for _, who := range [][]string{{"--as", "mallory@example.com", "--groups", "finance"}, {"--as", "dana@example.com", "--groups", "platform-eng"}} {
+		var out bytes.Buffer
+		code := cmdRegistry(append([]string{"disable", "coder", "--config", root, "--control-log", ctl}, who...), &out)
+		if code != 1 || !strings.Contains(out.String(), want) || strings.Contains(out.String(), "agent coder disabled") {
+			t.Fatalf("%v: exit %d\n%s", who, code, out.String())
+		}
+		e := lastControlEvent(t, ctl)
+		if e.Action != "disable" || e.Agent != "coder" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotOnRecord || e.ConfigHash != "" {
+			t.Fatalf("%v: %+v", who, e)
+		}
+		if readPointer(t, ctl) != hex2 {
+			t.Fatal("the pointer must not move")
+		}
+		noStagingResidue(t, ctl)
+	}
 }

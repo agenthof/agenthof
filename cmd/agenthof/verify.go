@@ -277,13 +277,22 @@ type installFacts struct {
 	At      time.Time
 }
 
-// remedyReapply is the not-on-record remedy, in the order that is right
-// after a repair: re-apply heals through CommitSnapshot's identical-snapshot
-// branch; a torn ledger must be repaired BEFORE that, never instead of it.
-const remedyReapply = "re-apply (for a torn ledger, audit repair control first)"
+// remedyNotOnRecord is the not-on-record remedy. It names config vouch — the
+// in-band heal for a legitimate unvouched pointer (a crash gap, a lost record,
+// a re-aim the operator stands behind), which leaves the bytes, and any agent
+// a flip disabled, exactly as they are. It does not say "re-apply": once
+// control actions require the vouch, a re-apply of the directory is refused
+// for the very state this remedy is offered for (and would re-enable a killed
+// agent). It does not mention a torn ledger: config vouch prints the repair
+// hint itself in that state. Recorded, so sized to the cap: with an apply or
+// vouch label the whole reason is 192 bytes (maxRecordedErrLen is 200).
+const remedyNotOnRecord = "if this install is legitimate, run: agenthof config vouch"
 
-// vouchInstalled is the vouch every execution read performs, pinned or not,
-// under the shared installed.lock the caller holds: the control ledger must
+// vouchInstalled is the vouch every execution read and every control-op
+// authorization read performs, and config vouch's own check (control-ledger
+// repair excepted by design), under the installed.lock the caller holds —
+// SHARED (run, serve, provision, prune) or EXCLUSIVE (apply, the kill switch,
+// config vouch): the control ledger must
 // record hash as the LAST install — control.LastInstalling(records).ConfigHash
 // == hash, and NOTHING ELSE. Classified exactly as the pull is (pull.go): a
 // held ledger flock → busy (unrecorded); no file → an empty chain that vouches
@@ -304,7 +313,10 @@ const remedyReapply = "re-apply (for a torn ledger, audit repair control first)"
 // root older than the log_id must still run unpinned. A damaged ledger is a
 // RECORDED refusal here (the pull answers an unrecorded 500 for the same
 // state): a run is a policy-bearing action an invoker attempted, and Article
-// III wants the attempt and why it did not execute in the ledger.
+// III wants the attempt and why it did not execute in the ledger. On a
+// not-on-record verdict records and last are returned too (last is zero when
+// nothing is on record), so config vouch can name the install it supersedes;
+// on busy or not-verifiable they are zero.
 func vouchInstalled(controlLog, hash string) (records []ledger.Record, last control.DecodedEvent, refusal *verifyRefusal) {
 	records, _, verr := ledger.ReadVerify(controlLog, ledger.Locked)
 	var torn *ledger.TornError
@@ -322,11 +334,20 @@ func vouchInstalled(controlLog, hash string) (records []ledger.Record, last cont
 	last, found := control.LastInstalling(records)
 	switch {
 	case !found:
-		return nil, control.DecodedEvent{}, &verifyRefusal{Kind: verifyNotOnRecord, Detail: "no install on record; " + remedyReapply}
+		return records, control.DecodedEvent{}, &verifyRefusal{Kind: verifyNotOnRecord, Detail: "no install on record; " + remedyNotOnRecord}
 	case last.ConfigHash != hash:
-		return nil, control.DecodedEvent{}, &verifyRefusal{Kind: verifyNotOnRecord, Detail: fmt.Sprintf("last recorded install is %s (%s); %s", last.ConfigHash, installLabel(last), remedyReapply)}
+		return records, last, &verifyRefusal{Kind: verifyNotOnRecord, Detail: fmt.Sprintf("last recorded install is %s (%s); %s", last.ConfigHash, installLabel(last), remedyNotOnRecord)}
 	}
 	return records, last, nil
+}
+
+// vouchRefused is the recorded reason for a control action refused because
+// the ledger does not vouch for the installed pointer. The caller prints
+// r.Error() whole FIRST; the recorded message is capped by truncateErr (an
+// apply or vouch label fits whole; a flip label is truncated — the
+// terminal/ledger difference the run refusals already have).
+func vouchRefused(r *verifyRefusal) *control.Reason {
+	return &control.Reason{Code: control.CodeNotOnRecord, Message: truncateErr(r)}
 }
 
 // recordedInstall is the pinned layer's account of the install at hash: the

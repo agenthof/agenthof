@@ -10,6 +10,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/obs"
@@ -325,5 +326,25 @@ func TestConfigHostApplyInstalledNotSignedAndKeyID(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "config keygen --control-log "+ctl) {
 		t.Fatalf("state C names keygen:\n%s", logs.String())
+	}
+}
+
+// TestConfigHostApplyNotOnRecordIsAFixedBody: over the API an
+// unvouched pointer answers refused with the fixed ReasonNotOnRecord — never
+// a hash, never a path — and no config_hash.
+func TestConfigHostApplyNotOnRecordIsAFixedBody(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	h, ctl, _ := newConfigHost(t, true)
+	applyAs(t, pullSample(t), ctl)
+	hex2 := dropInGrantingOutsider(t, ctl)
+	res := h.Apply(apiInvoker, sampleBundle(t), apiclient.Precondition{ExpectInstalled: hex2}, apiVia())
+	// The body is fixed and names no hash; config_hash on a refused result is
+	// the PROPOSAL's hash (types.go :150, as for every refusal) — never the
+	// installed one.
+	if res.Status != apiclient.ApplyRefused || res.Reason != apiclient.ReasonNotOnRecord || strings.Contains(res.Reason, "sha256:") || res.ConfigHash == hex2 || res.ConfigHash == "" {
+		t.Fatalf("%+v", res)
+	}
+	if e := lastControlEvent(t, ctl); e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotOnRecord || e.Origin == nil {
+		t.Fatalf("%+v", e)
 	}
 }

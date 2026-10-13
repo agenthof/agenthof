@@ -74,6 +74,15 @@ func label(rec record) string {
 			return "runs pruned"
 		}
 		return "runs prune " + rec.Outcome
+	case "vouch":
+		// The hash is the label's subject: a vouch installs no bytes, it
+		// makes the ledger stand behind the pointer that names them. Detail
+		// (what was on record before) is appended by Render in ONE pair of
+		// parentheses, so the writer's Detail uses a comma, never parentheses.
+		if rec.Outcome == "success" {
+			return "vouched for installed config " + rec.ConfigHash
+		}
+		return "vouch " + rec.Outcome
 	default:
 		return rec.Action
 	}

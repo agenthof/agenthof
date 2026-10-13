@@ -2,10 +2,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 
 	"github.com/agenthof/agenthof/internal/apiclient"
+	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/origin"
@@ -52,6 +56,10 @@ func applyResult(o applyOutcome) apiclient.ApplyResult {
 	}
 	if o.Reason != nil {
 		res.Reason = o.Reason.Message
+		if o.Reason.Code == control.CodeNotOnRecord {
+			// The recorded message names two hashes; the wire carries a fixed body.
+			res.Reason = apiclient.ReasonNotOnRecord
+		}
 	}
 	switch o.Kind {
 	case applyInstalled:
@@ -96,8 +104,16 @@ func (h *configHost) Pull(inv identity.Invoker) serve.PullResult {
 	out := pullConfig(pullRequest{ControlLog: h.controlLog, Authorize: true, Invoker: inv})
 	status := pullStatus(out.Kind)
 	switch out.Kind {
-	case pullStoreUnusable, pullNotBundleable:
+	case pullStoreUnusable:
+		// Every store-unusable cause (malformed pointer, roles unreadable,
+		// snapshot gone, bytes that do not hash as the pointer) is the
+		// rm-current hatch; config vouch refuses those states, so it is not
+		// named here.
+		h.logger.Error("config pull failed", "status", status, "err", fmt.Sprintf("%v; remove %s and re-apply", out.Err, filepath.Join(installedStore(h.controlLog), config.InstalledPointer)))
+	case pullNotBundleable:
 		h.logger.Error("config pull failed", "status", status, "err", out.Err)
+	case pullNotRecorded:
+		h.logger.Info("config pull not on record; if the install is legitimate, run: agenthof config vouch --control-log "+h.controlLog, "status", status)
 	case pullLedgerDamaged:
 		h.logger.Error("config pull failed", "status", status, "err", out.Err)
 		h.logger.Error("control ledger damaged; run: agenthof audit repair control --control-log " + h.controlLog)

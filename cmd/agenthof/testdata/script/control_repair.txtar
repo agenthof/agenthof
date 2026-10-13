@@ -15,12 +15,17 @@ exec agenthof apply --config examples/config --control-log control.jsonl --as da
 stdout 'registry ok: 5 agents, 2 workflows, 3 roles'
 stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
 
-# A second control log that will stay clean, for the "not torn" case.
-exec agenthof apply --config examples/config --control-log clean.jsonl --as dana@example.com --groups platform-eng
+# A second control log that will stay clean, for the "not torn" case. The
+# three ledgers share one installed store (same directory), and an apply now
+# lands only over a pointer the TARGET ledger vouches for; a fresh ledger
+# vouches for nothing, so these extra ledgers are seeded with `config vouch`
+# (a bootstrap-class record of the already-installed pointer) instead.
+exec agenthof config vouch --control-log clean.jsonl --as dana@example.com --groups platform-eng
 
-# A third control log, seeded with two genuine records via two plain
-# applies (never touching registry state), for the "chain break" case.
-exec agenthof apply --config examples/config --control-log broken.jsonl --as dana@example.com --groups platform-eng
+# A third control log, seeded with two genuine records (a vouch for the
+# already-installed pointer, then a plain apply that now vouches), never
+# touching registry state, for the "chain break" case.
+exec agenthof config vouch --control-log broken.jsonl --as dana@example.com --groups platform-eng
 exec agenthof apply --config examples/config --control-log broken.jsonl --as dana@example.com --groups platform-eng
 stdout 'control head: seq=2 sha256=[0-9a-f]{64}'
 

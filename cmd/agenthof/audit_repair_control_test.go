@@ -436,3 +436,55 @@ func TestAuditRepairControlMalformedPointerFailsClosed(t *testing.T) {
 		t.Fatalf("ledger must be untouched; got:\n%s", after)
 	}
 }
+
+// TestAuditRepairControlPrintsTheHatchOnATamperedStore: a
+// tampered snapshot + torn ledger → printed hatch, no append; rm current →
+// the --config fallback authorizes and repairs.
+func TestAuditRepairControlPrintsTheHatchOnATamperedStore(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	store := installedStore(ctl)
+	writeFileIn(t, config.SnapshotDir(store, readPointer(t, ctl)), "agents/coder.yaml", "name: coder\nmodel: fast\ninstruction: EVIL\noutput: patch\n")
+	appendFragment(t, ctl)
+	before := ledgerBytes(t, ctl)
+	var out bytes.Buffer
+	args := []string{"control", "--control-log", ctl, "--config", root, "--as", "dana@example.com", "--groups", "platform-eng"}
+	if code := cmdAuditRepairControl(args, &out); code != 1 || !strings.Contains(out.String(), "snapshot hashes as") || !strings.Contains(out.String(), installedHatch("audit repair control", "repair", store)) {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if !bytes.Equal(before, ledgerBytes(t, ctl)) {
+		t.Fatal("a printed refusal appends nothing")
+	}
+	if err := os.Remove(filepath.Join(store, config.InstalledPointer)); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := cmdAuditRepairControl(args, &out); code != 0 || !strings.Contains(out.String(), "control ledger tainted") {
+		t.Fatalf("--config fallback must repair: %d\n%s", code, out.String())
+	}
+}
+
+// TestAuditRepairControlAuthorizesFromByteVerifiedRolesWithoutVouching (the
+// exemption, pinned deliberately): on the T2 fixture with a
+// torn ledger, repair authorizes from the dropped-in (byte-verified) roles
+// and repairs; the taint row is under the invoker; it installs nothing and
+// the pointer is still not on record afterwards.
+func TestAuditRepairControlAuthorizesFromByteVerifiedRolesWithoutVouching(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	hex2 := dropInGrantingOutsider(t, ctl)
+	appendFragment(t, ctl)
+	var out bytes.Buffer
+	if code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--as", "mallory@example.com", "--groups", "finance"}, &out); code != 0 || !strings.Contains(out.String(), "control ledger tainted") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "repair" || e.Outcome != "success" || e.Invoker.Subject != "mallory@example.com" || e.ConfigHash != "" {
+		t.Fatalf("%+v", e)
+	}
+	if _, mismatch := installedPointerLine(ctl, mustRecords(t, ctl)); !mismatch || readPointer(t, ctl) != hex2 {
+		t.Fatal("a repair vouches for nothing and moves nothing")
+	}
+}

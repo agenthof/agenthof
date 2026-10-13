@@ -58,16 +58,16 @@ func LoadControl(path string) (events []control.DecodedEvent, verdict string, ok
 
 // ConfigJoin renders the join line for a run whose workflow_started carries
 // runHash at runStart; verdict is LoadControl's. The run's install is the
-// LAST installing event (control.Installing: a successful apply, or a
-// successful kill-switch flip against an installed snapshot) in ledger
-// order whose hash equals the run's and whose time is not after the run's
-// start — events is in seq order, so the last qualifying event is the latest
-// install with no clock comparison. Five forms, verbatim in
-// docs/reference/config.md: applied by (an apply); installed by … (kill
-// switch: …) (a flip); no install on record at the run's start (the hash
-// matches only later installs — the install→record gap re-installed later,
-// or clock skew — known but not vouched for at run time); no install on
-// record; control ledger unavailable.
+// LAST installing event (control.Installing: a successful apply, a
+// successful kill-switch flip against an installed snapshot, or a successful
+// vouch) in ledger order whose hash equals the run's and whose time is not
+// after the run's start — events is in seq order, so the last qualifying
+// event is the latest install with no clock comparison. The forms rendered
+// here: applied by (an apply); installed by … (kill switch: …) (a flip);
+// vouched for by … (a vouch); no install on record at
+// the run's start (the hash matches only later installs — the install→record
+// gap re-installed later, or clock skew — known but not vouched for at run
+// time); no install on record; control ledger unavailable.
 func ConfigJoin(events []control.DecodedEvent, verdict string, runHash string, runStart time.Time) string {
 	switch verdict {
 	case "missing", "torn", "broken", "error":
@@ -90,11 +90,14 @@ func ConfigJoin(events []control.DecodedEvent, verdict string, runHash string, r
 
 	switch {
 	case install == nil && later:
-		return fmt.Sprintf("config %s — no install on record at the run's start (matches a later apply or kill-switch flip)", runHash)
+		return fmt.Sprintf("config %s — no install on record at the run's start (matches a later apply, kill-switch flip or vouch)", runHash)
 	case install == nil:
 		return fmt.Sprintf("config %s — no install on record", runHash)
 	case install.Action == "apply":
 		return fmt.Sprintf("config %s — applied by %s (%s) at %s",
+			runHash, install.Invoker.Subject, install.Invoker.Method, install.Time.Format(time.RFC3339))
+	case install.Action == "vouch":
+		return fmt.Sprintf("config %s — vouched for by %s (%s) at %s",
 			runHash, install.Invoker.Subject, install.Invoker.Method, install.Time.Format(time.RFC3339))
 	}
 	state := "disabled"

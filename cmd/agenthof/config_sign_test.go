@@ -112,7 +112,7 @@ func TestConfigSignRefusesAnUnvouchedPointer(t *testing.T) {
 	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_install_before_append")
 	_, _ = applyCode(t, root, ctl)
 	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
-	want := "config sign: installed configuration is not yet on record; re-apply (or audit repair control) first\n"
+	want := "config sign: installed configuration is not yet on record; if it is legitimate, run: agenthof config vouch --control-log " + ctl + " (a torn ledger: audit repair control first)\n"
 	if code, out := signCode(t, ctl); code != 1 || out != want {
 		t.Fatalf("crash gap: %d %q", code, out)
 	}

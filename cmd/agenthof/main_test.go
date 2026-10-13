@@ -1246,6 +1246,71 @@ func adminMock(t *testing.T, failAt int, sentinel string) (*httptest.Server, *at
 	return srv, &generated
 }
 
+// TestGatewayProvisionAndRunsPruneRefuseAnUnvouchedPointer:
+// on the T2 fixture both are refused not_on_record — provision recorded with
+// the pointer hash, prune hash-less — nothing minted, nothing pruned.
+func TestGatewayProvisionAndRunsPruneRefuseAnUnvouchedPointer(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := applied(t, root)
+	original := readPointer(t, ctl)
+	hex2 := dropInGrantingOutsider(t, ctl)
+	want := "configuration not on record: last recorded install is " + original + " (apply); " + remedyNotOnRecord
+	srv, generated := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	if code := cmdGateway(append(provisionArgs(ctl, srv.URL), "--as", "mallory@example.com", "--groups", "finance"), &out); code != 1 || !strings.Contains(out.String(), "gateway provision: "+want) {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "provision" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotOnRecord || e.ConfigHash != hex2 {
+		t.Fatalf("%+v", e)
+	}
+	if generated.Load() != 0 {
+		t.Fatal("nothing may be minted")
+	}
+	logs := t.TempDir()
+	aged := agedRun(t, logs, "r-0000000000000001.jsonl")
+	out.Reset()
+	if code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", logs, "--artifact-dir", t.TempDir(), "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance"}, &out); code != 1 || !strings.Contains(out.String(), "runs prune: "+want) {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "prune" || e.Outcome != "refused" || e.Reason == nil || e.Reason.Code != control.CodeNotOnRecord || e.ConfigHash != "" {
+		t.Fatalf("%+v", e)
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatal("nothing may be pruned")
+	}
+}
+
+// TestGatewayProvisionAndRunsPruneAreBusyUnderAHeldWriterLock: with installed.lock held EXCLUSIVE elsewhere both print the busy
+// line, exit 1, record nothing — the shared take is bounded, never a hang.
+func TestGatewayProvisionAndRunsPruneAreBusyUnderAHeldWriterLock(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := applied(t, root)
+	unlock, err := ledger.LockFile(installedLock(ctl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	before := ledgerBytes(t, ctl)
+	srv, _ := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 1 || !strings.Contains(out.String(), "gateway provision: "+msgLockBusy+"\n") {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir(), "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 || !strings.Contains(out.String(), "runs prune: "+msgLockBusy+"\n") {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !bytes.Equal(before, ledgerBytes(t, ctl)) {
+		t.Fatal("busy records nothing")
+	}
+}
+
 // provisionArgs is a gateway provision invocation by the platform-eng
 // group against ctl and the mock admin API.
 func provisionArgs(ctl, adminBase string) []string {
@@ -1547,13 +1612,12 @@ func TestGatewayProvisionIsNotBlockedByAKillSwitchFlip(t *testing.T) {
 	}
 }
 
-// TestGatewayProvisionMintsFromTheUnverifiedRolesRead pins the boundary:
-// provision reads through the lenient authorization read, which is not
-// verified against the pointer, so a snapshot edited in place still mints —
-// while a run on the same root is refused with the mismatch text. The two
-// outcomes side by side are the boundary; a later change to it is
-// deliberate.
-func TestGatewayProvisionMintsFromTheUnverifiedRolesRead(t *testing.T) {
+// TestGatewayProvisionRefusesATamperedSnapshot pins the boundary: provision
+// reads through the authorization read, which verifies the bytes against the
+// pointer, so a snapshot edited in place mints nothing — and a run on the
+// same root is refused with the same mismatch text. Both reads refuse the
+// same bytes; a later change to it is deliberate.
+func TestGatewayProvisionRefusesATamperedSnapshot(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
 	root := budgetedSample(t)
@@ -1570,17 +1634,43 @@ func TestGatewayProvisionMintsFromTheUnverifiedRolesRead(t *testing.T) {
 	srv, _ := adminMock(t, 0, "")
 	t.Chdir(t.TempDir())
 	var out bytes.Buffer
-	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
-		t.Fatalf("provision must mint from the lenient read: %d\n%s", code, out.String())
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 1 ||
+		!strings.Contains(out.String(), "installed config "+pointer+": snapshot hashes as ") ||
+		!strings.Contains(out.String(), installedHatch("gateway provision", "provision", installedStore(ctl))) {
+		t.Fatalf("provision must refuse a tampered snapshot: %d\n%s", code, out.String())
 	}
-	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); err != nil {
-		t.Fatalf("key: %v", err)
+	if _, err := os.Stat(filepath.Join(".agenthof", "keys", "software-engineer.key")); !os.IsNotExist(err) {
+		t.Fatalf("no key may be minted from a tampered snapshot: %v", err)
 	}
-	if e := lastControlEvent(t, ctl); e.Outcome != "success" || e.ConfigHash != pointer {
+	if e := lastControlEvent(t, ctl); e.Action != "provision" || e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError || e.ConfigHash != "" {
 		t.Fatalf("%+v", e)
 	}
 	if code, runOut := runFixBug(t, root, ctl); code != 1 || !strings.Contains(runOut, "snapshot hashes as") {
 		t.Fatalf("the execution read must refuse the same root: %d\n%s", code, runOut)
+	}
+}
+
+// TestRunsPruneRefusesATamperedSnapshot: retention is
+// blocked on a corrupt store — recorded error/io_error, hatch printed,
+// nothing pruned.
+func TestRunsPruneRefusesATamperedSnapshot(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	pointer := readPointer(t, ctl)
+	logs := t.TempDir()
+	aged := agedRun(t, logs, "r-0000000000000001.jsonl")
+	writeFileIn(t, config.SnapshotDir(installedStore(ctl), pointer), "agents/coder.yaml", "name: coder\nmodel: fast\ninstruction: EVIL\noutput: patch\n")
+	var out bytes.Buffer
+	code := cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", logs, "--artifact-dir", t.TempDir(), "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	if code != 1 || !strings.Contains(out.String(), "snapshot hashes as") || !strings.Contains(out.String(), installedHatch("runs prune", "prune", installedStore(ctl))) {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Action != "prune" || e.Outcome != "error" || e.Reason == nil || e.Reason.Code != control.CodeIOError {
+		t.Fatalf("%+v", e)
+	}
+	if _, err := os.Stat(aged); err != nil {
+		t.Fatal("nothing may be pruned on a corrupt store")
 	}
 }
 

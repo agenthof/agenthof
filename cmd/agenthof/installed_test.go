@@ -24,27 +24,39 @@ func TestInstalledStoreIsBesideTheControlLog(t *testing.T) {
 	}
 }
 
+// TestApplyFloorErrors: the floor is "some role grants apply to a NAMED
+// group" — exactly the two rules Build already enforces for apply
+// (no-access-floor, public-control-role), restated so config vouch, which
+// never runs Build, cannot bless a control-plane lockout. No empty-string
+// rule: Validate has none, so the floor must not invent an apply rejection.
 func TestApplyFloorErrors(t *testing.T) {
-	ok := config.Config{Roles: []config.RoleDef{
-		{Name: "se", Workflows: []string{"w"}, AllowedGroups: []string{"*"}},
-		{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"enable", "apply"}},
-	}}
-	if errs := applyFloorErrors(ok); len(errs) != 0 {
-		t.Fatalf("a config granting apply must pass: %v", errs)
+	const wantMsg = "roles: (config): no role grants apply to a named group: a configuration nobody may apply could never be changed again; grant control: [apply] to at least one role whose allowed_groups names a real group"
+	role := func(groups ...string) config.Config {
+		return config.Config{Roles: []config.RoleDef{
+			{Name: "se", Workflows: []string{"w"}, AllowedGroups: []string{"*"}},
+			{Name: "ops", AllowedGroups: groups, Control: []string{"enable", "apply"}},
+		}}
 	}
-	bad := config.Config{Roles: []config.RoleDef{
-		{Name: "se", Workflows: []string{"w"}, AllowedGroups: []string{"*"}},
-		{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"enable", "disable", "repair"}},
-	}}
-	errs := applyFloorErrors(bad)
-	if len(errs) != 1 || errs[0].Code != "no-apply-floor" {
-		t.Fatalf("want one no-apply-floor error, got %+v", errs)
-	}
-	if got := errs[0].Error(); got != "roles: (config): no role grants apply: a configuration nobody may apply could never be changed again; grant control: [apply] to at least one role" {
-		t.Fatalf("message = %q", got)
-	}
-	if errs := applyFloorErrors(config.Config{}); len(errs) != 1 {
-		t.Fatalf("an empty config grants apply to nobody: %+v", errs)
+	for _, c := range []struct {
+		name string
+		cfg  config.Config
+		pass bool
+	}{
+		{"named group", role("platform-eng"), true},
+		{"public marker beside a named group", role("*", "ops"), true},
+		{"empty-string group passes exactly as Build does", role(""), true},
+		{"no groups (lockout shape)", role(), false},
+		{"public marker only (lockout shape)", role("*"), false},
+		{"apply granted to no role", config.Config{Roles: []config.RoleDef{{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"enable", "disable", "repair"}}}}, false},
+		{"empty config", config.Config{}, false},
+	} {
+		errs := applyFloorErrors(c.cfg)
+		if c.pass && len(errs) != 0 {
+			t.Fatalf("%s: must pass: %v", c.name, errs)
+		}
+		if !c.pass && (len(errs) != 1 || errs[0].Code != "no-apply-floor" || errs[0].Error() != wantMsg) {
+			t.Fatalf("%s: want one no-apply-floor error %q, got %+v", c.name, wantMsg, errs)
+		}
 	}
 }
 
@@ -95,6 +107,7 @@ func TestInstalledPointerLine(t *testing.T) {
 	const x = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	apply := func(h string) fixtureEvent { return fixtureEvent{action: "apply", hash: h} }
 	disable := func(h string) fixtureEvent { return fixtureEvent{action: "disable", agent: "coder", hash: h} }
+	vouch := func(h string) fixtureEvent { return fixtureEvent{action: "vouch", hash: h} }
 	bootFlip := func(h string) fixtureEvent {
 		return fixtureEvent{action: "enable", agent: "coder", hash: h, bootstrap: true}
 	}
@@ -125,6 +138,10 @@ func TestInstalledPointerLine(t *testing.T) {
 			"installed config: " + d + " — matches the last recorded install (disable agent coder)\n", false},
 		{"flip recorded before flips installed snapshots (upgrade wrinkle: exit 5 until the next apply)", []fixtureEvent{apply(a), disable(x)}, a + "\n",
 			"installed config: " + a + " — does NOT match the last recorded install (" + x + ", disable agent coder)" + mismatchTail, true},
+		{"vouch matches", []fixtureEvent{apply(a), vouch(b)}, b + "\n",
+			"installed config: " + b + " — matches the last recorded install (vouch)\n", false},
+		{"pointer behind a vouch", []fixtureEvent{apply(a), vouch(b)}, a + "\n",
+			"installed config: " + a + " — does NOT match the last recorded install (" + b + ", vouch)" + mismatchTail, true},
 		{"no events", nil, a + "\n",
 			"installed config: " + a + " — no install on record" + mismatchTail, true},
 		{"no store prints nothing", []fixtureEvent{apply(a)}, "", "", false},
@@ -140,5 +157,19 @@ func TestInstalledPointerLine(t *testing.T) {
 	controlLog, recs := pointerFixture(t, []fixtureEvent{apply(a)}, "garbage\n")
 	if line, mismatch := installedPointerLine(controlLog, recs); !mismatch || !strings.HasPrefix(line, "installed config: ") || !strings.Contains(line, "malformed pointer") {
 		t.Fatalf("malformed pointer: mismatch=%v line=%q", mismatch, line)
+	}
+}
+
+// TestInstallLabelVouch: a vouch event labels as exactly "vouch" — never
+// "vouch agent " (the flip shape with an empty agent).
+func TestInstallLabelVouch(t *testing.T) {
+	if got := installLabel(control.DecodedEvent{Action: "vouch", Outcome: "success", ConfigHash: "sha256:abc"}); got != "vouch" {
+		t.Fatalf("installLabel(vouch) = %q", got)
+	}
+	if got := installLabel(control.DecodedEvent{Action: "apply"}); got != "apply" {
+		t.Fatalf("installLabel(apply) = %q", got)
+	}
+	if got := installLabel(control.DecodedEvent{Action: "disable", Agent: "coder"}); got != "disable agent coder" {
+		t.Fatalf("installLabel(disable) = %q", got)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 
 	"github.com/agenthof/agenthof/internal/authz"
@@ -165,7 +164,7 @@ type applyRun struct {
 
 // applyConfig is THE apply — the CLI and the server both call it. Order,
 // pinned: (1) ledger writable; (2) writer lock, held through the success
-// append; (3) InstalledRoles; (4) authorize against the installed roles
+// append; (3) InstalledRoles, byte-verified; (3b) the ledger's vouch; (4) authorize against the installed roles
 // (or refuse a bootstrap the caller did not permit); (5) precondition; (6)
 // stage; (7) load; (8) build + no-apply-floor; (9) hash, and 9a for a
 // bundle: the staged copy must hash as the proposal; (10) commit; (11)
@@ -213,15 +212,43 @@ func applyConfig(req applyRequest, out io.Writer) applyOutcome {
 	installedRoles, currentHash, installed, instErr := config.InstalledRoles(store)
 	if instErr != nil {
 		// A pointer that is present but cannot be honored — malformed, or
-		// naming a snapshot whose roles cannot be read: nobody can be
+		// naming a snapshot whose roles cannot be read or whose bytes do not
+		// hash as the pointer: nobody can be
 		// authorized. Fail closed, recorded, and name the one way out, which
 		// is itself recorded as a bootstrap.
 		_, _ = fmt.Fprintln(out, instErr)
-		_, _ = fmt.Fprintf(out, "apply: cannot read the installed configuration under %s; refusing to apply (remove %s to re-bootstrap)\n",
-			store, filepath.Join(store, config.InstalledPointer))
+		_, _ = fmt.Fprint(out, installedHatch("apply", "apply", store))
 		return a.ioError(instErr)
 	}
 	a.res.CurrentHash, a.res.Installed = currentHash, installed
+
+	// 3b. The ledger must vouch for the pointer those roles came from: the
+	// LAST install it records is this hash (vouchInstalled — the execution
+	// read's judgment, under this exclusive lock definitive). No vouched
+	// roles exist until it passes, so it precedes authorization — an
+	// unauthorized caller learns the store's vouch STATE, never its hash —
+	// and the precondition. Busy and a damaged ledger are unrecorded, as at
+	// step 1 (a damaged ledger here is a race past step 1); not on record is
+	// a recorded refusal with the proposal's hash, as every refusal is.
+	if installed {
+		_, _, refusal := vouchInstalled(req.ControlLog, currentHash)
+		switch {
+		case refusal == nil:
+		case refusal.Transient():
+			_, _ = fmt.Fprintf(out, "apply: %s\n", msgLockBusy)
+			return a.done(applyBusy)
+		case refusal.Kind != verifyNotOnRecord:
+			_, _ = fmt.Fprintf(out, "apply: %s\n", refusal.Error())
+			return a.done(applyLedgerDamaged)
+		default:
+			_, _ = fmt.Fprintf(out, "apply: %s\n", refusal.Error())
+			h, hashErr := req.Source.Hash()
+			if hashErr != nil {
+				return a.hashFailure(hashErr)
+			}
+			return a.record(applyRefused, "refused", vouchRefused(refusal), h)
+		}
+	}
 
 	// 4. Authorize BEFORE the proposal is read, against the roles of the
 	// configuration already installed: a caller those roles grant no `apply`
@@ -231,7 +258,9 @@ func applyConfig(req applyRequest, out io.Writer) applyOutcome {
 	// CLI always does — in CLI mode the filesystem is the root of trust;
 	// docs/control-plane-lifecycle.md says so) and a recorded refusal
 	// otherwise. Authorization precedes the precondition so an unauthorized
-	// caller learns nothing about the installed hash.
+	// caller learns nothing about the installed hash and, since the vouch
+	// precedes it, nothing about whether the pointer is on record beyond that
+	// verdict.
 	if installed && !authz.ControlAllows(installedRoles, req.Invoker, "apply") {
 		return a.refused(control.NotAuthorized("apply"))
 	}

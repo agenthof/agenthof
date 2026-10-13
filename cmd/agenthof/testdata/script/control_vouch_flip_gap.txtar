@@ -1,0 +1,22 @@
+# The kill switch's flip crash gap at the CLI: the state changes, the event is
+# not recorded, the ledger no longer vouches for the pointer; every control
+# action refuses until config vouch heals it, and the healed configuration is
+# the one that was flipped (the agent stays disabled; nothing is re-enabled).
+
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+env AGENTHOF_TEST_CRASH_AT=after_state_before_append
+! exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'state changed; event NOT recorded'
+env AGENTHOF_TEST_CRASH_AT=
+! exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'configuration not on record'
+
+exec agenthof config vouch --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'vouched: '
+installedhash control.jsonl
+exec sh -c 'grep "enabled: false" installed/${HASH#sha256:}/agents/coder.yaml'
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'configuration invalid'
+exec agenthof audit control --control-log control.jsonl
+! stdout 'enabled agent coder'
+stdout 'vouched for installed config'
