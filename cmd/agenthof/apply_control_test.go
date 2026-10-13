@@ -789,6 +789,16 @@ func TestApplyRefusesAnUnvouchedPointer(t *testing.T) {
 		t.Fatal("the pointer must not move")
 	}
 	noStagingResidue(t, ctl)
+	// Reason-code additivity (spec test 22): the refusal reads through the
+	// existing renderers and filters with no new verb.
+	var audit bytes.Buffer
+	if code := cmdAuditControl([]string{"--control-log", ctl}, &audit); code != 0 || !strings.Contains(audit.String(), "config apply refused — mallory@example.com (asserted)") {
+		t.Fatalf("audit control: %d\n%s", code, audit.String())
+	}
+	var inv bytes.Buffer
+	if code := cmdInvestigate([]string{"--control-log", ctl, "--outcome", "refused"}, &inv); code != 0 {
+		t.Fatalf("investigate: %d\n%s", code, inv.String())
+	}
 	// The pull on the same fixture (spec test 15; order unchanged, §6.6): a
 	// caller the dropped-in roles grant answers 503 not recorded; a caller no
 	// role names answers 403 — the vouch is judged at step 6, after authz.

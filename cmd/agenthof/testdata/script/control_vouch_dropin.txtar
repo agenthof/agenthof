@@ -1,0 +1,34 @@
+# A correctly hashed snapshot dropped into the store with current re-aimed at
+# it by hand: bytes verify, the ledger does not vouch — every control action
+# refuses not_on_record (recorded), a run refuses, the pull answers not yet
+# on record, audit control reports the mismatch; config vouch heals it in
+# one recorded, labelled act.
+
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+installedhash control.jsonl
+env OLD=$HASH
+exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+installedhash control.jsonl
+repoint control.jsonl $OLD
+
+! exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'apply: configuration not on record: last recorded install is sha256:[0-9a-f]{64} \(disable agent coder\); if this install is legitimate, run: agenthof config vouch'
+! exec agenthof registry enable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry enable: configuration not on record'
+! exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'configuration not on record'
+! exec agenthof config pull --control-log control.jsonl
+stdout 'not yet on record'
+exec agenthof audit control --control-log control.jsonl
+stdout 'does NOT match the last recorded install'
+
+exec agenthof config vouch --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'vouched: '$OLD
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded install \(vouch\)'
+exec agenthof audit control --control-log control.jsonl
+stdout 'vouched for installed config '$OLD' \(previously on record: sha256:[0-9a-f]{64}, disable agent coder\)'
+exec agenthof config vouch --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'is already on record \(vouch, version'
+exec agenthof run software-engineer fix-bug --input hi --as dana@example.com --config examples/config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'

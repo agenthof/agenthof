@@ -1720,3 +1720,59 @@ func TestUnpinnedRunBusyIsUnrecordedAndWaitsBehindAShortHold(t *testing.T) {
 		})
 	}
 }
+
+// TestPinnedEdgeAfterAVouch (spec tests 33, 29b): on a pinned root a vouch
+// of a crash gap signs the vouch's version and the floor advances to it; a
+// vouch that lands BELOW a floor pinned before a repair truncated the tail
+// is refused stale until rm verify.floor — repair's consequence, not vouch's.
+func TestPinnedEdgeAfterAVouch(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, root, _ := pinnedRoot(t)
+	if _, reg, _, _, _, unverified := resolveAdvance(t, ctl); reg == nil || unverified != nil {
+		t.Fatalf("fixture: %v", unverified)
+	}
+	crashGap(t, root, ctl)
+	vouchAs(t, ctl)
+	_, reg, _, _, _, unverified := resolveAdvance(t, ctl)
+	if reg == nil || unverified != nil {
+		t.Fatalf("pinned run after vouch: %v", unverified)
+	}
+	if _, v, present, err := readVerifyFloor(ctl); err != nil || !present || v != lastControlEvent(t, ctl).Seq {
+		t.Fatalf("floor = vouch version: v=%d present=%v err=%v", v, present, err)
+	}
+	// Stale after repair. Ledger so far: apply(1), vouch(2). Install a NEW
+	// hash three times (seqs 3, 4, 5: a new snapshot, then two identical
+	// re-applies) and run, so the floor is 5. Tear seqs 3-5 away: the last
+	// surviving install is the vouch at 2, whose hash is not the pointer, so
+	// the pointer is not on record. Repair lands at 3; config vouch lands at
+	// 4 — below the floor 5 → every pinned run is stale until rm verify.floor.
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan hardest\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	for i := 0; i < 3; i++ {
+		applyAs(t, root, ctl)
+	}
+	if _, reg, _, _, _, unverified := resolveAdvance(t, ctl); reg == nil || unverified != nil {
+		t.Fatalf("advance to the latest apply: %v", unverified)
+	}
+	_, floor, _, _ := readVerifyFloor(ctl)
+	recs := mustRecords(t, ctl)
+	keep := recs[len(recs)-3].Raw // truncate so the last three records become a torn tail
+	raw := mustRead(t, ctl)
+	idx := bytes.Index(raw, keep)
+	if err := os.WriteFile(ctl, append(raw[:idx], []byte(`{"v":"control/1","seq":`)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repairAs(t, root, ctl)
+	vouchAs(t, ctl)
+	if v := lastControlEvent(t, ctl).Seq; v >= floor {
+		t.Fatalf("fixture: the vouch must land below the floor: %d vs %d", v, floor)
+	}
+	if _, _, _, _, _, unverified := resolveAdvance(t, ctl); unverified == nil || unverified.Kind != verifyStale {
+		t.Fatalf("stale until the floor is reset: %v", unverified)
+	}
+	if err := os.Remove(verifyFloorPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	if _, reg, _, _, _, unverified := resolveAdvance(t, ctl); reg == nil || unverified != nil {
+		t.Fatalf("rm verify.floor re-accepts: %v", unverified)
+	}
+}

@@ -1,0 +1,32 @@
+# Every control action authorizes from the installed snapshot's BYTE-VERIFIED
+# roles: an in-place edit under installed/<hex>/ refuses apply, the kill
+# switch, provision and prune with one text, recorded error/io_error, and
+# names the hatch; the two-step recovery is rm current, rm <hex>, re-apply.
+
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok'
+installedhash control.jsonl
+tamper control.jsonl roles/platform-admin.yaml '# edited in place'
+
+! exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'snapshot hashes as'
+stdout 'refusing to apply \(remove .*installed/current to re-bootstrap\)'
+! exec agenthof registry disable coder --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'snapshot hashes as'
+stdout 'refusing to disable'
+! exec agenthof runs prune --older-than 180d --log-dir logs --artifact-dir artifacts --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'snapshot hashes as'
+stdout 'refusing to prune'
+exec agenthof audit control --control-log control.jsonl
+stdout 'config apply error'
+stdout 'disable agent coder error'
+stdout 'runs prune error'
+
+rm installed/current
+! exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'is corrupt \(its bytes hash as'
+exec sh -c 'rm -r installed/${HASH#sha256:}'
+exec agenthof apply --config examples/config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok'
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded install \(apply\)'

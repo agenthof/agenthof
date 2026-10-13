@@ -464,3 +464,27 @@ func TestAuditRepairControlPrintsTheHatchOnATamperedStore(t *testing.T) {
 		t.Fatalf("--config fallback must repair: %d\n%s", code, out.String())
 	}
 }
+
+// TestAuditRepairControlAuthorizesFromByteVerifiedRolesWithoutVouching (spec
+// test 17 — the exemption, pinned deliberately): on the T2 fixture with a
+// torn ledger, repair authorizes from the dropped-in (byte-verified) roles
+// and repairs; the taint row is under the invoker; it installs nothing and
+// the pointer is still not on record afterwards.
+func TestAuditRepairControlAuthorizesFromByteVerifiedRolesWithoutVouching(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	hex2 := dropInGrantingOutsider(t, ctl)
+	appendFragment(t, ctl)
+	var out bytes.Buffer
+	if code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--as", "mallory@example.com", "--groups", "finance"}, &out); code != 0 || !strings.Contains(out.String(), "control ledger tainted") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	e := lastControlEvent(t, ctl)
+	if e.Action != "repair" || e.Outcome != "success" || e.Invoker.Subject != "mallory@example.com" || e.ConfigHash != "" {
+		t.Fatalf("%+v", e)
+	}
+	if _, mismatch := installedPointerLine(ctl, mustRecords(t, ctl)); !mismatch || readPointer(t, ctl) != hex2 {
+		t.Fatal("a repair vouches for nothing and moves nothing")
+	}
+}

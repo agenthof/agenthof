@@ -371,3 +371,63 @@ func TestConfigVouchHealsAKillSwitchCrashGapAndTheAgentStaysDisabled(t *testing.
 		t.Fatalf("audit control: %d\n%s", code, out.String())
 	}
 }
+
+// TestTaintedLedgerVouchesOrRefusesByWhatSurvived (spec test 19): after a
+// tear + repair, control ops succeed when the install record survived and
+// refuse not_on_record when the torn tail WAS the record — until config
+// vouch, which heals and leaves the ledger tainted.
+func TestTaintedLedgerVouchesOrRefusesByWhatSurvived(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	appendFragment(t, ctl)
+	repairAs(t, root, ctl)
+	applyAs(t, root, ctl) // the record survived: a control op authorizes
+	// Install a NEW hash (seq 4) so that tearing its record leaves seq 1's
+	// OLD hash as the last install — not the pointer. An identical re-apply
+	// would leave seq 1 vouching for the same pointer and prove nothing.
+	writeFileIn(t, root, "agents/planner.yaml", "name: planner\nmodel: fast\ninstruction: plan harder\noutput: plan\nendpoint: http://127.0.0.1:1\n")
+	applyAs(t, root, ctl)
+	raw := mustRead(t, ctl)
+	if err := os.WriteFile(ctl, raw[:len(raw)-10], 0o600); err != nil { // tear the apply's own record
+		t.Fatal(err)
+	}
+	repairAs(t, root, ctl)
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 || !strings.Contains(out.String(), "configuration not on record") {
+		t.Fatalf("the tail held the record: %d\n%s", code, out.String())
+	}
+	vouchAs(t, ctl)
+	applyAs(t, root, ctl)
+	if tainted, _ := control.IsTainted(mustRecords(t, ctl)); !tainted {
+		t.Fatal("still tainted, still vouches")
+	}
+}
+
+// TestFreshLedgerGenesisAfterTheFileIsLost (spec test 23, recovery (e)): the
+// ledger file gone, pointer present — a recording command creates the ledger
+// and its first record is a genesis with a fresh log_id (here the refused
+// apply); config vouch then heals.
+func TestFreshLedgerGenesisAfterTheFileIsLost(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	oldID := controlLogID(t, ctl)
+	if err := os.Remove(ctl); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 || !strings.Contains(out.String(), "no install on record; "+remedyNotOnRecord) {
+		t.Fatalf("%d\n%s", code, out.String())
+	}
+	if e := lastControlEvent(t, ctl); e.Seq != 1 || e.Outcome != "refused" || e.Reason.Code != control.CodeNotOnRecord {
+		t.Fatalf("%+v", e)
+	}
+	if controlLogID(t, ctl) == oldID {
+		t.Fatal("a re-created ledger has a fresh log_id")
+	}
+	vouchAs(t, ctl)
+	if e := lastControlEvent(t, ctl); e.Action != "vouch" || e.Detail != "no install on record" {
+		t.Fatalf("%+v", e)
+	}
+}
