@@ -24,7 +24,7 @@ func TestIntegrityValidateFloorAccepted(t *testing.T) {
 }
 
 // TestIntegrityValidateRejectsByName pins every Validate fault verbatim, in
-// the fixed order of the design (sink → anchor → duplicate → sink_backend →
+// the fixed order Validate applies (sink → anchor → duplicate → sink_backend →
 // anchor_backend), matched exactly: no case-folding, no trimming.
 func TestIntegrityValidateRejectsByName(t *testing.T) {
 	const (
@@ -148,7 +148,8 @@ func TestParseIntegrityFloorInEverySpelling(t *testing.T) {
 	}
 }
 
-// TestParseIntegrityRejectsMoreThanOneDocument: rule −1. yaml.Unmarshal would
+// TestParseIntegrityRejectsMoreThanOneDocument: the one-document rule, applied
+// before any document's content. yaml.Unmarshal would
 // read the first document and drop the rest — `sink: local` followed by
 // `anchor: tlog` would be the floor. The decoder refuses a second document of
 // any kind, including the null document a trailing bare --- produces, before
@@ -204,9 +205,11 @@ func TestParseIntegrityRejectsReservedValuesThroughYAML(t *testing.T) {
 	}
 }
 
-// TestParseIntegrityRejectsNonMappingsAndUnknownKeys: rules 0a, 0 and 0b at
-// every level, each with its position and line, and never a Go type name —
-// a typo can never floor, and a value-looking key is refused as a key.
+// TestParseIntegrityRejectsNonMappingsAndUnknownKeys: the shape rules at every
+// level — the node is a mapping (a list for duplicate), each key is a plain
+// scalar, and each key is known — reported with its position and line and
+// never a Go type name. A typo can never floor, an alias- or complex-keyed
+// entry can never floor, and a value-looking key is refused as a key.
 func TestParseIntegrityRejectsNonMappingsAndUnknownKeys(t *testing.T) {
 	const (
 		top  = "sink, anchor, duplicate, sink_backend, anchor_backend"
@@ -229,6 +232,10 @@ func TestParseIntegrityRejectsNonMappingsAndUnknownKeys(t *testing.T) {
 		"credential value key":     {"anchor_backend:\n  credential:\n    token: VALUE\n", `line 3: unknown key "token" in anchor_backend.credential (allowed keys: ` + cred + ")"},
 		"credential scalar":        {"anchor_backend:\n  credential: x\n", "line 2: anchor_backend.credential must be a mapping (allowed keys: " + cred + ")"},
 		"credential in duplicate":  {"duplicate:\n  - kind: local\n    credential: [a]\n", "line 3: duplicate[0].credential must be a mapping (allowed keys: " + cred + ")"},
+		"top alias key":            {"sink: &anchor local\n*anchor : tlog\n", "line 2: key must be a plain scalar (allowed keys: " + top + ")"},
+		"top complex key":          {"? [a]\n: b\n", "line 1: key must be a plain scalar (allowed keys: " + top + ")"},
+		"backend complex key":      {"sink_backend:\n  ? [a]\n  : b\n", "line 2: key must be a plain scalar in sink_backend (allowed keys: " + be + ")"},
+		"credential complex key":   {"anchor_backend:\n  credential:\n    ? [a]\n    : b\n", "line 3: key must be a plain scalar in anchor_backend.credential (allowed keys: " + cred + ")"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := ParseIntegrity([]byte(c.in))

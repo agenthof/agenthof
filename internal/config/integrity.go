@@ -67,7 +67,7 @@ type BackendCredential struct {
 }
 
 // Validate is ParseIntegrity's second half, exported for callers that hold an
-// Integrity built in Go: the fixed-order rules of the design, first fault
+// Integrity built in Go: the fixed-order rules below, first fault
 // only — sink, then anchor, then duplicate, then the two backends. A value is
 // matched exactly (case-sensitive, no trimming): config is law, not a guess.
 // Since every non-floor sink and anchor is refused first, the backend rules
@@ -126,7 +126,10 @@ func isNull(n *yaml.Node) bool { return n.Kind == yaml.ScalarNode && n.ShortTag(
 // level, and the first fault is reported with its line and position. The
 // walk also guards every level that must be a mapping (or, for duplicate, a
 // list): without it a scalar there would surface yaml.v3's own text naming a
-// Go type. The backend and credential shapes have no Unmarshaler of their
+// Go type. Every key must be a plain scalar: an alias- or complex-keyed
+// entry (`*a : v`, `? [a]\n: v`) carries no literal name for the key check,
+// so without this guard its resolved key would reach Decode, miss every
+// field, and be dropped as the floor. The backend and credential shapes have no Unmarshaler of their
 // own — yaml.v3 gives one no key path, and the position is what an operator
 // needs — so this one walk is where their shape rules live. A null node is
 // the floor and is not walked.
@@ -136,6 +139,9 @@ func (i *Integrity) UnmarshalYAML(value *yaml.Node) error {
 	}
 	for k := 0; k+1 < len(value.Content); k += 2 {
 		key, val := value.Content[k], value.Content[k+1]
+		if key.Kind != yaml.ScalarNode {
+			return fmt.Errorf("line %d: key must be a plain scalar (allowed keys: %s)", key.Line, integrityKeys)
+		}
 		switch key.Value {
 		case "sink", "anchor":
 		case "duplicate":
@@ -178,6 +184,9 @@ func checkBackendNode(n *yaml.Node, where string) error {
 	}
 	for k := 0; k+1 < len(n.Content); k += 2 {
 		key, val := n.Content[k], n.Content[k+1]
+		if key.Kind != yaml.ScalarNode {
+			return fmt.Errorf("line %d: key must be a plain scalar in %s (allowed keys: %s)", key.Line, where, backendKeys)
+		}
 		switch key.Value {
 		case "kind", "url":
 		case "credential":
@@ -202,7 +211,11 @@ func checkCredentialNode(n *yaml.Node, where string) error {
 		return fmt.Errorf("line %d: %s must be a mapping (allowed keys: %s)", n.Line, where, credentialKeys)
 	}
 	for k := 0; k+1 < len(n.Content); k += 2 {
-		switch key := n.Content[k]; key.Value {
+		key := n.Content[k]
+		if key.Kind != yaml.ScalarNode {
+			return fmt.Errorf("line %d: key must be a plain scalar in %s (allowed keys: %s)", key.Line, where, credentialKeys)
+		}
+		switch key.Value {
 		case "credential_source", "token_env", "grant_type", "client_auth", "issuer",
 			"token_endpoint", "client_id_env", "client_secret_env", "scope", "audience":
 		default:
