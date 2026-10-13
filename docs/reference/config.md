@@ -966,7 +966,7 @@ beside it too: `<dir>/integrity.yaml`, operator-written — Agenthof never write
 it. It has two knobs — `sink` (where the ledger's bytes live) and `anchor`
 (what pins its head) — and, absent, means the floor: `sink: local`, `anchor:
 none`, which is exactly the hash-chained local file the control ledger is
-today. The floor is the only posture this build honours; every other value is
+today. The floor is the only posture this build honors; every other value is
 reserved and refused by name:
 
 | key | accepted in this build | reserved — refused in this build |
@@ -985,7 +985,7 @@ a document that is not a mapping, and a file holding more than one YAML
 document are refused too, so a typo can never read as the floor. Every control
 writer — `apply`, `registry enable|disable`, `config vouch`, `gateway
 provision`, `runs prune`, `audit repair control` — reads the file before it
-touches the ledger and, on a posture it cannot honour or a file it cannot read
+touches the ledger and, on a posture it cannot honor or a file it cannot read
 or parse, prints `<command>: integrity <path>: <fault>` and exits 2, recording
 nothing; `serve` reads it once at startup and refuses to start the same way (a
 change to the file takes effect on restart). A missing file is the floor; a
