@@ -124,7 +124,10 @@ func installedPointerLine(controlLog string, records []ledger.Record) (line stri
 }
 
 // installLabel names an installing event for the audit readers: "apply",
-// "vouch", or "<disable|enable> agent <name>" for a kill-switch flip.
+// "vouch", or "<disable|enable> agent <name>" for a kill-switch flip. It is
+// only ever called on LastInstalling's result, so the default branch is
+// unreachable for any action Installing does not accept — an anchor record
+// never arrives here, because the predicate upstream excludes it.
 func installLabel(d control.DecodedEvent) string {
 	switch d.Action {
 	case "apply", "vouch":

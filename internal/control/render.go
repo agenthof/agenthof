@@ -83,6 +83,19 @@ func label(rec record) string {
 			return "vouched for installed config " + rec.ConfigHash
 		}
 		return "vouch " + rec.Outcome
+	case "anchor":
+		// The record pins a PRIOR head; the label names which one, so a
+		// reader can find the covered record by seq. A success record
+		// without its payload is malformed and must not read as a pin. The
+		// locator, backend and proof stay in the record for raw readers, as
+		// Origin's address and user agent do.
+		if rec.Outcome == "success" {
+			if rec.Anchor == nil {
+				return "anchor record without coverage"
+			}
+			return fmt.Sprintf("head anchored: seq %d %s (%s)", rec.Anchor.Seq, rec.Anchor.Hash, rec.Anchor.Kind)
+		}
+		return "anchor " + rec.Outcome
 	default:
 		return rec.Action
 	}

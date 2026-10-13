@@ -91,3 +91,23 @@ func TestNormalizeControlDoesNotCarryDetail(t *testing.T) {
 		t.Fatalf("detail must not reach investigate/1: %s", b)
 	}
 }
+
+// TestNormalizeControlAnchorCarriesNoPayload: the reserved payload is not
+// part of the investigate/1 contract yet — an anchor surfaces as its kind
+// and nothing more (reserved-additive for the export bundle).
+func TestNormalizeControlAnchorCarriesNoPayload(t *testing.T) {
+	r := normalizeControl(control.DecodedEvent{Seq: 2, Time: time.Unix(0, 0).UTC(), Action: "anchor", Outcome: "success",
+		Anchor: &control.Anchor{Seq: 1, Hash: strings.Repeat("ab", 32), Kind: "tlog", Backend: "https://log.example", Ref: "12345"}})
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Kind != "anchor" || !strings.Contains(string(b), `"kind":"anchor"`) {
+		t.Fatalf("kind must be the action: %s", b)
+	}
+	for _, leak := range []string{"12345", "log.example", `"anchor":{`} {
+		if strings.Contains(string(b), leak) {
+			t.Fatalf("the payload must not reach investigate/1: %s", b)
+		}
+	}
+}
