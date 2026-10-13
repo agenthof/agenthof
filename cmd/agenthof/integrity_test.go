@@ -5,12 +5,18 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agenthof/agenthof/internal/control"
+	"github.com/agenthof/agenthof/internal/ledger"
 )
 
 // writeIntegrity writes body as integrity.yaml beside ctl and returns its path.
@@ -278,5 +284,190 @@ func TestServeRefusesToStartOnAReservedPosture(t *testing.T) {
 	logs := startServeOnce(t, ctl) // fatals unless serve starts and exits 0
 	if strings.Contains(logs, "integrity") {
 		t.Fatalf("the floor must not be mentioned at startup:\n%s", logs)
+	}
+}
+
+// floorScenario runs apply, disable, enable, and a vouch of an unrecorded
+// re-apply against ctl, with or without a floor integrity.yaml beside it,
+// and returns the decoded records with Time zeroed plus the masked reader
+// outputs (run against logDir). root must be byte-identical across calls so
+// every hash matches.
+func floorScenario(t *testing.T, root, ctl, logDir string, floorFile bool) ([]control.DecodedEvent, []string) {
+	t.Helper()
+	if floorFile {
+		writeIntegrity(t, ctl, "sink: local\nanchor: none\nduplicate: []\nsink_backend: {}\n")
+	}
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("apply: %d\n%s", code, out.String())
+	}
+	for _, flip := range []string{"disable", "enable"} {
+		out.Reset()
+		if code := cmdRegistry([]string{flip, "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+			t.Fatalf("%s: %d\n%s", flip, code, out.String())
+		}
+	}
+	crashGap(t, root, ctl)
+	vouchAs(t, ctl)
+
+	recs, _, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []control.DecodedEvent
+	for _, r := range recs {
+		if strings.Contains(string(r.Raw), `"anchor"`) {
+			t.Fatalf("no floor record may carry an anchor key: %s", r.Raw)
+		}
+		d, err := control.Decode(r.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Time = time.Time{}
+		events = append(events, d)
+	}
+	return events, readerOutputs(t, ctl, logDir)
+}
+
+// readerOutputs runs the four readers against ctl (and the run logs under
+// logDir — one shared, empty directory per test, so a path printed by any
+// reader is the same across the runs being compared) and returns their exit
+// codes and outputs with the per-run noise masked: timestamps, 64-hex
+// hashes, and the root directory.
+func readerOutputs(t *testing.T, ctl, logDir string) []string {
+	t.Helper()
+	mask := func(s string) string {
+		s = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?`).ReplaceAllString(s, "<time>")
+		s = regexp.MustCompile(`[0-9a-f]{64}`).ReplaceAllString(s, "<hex>")
+		return strings.ReplaceAll(s, filepath.Dir(ctl), "<root>")
+	}
+	var got []string
+	var out bytes.Buffer
+	code := cmdAuditControl([]string{"--control-log", ctl}, &out)
+	got = append(got, fmt.Sprintf("audit control exit %d\n%s", code, mask(out.String())))
+	out.Reset()
+	code = cmdAuditVerify([]string{"control", "--control-log", ctl}, &out)
+	got = append(got, fmt.Sprintf("audit verify control exit %d\n%s", code, mask(out.String())))
+	out.Reset()
+	code = cmdInvestigate([]string{"--log-dir", logDir, "--control-log", ctl}, &out)
+	got = append(got, fmt.Sprintf("investigate exit %d\n%s", code, mask(out.String())))
+	out.Reset()
+	code = cmdConfigPull([]string{"--control-log", ctl}, &out)
+	got = append(got, fmt.Sprintf("config pull exit %d\n%s", code, mask(out.String())))
+	return got
+}
+
+// TestFloorPostureIsByteIdenticalToNoFile: the same scenario on a root with
+// no integrity.yaml and on a root with a floor file yields the same number
+// of records, record for record equal once Time is zeroed, and identical
+// reader output once time and hashes are masked. No record anywhere carries
+// an anchor key, and nothing creates the file.
+func TestFloorPostureIsByteIdenticalToNoFile(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("AGENTHOF_SERVER", "")
+	rootA := writeSample(t)
+	rootB := t.TempDir()
+	if err := os.CopyFS(rootB, os.DirFS(rootA)); err != nil { // byte-identical configuration ⇒ identical hashes
+		t.Fatal(err)
+	}
+	ctlA := filepath.Join(t.TempDir(), "control.jsonl")
+	ctlB := filepath.Join(t.TempDir(), "control.jsonl")
+	logs := t.TempDir() // one empty run-log directory for every reader call
+	eventsA, readersA := floorScenario(t, rootA, ctlA, logs, false)
+	eventsB, readersB := floorScenario(t, rootB, ctlB, logs, true)
+	if len(eventsA) != 4 {
+		t.Fatalf("fixture: want apply, disable, enable, vouch; got %d records", len(eventsA))
+	}
+	if !reflect.DeepEqual(eventsA, eventsB) {
+		t.Fatalf("records differ\nno file: %+v\nfloor:   %+v", eventsA, eventsB)
+	}
+	if !reflect.DeepEqual(readersA, readersB) {
+		t.Fatalf("reader output differs\nno file:\n%s\nfloor:\n%s", strings.Join(readersA, "\n"), strings.Join(readersB, "\n"))
+	}
+	if _, err := os.Stat(integrityPath(ctlA)); !os.IsNotExist(err) {
+		t.Fatalf("nothing may create integrity.yaml: stat err = %v", err)
+	}
+}
+
+// TestReadersIgnoreThePosture: audit control, audit verify control,
+// investigate and config pull succeed on a root whose integrity.yaml says
+// anchor: tlog, with output identical to the no-file case — readers are the
+// recovery path, not a guarantee path, and do not load the file in this
+// build.
+func TestReadersIgnoreThePosture(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("AGENTHOF_SERVER", "")
+	root := writeSample(t)
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	logs := t.TempDir()
+	_, before := floorScenario(t, root, ctl, logs, false)
+	writeIntegrity(t, ctl, reservedPosture)
+	after := readerOutputs(t, ctl, logs)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("readers must not consult the posture\nno file:\n%s\nreserved:\n%s", strings.Join(before, "\n"), strings.Join(after, "\n"))
+	}
+	for _, o := range after {
+		if strings.Contains(o, "integrity "+integrityPath(ctl)) || strings.Contains(o, "reserved") {
+			t.Fatalf("a reader must not mention the posture:\n%s", o)
+		}
+	}
+}
+
+// TestNoFloorWriterEmitsAnAnchorKey: every writer on the floor path —
+// apply, disable, enable, vouch, provision, prune — under an explicit floor
+// integrity.yaml writes ledger lines with no "anchor" key. The key is first
+// written when an anchor backend exists; until then its absence is the
+// floor's byte-identity guarantee.
+func TestNoFloorWriterEmitsAnAnchorKey(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	writeIntegrity(t, ctl, "sink: local\nanchor: none\n")
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("apply: %d\n%s", code, out.String())
+	}
+	for _, flip := range []string{"disable", "enable"} {
+		out.Reset()
+		if code := cmdRegistry([]string{flip, "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+			t.Fatalf("%s: %d\n%s", flip, code, out.String())
+		}
+	}
+	crashGap(t, root, ctl)
+	vouchAs(t, ctl)
+
+	srv, _ := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	out.Reset()
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	logs := t.TempDir()
+	agedRun(t, logs, "r-old.jsonl")
+	out.Reset()
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", logs, "--artifact-dir", t.TempDir()), &out); code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+
+	recs, _, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, r := range recs {
+		if strings.Contains(string(r.Raw), `"anchor"`) {
+			t.Fatalf("no floor-path writer may emit an anchor key: %s", r.Raw)
+		}
+		d, err := control.Decode(r.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[d.Action] = true
+	}
+	for _, action := range []string{"apply", "disable", "enable", "vouch", "provision", "prune"} {
+		if !seen[action] {
+			t.Fatalf("fixture: no %q record was scanned (saw %v)", action, seen)
+		}
 	}
 }
