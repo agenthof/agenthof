@@ -9,7 +9,8 @@ import "github.com/agenthof/agenthof/internal/ledger"
 // and its bytes verified; the ledger lacked the record). A flip marked
 // Bootstrap ran while nothing was installed — it edited the configuration
 // directory and recorded that directory's hash, installing nothing — so it
-// is not an install, whatever its hash. This is the ONE definition every
+// is not an install, whatever its hash. An anchor record pins a head and
+// installs nothing; it is never accepted here. This is the ONE definition every
 // reader uses: cmd/agenthof's installed-pointer verdict (audit control /
 // audit verify control exit 5), the configuration pull's version and
 // vouching (through LastInstalling), the execution read's and every control

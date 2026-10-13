@@ -49,9 +49,10 @@ type Witness struct {
 // Event is a control/1 record. Callers set Action, Agent, Outcome, Reason,
 // Invoker, AssertedAs, Witness, ConfigHash, Bootstrap (apply and
 // enable/disable), Origin (an API-recorded action; nil from the CLI),
-// Detail (runs prune and vouch), and (repair only) FragmentLen/FragmentSHA. V,
-// and the seq/time/prev/log_id fields on the wire, are set by Append;
-// callers never set them.
+// Detail (runs prune and vouch), (anchor only, reserved — no writer in this
+// build) Anchor, and (repair only) FragmentLen/FragmentSHA. V, and the
+// seq/time/prev/log_id fields on the wire, are set by Append; callers never
+// set them.
 type Event struct {
 	V          string           `json:"v,omitempty"`
 	Action     string           `json:"action"`
@@ -90,6 +91,47 @@ type Event struct {
 	// absent on every record written before it existed and on every record
 	// that does not set it.
 	Detail string `json:"detail,omitempty"`
+	// Anchor is the reserved payload of an action "anchor" record: the head
+	// an external proof covers, and where that proof is — never a secret
+	// (Article III bans secrets and artifact bodies from an event, nothing
+	// else; a small proof is neither). Nothing in this build writes one
+	// (Append refuses the action); it is defined so every reader handles the
+	// record correctly before the first writer exists. An anchor is not an
+	// install: it carries no config_hash and Installing never accepts it.
+	// Additive and omitempty (Article VI).
+	Anchor *Anchor `json:"anchor,omitempty"`
+}
+
+// Anchor is what an "anchor" record says about the head it pins. Every
+// field is reserved for the first anchoring writer (anchor: tlog); none is
+// written in this build. One head per record: Hash is a single head hash; a
+// batch over several heads would add a root field, never change Hash.
+type Anchor struct {
+	Seq  int    `json:"seq"`  // the covered head: seq of the last record the proof covers (1 ≤ Seq < this record's seq)
+	Hash string `json:"hash"` // the covered head's hash: lowercase hex SHA-256 of record Seq's bytes (ledger.Head.Hash at Seq)
+	Kind string `json:"kind"` // which knob produced it: "tlog" | "signed" (the integrity.yaml anchor value)
+	// BackendKind is the proof FORMAT — the integrity backend kind vocabulary
+	// ("transparency-log", "rfc3161", "kms", …) — so a verifier knows from
+	// the record alone whether Ref is a log index or a content hash, without
+	// reading integrity.yaml (which may have changed since).
+	BackendKind string `json:"backend_kind,omitempty"`
+	// Backend is the external service's public identity — the log origin,
+	// the TSA endpoint, or a key URI — the proof is verifiable against.
+	// A string on purpose: never to become an object. Never a secret.
+	Backend string `json:"backend,omitempty"`
+	// Ref is an opaque, backend-kind-defined LOCATOR for the proof: a
+	// transparency-log entry index, or the sha256 of a proof kept beside the
+	// ledger. Never a secret. Present on every successful anchor; absent on
+	// a failed attempt, which has nothing to locate.
+	Ref string `json:"ref,omitempty"`
+	// Proof is a small, bounded proof that rides on the record itself — an
+	// RFC-3161 timestamp token (DER, 1–4 KB) or a signature (64–96 B), as
+	// standard base64 — for the backends whose proof is not fetchable from
+	// the service (a TSA keeps no tokens; a signature is bytes). Bounded
+	// (the first anchoring writer fixes the cap and refuses above it); never
+	// a secret. Alternative, equally additive: Ref = sha256 of a proof in a
+	// sibling store — the first anchoring writer chooses per backend kind.
+	Proof string `json:"proof,omitempty"`
 }
 
 // CaptureWitness captures the local OS user (preferring $USER, falling

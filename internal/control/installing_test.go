@@ -38,6 +38,11 @@ func TestInstallingAxes(t *testing.T) {
 		{"vouch refused", control.DecodedEvent{Action: "vouch", Outcome: "refused", ConfigHash: h}, false},
 		{"vouch rejected", control.DecodedEvent{Action: "vouch", Outcome: "rejected", ConfigHash: h}, false},
 		{"vouch success without hash", control.DecodedEvent{Action: "vouch", Outcome: "success"}, false},
+		// An anchor pins a head and installs nothing — refused by the action
+		// clause with no code change, with or without a hash or payload.
+		{"anchor success", control.DecodedEvent{Action: "anchor", Outcome: "success"}, false},
+		{"anchor success with a hash is not an install", control.DecodedEvent{Action: "anchor", Outcome: "success", ConfigHash: h}, false},
+		{"anchor success with a payload", control.DecodedEvent{Action: "anchor", Outcome: "success", Anchor: &control.Anchor{Seq: 1, Hash: strings.Repeat("a", 64), Kind: "tlog"}}, false},
 	}
 	for _, c := range cases {
 		if got := control.Installing(c.e); got != c.want {
