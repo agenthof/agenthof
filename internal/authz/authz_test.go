@@ -163,3 +163,31 @@ func TestControlAllowsPullIsOpByOp(t *testing.T) {
 		})
 	}
 }
+
+// TestVouchIsNotAGrantableControlOp pins that config vouch is gated by the
+// host's own authority, never by a role: "vouch" is not in the grantable set,
+// so a role that lists it (in a raw, never-applied config) confers nothing,
+// whoever the invoker is.
+func TestVouchIsNotAGrantableControlOp(t *testing.T) {
+	if KnownControlOp("vouch") {
+		t.Fatal(`"vouch" must not be a control op`)
+	}
+	for _, op := range ControlOps {
+		if op == "vouch" {
+			t.Fatal(`"vouch" must not appear in ControlOps`)
+		}
+	}
+	roles := []config.RoleDef{
+		{Name: "vouchers", AllowedGroups: []string{"platform-eng"}, Control: []string{"vouch", "apply"}},
+		{Name: "open", AllowedGroups: []string{"*"}, Control: []string{"vouch"}},
+	}
+	for _, inv := range []identity.Invoker{
+		{Subject: "x", Groups: []string{"platform-eng"}},
+		{Subject: "x", Groups: []string{"*"}},
+		{Subject: "x"},
+	} {
+		if ControlAllows(roles, inv, "vouch") {
+			t.Fatalf("ControlAllows must deny vouch regardless of roles, invoker %+v", inv)
+		}
+	}
+}

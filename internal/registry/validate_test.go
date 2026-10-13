@@ -783,6 +783,8 @@ func TestValidateControlGrants(t *testing.T) {
 	}{
 		{"unknown token", config.RoleDef{Name: "x", AllowedGroups: []string{"ops"}, Control: []string{"apply", "nuke"}},
 			"control-bad-op", `control names "nuke", which is not a control operation (` + strings.Join(authz.ControlOps, ", ") + `)`},
+		{"vouch is not grantable", config.RoleDef{Name: "x", AllowedGroups: []string{"ops"}, Control: []string{"vouch"}},
+			"control-bad-op", `control names "vouch", which is not a control operation`},
 		{"present-empty", config.RoleDef{Name: "x", Workflows: []string{"fix-bug"}, AllowedGroups: []string{"ops"}, Control: []string{}},
 			"control-empty", "control is present but names no operations"},
 		{"public control role", config.RoleDef{Name: "x", AllowedGroups: []string{"*"}, Control: []string{"disable"}},
