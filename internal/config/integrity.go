@@ -1,8 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Integrity is a control root's integrity posture — the two-knob seam of the
@@ -98,4 +102,147 @@ func (i Integrity) Validate() error {
 		return errors.New("anchor_backend is set but anchor is none; backend coordinates are reserved for tlog and signed")
 	}
 	return nil
+}
+
+// The allowed-key lists, in the order the error texts name them. A future
+// sibling key (cadence, runs) is added here: the text is not a wire contract.
+const (
+	integrityKeys  = "sink, anchor, duplicate, sink_backend, anchor_backend"
+	backendKeys    = "kind, url, credential"
+	credentialKeys = "credential_source, token_env, grant_type, client_auth, issuer, token_endpoint, client_id_env, client_secret_env, scope, audience"
+)
+
+// rawIntegrity is Integrity without its methods, so the mapping can be decoded
+// with value.Decode without recursing back into UnmarshalYAML.
+type rawIntegrity Integrity
+
+// isNull reports a null node (`~`, `null`, or a key with no value): yaml.v3
+// decodes it to the zero value, which is the floor for every reserved key.
+func isNull(n *yaml.Node) bool { return n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null" }
+
+// UnmarshalYAML decodes an integrity.yaml document fail-closed. yaml.v3
+// silently drops unknown mapping keys, so a typo like `ancher: tlog` would
+// otherwise read as the floor: the keys are checked by hand first, at every
+// level, and the first fault is reported with its line and position. The
+// walk also guards every level that must be a mapping (or, for duplicate, a
+// list): without it a scalar there would surface yaml.v3's own text naming a
+// Go type. The backend and credential shapes have no Unmarshaler of their
+// own — yaml.v3 gives one no key path, and the position is what an operator
+// needs — so this one walk is where their shape rules live. A null node is
+// the floor and is not walked.
+func (i *Integrity) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: integrity.yaml must be a mapping (allowed keys: %s)", value.Line, integrityKeys)
+	}
+	for k := 0; k+1 < len(value.Content); k += 2 {
+		key, val := value.Content[k], value.Content[k+1]
+		switch key.Value {
+		case "sink", "anchor":
+		case "duplicate":
+			if isNull(val) {
+				continue
+			}
+			if val.Kind != yaml.SequenceNode {
+				return fmt.Errorf("line %d: duplicate must be a list of backends (each a mapping; allowed keys: %s)", val.Line, backendKeys)
+			}
+			for n, entry := range val.Content {
+				if err := checkBackendNode(entry, fmt.Sprintf("duplicate[%d]", n)); err != nil {
+					return err
+				}
+			}
+		case "sink_backend", "anchor_backend":
+			if isNull(val) {
+				continue
+			}
+			if err := checkBackendNode(val, key.Value); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("line %d: unknown key %q (allowed keys: %s)", key.Line, key.Value, integrityKeys)
+		}
+	}
+	var raw rawIntegrity
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*i = Integrity(raw)
+	return nil
+}
+
+// checkBackendNode applies the backend shape rules to the node at `where`
+// (sink_backend, anchor_backend, or duplicate[N]): a mapping, known keys
+// only, and the same for its credential. A null credential is unset.
+func checkBackendNode(n *yaml.Node, where string) error {
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: %s must be a mapping (allowed keys: %s)", n.Line, where, backendKeys)
+	}
+	for k := 0; k+1 < len(n.Content); k += 2 {
+		key, val := n.Content[k], n.Content[k+1]
+		switch key.Value {
+		case "kind", "url":
+		case "credential":
+			if isNull(val) {
+				continue
+			}
+			if err := checkCredentialNode(val, where+".credential"); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("line %d: unknown key %q in %s (allowed keys: %s)", key.Line, key.Value, where, backendKeys)
+		}
+	}
+	return nil
+}
+
+// checkCredentialNode applies the credential shape rules at `where`: a
+// mapping whose keys are the ten broker-reference fields and nothing else —
+// a key that looks like a value (`token: …`) is refused as a key.
+func checkCredentialNode(n *yaml.Node, where string) error {
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: %s must be a mapping (allowed keys: %s)", n.Line, where, credentialKeys)
+	}
+	for k := 0; k+1 < len(n.Content); k += 2 {
+		switch key := n.Content[k]; key.Value {
+		case "credential_source", "token_env", "grant_type", "client_auth", "issuer",
+			"token_endpoint", "client_id_env", "client_secret_env", "scope", "audience":
+		default:
+			return fmt.Errorf("line %d: unknown key %q in %s (allowed keys: %s)", key.Line, key.Value, where, credentialKeys)
+		}
+	}
+	return nil
+}
+
+// ParseIntegrity decodes and validates the bytes of an integrity.yaml. It
+// reports the bare fault ("line 3: unknown key …", or a Validate rule); the
+// caller names the file. Empty or comment-only bytes are the floor. It
+// decodes with a yaml.Decoder, never yaml.Unmarshal: Unmarshal reads the
+// FIRST document and drops the rest, so a second document saying anchor: tlog
+// would be read as the floor. Exactly one document is accepted.
+func ParseIntegrity(data []byte) (Integrity, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	// The first document is read as a bare node so that NO Unmarshaler runs
+	// before the document count is known: the one-document rule really is
+	// first, even when the first document is itself faulty.
+	var doc yaml.Node
+	if err := dec.Decode(&doc); err != nil {
+		if errors.Is(err, io.EOF) {
+			return Integrity{}, nil // empty / comment-only: the floor
+		}
+		return Integrity{}, err // a yaml syntax fault ("line N: …")
+	}
+	var rest any
+	if err := dec.Decode(&rest); !errors.Is(err, io.EOF) {
+		// A second document of any kind — a mapping, or the null document a
+		// trailing bare "---" produces (err == nil there) — is refused; the
+		// second document is never inspected.
+		return Integrity{}, errors.New("more than one YAML document; integrity.yaml holds exactly one")
+	}
+	var in Integrity
+	if err := doc.Decode(&in); err != nil { // the shape rules, via UnmarshalYAML
+		return Integrity{}, err
+	}
+	if err := in.Validate(); err != nil { // the value rules
+		return Integrity{}, err
+	}
+	return in, nil
 }
