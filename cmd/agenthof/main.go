@@ -248,7 +248,8 @@ func buildResolved(cfg config.Config, hash string, installed bool, loadErrs []er
 // server runs too. Exit 0 only when a snapshot was installed AND recorded;
 // 1 for every recorded denial, a busy lock, a failed precondition, the
 // install-then-record gap, and a damaged ledger (which prints the repair
-// hint and records nothing); 2 for usage.
+// hint and records nothing); 2 for usage and for an integrity posture this
+// build cannot honour (refused before the ledger is opened, so unrecorded).
 func cmdApply(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	cfgDir := fs.String("config", "./config", "config directory")
@@ -443,9 +444,10 @@ func controlLedgerWritable(prefix, controlLog string, out io.Writer) bool {
 // cmdRegistryFlip implements the audited write path for `registry
 // enable|disable`. Every branch that can write a control event does so
 // before returning, once the control chain itself is known writable; the
-// only unrecorded exits are a control ledger that cannot be opened and a
-// final append that fails AFTER the state already changed (the documented
-// residual window). With something installed the flip is a re-snapshot of
+// only unrecorded exits are an integrity posture this build cannot honour
+// (refused before the ledger is opened), a control ledger that cannot be
+// opened, and a final append that fails AFTER the state already changed (the
+// documented residual window). With something installed the flip is a re-snapshot of
 // the installed configuration (flipInstalled); with nothing installed it is
 // the bootstrap-era path below — the directory is the only configuration
 // there is, so the bit is flipped there and the first apply installs the

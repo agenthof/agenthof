@@ -71,10 +71,11 @@ func TestLoadIntegrityFloorFileIsTheFloor(t *testing.T) {
 	}
 }
 
-// TestLoadIntegrityNamesTheFileOnce: a reserved posture, a shape fault and
-// an unreadable file are each an error — never the floor — naming the path
-// exactly once: the package reports the bare fault, and an OS read error's
-// own path (a *fs.PathError) is stripped so it is not named twice.
+// TestLoadIntegrityNamesTheFileOnce: a reserved posture, a shape fault, a
+// dangling symlink and an unreadable file are each an error — never the floor
+// — naming the path exactly once: the package reports the bare fault, and an
+// OS read error's own path (a *fs.PathError) is stripped so it is not named
+// twice.
 func TestLoadIntegrityNamesTheFileOnce(t *testing.T) {
 	ctl := filepath.Join(t.TempDir(), "control.jsonl")
 	p := writeIntegrity(t, ctl, reservedPosture)
@@ -96,6 +97,21 @@ func TestLoadIntegrityNamesTheFileOnce(t *testing.T) {
 	_, err = loadIntegrity(ctl)
 	if want := "integrity " + p + ": more than one YAML document; integrity.yaml holds exactly one"; err == nil || err.Error() != want {
 		t.Fatalf("multi-document: err = %v\nwant %q", err, want)
+	}
+
+	// A dangling symlink is a present directory entry whose read fails: a
+	// fault, not a missing file — a broken target never silently floors.
+	dctl := filepath.Join(t.TempDir(), "control.jsonl")
+	dp := integrityPath(dctl)
+	if err := os.Symlink(filepath.Join(filepath.Dir(dctl), "gone.yaml"), dp); err != nil {
+		t.Fatal(err)
+	}
+	_, err = loadIntegrity(dctl)
+	if want := "integrity " + dp + ": no such file or directory"; err == nil || err.Error() != want {
+		t.Fatalf("dangling symlink: err = %v\nwant %q", err, want)
+	}
+	if strings.Count(err.Error(), dp) != 1 {
+		t.Fatalf("the path must appear exactly once: %q", err)
 	}
 
 	if os.Geteuid() == 0 {
