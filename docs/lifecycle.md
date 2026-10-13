@@ -435,8 +435,8 @@ step started/succeeded/failed, any bounces, and how the run finished. That is
 the full loop — *who asked → what ran → what it touched → whether the record can
 be trusted* — with no cross-referencing required. When the run's
 `workflow_started` carries a config hash, `audit <run-id>` also prints one
-more line naming the control-plane install — the `apply` or kill-switch flip —
-that put that config in place (or
+more line naming the control-plane install — the `apply`, kill-switch flip, or
+`config vouch` — that put that config on record (or
 saying plainly that none is on record, or that the control ledger isn't
 available right now) — see
 [`reference/config.md`](reference/config.md#control-plane-cli) for the exact

@@ -76,8 +76,16 @@ The governed core is real and runnable today:
   snapshot the last successful `apply` put in place — never against the
   change being proposed, so a change cannot grant its own applier the right
   to make it; the first `apply` on a fresh control root bootstraps, and
-  `audit control` says so. A configuration that grants `apply` to nobody is
-  rejected rather than installed.
+  `audit control` says so. That authorization read verifies the snapshot's
+  bytes against the pointer and requires the control ledger to record the
+  pointer as its last install — a pointer it does not vouch for refuses every
+  control action, recorded (`audit repair control` excepted: it verifies the
+  bytes but does not consult the ledger it repairs; a pull, being a read,
+  answers a retryable `503` and records nothing). `config vouch` puts an
+  install whose record never landed back on record without touching the
+  configuration — a recovery act open to any identity on the host, always
+  recorded as its own event. A configuration that grants `apply` to no named
+  group is rejected rather than installed.
 - **`run` executes the installed configuration** — a run (command line or
   `serve`) resolves the snapshot the last successful `apply` or kill-switch
   flip installed beside its control ledger, never the configuration
@@ -85,12 +93,14 @@ The governed core is real and runnable today:
   refusal that names the `apply` to run. The kill switch re-installs the
   configuration with the one bit flipped — the directory is untouched, and an
   `apply` re-asserts what the directory declares. `audit <run-id>` names the
-  install a run executed under, `apply` or flip. The installed bytes are verified
-  against the pointer before a run or a kill-switch flip reads them, and `run`
-  and `serve` execute only a snapshot the control ledger records as its last
-  install — a pointer the ledger does not vouch for (re-aimed by hand, a
-  dropped-in snapshot, an install whose record never landed) is a recorded
-  refusal, and a damaged ledger refuses runs until it is repaired. What remains
+  install a run executed under, `apply`, flip, or vouch. The installed bytes
+  are verified against the pointer before a run, a control command's
+  authorization, or a kill-switch flip reads them, and `run` and `serve`
+  execute — as the control commands authorize against — only a snapshot the
+  control ledger records as its last install: a pointer the ledger does not
+  vouch for (re-aimed by hand, a dropped-in snapshot, an install whose record
+  never landed) is a recorded refusal, and a damaged ledger refuses runs until
+  it is repaired. What remains
   undefended is a consistent rewrite of both the pointer and the ledger, which
   a head saved off the machine catches today (`audit verify control
   --expect-head`), a pinned key refuses unless the writer also holds the

@@ -473,7 +473,9 @@ its members run `gateway provision`, which mints provider keys for the
 installed roles; `prune` lets them run `runs prune`. `pull` lets its members
 read the installed configuration over the API — `config pull --server`,
 `GET /v1/config` — so an execution point can enforce it; a grant of `apply`
-includes it.
+includes it. `vouch` is not a grantable operation (`control-bad-op`): `config
+vouch` is authorized against no role by design, because the roles' own
+provenance is what it restores.
 
 How the grant is enforced — which command checks which operation, what a
 refusal records, and the honest limits — is in
@@ -851,6 +853,10 @@ recorded and why; this section is the flag-by-flag and exit-code reference.
 recorded: a pull reads, and keygen/sign derive or attest the operator's
 signature of an install the control ledger already records, gated by
 possession of the signing key on the host (constitution, Article VI).
+`config vouch` is host-local too but **is** recorded: it appends the install
+event the ledger lacks for the snapshot already installed — a recovery act
+authorized against no role, permitted for any identity the host resolves (see
+[`docs/control-plane-lifecycle.md`](../control-plane-lifecycle.md#recovering-an-unrecorded-install)).
 
 | Command | Flags |
 |---|---|
@@ -858,6 +864,7 @@ possession of the signing key on the host (constitution, Article VI).
 | `agenthof config pull [--server <url> [--token <jwt>]] [--control-log <path>] [--out <dir>] [--json]` | `--server`, `--token`, `--control-log`, `--out`, `--json` |
 | `agenthof config keygen [--control-log <path>]` | `--control-log` |
 | `agenthof config sign [--control-log <path>]` | `--control-log` |
+| `agenthof config vouch [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--as`, `--groups`, `--token` |
 | `agenthof registry enable\|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | same |
 | `agenthof audit control [--control-log <path>]` | `--control-log` |
 | `agenthof audit verify control [--control-log <path>] [--expect-head <hex>]` | `--control-log`, `--expect-head` |
@@ -889,14 +896,21 @@ control commands read it to decide who may act (see `--config` below); `run`
 reads the installed configuration from `installed/` beside it — this is the
 only way `run` finds what to execute. `run` finds that snapshot under the same
 `--control-log` you applied to; if you passed `--control-log` to `apply`, pass
-the same path to `run`. `audit control` and `audit verify
-control` report whether it matches the last recorded install (an `apply` or a
-kill-switch flip) — and `run` and `serve` **execute only when it does**: the
-execution read checks the pointer against the control ledger and refuses,
-recorded, a pointer that is not the last recorded install (`configuration not
-on record`) or a ledger it cannot read (`configuration not verifiable: control
-ledger …`); the remedy is to `apply` again (after `audit repair control` if
-the ledger is torn). The pointer, the ledger (and, with a key pinned, the
+the same path to `run`. Every read of a snapshot verifies its bytes against
+the pointer before parsing them. `audit control` and `audit verify
+control` report whether the pointer matches the last recorded install (an
+`apply`, a kill-switch flip, or a `config vouch`) — and `run` and `serve`
+**execute only when it does**, as the control commands **authorize only when
+it does**: the execution read and the authorization read both check the
+pointer against the control ledger and refuse, recorded, a pointer that is not
+the last recorded install (`configuration not on record`) or a ledger they
+cannot read (`configuration not verifiable: control ledger …`). The remedy
+depends on the fault: a pointer whose bytes verify but which the ledger does
+not vouch for is healed by `agenthof config vouch --control-log <path>`
+(after `audit repair control` if the ledger is torn) — a re-apply is refused
+the same way until then; bytes that do not hash as the pointer are never
+vouched for, and the remedy is to remove `installed/current` and `apply`. The
+pointer, the ledger (and, with a key pinned, the
 signature) are read under one shared hold of the configuration lock,
 `<dir>/installed.lock` beside the ledger — a local `run` and `serve` open it,
 and on a fresh root create it, so the control root must be writable by the user
@@ -960,14 +974,23 @@ it shows the directory, not what is installed. `audit repair control` takes it
 too (default `./config`). For **authorization**
 none of these commands reads it once a configuration is installed: the roles that
 decide who may `apply`, `enable`, `disable`, `repair`, `provision`, or `prune` are the installed
-snapshot's (`--control-log`'s `installed/current`), read without validation,
-roles only. Only while nothing is installed yet — a fresh control root — do
+snapshot's (`--control-log`'s `installed/current`). That read verifies the
+snapshot's bytes against the pointer before parsing anything (a mismatch
+authorizes nobody and names the hatch: remove `installed/current` to
+re-bootstrap), and — for every command but `repair` — requires the control
+ledger to record that pointer as its last install, or the action is refused,
+recorded, `configuration not on record`; `audit repair control` verifies the
+bytes but does not consult the ledger it is about to repair. The roles are
+then parsed leniently, roles only, without the full validation `apply` runs.
+Only while nothing is installed yet — a fresh control root — do
 `enable|disable` and `repair` fall back to the roles in `--config`, read
 without validating; a directory that cannot be read then means nobody can be
 authorized, and repair prints `refusing to repair` and exits 1 without touching
 the ledger. `apply` on a fresh control root is a **bootstrap**: permitted for
 any invoker, installed, and recorded with `bootstrap: true`. A configuration
-that grants `apply` to no role is rejected at apply (`no-apply-floor`).
+that grants `apply` to no role, or only to roles whose `allowed_groups` name
+no real group, is rejected at apply (`no-apply-floor`); `config vouch`
+re-checks the same floor over the installed roles before it vouches.
 
 ### `--as`, `--groups`, `--token`
 
@@ -985,7 +1008,13 @@ caller no role grants is refused: `apply` and `registry enable|disable`
 record it as a `refused` event with reason `not_authorized` (apply's carries
 the `config_hash` of the config it tried to apply); `audit repair control`
 prints it and records nothing, since the only ledger to write to may be the
-torn one. Under `--as`/`--groups` the decision is computed on self-asserted
+torn one. Before any of them authorizes, the installed pointer must be the
+install the control ledger records last; if it is not, the action is refused
+with reason `not_on_record` — recorded, with the proposal's hash for `apply`
+and the installed hash for `gateway provision` — and the text names `config
+vouch` as the remedy. `config vouch` takes the same identity flags, so its
+record carries the same three identities, but no role is consulted: it is
+permitted for any identity the host resolves. Under `--as`/`--groups` the decision is computed on self-asserted
 groups and is a recorded decision, not a wall — see
 [`docs/control-plane-lifecycle.md`](../control-plane-lifecycle.md) for the
 honest limits. `--token` authenticates the invoker from a raw
@@ -1127,8 +1156,16 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
-| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run — recorded, `configuration not on record` — until an `apply` lands; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run — recorded, `configuration not on record` — until a re-apply); or (`--if-installed`) the precondition did not hold, printed and **not** recorded; or another process holds the installed-configuration writer lock (`another agenthof process holds the installed-configuration lock; retry`), not recorded; or (`--server`) any answer other than installed, and every transport error |
+| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`), an installed pointer the control ledger does not record as its last install (`refused`, reason `not_on_record`; the text names the last recorded install, or that there is none, and `config vouch` as the remedy), or an installed snapshot whose bytes do not hash as its pointer (`error`, reason `io_error`; the hatch names `installed/current`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run and every control action is refused — recorded, `configuration not on record` — until `config vouch` puts the flipped snapshot on record, agent still disabled; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run and every control action — a re-apply included — is refused, recorded, `configuration not on record`, until `config vouch`); or (`--if-installed`) the precondition did not hold, printed and **not** recorded (checked after the vouch, so on an unvouched pointer the `not_on_record` refusal comes first); or another process holds the installed-configuration writer lock (`another agenthof process holds the installed-configuration lock; retry`), not recorded; or (`--server`) any answer other than installed, and every transport error |
 | `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set; `--if-installed` not `sha256:<hex>` or `none`; `--server` without a token or without `--if-installed`; `--bundle` without `--server` |
+
+`agenthof config vouch` (local only; it appends to the control ledger beside which the snapshot is installed):
+
+| Exit | Meaning |
+|---|---|
+| `0` | Vouched — the installed snapshot's bytes hash as the pointer, its roles grant `apply` to a named group, the ledger did not record it as its last install, and a `vouch` `success` event carrying the pointer's hash was recorded (then signed, when a signing key is configured; `signed: key_id …`); or **already on record** — the ledger's last install is already the pointer: printed, exit 0, nothing recorded and no signature written (idempotent) |
+| `1` | A recorded `refused` (a `--token` that failed verification), `error` (the pointer is malformed, the snapshot is gone, or its bytes do not hash as the pointer — never vouched for; the hatch names `installed/current`), or `rejected` (`no-apply-floor`: no installed role grants `apply` to a named group); or — nothing recorded — nothing is installed under the store (`nothing to vouch for`), the control ledger is torn or broken (the repair hint; repair first), or another process holds the installed-configuration lock or the ledger lock (`retry`); or the vouch event could not be appended (`vouch NOT recorded` — nothing changed, re-run); or the vouch was recorded but its signature could not be written (`signature NOT written`, the vouch stands; `config sign` is the remedy) |
+| `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set |
 
 `agenthof config pull`:
 
@@ -1142,13 +1179,13 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 
 | Exit | Meaning |
 |---|---|
-| `1` | A recorded refusal: `no configuration installed` (nothing is installed under `--control-log`'s root; the hint names the `apply` to run), or `configuration invalid: …` (the installed configuration fails validation — or the store itself is damaged: a malformed pointer, a missing snapshot, or a snapshot whose bytes no longer hash to the pointer — the label is generic, the text names the cause), or `configuration not on record: …` (the pointer is not the install the control ledger records last — re-aimed by hand, a dropped-in snapshot, or an install whose record never landed; the text names the last recorded install, or that there is none, and the remedy, re-apply — this holds with or without a pinned key), or `configuration not verifiable: control ledger …` (the ledger is torn or broken — the text names the `audit repair control` to run — or cannot be read; also without a pin) or, with a key pinned, `configuration not verifiable: …` (the pinned key or floor cannot be read) and the `configuration not verified: …` verdicts (`unsigned`, `unknown key`, `bad signature`, `stale`, `foreign ledger`), or the registry gate's own reasons; or — **not** recorded, no run id — another process holds the configuration lock past the timeout (`run: another agenthof process holds the installed-configuration lock; retry`) |
+| `1` | A recorded refusal: `no configuration installed` (nothing is installed under `--control-log`'s root; the hint names the `apply` to run), or `configuration invalid: …` (the installed configuration fails validation — or the store itself is damaged: a malformed pointer, a missing snapshot, or a snapshot whose bytes no longer hash to the pointer — the label is generic, the text names the cause), or `configuration not on record: …` (the pointer is not the install the control ledger records last — re-aimed by hand, a dropped-in snapshot, or an install whose record never landed; the text names the last recorded install, or that there is none, and the remedy, `config vouch` — this holds with or without a pinned key), or `configuration not verifiable: control ledger …` (the ledger is torn or broken — the text names the `audit repair control` to run — or cannot be read; also without a pin) or, with a key pinned, `configuration not verifiable: …` (the pinned key or floor cannot be read) and the `configuration not verified: …` verdicts (`unsigned`, `unknown key`, `bad signature`, `stale`, `foreign ledger`), or the registry gate's own reasons; or — **not** recorded, no run id — another process holds the configuration lock past the timeout (`run: another agenthof process holds the installed-configuration lock; retry`) |
 
 `agenthof audit control`:
 
 | Exit | Meaning |
 |---|---|
-| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code — and, when something is installed, a trailing `installed config:` line saying whether the pointer matches the last recorded install — the last successful `apply` or kill-switch flip (informational here; see `verify control`). An event recorded over the API shows its way in beside the method — `dana@example.com (oidc, via api)` |
+| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code — and, when something is installed, a trailing `installed config:` line saying whether the pointer matches the last recorded install — the last successful `apply`, kill-switch flip, or `config vouch` (informational here; see `verify control`; only the pointer is compared, the snapshot's bytes are not hashed). An event recorded over the API shows its way in beside the method — `dana@example.com (oidc, via api)` |
 | `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain — a torn or broken chain still renders whatever valid prefix was recovered, with the failure named in the trailing integrity line |
 | `2` | Usage error |
 
@@ -1159,7 +1196,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain |
 | `3` | The chain is tainted — a `repair` event has ever been appended to it (checked, and reported, before `--expect-head` is) |
 | `4` | `--expect-head` was given and does not match the verified head |
-| `5` | The installed pointer (`installed/current` beside the log) does not name the last recorded install (the last successful `apply` or kill-switch flip) — an install whose event was never appended or whose record was lost — or the pointer itself is damaged (unreadable or malformed). Only the pointer is read, never the snapshot directory, so a matching pointer whose snapshot bytes were deleted is still exit 0. Checked last, after `3` and `4` |
+| `5` | The installed pointer (`installed/current` beside the log) does not name the last recorded install (the last successful `apply`, kill-switch flip, or `config vouch`) — an install whose event was never appended or whose record was lost (`config vouch` is the remedy) — or the pointer itself is damaged (unreadable or malformed). Only the pointer is read, never the snapshot directory, so a matching pointer whose snapshot bytes were deleted is still exit 0. Checked last, after `3` and `4` |
 | `0` | None of the above — the chain is clean, `--expect-head` (if given) matched, and the installed pointer (if any) matches |
 | `2` | Usage error |
 
@@ -1168,7 +1205,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | A torn tail was repaired: the damaged bytes were moved to a `<log>.torn-<timestamp>` fragment, the live log truncated to its last valid record, and a `repair` event appended — the ledger is now tainted |
-| `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; no role grants `repair` to the invoker, the installed pointer cannot be read, or — nothing installed — `--config` cannot be read (all printed, never recorded); or another IO error. None of these write a control event, since the ledger being repaired may itself be the file in question |
+| `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; no role grants `repair` to the invoker, the installed pointer cannot be read or its snapshot's bytes do not hash as the pointer (repair verifies the bytes but, by design, does not ask the ledger it is repairing to vouch for the pointer), or — nothing installed — `--config` cannot be read (all printed, never recorded); or another IO error. None of these write a control event, since the ledger being repaired may itself be the file in question |
 | `2` | Usage error |
 
 `agenthof gateway provision`:
@@ -1176,7 +1213,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | Every installed role that owns workflows has a valid provider key (minted now, or already valid), and a `success` event carrying the installed hash was recorded |
-| `1` | A recorded `refused` (no role grants `provision` to the invoker; nothing installed; a token that failed verification) or `error` (the installed pointer cannot be honored; the first role whose key could not be minted — earlier keys persist); or the control ledger is torn or broken (the repair hint, nothing recorded); or another process holds the ledger lock (`another agenthof process holds the installed-configuration lock; retry`, nothing recorded); or keys were minted but the event could not be appended — `provision ran; event NOT recorded` |
+| `1` | A recorded `refused` (no role grants `provision` to the invoker; the installed pointer is not the install the ledger records last — `not_on_record`, carrying the installed hash; nothing installed; a token that failed verification) or `error` (the installed pointer cannot be honored — malformed, snapshot gone, or bytes that do not hash as the pointer; the first role whose key could not be minted — earlier keys persist); or the control ledger is torn or broken (the repair hint, nothing recorded); or another process holds the installed-configuration lock or the ledger lock (`another agenthof process holds the installed-configuration lock; retry`, nothing recorded); or keys were minted but the event could not be appended — `provision ran; event NOT recorded` |
 | `2` | Usage error — bad flags (including the retired `--config`), `LITELLM_MASTER_KEY` unset, or `--token` without `AGENTHOF_OIDC_ISSUER` |
 
 `agenthof runs prune`:
@@ -1184,7 +1221,7 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | Exit | Meaning |
 |---|---|
 | `0` | The sweep ran and a `success` event was recorded whose `detail` is the printed `pruned N run(s) and M artifact(s) older than …` line |
-| `1` | A recorded `refused` (no role grants `prune`; nothing installed; a token that failed verification) — nothing deleted; or a recorded `error` (the installed pointer cannot be honored, or the run directory or the control log could not be read — nothing deleted; or the artifact store failed after the runs were removed — the `detail` says how many); or a torn or broken control ledger (the repair hint, nothing recorded); or another process holds the ledger lock (nothing recorded); or the sweep ran but the event could not be appended — `runs pruned; event NOT recorded` |
+| `1` | A recorded `refused` (no role grants `prune`; the installed pointer is not the install the ledger records last — `not_on_record`; nothing installed; a token that failed verification) — nothing deleted; or a recorded `error` (the installed pointer cannot be honored — malformed, snapshot gone, or bytes that do not hash as the pointer — or the run directory or the control log could not be read — nothing deleted; or the artifact store failed after the runs were removed — the `detail` says how many); or a torn or broken control ledger (the repair hint, nothing recorded); or another process holds the installed-configuration lock or the ledger lock (nothing recorded); or the sweep ran but the event could not be appended — `runs pruned; event NOT recorded` |
 | `2` | Usage error — bad flags, `--older-than` missing, not a duration, non-positive, or a day count out of range, or `--token` without `AGENTHOF_OIDC_ISSUER`; checked before identity and before the ledger is touched |
 
 `agenthof investigate`:
@@ -1268,17 +1305,21 @@ Field notes:
 
 `agenthof audit <run-id>` prints a config-join line right after the run's own
 timeline, for a run whose `workflow_started` event carries a `config_hash`:
-it names the install — the `apply` or kill-switch flip — that put that exact
-config in place, drawn from `--control-log` (default
-`.agenthof/control.jsonl`). Five forms, verbatim:
+it names the install — the `apply`, kill-switch flip, or `config vouch` —
+that put that exact config on record, drawn from `--control-log` (default
+`.agenthof/control.jsonl`). Six forms, verbatim:
 
 - A matching install at or before the run started — a successful `apply`:
   `config sha256:<hash> — applied by <subject> (<method>) at <RFC3339 time>`
 - …or a successful kill-switch flip against an installed snapshot:
   `config sha256:<hash> — installed by <subject> (<method>) at <RFC3339 time> (kill switch: <enabled|disabled> agent <name>)`
-- The hash matches only a later install — the install→record gap re-installed
-  later, or clock skew — none at or before the run's start:
-  `config sha256:<hash> — no install on record at the run's start (matches a later apply or kill-switch flip)`
+- …or a successful `config vouch` (an install whose own record never landed,
+  put on record afterwards — a healed kill-switch gap reads this way, not as a
+  flip):
+  `config sha256:<hash> — vouched for by <subject> (<method>) at <RFC3339 time>`
+- The hash matches only a later install — the install→record gap put on
+  record later, or clock skew — none at or before the run's start:
+  `config sha256:<hash> — no install on record at the run's start (matches a later apply, kill-switch flip or vouch)`
 - No install on record matches the hash at all:
   `config sha256:<hash> — no install on record`
 - The control log is missing, torn, broken, or otherwise unreadable:

@@ -266,12 +266,14 @@ and hostname, captured independently of the asserted identity, the same
 oidc-is-evidence / asserted-is-a-claim / witness-is-corroboration framing
 as [identity](#identity-three-identities-per-action) above. A successful
 `apply`, a rejected `apply`, an `apply` refused because no role grants it to
-the invoker, and a successful flip each also carry a `config_hash` — over the
-applied, rejected, or refused bytes, or the hash of the snapshot the flip
-installed (or, before anything is installed, of the directory as flipped) — so
+the invoker, a successful flip, and a `config vouch` each also carry a `config_hash` — over the
+applied, rejected, or refused bytes, the hash of the snapshot the flip
+installed (or, before anything is installed, of the directory as flipped), or
+the installed snapshot the vouch put on record — so
 "who approved what's running", or
 what a rejected config looked like, needs no cross-referencing. A denial is an event too: a failed token, an invoker
-no role grants the operation, a rejected config, and an unknown agent name
+no role grants the operation, an installed pointer the control ledger does not
+record as its last install (`not_on_record`), a rejected config, and an unknown agent name
 are all recorded, each with a reason code. The one exception is a control log
 that itself cannot be written — torn or broken — where the refusal is loud
 (naming the repair command to run) but unrecorded, since there is no
@@ -283,7 +285,10 @@ then fails (or, before anything is installed, hashing the edited directory
 fails), the command prints "state changed; event NOT recorded" and exits
 nonzero — the one case where the registry's state and the control log can
 disagree, and it is treated as an incident to investigate by hand, not a
-bug the ledger papers over.
+bug the ledger papers over. Once something is installed, that gap is also
+fail-closed: every run and every control action under the unrecorded pointer
+is refused as not on record until `config vouch` puts the flipped snapshot on
+record (bytes untouched, the agent still disabled).
 
 A torn control log — the tail of an interrupted write — is recovered with
 `agenthof audit repair control`. The damaged bytes are moved, verbatim, to
