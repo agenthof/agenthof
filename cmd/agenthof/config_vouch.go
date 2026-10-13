@@ -27,7 +27,8 @@ import (
 // in doubt — a presented token that fails verification is still refused and
 // recorded; always recorded under the invoker with the three identities, and
 // the record's detail names what the ledger vouched for before. Local only,
-// like config sign. Order, pinned: (1) the invoker; (2) ledger writable
+// like config sign. Order, pinned: (1) the invoker; (1b) the root's
+// integrity posture (reserved or unreadable: exit 2, unrecorded); (2) ledger writable
 // (busy or damaged: unrecorded); (3) a refused token (recorded); (4) the
 // installed-configuration writer lock, EXCLUSIVE, held through the append
 // and the sign step — a reader must never see the pair mid-vouch; (5) the
@@ -51,6 +52,13 @@ func cmdConfigVouch(args []string, out io.Writer) int {
 	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
 	if usageErr {
 		_, _ = fmt.Fprintln(out, "config vouch: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
+	}
+	// 1b. The root's integrity posture, before the ledger-writable check:
+	// its fault is exit 2 and the command's own; the helper's contract
+	// (false ⇒ exit 1) is untouched.
+	if _, err := loadIntegrity(*controlLog); err != nil {
+		_, _ = fmt.Fprintf(out, "config vouch: %v\n", err)
 		return 2
 	}
 	// 2. The ledger must be writable before anything is recorded.

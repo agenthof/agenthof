@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,5 +100,76 @@ func TestLoadIntegrityNamesTheFileOnce(t *testing.T) {
 	}
 	if strings.Count(err.Error(), p) != 1 {
 		t.Fatalf("the PathError's own path must be stripped: %q", err)
+	}
+}
+
+// TestControlWritersRefuseAReservedPosture: with integrity.yaml saying
+// anchor: tlog beside the ledger, each CLI writer prints its own prefix, the
+// fault naming the file once, and exits 2 — not the ledger-damaged exit 1 —
+// before anything is recorded: on a fresh root no ledger and no store are
+// created; on an applied root the ledger bytes and the pointer are unchanged.
+func TestControlWritersRefuseAReservedPosture(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test") // provision's earlier exit-2 class must not be what fires
+
+	// A fresh root: apply is the bootstrap; nothing may appear.
+	root := writeSample(t)
+	fresh := filepath.Join(t.TempDir(), "control.jsonl")
+	p := writeIntegrity(t, fresh, reservedPosture)
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", fresh, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 2 || !strings.Contains(out.String(), "apply: "+reservedFault(p)+"\n") {
+		t.Fatalf("fresh apply: exit %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(fresh); !os.IsNotExist(err) {
+		t.Fatalf("no genesis may be written: stat err = %v", err)
+	}
+	if _, err := os.Stat(installedStore(fresh)); !os.IsNotExist(err) {
+		t.Fatalf("nothing may be installed: stat err = %v", err)
+	}
+
+	// An applied root: every writer, ledger and pointer byte-identical after.
+	ctl := applied(t, root)
+	p = writeIntegrity(t, ctl, reservedPosture)
+	before, pointer := ledgerBytes(t, ctl), readPointer(t, ctl)
+	for _, c := range []struct {
+		name, prefix string
+		run          func(out *bytes.Buffer) int
+	}{
+		{"apply", "apply", func(out *bytes.Buffer) int {
+			return cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, out)
+		}},
+		{"registry disable", "registry disable", func(out *bytes.Buffer) int {
+			return cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, out)
+		}},
+		{"registry enable", "registry enable", func(out *bytes.Buffer) int {
+			return cmdRegistry([]string{"enable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, out)
+		}},
+		{"config vouch", "config vouch", func(out *bytes.Buffer) int {
+			return cmdConfigVouch([]string{"--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, out)
+		}},
+		{"gateway provision", "gateway provision", func(out *bytes.Buffer) int {
+			return cmdGateway(provisionArgs(ctl, "http://127.0.0.1:0"), out) // never dialed
+		}},
+		{"runs prune", "runs prune", func(out *bytes.Buffer) int {
+			return cmdRuns([]string{"prune", "--older-than", "180d", "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir(), "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, out)
+		}},
+	} {
+		var out bytes.Buffer
+		code := c.run(&out)
+		if code != 2 {
+			t.Fatalf("%s: exit %d, want 2\n%s", c.name, code, out.String())
+		}
+		if want := c.prefix + ": " + reservedFault(p) + "\n"; !strings.Contains(out.String(), want) {
+			t.Fatalf("%s: missing %q\n%s", c.name, want, out.String())
+		}
+		if strings.Contains(out.String(), "control ledger damaged") || strings.Contains(out.String(), "control head:") {
+			t.Fatalf("%s: must refuse before the ledger is touched:\n%s", c.name, out.String())
+		}
+		if !bytes.Equal(before, ledgerBytes(t, ctl)) {
+			t.Fatalf("%s: the ledger must be byte-identical", c.name)
+		}
+		if readPointer(t, ctl) != pointer {
+			t.Fatalf("%s: the pointer must not move", c.name)
+		}
 	}
 }
