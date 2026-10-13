@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -245,5 +247,36 @@ func TestAuditRepairControlDisclosesNoPostureBeforeAuthz(t *testing.T) {
 	after, err := os.ReadFile(ctl)
 	if err != nil || !bytes.Equal(after, torn) {
 		t.Fatalf("nothing may change: %v", err)
+	}
+}
+
+// TestServeRefusesToStartOnAReservedPosture: serve reads the posture once
+// at startup and refuses to start — exit 2, nothing listening — on one it
+// cannot honour; with the floor written explicitly it starts exactly as
+// before. A server that started at the floor on a reserved root would write
+// every API apply unanchored, so warn-and-continue is wrong here.
+func TestServeRefusesToStartOnAReservedPosture(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	p := writeIntegrity(t, ctl, reservedPosture)
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_OIDC_ISSUER", "https://idp.test") // set, so the posture is the only fault
+	// A bounded context: a serve that wrongly starts must still return (exit
+	// 0 on the context ending), so the test fails instead of hanging.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	code := cmdServe(ctx, []string{"--addr", "127.0.0.1:0", "--control-log", ctl, "--log-dir", t.TempDir()}, &out, io.Discard)
+	if code != 2 || !strings.Contains(out.String(), "serve: "+reservedFault(p)+"\n") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "serving on") {
+		t.Fatalf("nothing may listen:\n%s", out.String())
+	}
+
+	writeIntegrity(t, ctl, "sink: local\nanchor: none\n")
+	logs := startServeOnce(t, ctl) // fatals unless serve starts and exits 0
+	if strings.Contains(logs, "integrity") {
+		t.Fatalf("the floor must not be mentioned at startup:\n%s", logs)
 	}
 }
