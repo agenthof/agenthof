@@ -248,7 +248,8 @@ func buildResolved(cfg config.Config, hash string, installed bool, loadErrs []er
 // server runs too. Exit 0 only when a snapshot was installed AND recorded;
 // 1 for every recorded denial, a busy lock, a failed precondition, the
 // install-then-record gap, and a damaged ledger (which prints the repair
-// hint and records nothing); 2 for usage.
+// hint and records nothing); 2 for usage and for an integrity posture this
+// build cannot honour (refused before the ledger is opened, so unrecorded).
 func cmdApply(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	cfgDir := fs.String("config", "./config", "config directory")
@@ -292,6 +293,15 @@ func cmdApply(args []string, out io.Writer) int {
 	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
 	if usageErr {
 		_, _ = fmt.Fprintln(out, "apply: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
+	}
+
+	// The root's integrity posture, before the ledger is even opened: a
+	// posture this build cannot honour, or a file it cannot read, is a root
+	// this binary cannot serve — exit 2, nothing recorded (the same
+	// unrecorded class as a ledger that cannot be opened).
+	if _, err := loadIntegrity(*controlLog); err != nil {
+		_, _ = fmt.Fprintf(out, "apply: %v\n", err)
 		return 2
 	}
 
@@ -434,9 +444,10 @@ func controlLedgerWritable(prefix, controlLog string, out io.Writer) bool {
 // cmdRegistryFlip implements the audited write path for `registry
 // enable|disable`. Every branch that can write a control event does so
 // before returning, once the control chain itself is known writable; the
-// only unrecorded exits are a control ledger that cannot be opened and a
-// final append that fails AFTER the state already changed (the documented
-// residual window). With something installed the flip is a re-snapshot of
+// only unrecorded exits are an integrity posture this build cannot honour
+// (refused before the ledger is opened), a control ledger that cannot be
+// opened, and a final append that fails AFTER the state already changed (the
+// documented residual window). With something installed the flip is a re-snapshot of
 // the installed configuration (flipInstalled); with nothing installed it is
 // the bootstrap-era path below — the directory is the only configuration
 // there is, so the bit is flipped there and the first apply installs the
@@ -445,6 +456,12 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(as, groups, token)
 	if usageErr {
 		_, _ = fmt.Fprintln(out, "registry: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
+	}
+
+	// The root's integrity posture, before the ledger is opened (see cmdApply).
+	if _, err := loadIntegrity(controlLog); err != nil {
+		_, _ = fmt.Fprintf(out, "registry %s: %v\n", action, err)
 		return 2
 	}
 
@@ -1027,7 +1044,8 @@ const msgProvisionNotRecorded = "provision ran; event NOT recorded"
 // minted for. That read verifies the bytes against the pointer and requires
 // the ledger's vouch, under installed.lock shared across the two reads
 // (lifecycle). Order: flags; the
-// master key (a usage fault, unrecorded); the invoker; ledger writable
+// master key (a usage fault, unrecorded); the invoker; the root's integrity
+// posture (exit 2, unrecorded); ledger writable
 // (busy or damaged, unrecorded); a refused token (recorded); the installed
 // read under the shared lock (error recorded; busy or damaged ledger
 // unrecorded; not on record refused, recorded with the hash); nothing
@@ -1059,6 +1077,13 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
 	if usageErr {
 		_, _ = fmt.Fprintln(out, "gateway provision: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
+	}
+	// The root's integrity posture, before the ledger-writable check: its
+	// fault is exit 2 and the command's own; the helper's contract (false ⇒
+	// exit 1) is untouched.
+	if _, err := loadIntegrity(*controlLog); err != nil {
+		_, _ = fmt.Fprintf(out, "gateway provision: %v\n", err)
 		return 2
 	}
 	if !controlLedgerWritable("gateway provision", *controlLog, out) {
@@ -1454,7 +1479,8 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	// or roles that cannot be read, installed or not — is printed and exits
 	// nonzero, fail-closed, because the one ledger to record it in is the
 	// damaged one. The check runs before the ledger is even looked at, so a
-	// refused caller learns nothing about it.
+	// refused caller learns nothing about it. The integrity posture is read
+	// after this check for the same reason.
 	store := installedStore(*controlLog)
 	roles, _, installed, instErr := config.InstalledRoles(store)
 	if instErr != nil {
@@ -1476,6 +1502,16 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	if !authz.ControlAllows(roles, inv, "repair") {
 		_, _ = fmt.Fprintf(out, "audit repair control: %s\n", control.NotAuthorized("repair").Message)
 		return 1
+	}
+
+	// The root's integrity posture — read only now, after authorization and
+	// before the ledger is looked at: loading it earlier would print the
+	// root's posture and a root-local path to a caller who is not allowed to
+	// learn either. Nothing between the check above and the Stat below
+	// writes, so no repair ever runs on a root this build cannot honour.
+	if _, err := loadIntegrity(*controlLog); err != nil {
+		_, _ = fmt.Fprintf(out, "audit repair control: %v\n", err)
+		return 2
 	}
 
 	if _, statErr := os.Stat(*controlLog); statErr != nil {
@@ -1549,8 +1585,8 @@ const msgPrunedNotRecorded = "runs pruned; event NOT recorded"
 // than --older-than, authorized against the installed roles and recorded in
 // the control ledger with a one-line summary of what it removed. Order: the
 // --older-than usage checks first (exit 2, before identity and before the
-// ledger is touched); the invoker; ledger writable (busy or damaged,
-// unrecorded); a refused token (recorded); the installed read, pointer and
+// ledger is touched); the invoker; the root's integrity posture (exit 2,
+// unrecorded); ledger writable (busy or damaged, unrecorded); a refused token (recorded); the installed read, pointer and
 // the ledger's vouch, under installed.lock shared across the two reads
 // (error recorded; busy or damaged ledger unrecorded; not on record refused,
 // recorded without a hash); nothing installed (refusal recorded — prune reads
@@ -1585,6 +1621,12 @@ func cmdRunsPrune(args []string, out io.Writer) int {
 	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
 	if usageErr {
 		_, _ = fmt.Fprintln(out, "runs prune: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		return 2
+	}
+	// The root's integrity posture, before the ledger-writable check (see
+	// cmdGatewayProvision).
+	if _, err := loadIntegrity(*controlLog); err != nil {
+		_, _ = fmt.Fprintf(out, "runs prune: %v\n", err)
 		return 2
 	}
 	if !controlLedgerWritable("runs prune", *controlLog, out) {

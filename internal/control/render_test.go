@@ -289,3 +289,37 @@ func TestControlRenderVouch(t *testing.T) {
 		t.Fatalf("vouch refused line:\n%s", out)
 	}
 }
+
+// TestControlRenderAnchorLabels: a success anchor names the head it pins by
+// seq and hash and the knob that produced it; a success without its payload
+// is malformed and must not read as a pin; a non-success is worded around
+// the action; the locator, backend and proof stay in the record, not on the
+// line; the integrity line is untouched (no taint from an anchor).
+func TestControlRenderAnchorLabels(t *testing.T) {
+	h := strings.Repeat("ab", 32)
+	recs := []ledger.Record{
+		rec(1, "apply", "", "success", "dana@example.com", "asserted"),
+		recAnchor(2, "success", "", `{"seq":1,"hash":"`+h+`","kind":"tlog","backend_kind":"transparency-log","backend":"https://log.example","ref":"12345","proof":"AQID"}`),
+		recAnchor(3, "success", "", ""),
+		recAnchor(4, "error", "", `{"seq":1,"hash":"`+h+`"}`),
+	}
+	out := control.Render(recs, ledger.Head{Hash: "z", Count: 4}, nil)
+	for _, want := range []string{
+		"seq 2  2026-10-13 10:02:00  head anchored: seq 1 " + h + " (tlog) — dana@example.com (asserted)\n",
+		"seq 3  2026-10-13 10:03:00  anchor record without coverage — dana@example.com (asserted)\n",
+		"seq 4  2026-10-13 10:04:00  anchor error — dana@example.com (asserted)\n",
+		"control ledger integrity: verified (4 events)\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q:\n%s", want, out)
+		}
+	}
+	for _, leak := range []string{"12345", "https://log.example", "transparency-log", "AQID"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("%q must stay in the record, not on the line:\n%s", leak, out)
+		}
+	}
+	if tainted, _ := control.IsTainted(recs); tainted {
+		t.Fatal("an anchor must not taint the ledger")
+	}
+}

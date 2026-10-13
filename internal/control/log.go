@@ -19,7 +19,7 @@ import (
 // record is the control/1 on-disk shape. Field order here is the wire
 // order (spec §3.2): v, seq, time, action, agent, outcome, reason,
 // invoker, asserted_as, witness, config_hash, bootstrap, fragment_len,
-// fragment_sha256, origin, detail, prev, log_id. It intentionally does not embed Event,
+// fragment_sha256, origin, detail, anchor, prev, log_id. It intentionally does not embed Event,
 // since the wire order interleaves the writer-assigned fields (seq, time
 // up front; prev, log_id at the end) around the caller-assigned ones.
 //
@@ -44,11 +44,16 @@ type record struct {
 	FragmentSHA string           `json:"fragment_sha256,omitempty"`
 	Origin      *origin.Origin   `json:"origin,omitempty"`
 	Detail      string           `json:"detail,omitempty"`
-	Prev        string           `json:"prev"`
-	LogID       string           `json:"log_id,omitempty"`
+	// Anchor is read back by the readers (Render, IsTainted); Append does not
+	// copy it in this build — the guard below returns before a record is
+	// built — so the copy lands with the first anchoring writer.
+	Anchor *Anchor `json:"anchor,omitempty"`
+	Prev   string  `json:"prev"`
+	LogID  string  `json:"log_id,omitempty"`
 }
 
-// Append rejects any non-"success" Event with a nil Reason: every
+// Append refuses an anchor record (reserved; see Event.Anchor) and rejects
+// any non-"success" Event with a nil Reason: every
 // control-plane denial must explain itself, and this is the one place
 // that rule is enforced, rather than scattered across call sites. It
 // then opens the control log at path Locked (ledger.Open verifies the
@@ -57,6 +62,14 @@ type record struct {
 // genesis record only, marshals the record, and appends it. It returns
 // the chain's new Head.
 func Append(path string, e Event) (ledger.Head, error) {
+	// Anchor records are reserved: no anchoring backend exists in this build,
+	// so a record claiming one would be a false guarantee. Refused before the
+	// ledger is opened — nothing is written, no genesis on a fresh root — and
+	// before the reason rule, so an anchor is always refused as an anchor,
+	// whatever else it carries. The action and the payload are each enough.
+	if e.Action == "anchor" || e.Anchor != nil {
+		return ledger.Head{}, errors.New("control: anchor records are reserved; nothing anchors in this build")
+	}
 	if e.Outcome != "success" && e.Reason == nil {
 		return ledger.Head{}, fmt.Errorf("control: outcome %q requires a reason", e.Outcome)
 	}

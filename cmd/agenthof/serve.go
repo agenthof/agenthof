@@ -55,6 +55,18 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 	}
 	logger := obs.New(stderr, level, format)
 
+	// The control root's integrity posture, read once at startup. Unlike an
+	// unusable or unvouched install (warned about below and fixable live by
+	// an apply), a posture this build cannot honour has no live fix: a
+	// server that started at the floor on such a root would write every API
+	// apply unanchored for its whole life. So it is a hard refusal, exit 2,
+	// like an unset AGENTHOF_OIDC_ISSUER. A change to the file takes effect
+	// on restart. The readers do not load it, so audit keeps working.
+	if _, err := loadIntegrity(*controlLog); err != nil {
+		_, _ = fmt.Fprintf(out, "serve: %v\n", err)
+		return 2
+	}
+
 	issuer := os.Getenv("AGENTHOF_OIDC_ISSUER")
 	if issuer == "" {
 		_, _ = fmt.Fprintln(out, "serve: AGENTHOF_OIDC_ISSUER must be set — serve authenticates every call with OIDC")

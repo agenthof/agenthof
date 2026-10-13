@@ -31,6 +31,7 @@ type DecodedEvent struct {
 	FragmentSHA string           `json:"fragment_sha256,omitempty"`
 	Origin      *origin.Origin   `json:"origin,omitempty"`
 	Detail      string           `json:"detail,omitempty"`
+	Anchor      *Anchor          `json:"anchor,omitempty"`
 }
 
 // Decode unmarshals a single control/1 log line into a DecodedEvent.

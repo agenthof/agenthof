@@ -1,6 +1,10 @@
 package investigate
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,5 +219,61 @@ func TestConfigJoinLaterFormNamesVouch(t *testing.T) {
 	line := ConfigJoin(ev, "verified", "sha256:aaa", ev[0].Time.Add(-time.Hour))
 	if line != "config sha256:aaa — no install on record at the run's start (matches a later apply, kill-switch flip or vouch)" {
 		t.Fatalf("line=%q", line)
+	}
+}
+
+// TestConfigJoinIgnoresAnAnchorWithTheRunsHash: an anchor record carrying
+// the run's config_hash — set on purpose, malformed — is excluded by the
+// Installing predicate, not by the hash: the join names the apply, never the
+// anchor's invoker.
+func TestConfigJoinIgnoresAnAnchorWithTheRunsHash(t *testing.T) {
+	t0 := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	ev := []control.DecodedEvent{
+		{Seq: 1, Time: t0, Action: "apply", Outcome: "success", ConfigHash: "sha256:aaa", Invoker: identity.Invoker{Subject: "dana@example.com", Issuer: "local", Method: "asserted"}},
+		{Seq: 2, Time: t0.Add(time.Minute), Action: "anchor", Outcome: "success", ConfigHash: "sha256:aaa",
+			Invoker: identity.Invoker{Subject: "anchor-bot", Issuer: "local", Method: "asserted"},
+			Anchor:  &control.Anchor{Seq: 1, Hash: strings.Repeat("ab", 32), Kind: "tlog", Ref: "1"}},
+	}
+	line := ConfigJoin(ev, "verified", "sha256:aaa", t0.Add(2*time.Minute))
+	if want := "config sha256:aaa — applied by dana@example.com (asserted) at " + t0.Format(time.RFC3339); line != want {
+		t.Fatalf("line=%q\nwant=%q", line, want)
+	}
+	if strings.Contains(line, "anchor-bot") {
+		t.Fatalf("the anchor must never be the install: %q", line)
+	}
+}
+
+// TestLoadControlDecodesAnAnchorRecord: a ledger holding a hand-built,
+// correctly chained anchor record loads verified, decodes the payload, and
+// normalizes to kind "anchor" with no payload on the investigate/1 wire.
+func TestLoadControlDecodesAnAnchorRecord(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.jsonl")
+	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success", Invoker: identity.Static("dana@example.com"),
+		Witness: control.CaptureWitness(), ConfigHash: "sha256:aaa"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// prev is the SHA-256 of the previous line's exact bytes, without its "\n".
+	sum := sha256.Sum256(bytes.TrimSuffix(raw, []byte("\n")))
+	prev := hex.EncodeToString(sum[:])
+	line := fmt.Sprintf(`{"v":"control/1","seq":2,"time":"2026-10-13T10:02:00Z","action":"anchor","outcome":"success",`+
+		`"invoker":{"subject":"anchor-bot","issuer":"local","method":"asserted"},"witness":{"os_user":"dana","hostname":"host"},`+
+		`"anchor":{"seq":1,"hash":%q,"kind":"tlog","backend_kind":"transparency-log","backend":"https://log.example","ref":"12345"},"prev":%q}`+"\n", prev, prev)
+	if err := os.WriteFile(p, append(raw, line...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ev, verdict, ok := LoadControl(p)
+	if !ok || verdict != "verified" || len(ev) != 2 {
+		t.Fatalf("verdict=%q ok=%v events=%d", verdict, ok, len(ev))
+	}
+	if ev[1].Action != "anchor" || ev[1].Anchor == nil || ev[1].Anchor.Seq != 1 || ev[1].Anchor.Hash != prev || ev[1].Anchor.Ref != "12345" {
+		t.Fatalf("anchor event: %+v", ev[1])
+	}
+	r := normalizeControl(ev[1])
+	if r.Kind != "anchor" || r.Source != "control" || r.Seq != 2 || r.ConfigHash != "" {
+		t.Fatalf("normalized: %+v", r)
 	}
 }
