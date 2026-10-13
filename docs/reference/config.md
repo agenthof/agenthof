@@ -961,6 +961,40 @@ with `config pull`; a configuration pulled and applied on another host is signed
 there with that host's key, so the key to pin on a host is the one its own
 installs carry.
 
+The **integrity posture** of the control ledger, when one is declared, lives
+beside it too: `<dir>/integrity.yaml`, operator-written — Agenthof never writes
+it. It has two knobs — `sink` (where the ledger's bytes live) and `anchor`
+(what pins its head) — and, absent, means the floor: `sink: local`, `anchor:
+none`, which is exactly the hash-chained local file the control ledger is
+today. The floor is the only posture this build honours; every other value is
+reserved and refused by name:
+
+| key | accepted in this build | reserved — refused in this build |
+|---|---|---|
+| `sink` | absent, `""`, `local` | `worm`, `external` (and `duplicate`, which when it ships is written as the `duplicate:` list, not as the sink) |
+| `anchor` | absent, `""`, `none` | `tlog`, `signed` |
+| `duplicate` | absent, `null`, `[]` | any entry — a list of further sinks written in parallel with `sink` |
+| `sink_backend`, `anchor_backend` | absent, `null`, `{}` | any set field — the coordinates of a reserved sink or anchor: `kind`, `url`, and a `credential` block |
+
+A backend's `credential` is the same broker-reference vocabulary a tool
+resource's credential uses — `credential_source`, `token_env`, `grant_type`,
+`client_auth`, `issuer`, `token_endpoint`, `client_id_env`,
+`client_secret_env`, `scope`, `audience` — environment-variable *names*, never
+values: no field in this file can hold a secret. An unknown key at any level,
+a document that is not a mapping, and a file holding more than one YAML
+document are refused too, so a typo can never read as the floor. Every control
+writer — `apply`, `registry enable|disable`, `config vouch`, `gateway
+provision`, `runs prune`, `audit repair control` — reads the file before it
+touches the ledger and, on a posture it cannot honour or a file it cannot read
+or parse, prints `<command>: integrity <path>: <fault>` and exits 2, recording
+nothing; `serve` reads it once at startup and refuses to start the same way (a
+change to the file takes effect on restart). A missing file is the floor; a
+present file that cannot be read is never treated as missing. The readers —
+`audit control`, `audit verify control`, `investigate` — do not consult it.
+Writing a reserved value today stops every control write; it anchors and
+stores nothing. The floor adds no guarantee beyond the chain itself, and
+nothing in this file changes what the chain can and cannot detect.
+
 ### `--config`
 
 `apply` validates and installs it. `run` accepts it but executes the installed

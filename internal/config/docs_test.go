@@ -38,7 +38,7 @@ func TestConfigReferenceCoversAllYAMLFields(t *testing.T) {
 			}
 		}
 	}
-	for _, root := range []any{AgentDef{}, Step{}, WorkflowDef{}, RoleDef{}, ModelRoute{}, GatewayConfig{}} {
+	for _, root := range []any{AgentDef{}, Step{}, WorkflowDef{}, RoleDef{}, ModelRoute{}, GatewayConfig{}, Integrity{}} {
 		rt := reflect.TypeOf(root)
 		walk(rt, rt.Name())
 	}
