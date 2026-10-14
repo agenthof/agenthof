@@ -6,8 +6,10 @@ package investigate
 import (
 	"time"
 
+	"github.com/agenthof/agenthof/internal/anchorverify"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/origin"
 )
 
 // Invoker is the normalized identity of whoever caused a Record's event.
@@ -41,6 +43,14 @@ type Record struct {
 	// Absent on a root run's records.
 	ParentRunID string `json:"parent_run_id,omitempty"`
 	Depth       int    `json:"depth,omitempty"`
+
+	// Anchor is what a control "anchor" record says it pinned, and — on a
+	// success record — whether this reader could stand behind it, decided
+	// offline. Absent on every record that is not an anchor. Present on
+	// every success anchor record, payload or not: a success record without
+	// a payload carries only its verdict (a mismatch, "anchor record without
+	// coverage"). Additive and omitempty.
+	Anchor *Anchor `json:"anchor,omitempty"`
 
 	// pos is the intra-source position (line index for run events, Seq
 	// for control events) used only for merge ordering; it is never
@@ -89,9 +99,30 @@ func normalizeRun(e engine.Event, lineIdx int) Record {
 	}
 }
 
+// Anchor is the investigate/1 view of a control anchor payload: the facts as
+// recorded (never the proof), plus the offline verdict. Every fact string is
+// origin.Clean'd at normalization — the ledger's writer may be hostile — and
+// every field is omitempty, so a payload-less success record renders no 0
+// or "". Cause is carried exactly as the verifier produced it: the
+// structural cause is longer than origin.Clean's cap, and truncating it
+// would make this view and audit verify control disagree on the one verdict
+// they must share.
+type Anchor struct {
+	Seq          int    `json:"seq,omitempty"`            // the covered head's seq (1 ≤ Seq < the record's own Seq)
+	Hash         string `json:"hash,omitempty"`           // the covered head's hash, as recorded
+	Kind         string `json:"kind,omitempty"`           // "tlog" | "signed"
+	BackendKind  string `json:"backend_kind,omitempty"`   // the proof format: "transparency-log" | "rfc3161" | …
+	Backend      string `json:"backend,omitempty"`        // the log's public identity (URL), as recorded
+	Ref          string `json:"ref,omitempty"`            // the entry locator; absent on a failed attempt
+	BackendKeyID string `json:"backend_key_id,omitempty"` // which log key signed at anchor time; "" for a kind without one
+	Verdict      string `json:"verdict,omitempty"`        // "verified" | "mismatch" | "unverifiable"; present iff the record's outcome is "success"
+	Cause        string `json:"cause,omitempty"`          // operator prose for a non-verified verdict; "" when verified
+}
+
 // normalizeControl maps a control.DecodedEvent into the unified Record
-// shape.
-func normalizeControl(d control.DecodedEvent) Record {
+// shape. verdict is the offline anchor verdict for a success anchor record
+// (Timeline supplies one for every such record); nil for every other record.
+func normalizeControl(d control.DecodedEvent, verdict *anchorverify.Result) Record {
 	var reason string
 	if d.Reason != nil {
 		reason = d.Reason.Message
@@ -111,6 +142,33 @@ func normalizeControl(d control.DecodedEvent) Record {
 		Reason:     reason,
 		ConfigHash: d.ConfigHash,
 		Seq:        d.Seq,
+		Anchor:     anchorView(d, verdict),
 		pos:        d.Seq,
 	}
+}
+
+// anchorView builds the investigate/1 anchor object: the facts on every
+// anchor attempt that recorded a payload (a failed attempt recorded what it
+// tried), and the verdict on every success record, payload or not. nil for
+// any record that is not an anchor, and for a refused anchor (no payload,
+// no claim). The proof is deliberately not copied.
+func anchorView(d control.DecodedEvent, verdict *anchorverify.Result) *Anchor {
+	if d.Action != "anchor" {
+		return nil
+	}
+	var v *Anchor
+	if a := d.Anchor; a != nil {
+		v = &Anchor{
+			Seq: a.Seq, Hash: origin.Clean(a.Hash), Kind: origin.Clean(a.Kind), BackendKind: origin.Clean(a.BackendKind),
+			Backend: origin.Clean(a.Backend), Ref: origin.Clean(a.Ref), BackendKeyID: origin.Clean(a.BackendKeyID),
+		}
+	}
+	if d.Outcome != "success" || verdict == nil {
+		return v
+	}
+	if v == nil {
+		v = &Anchor{}
+	}
+	v.Verdict, v.Cause = string(verdict.State), verdict.Cause
+	return v
 }

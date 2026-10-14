@@ -272,7 +272,7 @@ func TestLoadControlDecodesAnAnchorRecord(t *testing.T) {
 	if ev[1].Action != "anchor" || ev[1].Anchor == nil || ev[1].Anchor.Seq != 1 || ev[1].Anchor.Hash != prev || ev[1].Anchor.Ref != "12345" {
 		t.Fatalf("anchor event: %+v", ev[1])
 	}
-	r := normalizeControl(ev[1])
+	r := normalizeControl(ev[1], nil)
 	if r.Kind != "anchor" || r.Source != "control" || r.Seq != 2 || r.ConfigHash != "" {
 		t.Fatalf("normalized: %+v", r)
 	}

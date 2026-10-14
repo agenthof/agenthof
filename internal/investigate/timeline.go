@@ -192,7 +192,7 @@ func Timeline(logDir, controlLog string, f Filter) (Result, error) {
 		// a synthetic "missing" integrity value.
 		sources = append(sources, Source{Path: controlLog, Kind: "control", Integrity: verdict, Count: len(controlEvents)})
 		for _, d := range controlEvents {
-			records = append(records, normalizeControl(d))
+			records = append(records, normalizeControl(d, nil))
 		}
 	}
 
