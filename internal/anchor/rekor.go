@@ -96,7 +96,7 @@ func (r *Rekor) Kind() string { return "transparency-log" }
 // POST, and the bearer only when auth is set; it reads at most maxBody bytes
 // and reports an oversized body as an error. A transport error is "<host>:
 // <err>"; a status is returned for the caller to classify.
-func (r *Rekor) do(ctx context.Context, method, path string, body []byte, auth bool) (int, []byte, error) {
+func (r *Rekor) do(ctx context.Context, method, path, accept string, body []byte, auth bool) (int, []byte, error) {
 	var rd io.Reader
 	if body != nil {
 		rd = bytes.NewReader(body)
@@ -105,7 +105,7 @@ func (r *Rekor) do(ctx context.Context, method, path string, body []byte, auth b
 	if err != nil {
 		return 0, nil, err
 	}
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -118,6 +118,13 @@ func (r *Rekor) do(ctx context.Context, method, path string, body []byte, auth b
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
+		// client.Do returns a *url.Error that repeats the full request URL
+		// (path included); keep only its cause so the recorded message is
+		// fixed phrases plus the host, never a path.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return 0, nil, fmt.Errorf("%s: %w", r.host, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -203,7 +210,7 @@ const (
 // its id. Used at Submit when no key is pinned (recording the id) and at
 // Verify when unpinned and online (comparing the id to the record's).
 func (r *Rekor) servedKey(ctx context.Context, treeID uint64, auth bool) (*ecdsa.PublicKey, string, error) {
-	status, raw, err := r.do(ctx, http.MethodGet, "/api/v1/log/publicKey?treeID="+strconv.FormatUint(treeID, 10), nil, auth)
+	status, raw, err := r.do(ctx, http.MethodGet, "/api/v1/log/publicKey?treeID="+strconv.FormatUint(treeID, 10), "application/x-pem-file", nil, auth)
 	if err != nil {
 		return nil, "", err
 	}
@@ -348,7 +355,7 @@ func (r *Rekor) Submit(ctx context.Context, head Head) (Receipt, error) {
 		return Receipt{}, err
 	}
 
-	status, raw, err := r.do(ctx, http.MethodPost, "/api/v1/log/entries", body, true)
+	status, raw, err := r.do(ctx, http.MethodPost, "/api/v1/log/entries", "application/json", body, true)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -470,7 +477,7 @@ func (r *Rekor) presence(ctx context.Context, ref, storedBody string) error {
 	unavailable := func(cause string) error {
 		return &Unavailable{Cause: cause + " (proof verified offline; presence not checked)"}
 	}
-	status, raw, err := r.do(ctx, http.MethodGet, "/api/v1/log/entries/"+ref, nil, false)
+	status, raw, err := r.do(ctx, http.MethodGet, "/api/v1/log/entries/"+ref, "application/json", nil, false)
 	if err != nil {
 		return unavailable(err.Error())
 	}
@@ -485,7 +492,18 @@ func (r *Rekor) presence(ctx context.Context, ref, storedBody string) error {
 		}
 		return nil
 	case http.StatusNotFound:
-		return &Mismatch{Cause: "recorded entry is absent from the log (404)"}
+		// A 404 is a mismatch only when the log itself reports the entry
+		// absent, via Rekor's JSON error body ({"code":404,...}). A bare or
+		// HTML 404 — a decommissioned host whose domain still answers, a
+		// proxy, the eventual v1 sunset — is "could not check", never
+		// "tampered"; the stored proof has already decided offline.
+		var rekErr struct {
+			Code int `json:"code"`
+		}
+		if json.Unmarshal(raw, &rekErr) == nil && rekErr.Code == http.StatusNotFound {
+			return &Mismatch{Cause: "recorded entry is absent from the log (404)"}
+		}
+		return unavailable(fmt.Sprintf("status 404 from %s without a log error body", r.host))
 	default:
 		return unavailable(fmt.Sprintf("status %d from %s", status, r.host))
 	}

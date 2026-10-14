@@ -258,8 +258,8 @@ func TestRekorHTTPHygiene(t *testing.T) {
 		t.Fatalf("trailing slash must be trimmed: %v %q", err, r2.Backend)
 	}
 	hdr := rec.LastHeaders()
-	if hdr.Get("Accept") != "application/json" || hdr.Get("Authorization") != "" {
-		t.Fatalf("anonymous request headers %v", hdr)
+	if hdr.Get("Accept") != "application/x-pem-file" || hdr.Get("Authorization") != "" {
+		t.Fatalf("anonymous served-key request headers %v", hdr)
 	}
 	r, err := rk.Submit(context.Background(), head41)
 	if err != nil || r.Backend != f.URL {
@@ -283,8 +283,8 @@ func TestRekorHTTPHygiene(t *testing.T) {
 
 // TestRekorSubmitDoesNotLeakServerControlledEntryID: a 201 whose single entry
 // key is not 80 hex must not place that key into the error — the error is
-// recorded verbatim in the control ledger (spec §8 step 7: fixed phrases +
-// status + URL host, never response content).
+// recorded verbatim in the control ledger, so it carries fixed phrases plus
+// the status and the URL host, never server-controlled response content.
 func TestRekorSubmitDoesNotLeakServerControlledEntryID(t *testing.T) {
 	body := []byte(`{"` + anchortest.Sentinel + `":{"body":"","integratedTime":0,"logIndex":0,"logID":"x","verification":{"inclusionProof":{"logIndex":0,"treeSize":1,"rootHash":"","hashes":[],"checkpoint":{"envelope":""}}}}}`)
 	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {

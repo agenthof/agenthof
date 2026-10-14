@@ -32,9 +32,10 @@ type Receipt struct {
 }
 
 // MaxProofLen bounds Receipt.Proof on the record: 8192 bytes of base64. A
-// Rekor v1 proof envelope for a tree of 2^32 entries is ≈4 KB; an RFC-3161
-// token is 1–4 KB DER (≈5.5 KB base64); a tile-backed log entry with its
-// checkpoint ≈1.5 KB. Submit refuses a larger proof; the control ledger's
+// Rekor v1 proof envelope at a few billion entries is ≈6 KB base64 (measured;
+// the cap holds past 2^47 entries); an RFC-3161 token is 1–4 KB DER (≈5.5 KB
+// base64); a tile-backed log entry with its checkpoint ≈1.5 KB. Submit refuses
+// a larger proof; the control ledger's
 // Append refuses a larger record (internal/control.MaxAnchorProofLen is
 // documented equal to this constant and a test in cmd/agenthof pins it).
 const MaxProofLen = 8192

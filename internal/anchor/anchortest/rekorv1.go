@@ -390,10 +390,30 @@ func (f *RekorV1) handle(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/log/entries":
+		if !acceptsJSON(r) {
+			notAcceptable(w)
+			return
+		}
 		f.create(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/log/entries/"):
+		if !acceptsJSON(r) {
+			notAcceptable(w)
+			return
+		}
 		f.get(w, strings.TrimPrefix(r.URL.Path, "/api/v1/log/entries/"))
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/log/publicKey":
+		// The publicKey endpoint produces application/x-pem-file only.
+		// go-swagger content negotiation answers an Accept: application/json
+		// request by JSON-encoding the PEM as a string (which a PEM parser
+		// rejects) — faithfully reproduced so a client that asks for the
+		// wrong media type is caught by the hermetic suite, not only against
+		// the live log.
+		if r.Header.Get("Accept") == "application/json" {
+			w.Header().Set("Content-Type", "application/json")
+			enc, _ := json.Marshal(string(f.PublicKeyPEM()))
+			_, _ = w.Write(enc)
+			return
+		}
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		_, _ = w.Write(f.PublicKeyPEM())
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/log":
@@ -407,6 +427,24 @@ func (f *RekorV1) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, Sentinel)
 	}
+}
+
+// acceptsJSON reports whether the request's Accept header allows the JSON the
+// entries endpoints produce. An absent Accept and */* both pass, matching
+// go-swagger's default negotiation; any other concrete type is refused 406.
+func acceptsJSON(r *http.Request) bool {
+	switch r.Header.Get("Accept") {
+	case "", "application/json", "*/*":
+		return true
+	default:
+		return false
+	}
+}
+
+func notAcceptable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotAcceptable)
+	_, _ = io.WriteString(w, `{"code":406,"message":"not acceptable"}`)
 }
 
 // create validates the hashedrekord (kind, version, sha256 hex, a PEM PKIX
@@ -493,10 +531,14 @@ func corruptBody(body []byte) []byte {
 func (f *RekorV1) get(w http.ResponseWriter, id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	i, ok := f.index[strings.ToLower(id)]
+	i, ok := f.index[id]
 	if !ok || f.forgotten[id] {
+		// Rekor reports a genuinely absent entry with its JSON error body;
+		// this is what makes a 404 a Mismatch rather than "could not check".
+		// A bare/HTML 404 (a decommissioned host) is reached via Fail(404).
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, Sentinel)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": http.StatusNotFound, "message": "entry not found"})
 		return
 	}
 	e, err := f.entry(i)

@@ -187,7 +187,11 @@ func TestRekorVerifyPresenceFailuresAreUnavailable(t *testing.T) {
 	wantUnavailable(t, rk.Verify(ctx, head41, r), "proof verified offline")
 	cancel()
 	f.Reset()
-	for _, status := range []int{500, 302, 401, 501} {
+	// 404 included: a bare 404 (no Rekor JSON error body — a decommissioned
+	// host whose domain still answers, the eventual v1 sunset) is "could not
+	// check", NOT "tampered"; only the log's own {"code":404} error is a
+	// mismatch (pinned in TestRekorVerifyContentIsMismatch via Forget).
+	for _, status := range []int{500, 302, 401, 501, 404} {
 		f.Fail(status)
 		err := rk.Verify(context.Background(), head41, r)
 		wantUnavailable(t, err, "status "+strconv.Itoa(status)+" from")
