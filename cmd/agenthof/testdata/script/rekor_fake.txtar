@@ -1,0 +1,16 @@
+# The per-script Rekor fake: every script gets its own at $REKOR_URL, driven
+# through the rekor command, so the switches of one script never leak into
+# another. rekor pubkey writes the log's current key for pinning; rekor rotate
+# changes it; rekor requests asserts how many requests the fake has seen.
+
+rekor requests 0
+rekor pubkey anchor.pub
+grep 'BEGIN PUBLIC KEY' anchor.pub
+cp anchor.pub before.pub
+rekor rotate
+rekor pubkey anchor.pub
+! cmp anchor.pub before.pub
+rekor posture integrity.yaml
+grep 'anchor: tlog' integrity.yaml
+grep 'url: http://127.0.0.1:' integrity.yaml
+rekor requests 0

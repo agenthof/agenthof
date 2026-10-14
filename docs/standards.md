@@ -45,7 +45,7 @@ say so ([below](#where-agenthof-deliberately-diverges)).
 | Reference | What it is | How Agenthof aligns |
 | --- | --- | --- |
 | [Schneier & Kelsey, *Secure Audit Logs* (1999)](https://www.schneier.com/wp-content/uploads/2016/02/paper-auditlogs.pdf) · [Crosby & Wallach, *Tamper-Evident Logging* (2009)](https://www.usenix.org/legacy/events/sec09/tech/full_papers/crosby.pdf) | The foundational work on append-only, hash-linked audit logs. | The ledger is exactly this: each event carries the SHA-256 of its predecessor; `audit` verifies the chain (Article III). |
-| [RFC 9162, *Certificate Transparency*](https://www.rfc-editor.org/rfc/rfc9162) | The Merkle-tree transparency-log model for proving a log to a third party. | The model for a **reserved** external-anchoring tier — publishing the chain head off-machine so tampering is provable to others, not just detectable locally. Not shipped today. |
+| [RFC 9162, *Certificate Transparency*](https://www.rfc-editor.org/rfc/rfc9162) | The Merkle-tree transparency-log model for proving a log to a third party. | The model for external anchoring of the control-ledger head (`anchor: tlog`, `audit anchor`) — publishing the head to a transparency log so a determined rewrite is provable to others, not just detectable locally. Shipped for the head; a non-erasable storage sink for the whole ledger stays reserved. |
 
 ## Tool / MCP & gateway security
 

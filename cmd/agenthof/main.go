@@ -49,7 +49,8 @@ Usage:
   agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--allow-api-bootstrap] [--addr-file <path>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--max-concurrent-runs <n>] [--shutdown-timeout <dur>] [--log-level ...] [--log-format ...]  (AGENTHOF_OIDC_ISSUER required)
   agenthof audit <run-id> [--log-dir <dir>] [--server <url>] [--token <jwt>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
-  agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
+  agenthof audit verify control [--control-log <path>] [--expect-head <hex>|<seq>:<hex>] [--anchor-key <path>] [--offline] [--anchor-timeout 30s]
+  agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout 30s]  (pins the control-ledger head into the transparency log integrity.yaml names; an authorized control action, recorded whether it succeeded or failed; prints the anchored head and entry to ship off the box)
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
@@ -1228,6 +1229,11 @@ func cmdAudit(args []string, out io.Writer) int {
 	if args[0] == "repair" {
 		return cmdAuditRepairControl(args[1:], out)
 	}
+	// "anchor" is disambiguated the same way: a run id is always "r-<hex>"
+	// (engine.NewRunID), which "anchor" can never match.
+	if args[0] == "anchor" {
+		return cmdAuditAnchor(args[1:], out)
+	}
 	runID := args[0]
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
@@ -1365,24 +1371,37 @@ func cmdAuditControl(args []string, out io.Writer) int {
 }
 
 // cmdAuditVerifyControl implements `audit verify control [--control-log
-// <path>] [--expect-head <hex>]`: the control-ledger counterpart to
-// cmdAuditVerify, reporting the control chain's head and, given
-// --expect-head, comparing it against a previously recorded hash. Exit
-// codes, checked in this order (spec §3.6): 1 for a missing control log
-// or any other open/IO failure; 1 for a torn/broken chain; 3 when the
-// chain is tainted (control.IsTainted — a "repair" record was ever
-// appended), which takes precedence over an --expect-head mismatch; 4
-// for an --expect-head mismatch (hash only — count is informational);
-// 5 when the installed pointer (<dir of --control-log>/installed/current)
-// does not name the last recorded install (the last successful apply or
-// kill-switch flip — control.Installing) — an install whose event was never
-// appended, or whose record was lost — checked last; 0 otherwise.
+// <path>] [--expect-head <hex>|<seq>:<hex>]`: the control-ledger counterpart
+// to cmdAuditVerify. It computes EVERYTHING, prints every line, and only then
+// picks the exit by precedence — unlike a check that returns at the first
+// verdict, a repaired root still shows an --expect-head mismatch and a
+// pointer mismatch. A missing log, any other open/IO failure, and a
+// torn/broken chain exit 1 first and stop: such a chain has no positions to
+// reproduce heads at. Every recorded anchor is then checked (verifyAnchors:
+// the structural check, then the stored proof under the pinned log key, then
+// a presence check unless --offline) and its line printed. Then, in
+// precedence order: 6 an anchor disagrees with the chain or the log; 3 tainted (control.IsTainted
+// — a "repair" record was ever appended); 4 --expect-head did not hold
+// (either form: <hex> is the current head, <seq>:<hex> is the head the chain
+// must reproduce at seq); 5 the installed pointer
+// (<dir of --control-log>/installed/current) does not name the last recorded
+// install (control.Installing) — an install whose event was never appended,
+// or whose record was lost; 7 an anchor could not be decided (an unreachable
+// log, a key the verifier does not hold) — never a tamper verdict, and
+// outranked by every definitive one; 0 otherwise; 2 usage.
 func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit verify control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
-	expectHead := fs.String("expect-head", "", "expected control ledger head hash (hex) to verify against")
+	expectHead := fs.String("expect-head", "", "expected control ledger head: <hex> (the current head) or <seq>:<hex> (the head the chain must reproduce at seq)")
+	anchorKey := fs.String("anchor-key", "", "pin the transparency log's checkpoint key at this path (PEM, ECDSA P-256) instead of anchor.pub beside the ledger; absent or unreadable fails closed")
+	offline := fs.Bool("offline", false, "verify anchors from their stored proofs only: no served-key fetch, no presence check (needs a pinned key)")
+	anchorTimeout := fs.Duration("anchor-timeout", 30*time.Second, "per-anchor bound on the log calls made while verifying anchors")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *expectHead != "" && !expectHeadRE.MatchString(*expectHead) {
+		_, _ = fmt.Fprintln(out, "audit verify control: --expect-head must be <hex> or <seq>:<hex> (64 lowercase hex)")
 		return 2
 	}
 	records, head, err := ledger.ReadVerify(*controlLog, ledger.Locked)
@@ -1404,18 +1423,31 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
-	line, mismatch := installedPointerLine(*controlLog, records)
+	line, pointerMismatch := installedPointerLine(*controlLog, records)
 	_, _ = fmt.Fprint(out, line)
-	if tainted, seq := control.IsTainted(records); tainted {
-		_, _ = fmt.Fprintf(out, "control ledger TAINTED: repaired at seq %d\n", seq)
+	anchors := verifyAnchors(*controlLog, records, *anchorKey, *offline, *anchorTimeout, out)
+	tainted, taintSeq := control.IsTainted(records)
+	if tainted {
+		_, _ = fmt.Fprintf(out, "control ledger TAINTED: repaired at seq %d\n", taintSeq)
+	}
+	expectFailed := false
+	if *expectHead != "" {
+		if msg := expectHeadMismatch(*expectHead, records, head); msg != "" {
+			_, _ = fmt.Fprintln(out, msg)
+			expectFailed = true
+		}
+	}
+	switch {
+	case anchors.mismatch > 0:
+		return exitAnchorMismatch
+	case tainted:
 		return 3
-	}
-	if *expectHead != "" && *expectHead != head.Hash {
-		_, _ = fmt.Fprintf(out, "expect-head mismatch: want %s, got %s\n", *expectHead, head.Hash)
+	case expectFailed:
 		return 4
-	}
-	if mismatch {
+	case pointerMismatch:
 		return exitInstalledMismatch
+	case anchors.unverifiable > 0:
+		return exitAnchorUnverifiable
 	}
 	return 0
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -20,12 +21,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/anchor/anchortest"
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/identity/oidctest"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rogpeppe/go-internal/testscript"
 )
+
+// rekorKey keys a script's own Rekor fake in its testscript Env.
+type rekorKey struct{}
 
 func TestMain(m *testing.M) {
 	// Lock-holder helper for the cross-process busy tests (apply_test.go,
@@ -141,6 +147,14 @@ func TestScript(t *testing.T) {
 			e.Setenv("LITELLM_MASTER_KEY", "")
 			e.Setenv("OIDC_ISSUER", oidcSrv.URL)
 			e.Setenv("OIDC_TOKEN", oidcToken)
+			// One Rekor fake per script, so a script's switches (stop, rotate,
+			// fail) never race another script running in parallel. Its URL
+			// travels as $REKOR_URL; the fake itself rides in e.Values for the
+			// rekor command below.
+			fake := anchortest.NewRekorV1()
+			e.Defer(fake.Close)
+			e.Values[rekorKey{}] = fake
+			e.Setenv("REKOR_URL", fake.URL)
 			if err := copyDir(filepath.Join("..", "..", "examples", "config"),
 				filepath.Join(e.WorkDir, "examples", "config")); err != nil {
 				return err
@@ -324,6 +338,121 @@ func TestScript(t *testing.T) {
 				var line [5]byte
 				if _, err := io.ReadFull(stdout, line[:]); err != nil || string(line[:]) != "held\n" {
 					ts.Fatalf("lock holder never reported held: %q %v", line[:], err)
+				}
+			},
+			// rekor <switch> [arg]: drives this script's Rekor fake.
+			//   fail <status> | corruptnext | drop | stop | start | rotate |
+			//   corrupt <ref> | forget <ref> | cosign | hostname <s> | reset |
+			//   requests <n> (asserts the fake saw exactly n requests) |
+			//   pubkey <path> (writes the current key PEM for pinning) |
+			//   posture <path> [clientcreds] (writes a tlog integrity.yaml naming the fake)
+			"rekor": func(ts *testscript.TestScript, neg bool, args []string) {
+				fake, _ := ts.Value(rekorKey{}).(*anchortest.RekorV1)
+				if fake == nil || len(args) == 0 {
+					ts.Fatalf("usage: rekor <switch> [arg]")
+				}
+				arg := func() string {
+					if len(args) != 2 {
+						ts.Fatalf("rekor %s needs one argument", args[0])
+					}
+					return args[1]
+				}
+				switch args[0] {
+				case "fail":
+					n, err := strconv.Atoi(arg())
+					ts.Check(err)
+					fake.Fail(n)
+				case "corruptnext":
+					fake.CorruptNext()
+				case "drop":
+					fake.Drop()
+				case "stop":
+					fake.Stop()
+				case "start":
+					fake.Start()
+				case "rotate":
+					fake.RotateKey()
+				case "corrupt":
+					fake.Corrupt(arg())
+				case "forget":
+					fake.Forget(arg())
+				case "cosign":
+					fake.Cosign()
+				case "hostname":
+					fake.SetHostname(arg())
+				case "reset":
+					fake.Reset()
+				case "requests":
+					n, err := strconv.Atoi(arg())
+					ts.Check(err)
+					if got := fake.Requests(); len(got) != n {
+						ts.Fatalf("fake saw %d requests, want %d: %v", len(got), n, got)
+					}
+				case "pubkey":
+					ts.Check(os.WriteFile(ts.MkAbs(arg()), fake.PublicKeyPEM(), 0o600))
+				case "posture":
+					body := "anchor: tlog\nanchor_backend:\n  url: " + fake.URL + "\n"
+					if len(args) == 3 && args[2] == "clientcreds" {
+						body += "  credential:\n    grant_type: client_credentials\n    client_auth: client_secret_basic\n    token_endpoint: " + fake.URL + "/token\n    client_id_env: ANCHOR_CLIENT_ID\n    client_secret_env: ANCHOR_CLIENT_SECRET\n"
+					}
+					ts.Check(os.WriteFile(ts.MkAbs(args[1]), []byte(body), 0o600))
+				default:
+					ts.Fatalf("unknown rekor switch %q", args[0])
+				}
+			},
+			// reforge <control-log> <seq>: rewrites records seq..N so the chain
+			// stays valid but every head from seq on differs — the whole-root
+			// rewrite anchoring exists to expose. The witness is replaced and
+			// prev recomputed; seq and every other field are kept.
+			"reforge": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 2 {
+					ts.Fatalf("usage: reforge <control-log> <seq>")
+				}
+				from, err := strconv.Atoi(args[1])
+				ts.Check(err)
+				path := ts.MkAbs(args[0])
+				recs, _, err := ledger.ReadVerify(path, ledger.Unlocked)
+				ts.Check(err)
+				var out bytes.Buffer
+				prev := ""
+				for i, r := range recs {
+					raw := r.Raw
+					if i+1 >= from {
+						var m map[string]any
+						ts.Check(json.Unmarshal(raw, &m))
+						m["prev"] = prev
+						m["witness"] = map[string]any{"os_user": "forger", "hostname": "elsewhere"}
+						raw, err = json.Marshal(m)
+						ts.Check(err)
+					}
+					out.Write(raw)
+					out.WriteByte('\n')
+					sum := sha256.Sum256(raw)
+					prev = hex.EncodeToString(sum[:])
+				}
+				ts.Check(os.WriteFile(path, out.Bytes(), 0o600))
+			},
+			// anchorref <control-log>: exports the last successful anchor's ref,
+			// covered seq and hash as $REF, $ASEQ, $AHASH.
+			"anchorref": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 1 {
+					ts.Fatalf("usage: anchorref <control-log>")
+				}
+				recs, _, err := ledger.ReadVerify(ts.MkAbs(args[0]), ledger.Unlocked)
+				ts.Check(err)
+				found := false
+				for _, r := range recs {
+					d, err := control.Decode(r.Raw)
+					if err != nil || d.Action != "anchor" || d.Outcome != "success" || d.Anchor == nil {
+						continue
+					}
+					ts.Setenv("REF", d.Anchor.Ref)
+					ts.Setenv("ASEQ", strconv.Itoa(d.Anchor.Seq))
+					ts.Setenv("AHASH", d.Anchor.Hash)
+					found = true
+				}
+				if !found {
+					ts.Fatalf("no successful anchor in %s", args[0])
 				}
 			},
 		},

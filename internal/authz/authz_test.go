@@ -86,7 +86,7 @@ func TestControlAllows(t *testing.T) {
 }
 
 func TestControlOpsFixedSet(t *testing.T) {
-	for _, op := range []string{"apply", "enable", "disable", "repair", "provision", "prune", "pull"} {
+	for _, op := range []string{"apply", "enable", "disable", "repair", "provision", "prune", "pull", "anchor"} {
 		if !KnownControlOp(op) {
 			t.Fatalf("%q must be a control op", op)
 		}
@@ -95,6 +95,29 @@ func TestControlOpsFixedSet(t *testing.T) {
 		if KnownControlOp(op) {
 			t.Fatalf("%q must not be a control op", op)
 		}
+	}
+}
+
+// TestControlAllowsAnchor: the eighth operation is granted exactly like the
+// other seven — membership AND grant; a public role grants no anchor; a
+// grant of apply does not imply it; vouch is still not an operation.
+func TestControlAllowsAnchor(t *testing.T) {
+	inv := identity.Invoker{Subject: "dana@example.com", Groups: []string{"platform-eng"}}
+	granting := []config.RoleDef{{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"anchor"}}}
+	if !ControlAllows(granting, inv, "anchor") {
+		t.Fatal("membership AND grant must allow anchor")
+	}
+	if ControlAllows([]config.RoleDef{{Name: "ops", AllowedGroups: []string{"finance"}, Control: []string{"anchor"}}}, inv, "anchor") {
+		t.Fatal("grant without membership must deny")
+	}
+	if ControlAllows([]config.RoleDef{{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"apply", "prune"}}}, inv, "anchor") {
+		t.Fatal("apply and prune do not imply anchor")
+	}
+	if ControlAllows([]config.RoleDef{{Name: "pub", AllowedGroups: []string{"*"}, Control: []string{"anchor"}}}, inv, "anchor") {
+		t.Fatal("a public role grants no control operation")
+	}
+	if KnownControlOp("vouch") {
+		t.Fatal("vouch is not a grantable operation")
 	}
 }
 

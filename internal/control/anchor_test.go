@@ -1,6 +1,7 @@
 package control_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -80,45 +81,134 @@ func TestDecodeAnchorPayload(t *testing.T) {
 	}
 }
 
-// TestAppendRefusesAnchorRecords: never emitted, by construction. The
-// refusal lands before ledger.Open — on a fresh root no file and no genesis
-// appear — and before the reason rule, so an anchor is always refused as an
-// anchor; a payload on any other action is refused the same way and leaves
-// an existing ledger byte-identical.
-func TestAppendRefusesAnchorRecords(t *testing.T) {
-	const want = "control: anchor records are reserved; nothing anchors in this build"
-	p := filepath.Join(t.TempDir(), "control.jsonl")
-	inv := identity.Static("dana@example.com")
-	w := control.CaptureWitness()
-	for name, e := range map[string]control.Event{
-		"anchor success with payload": {Action: "anchor", Outcome: "success", Invoker: inv, Witness: w, Anchor: &control.Anchor{Seq: 1, Hash: coveredHash, Kind: "tlog", Ref: "1"}},
-		"anchor success no payload":   {Action: "anchor", Outcome: "success", Invoker: inv, Witness: w},
-		"anchor error without reason": {Action: "anchor", Outcome: "error", Invoker: inv, Witness: w},
-	} {
-		if _, err := control.Append(p, e); err == nil || err.Error() != want {
-			t.Fatalf("%s: err = %v, want %q", name, err, want)
-		}
-	}
-	if _, err := os.Stat(p); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("a refused anchor must create no file: stat err = %v", err)
-	}
+// goodAnchor is a complete success payload covering seq 1.
+func goodAnchor() *control.Anchor {
+	return &control.Anchor{Seq: 1, Hash: coveredHash, Kind: "tlog", BackendKind: "transparency-log", Backend: "https://rekor.sigstore.dev",
+		Ref: strings.Repeat("0", 16) + strings.Repeat("ab", 32), Proof: "AQID", BackendKeyID: strings.Repeat("cd", 32)}
+}
 
+// appliedLedger returns a ledger with one apply record and the invoker/witness
+// every test uses.
+func appliedLedger(t *testing.T) (string, identity.Invoker, control.Witness) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
 	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc"}); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
+	return p, inv, w
+}
+
+// TestAppendAcceptsAValidAnchor: a success anchor with a full payload, an
+// error anchor with the covered head only, and a refused anchor with no
+// payload each append; the payload round-trips field for field with
+// backend_key_id last inside "anchor"; the record installs nothing.
+func TestAppendAcceptsAValidAnchor(t *testing.T) {
+	p, inv, w := appliedLedger(t)
+	head, err := control.Append(p, control.Event{Action: "anchor", Outcome: "success", Invoker: inv, Witness: w, Anchor: goodAnchor()})
+	if err != nil || head.Count != 2 {
+		t.Fatalf("success: %v %+v", err, head)
 	}
-	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc", Anchor: &control.Anchor{}}); err == nil || err.Error() != want {
-		t.Fatalf("a payload on another action: err = %v, want %q", err, want)
+	if _, err := control.Append(p, control.Event{Action: "anchor", Outcome: "error", Reason: &control.Reason{Code: control.CodeAnchorFailed, Message: "status 501 from rekor.test"},
+		Invoker: inv, Witness: w, Anchor: &control.Anchor{Seq: 2, Hash: coveredHash, Kind: "tlog", BackendKind: "transparency-log", Backend: "https://rekor.sigstore.dev"}}); err != nil {
+		t.Fatalf("error: %v", err)
 	}
-	after, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := control.Append(p, control.Event{Action: "anchor", Outcome: "refused", Reason: control.NotAuthorized("anchor"), Invoker: inv, Witness: w}); err != nil {
+		t.Fatalf("refused: %v", err)
 	}
-	if string(before) != string(after) {
-		t.Fatal("a refused append must leave the ledger byte-identical")
+	recs, _, err := ledger.ReadVerify(p, ledger.Locked)
+	if err != nil || len(recs) != 4 {
+		t.Fatalf("%v %d", err, len(recs))
+	}
+	d, err := control.Decode(recs[1].Raw)
+	if err != nil || !reflect.DeepEqual(d.Anchor, goodAnchor()) {
+		t.Fatalf("round trip: %+v %v", d.Anchor, err)
+	}
+	if want := `"anchor":{"seq":1,"hash":"` + coveredHash + `","kind":"tlog","backend_kind":"transparency-log","backend":"https://rekor.sigstore.dev","ref":"` + goodAnchor().Ref + `","proof":"AQID","backend_key_id":"` + strings.Repeat("cd", 32) + `"},"prev":"`; !strings.Contains(string(recs[1].Raw), want) {
+		t.Fatalf("wire:\n%s\nwant %s", recs[1].Raw, want)
+	}
+	if strings.Contains(string(recs[3].Raw), `"anchor":`) {
+		t.Fatalf("a refused anchor carries no payload: %s", recs[3].Raw)
+	}
+	if last, ok := control.LastInstalling(recs); !ok || last.Seq != 1 {
+		t.Fatalf("an anchor never installs: %+v %v", last, ok)
+	}
+}
+
+// TestAppendRefusesMalformedAnchors: each permit violation
+// is refused with its exact text; every refusal appends nothing.
+func TestAppendRefusesMalformedAnchors(t *testing.T) {
+	p, inv, w := appliedLedger(t)
+	before, _ := os.ReadFile(p)
+	ok := control.Event{Action: "anchor", Outcome: "success", Invoker: inv, Witness: w}
+	with := func(mut func(a *control.Anchor)) control.Event {
+		e := ok
+		a := goodAnchor()
+		mut(a)
+		e.Anchor = a
+		return e
+	}
+	cases := map[string]struct {
+		e    control.Event
+		want string
+	}{
+		"payload on apply":        {control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc", Anchor: &control.Anchor{}}, `control: anchor payload on a "apply" record`},
+		"success without payload": {ok, "control: a successful anchor must say what it covers"},
+		"refused with payload":    {control.Event{Action: "anchor", Outcome: "refused", Reason: control.NotAuthorized("anchor"), Invoker: inv, Witness: w, Anchor: goodAnchor()}, "control: a refused anchor tried nothing and covers nothing"},
+		"config_hash":             {func() control.Event { e := with(func(*control.Anchor) {}); e.ConfigHash = "sha256:abc"; return e }(), "control: an anchor installs nothing and carries no config_hash"},
+		"bad hex":                 {with(func(a *control.Anchor) { a.Hash = "ABCD" }), `control: anchor hash "ABCD" is not a lowercase hex sha256`},
+		"proof over cap":          {with(func(a *control.Anchor) { a.Proof = strings.Repeat("A", control.MaxAnchorProofLen+1) }), "control: anchor proof is 8193 bytes; the cap is 8192"},
+		"seq 0":                   {with(func(a *control.Anchor) { a.Seq = 0 }), "control: anchor covers seq 0 but the chain has 1 records"},
+		"seq count+1":             {with(func(a *control.Anchor) { a.Seq = 2 }), "control: anchor covers seq 2 but the chain has 1 records"},
+		"kind missing":            {with(func(a *control.Anchor) { a.Kind = "" }), "control: successful anchor record is incomplete (kind)"},
+		"kind unknown":            {with(func(a *control.Anchor) { a.Kind = "tsa" }), `control: anchor kind "tsa" is not tlog or signed`},
+		"backend_kind missing":    {with(func(a *control.Anchor) { a.BackendKind = "" }), "control: successful anchor record is incomplete (backend_kind)"},
+		"backend missing":         {with(func(a *control.Anchor) { a.Backend = "" }), "control: successful anchor record is incomplete (backend)"},
+		"ref missing":             {with(func(a *control.Anchor) { a.Ref = "" }), "control: successful anchor record is incomplete (ref)"},
+		"proof missing":           {with(func(a *control.Anchor) { a.Proof = "" }), "control: successful anchor record is incomplete (proof)"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := control.Append(p, c.e); err == nil || err.Error() != c.want {
+				t.Fatalf("err = %v, want %q", err, c.want)
+			}
+			after, _ := os.ReadFile(p)
+			if !bytes.Equal(before, after) {
+				t.Fatal("a refused append must leave the ledger byte-identical")
+			}
+		})
+	}
+	// seq = Count is accepted (the head itself).
+	if _, err := control.Append(p, with(func(a *control.Anchor) { a.Seq = 1 })); err != nil {
+		t.Fatalf("seq == count: %v", err)
+	}
+}
+
+// TestAppendAnchorRefusalLeavesTheLedgerUnchanged: on a FRESH root a pre-Open
+// refusal (a malformed payload) leaves no file; a post-Open refusal (seq out
+// of range on an empty chain) leaves an empty file and no record — "unchanged"
+// is "no record appended", never "no file".
+func TestAppendAnchorRefusalLeavesTheLedgerUnchanged(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
+	bad := goodAnchor()
+	bad.Hash = "nope"
+	if _, err := control.Append(p, control.Event{Action: "anchor", Outcome: "success", Invoker: inv, Witness: w, Anchor: bad}); err == nil {
+		t.Fatal("want refusal")
+	}
+	if _, err := os.Stat(p); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a pre-Open refusal must create no file: %v", err)
+	}
+	if _, err := control.Append(p, control.Event{Action: "anchor", Outcome: "success", Invoker: inv, Witness: w, Anchor: goodAnchor()}); err == nil || err.Error() != "control: anchor covers seq 1 but the chain has 0 records" {
+		t.Fatalf("err = %v", err)
+	}
+	info, err := os.Stat(p)
+	if err != nil || info.Size() != 0 {
+		t.Fatalf("a post-Open refusal on a fresh root leaves an empty file: %v", err)
+	}
+	recs, head, err := ledger.ReadVerify(p, ledger.Locked)
+	if err != nil || len(recs) != 0 || head.Count != 0 {
+		t.Fatalf("no record may be appended: %v %d", err, len(recs))
 	}
 }
 

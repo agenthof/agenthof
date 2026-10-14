@@ -1,0 +1,171 @@
+# audit verify control checks every anchor the chain records — offline from the
+# stored proof under the pinned log key, then a non-load-bearing presence check
+# — with an honest split: 6 is a content disagreement, 7 is "could not decide".
+# It computes every verdict, prints every line, then picks the exit by
+# precedence 1, 6, 3, 4, 5, 7. It never reads integrity.yaml.
+
+exec agenthof apply --config config --control-log control.jsonl --as dana@example.com --groups platform-eng
+cp installed/current current.bak
+rekor posture integrity.yaml
+rekor pubkey anchor.pub
+
+# No anchors yet: a note, not a verdict.
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'anchors: none \(if this root is meant to be anchored — integrity.yaml anchor: tlog — run: agenthof audit anchor\)'
+
+exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'anchored: seq=1 sha256=[0-9a-f]{64}'
+anchorref control.jsonl
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'anchor seq 1 [0-9a-f]{64} → http://127\.0\.0\.1:[0-9]+ entry [0-9a-f]{80}: verified \(log key pinned\)'
+stdout 'anchors: 1 \(1 verified, 0 mismatch, 0 unverifiable\)'
+cp control.jsonl good.jsonl
+
+# Whole-root rewrite from the anchored seq: the chain is valid, the anchor
+# record says H_1, the chain no longer reproduces it → 6, with --offline too.
+reforge control.jsonl 1
+! exec agenthof audit verify control --control-log control.jsonl
+stdout 'control head: seq=2'
+stdout 'anchor seq 1 [0-9a-f]{64} → .*: MISMATCH — the chain does not reproduce the recorded head at seq 1'
+stdout 'anchors: 1 \(0 verified, 1 mismatch, 0 unverifiable\)'
+! exec agenthof audit verify control --control-log control.jsonl --offline
+stdout 'MISMATCH'
+cp good.jsonl control.jsonl
+
+# The off-box reference: the anchored: line IS a verifier input.
+exec agenthof audit verify control --control-log control.jsonl --expect-head $ASEQ:$AHASH
+reforge control.jsonl 1
+! exec agenthof audit verify control --control-log control.jsonl --expect-head $ASEQ:$AHASH
+stdout 'expect-head mismatch: want '$AHASH' at seq 1, got [0-9a-f]{64}'
+cp good.jsonl control.jsonl
+
+# Presence disagreements under the pinned key are 6.
+rekor corrupt $REF
+! exec agenthof audit verify control --control-log control.jsonl
+stdout 'MISMATCH — log serves a different body for the recorded entry'
+rekor reset
+# A forgotten entry answers 404 — but a 404 is "could not check" (Rekor v1
+# cannot tell a genuinely absent entry from a vanished route), never tampering;
+# the run is a 7, and never MISMATCH.
+rekor forget $REF
+! exec agenthof audit verify control --control-log control.jsonl
+stdout 'unverifiable — status 404 from 127\.0\.0\.1:[0-9]+ \(proof verified offline; presence not checked\)'
+! stdout 'MISMATCH'
+rekor reset
+
+# Key identity is 7, never 6: the log rotates; the operator pins the NEW key;
+# the stored checkpoint is under the old one.
+rekor rotate
+rekor pubkey anchor.pub
+! exec agenthof audit verify control --control-log control.jsonl
+stdout 'unverifiable — log key differs from the pinned key — update anchor.pub, or pass --anchor-key, to decide'
+! stdout 'MISMATCH'
+stdout 'anchors: 1 \(0 verified, 0 mismatch, 1 unverifiable\)'
+# Unpinned after the rotation: the served key is not the recorded one → 7.
+rm anchor.pub
+! exec agenthof audit verify control --control-log control.jsonl
+stdout 'unverifiable — log key differs from the key recorded at anchor time — pin a key to decide'
+# Unpinned and offline: nothing to verify under → 7.
+! exec agenthof audit verify control --control-log control.jsonl --offline
+stdout 'unverifiable — no key to verify under \(unpinned, offline\)'
+
+# The pinned key that signed, with the log STOPPED: offline → 0 (the stored
+# proof decides); online → 7 whose line says the proof verified offline.
+rekor pubkey new.pub
+cp control.jsonl rotated.jsonl
+exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+cp new.pub anchor.pub
+rekor stop
+# Anchor 2 verifies offline under the pinned (new) key; anchor 1, signed by
+# the old key, is unverifiable — so the run is a 7, with the 0-worthy line
+# printed for seq 2.
+! exec agenthof audit verify control --control-log control.jsonl --offline
+stdout 'anchor seq 2 .*: verified \(log key pinned; offline: presence not checked\)'
+stdout 'anchor seq 1 .*: unverifiable — log key differs from the pinned key'
+! exec agenthof audit verify control --control-log control.jsonl
+stdout 'anchor seq 2 .*: unverifiable — 127\.0\.0\.1:[0-9]+: .* \(proof verified offline; presence not checked\)'
+! stdout 'MISMATCH'
+! stdout 'tamper'
+
+# Definitive beats transient: with the log stopped, a hand-moved pointer still
+# reports its verdict beside the unverifiable anchors (exit 5, pinned by the
+# in-process test), and a wrong --expect-head its mismatch (exit 4).
+exec sh -c 'printf "sha256:%064d\n" 0 > installed/current'
+! exec agenthof audit verify control --control-log control.jsonl
+stdout 'unverifiable'
+stdout 'does NOT match the last recorded install'
+cp current.bak installed/current
+! exec agenthof audit verify control --control-log control.jsonl --expect-head 0000000000000000000000000000000000000000000000000000000000000000
+stdout 'unverifiable'
+stdout 'expect-head mismatch: want 0000000000000000000000000000000000000000000000000000000000000000, got [0-9a-f]{64}'
+rekor start
+
+# --anchor-key: a second-machine pin without planting a file beside the ledger.
+# Anchor 1 was signed under the old key, so every run under new.pub is a 7
+# (anchor 2 verified, anchor 1 undecidable): the exits below are `! exec`.
+rm anchor.pub
+! exec agenthof audit verify control --control-log control.jsonl --anchor-key new.pub --offline
+stdout 'anchor seq 2 .*: verified \(log key pinned; offline: presence not checked\)'
+! exec agenthof audit verify control --control-log control.jsonl --anchor-key missing.pub --offline
+stdout 'unverifiable — pinned log key .*missing.pub: '
+exec sh -c 'printf "garbage" > bad.pub'
+! exec agenthof audit verify control --control-log control.jsonl --anchor-key bad.pub --offline
+stdout 'unverifiable — pinned log key .*bad.pub: not a PEM PUBLIC KEY block'
+
+# Posture-blind: the file may say anything, or be gone; the verdicts and the
+# output are byte-identical.
+! exec agenthof audit verify control --control-log control.jsonl --anchor-key new.pub --offline
+cp stdout with-posture.txt
+rm integrity.yaml
+! exec agenthof audit verify control --control-log control.jsonl --anchor-key new.pub --offline
+cmp stdout with-posture.txt
+exec sh -c 'printf "anchor: none\n" > integrity.yaml'
+! exec agenthof audit verify control --control-log control.jsonl --anchor-key new.pub --offline
+cmp stdout with-posture.txt
+exec sh -c 'printf "{{garbage" > integrity.yaml'
+! exec agenthof audit verify control --control-log control.jsonl --anchor-key new.pub --offline
+cmp stdout with-posture.txt
+! stdout 'integrity'
+
+# No network unasked: writers and --offline readers never contact the log.
+rekor reset
+rekor posture integrity.yaml
+exec agenthof registry disable planner --config config --control-log control.jsonl --as dana@example.com --groups platform-eng
+exec agenthof registry enable planner --config config --control-log control.jsonl --as dana@example.com --groups platform-eng
+exec agenthof runs prune --older-than 180d --log-dir runs --control-log control.jsonl --as dana@example.com --groups platform-eng
+exec agenthof audit control --control-log control.jsonl
+exec agenthof investigate --log-dir runs --control-log control.jsonl
+! exec agenthof audit verify control --control-log control.jsonl --anchor-key new.pub --offline
+rekor requests 0
+
+# A torn chain exits 1 before any anchor is touched: no anchor line, no request.
+exec sh -c 'printf ''{"v":"control/1","seq":9,"partial'' >> control.jsonl'
+! exec agenthof audit verify control --control-log control.jsonl --anchor-key new.pub
+stdout 'ledger torn'
+! stdout 'anchor seq'
+rekor requests 0
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, prune, anchor]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

@@ -252,11 +252,17 @@ exact flags and exit codes.
 
 The control log's integrity posture — where its bytes live, and whether its
 head is pinned to an off-machine anchor — is declared in an `integrity.yaml`
-beside the control log (not a run's log); absent means the default. The only
-posture this build honours is the local hash-chained file described here (sink
-`local`, anchor `none`); the stronger external tiers are named but reserved —
-refused when a control write or `serve` startup reads them, never silently
-treated as this floor.
+beside the control log (not a run's log); absent means the default, the local
+hash-chained file described here (sink `local`, anchor `none`). Setting
+`anchor: tlog` turns on external anchoring: `agenthof audit anchor` pins the
+current head into a transparency log you name, and `audit verify control` then
+checks every recorded anchor against the chain — so a determined whole-root
+rewrite becomes detectable by a third party, not just locally, within the
+bounds Article III states (independence holds only when the log's key and
+address do not both come from the root being verified; an unreachable log or a
+rotated key reads as unverifiable, never as tampering). The stronger storage
+tiers (`sink: worm`/`external`) and `anchor: signed` are named but reserved —
+refused, never silently treated as the floor.
 
 The default path is `.agenthof/control.jsonl`, resolved relative to the
 current working directory — run
