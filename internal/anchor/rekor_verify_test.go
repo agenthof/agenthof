@@ -58,7 +58,7 @@ func wantUnavailable(t *testing.T, err error, cause string) {
 	}
 }
 
-// TestRekorVerifyPassesAndInformational (spec test 6): happy path pinned → nil;
+// TestRekorVerifyPassesAndInformational: happy path pinned → nil;
 // unpinned online → nil; a renamed origin → nil (hostname is informational);
 // a cosigned checkpoint → nil; Offline under the pinned key with the fake
 // STOPPED → nil (the stored proof decides).
@@ -93,7 +93,7 @@ func TestRekorVerifyPassesAndInformational(t *testing.T) {
 	}
 }
 
-// TestRekorVerifyKeyIdentityIsUnavailable (spec test 4, Review Focus 1): a
+// TestRekorVerifyKeyIdentityIsUnavailable: a
 // pinned key other than the signer; unpinned after RotateKey (served id ≠
 // recorded); unpinned with the publicKey endpoint failing; unpinned Offline.
 func TestRekorVerifyKeyIdentityIsUnavailable(t *testing.T) {
@@ -110,7 +110,7 @@ func TestRekorVerifyKeyIdentityIsUnavailable(t *testing.T) {
 	wantUnavailable(t, newRekor(t, f, anchor.RekorOptions{Offline: true}).Verify(context.Background(), head41, r), "no key to verify under")
 }
 
-// TestRekorVerifyContentIsMismatch (spec test 5): every content disagreement
+// TestRekorVerifyContentIsMismatch: every content disagreement
 // under the correct pinned key is *Mismatch.
 func TestRekorVerifyContentIsMismatch(t *testing.T) {
 	f, r, _ := anchored(t, anchor.RekorOptions{})
@@ -172,7 +172,7 @@ func TestRekorVerifyContentIsMismatch(t *testing.T) {
 	wantMismatch(t, online.Verify(ctx, head41, r), "log serves a different body")
 }
 
-// TestRekorVerifyPresenceFailuresAreUnavailable (spec test 7, Review Focus 2):
+// TestRekorVerifyPresenceFailuresAreUnavailable:
 // with the proof verified offline under the pinned key, a dropped connection,
 // a timeout, a 500, a 302 and a non-JSON 200 on the presence check are each
 // *Unavailable whose cause says the proof verified offline.
@@ -207,7 +207,7 @@ func TestRekorVerifyPresenceFailuresAreUnavailable(t *testing.T) {
 	}
 }
 
-// TestRekorVerifyRejectsHostileRecordFields (Review Focus 3): fields a hostile
+// TestRekorVerifyRejectsHostileRecordFields: fields a hostile
 // ledger could plant never panic and never reach a host the record did not
 // name — a ref that is not 80 hex, a proof that is not base64 or not JSON, an
 // envelope version this build does not read, a backend URL that is not an
@@ -257,7 +257,7 @@ func TestRekorServedKey(t *testing.T) {
 	}
 }
 
-// TestBackendAsymmetry (spec test 9): one caller, two implementers — a Ref
+// TestBackendAsymmetry: one caller, two implementers — a Ref
 // that is a live locator with a key identity, and a Ref that is a digest with
 // none — both carrying Proof, both verified by the same code.
 func TestBackendAsymmetry(t *testing.T) {

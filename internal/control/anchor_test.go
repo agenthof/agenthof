@@ -135,7 +135,7 @@ func TestAppendAcceptsAValidAnchor(t *testing.T) {
 	}
 }
 
-// TestAppendRefusesMalformedAnchors (Review Focus 4): each permit violation
+// TestAppendRefusesMalformedAnchors: each permit violation
 // is refused with its exact text; every refusal appends nothing.
 func TestAppendRefusesMalformedAnchors(t *testing.T) {
 	p, inv, w := appliedLedger(t)

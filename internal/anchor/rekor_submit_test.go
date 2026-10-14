@@ -98,7 +98,7 @@ func (rc *recorder) HugeNext(n int) {
 	rc.mu.Unlock()
 }
 
-// TestRekorSubmitHappyPath (spec test 1): Ref is treeID ‖ HashLeaf(body) in 80
+// TestRekorSubmitHappyPath: Ref is treeID ‖ HashLeaf(body) in 80
 // lowercase hex; Proof decodes as a rekor-v1-proof/1 envelope whose body,
 // hashes and checkpoint are what the fake served; BackendKeyID is the fake's
 // key id; IntegratedTime/LogIndex as served; Backend is the URL as given; the
@@ -173,7 +173,7 @@ func TestRekorSubmitHappyPath(t *testing.T) {
 	}
 }
 
-// TestRekorSubmitVerifiesBeforeReturning (spec test 2): a 201 whose body does
+// TestRekorSubmitVerifiesBeforeReturning: a 201 whose body does
 // not hash to its entry id is an error and no Receipt; with a pinned key and
 // the log signing under another key, an error naming the pinned-key fix.
 func TestRekorSubmitVerifiesBeforeReturning(t *testing.T) {
@@ -194,7 +194,7 @@ func TestRekorSubmitVerifiesBeforeReturning(t *testing.T) {
 	}
 }
 
-// TestRekorSubmitFailuresClassifiedIdentically (spec test 3): every non-201 is
+// TestRekorSubmitFailuresClassifiedIdentically: every non-201 is
 // "status N from <host>" with nothing from the response; a dropped connection
 // and a timeout are errors; a proof over MaxProofLen is refused.
 func TestRekorSubmitFailuresClassifiedIdentically(t *testing.T) {
@@ -233,7 +233,7 @@ func TestRekorSubmitFailuresClassifiedIdentically(t *testing.T) {
 	}
 }
 
-// TestRekorHTTPHygiene (Review Focus 3): NewRekor refuses a URL that is not an
+// TestRekorHTTPHygiene: NewRekor refuses a URL that is not an
 // absolute http(s) URL without credentials, query or fragment; trims one
 // trailing slash; never follows a redirect (a 302 is "status 302"); sends
 // Accept: application/json and Authorization only when a bearer is given;
