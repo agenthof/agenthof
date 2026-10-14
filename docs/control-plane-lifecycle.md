@@ -908,6 +908,23 @@ the other:
 
 Both are in the exit-code table in [`reference/config.md`](reference/config.md).
 
+`agenthof investigate` shows the same thing in its timeline, so an incident
+read does not need a second command: every `anchor` event that recorded what
+it tried carries its facts (the covered `seq:hash`, the log, the entry; a
+refused attempt recorded none) and, on a success record, the verdict
+`audit verify control --offline` reaches under the same pin — `verified`,
+`mismatch` or `unverifiable` — from the records alone, **offline** under the
+pinned key (`anchor.pub` beside the ledger, or `--anchor-key`; over `serve`,
+the server's own `anchor.pub`), with the cause when not verified; the trailer
+`anchors: N (v verified, m mismatch, u unverifiable)` follows the integrity
+line, and `--json` carries it as `anchor.verdict` on the event. It is
+informational: `investigate` never asks the log, and its exit code and
+`integrity.ok` say what the chains' bytes say, not what the anchors say —
+`audit verify control` is the gate (exits 6 and 7). Without a pin nothing
+reads `verified`: every anchor the chain still reproduces is `unverifiable`.
+The fields are in
+[`reference/config.md`](reference/config.md) under *Anchors in the timeline*.
+
 A verifier on **another machine** needs three things, none of them from the
 box under suspicion: a copy of the ledger, the `anchored: seq=K sha256=H_K`
 line it shipped earlier, and the log's public key obtained from the log's own
@@ -957,12 +974,13 @@ What an anchor proves is bounded, and the bounds are the point (Article III):
 Shipped: `anchor: tlog` with a `transparency-log` backend, `audit anchor`,
 the `anchor` record with its proof, `audit control`'s rendering of it, and
 `audit verify control`'s per-anchor verdicts with `--expect-head K:H`,
-`--anchor-key`, `--offline` and `--anchor-timeout`. Reserved, and refused by
+`--anchor-key`, `--offline` and `--anchor-timeout`, and the anchor facts and
+offline verdict on `anchor` events in `investigate`'s timeline and
+`investigate/1` document, locally and over `serve`. Reserved, and refused by
 name today if you write them: an RFC 3161 timestamp-authority backend (`kind:
 rfc3161`), the storage sinks (`sink: worm`, `sink: external`) and `anchor:
 signed`. Reserved, and simply not there yet: a periodic or `serve`-driven
-cadence, and an anchor join in the `investigate/1` timeline. Only shipped
-behavior is a guarantee.
+cadence. Only shipped behavior is a guarantee.
 
 ## The config_hash bridge to runs
 

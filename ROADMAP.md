@@ -200,7 +200,12 @@ The governed core is real and runnable today:
   chain — failing only on a head the chain no longer reproduces, and reporting
   an unreachable log or a rotated key as *unverifiable*, never as tampering.
   This makes a determined whole-root rewrite — the one gap the local hash chain
-  cannot close — provable to a third party. The guarantee is bounded and stated
+  cannot close — provable to a third party.
+  `agenthof investigate` shows each anchor's facts and the verdict
+  `audit verify control --offline` reaches, decided offline from the stored
+  proof, on its event in the timeline and the
+  `investigate/1` document, locally and over `serve` — informational, with
+  `audit verify control` as the gate. The guarantee is bounded and stated
   plainly: between anchors the head rests on the chain alone (cadence is the
   operator's cron); independence holds only when the log's key and address do
   not both come from the root being verified; and a public-good log exposes
