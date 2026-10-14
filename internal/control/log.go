@@ -60,6 +60,19 @@ type record struct {
 // cmd/agenthof pins the equality — this package imports nothing of anchor.
 const MaxAnchorProofLen = 8192
 
+// Length caps on the locator and identity strings of an anchor record,
+// judged at Append beside the proof cap: a Rekor entry id is 80 bytes, a
+// backend URL conventionally fits in 2048, a kind is a word, a key id is 64
+// hex. Nothing an honest writer produces comes near them; they make the
+// honest ledger's bounds explicit, so every cause a verifier derives from a
+// record Append wrote is bounded too.
+const (
+	MaxAnchorRefLen          = 256
+	MaxAnchorBackendLen      = 2048
+	MaxAnchorBackendKindLen  = 64
+	MaxAnchorBackendKeyIDLen = 128
+)
+
 var anchorHashRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // checkAnchorShape is Append's permit for an anchor record — the structural
@@ -95,6 +108,19 @@ func checkAnchorShape(e Event) error {
 	}
 	if len(a.Proof) > MaxAnchorProofLen {
 		return fmt.Errorf("control: anchor proof is %d bytes; the cap is %d", len(a.Proof), MaxAnchorProofLen)
+	}
+	for _, f := range []struct {
+		name, value string
+		cap         int
+	}{
+		{"ref", a.Ref, MaxAnchorRefLen},
+		{"backend", a.Backend, MaxAnchorBackendLen},
+		{"backend_kind", a.BackendKind, MaxAnchorBackendKindLen},
+		{"backend_key_id", a.BackendKeyID, MaxAnchorBackendKeyIDLen},
+	} {
+		if len(f.value) > f.cap {
+			return fmt.Errorf("control: anchor %s is %d bytes; the cap is %d", f.name, len(f.value), f.cap)
+		}
 	}
 	if e.Outcome != "success" {
 		return nil
