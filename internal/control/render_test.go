@@ -323,3 +323,27 @@ func TestControlRenderAnchorLabels(t *testing.T) {
 		t.Fatal("an anchor must not taint the ledger")
 	}
 }
+
+// TestRenderShowsARealAnchorAndHidesItsLocator: a success anchor written by
+// Append renders as "head anchored: seq K <hash> (tlog)"; the ref, the proof
+// and the key id stay in the record for raw readers.
+func TestRenderShowsARealAnchorAndHidesItsLocator(t *testing.T) {
+	p, inv, w := appliedLedger(t)
+	a := goodAnchor()
+	if _, err := control.Append(p, control.Event{Action: "anchor", Outcome: "success", Invoker: inv, Witness: w, Anchor: a}); err != nil {
+		t.Fatal(err)
+	}
+	recs, head, err := ledger.ReadVerify(p, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := control.Render(recs, head, nil)
+	if !strings.Contains(out, "seq 2  ") || !strings.Contains(out, "head anchored: seq 1 "+coveredHash+" (tlog) — dana@example.com (asserted)") {
+		t.Fatalf("render:\n%s", out)
+	}
+	for _, hidden := range []string{a.Ref, a.Proof, a.BackendKeyID, a.Backend} {
+		if strings.Contains(out, hidden) {
+			t.Fatalf("render must not show %q:\n%s", hidden, out)
+		}
+	}
+}
