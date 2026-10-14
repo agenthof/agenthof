@@ -55,7 +55,7 @@ Usage:
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]  (mints a per-role model key at the reserved model gateway for the installed roles; recorded in the control ledger; no run consumes it)
-  agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>] [--server <url>] [--token <jwt>]
+  agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>] [--server <url>] [--token <jwt>]
 `
 
 func main() {
@@ -1870,7 +1870,10 @@ func parseRetentionDuration(s string) (time.Duration, error) {
 // normalize every run log under --log-dir plus --control-log into one
 // timeline, then renders it as text or (with --json) the investigate/1 JSON
 // contract. The exit code always comes from investigate.ExitCode — --json
-// changes only the rendering, never the exit code.
+// changes only the rendering, never the exit code. Every success anchor
+// record carries an offline verdict under the pinned log key (--anchor-key,
+// else anchor.pub beside the control ledger); the verdict is shown, never
+// gated on. --anchor-key with a server is a usage error.
 func cmdInvestigate(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("investigate", flag.ContinueOnError)
 	since := fs.String("since", "", "only events at/after this time: a duration (e.g. 1h, 30d) meaning \"ago\", or an RFC3339 timestamp")
@@ -1883,6 +1886,7 @@ func cmdInvestigate(args []string, out io.Writer) int {
 	jsonOut := fs.Bool("json", false, "render as the investigate/1 JSON contract instead of text")
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	anchorKey := fs.String("anchor-key", "", "pin the transparency log's checkpoint key at this path (PEM, ECDSA P-256) instead of anchor.pub beside the control ledger; absent or unreadable makes every anchor unverifiable, never a usage error; local only (exit 2 with --server)")
 	server := fs.String("server", "", "investigate against an agenthof serve API at this base URL (env AGENTHOF_SERVER)")
 	token := fs.String("token", "", "bearer for --server (env AGENTHOF_TOKEN)")
 	fs.SetOutput(out)
@@ -1915,6 +1919,14 @@ func cmdInvestigate(args []string, out io.Writer) int {
 	}
 
 	if base := serverBase(*server); base != "" {
+		// A pinned key is a trust input, not a path hint: --log-dir and
+		// --control-log yield to the server's own answer, but silently
+		// ignoring a pin the operator named would let them believe a verdict
+		// they did not get.
+		if *anchorKey != "" {
+			_, _ = fmt.Fprintln(out, "investigate: --anchor-key is local-only; the server pins anchor.pub beside its own ledger")
+			return 2
+		}
 		q := apiclient.InvestigateQuery{Invoker: f.Invoker, Agent: f.Agent, Outcome: f.Outcome, Run: f.Run, ConfigHash: f.ConfigHash}
 		if f.Since != nil {
 			q.Since = f.Since.Format(time.RFC3339)
@@ -1925,7 +1937,7 @@ func cmdInvestigate(args []string, out io.Writer) int {
 		return investigateViaServer(base, serverToken(*token), q, *jsonOut, out)
 	}
 
-	res, err := investigate.Timeline(*logDir, *controlLog, f, investigate.Options{})
+	res, err := investigate.Timeline(*logDir, *controlLog, f, investigateOptions(*controlLog, *anchorKey))
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)
 		return 1

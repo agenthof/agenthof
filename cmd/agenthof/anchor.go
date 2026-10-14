@@ -24,6 +24,7 @@ import (
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/control"
+	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/origin"
 )
@@ -445,4 +446,18 @@ func verifyAnchors(controlLog string, records []ledger.Record, anchorKey string,
 	}
 	_, _ = fmt.Fprintf(out, "anchors: %d (%d verified, %d mismatch, %d unverifiable)\n", len(results), v.verified, v.mismatch, v.unverifiable)
 	return v
+}
+
+// investigateOptions is the anchor-verdict wiring investigate and serve hand
+// investigate.Timeline: the pin resolved exactly as audit verify control
+// resolves it (--anchor-key, else anchor.pub beside the ledger, else
+// unpinned; a key that cannot be loaded is a per-anchor verdict, never exit
+// 2), and the verify-side backend through the newAnchorBackend seam. serve
+// passes anchorKey == "": its pin is the anchor.pub beside its own ledger,
+// resolved per request.
+func investigateOptions(controlLog, anchorKey string) investigate.Options {
+	return investigate.Options{
+		AnchorKey:     func() (*ecdsa.PublicKey, error) { return pinnedLogKey(controlLog, anchorKey) },
+		AnchorBackend: verifyBackendFactory,
+	}
 }
