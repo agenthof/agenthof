@@ -74,9 +74,9 @@ type BackendCredential struct {
 // matched exactly (case-sensitive, no trimming): config is law, not a guess.
 // Since every reserved sink and anchor is refused first, the backend rules
 // can only fire at the floor — except anchor_backend under anchor: tlog,
-// which is that anchor's own coordinates and is judged by rule 3. Coordinates
-// naming a backend nothing consumes would be a false signal to a reader of
-// the file.
+// which is that anchor's own coordinates and is validated as part of the
+// tlog case above. Coordinates naming a backend nothing consumes would be a
+// false signal to a reader of the file.
 func (i Integrity) Validate() error {
 	switch i.Sink {
 	case "", "local":
@@ -112,12 +112,13 @@ func (i Integrity) Validate() error {
 	return nil
 }
 
-// validateAnchorBackend is rule 3 for anchor: tlog — the coordinates the
-// anchoring command consumes, in the fixed first-fault order 3b–3g. Rule 3g
-// is shape-only on purpose: it does not check that client_credentials has
-// its endpoint and env names — the broker fails at use with its own named
-// error, and audit anchor records that as an anchor error. Validation is
-// syntactic: no network, no DNS; the first contact with the log is the
+// validateAnchorBackend checks anchor: tlog's own coordinates — the ones the
+// anchoring command consumes — reporting the first fault in a fixed order
+// (kind, url, then the credential fields). The credential check is shape-only
+// on purpose: it does not check that client_credentials has its endpoint and
+// env names — the broker fails at use with its own named error, and audit
+// anchor records that as an anchor error. Validation is syntactic: no
+// network, no DNS; the first contact with the log is the
 // command.
 func validateAnchorBackend(b IntegrityBackend) error {
 	if !b.IsSet() {

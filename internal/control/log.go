@@ -53,8 +53,9 @@ type record struct {
 
 // MaxAnchorProofLen bounds Anchor.Proof on a record: 8192 bytes of standard
 // base64 — a transparency log's inclusion proof with its signed checkpoint
-// (≈4 KB for a tree of 2^32 entries), an RFC-3161 token (≤5.5 KB) and a
-// tile-backed log entry (≈1.5 KB) all fit. Fixed here by the first anchoring
+// (≈6 KB base64 at a few billion entries, measured; fits past 2^47), an
+// RFC-3161 token (≤5.5 KB) and a tile-backed log entry (≈1.5 KB) all fit.
+// Fixed here by the first anchoring
 // writer; internal/anchor.MaxProofLen is documented as equal and a test in
 // cmd/agenthof pins the equality — this package imports nothing of anchor.
 const MaxAnchorProofLen = 8192

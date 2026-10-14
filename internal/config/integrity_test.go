@@ -319,8 +319,9 @@ func TestParseIntegrityRoundTrip(t *testing.T) {
 	}
 }
 
-// TestIntegrityValidateTlog pins rules 3a–3g with their exact strings and
-// their order (first fault only), and the accepted shapes: kind empty or
+// TestIntegrityValidateTlog pins the anchor: tlog coordinate checks with their
+// exact strings and their order (first fault only), and the accepted shapes:
+// kind empty or
 // transparency-log; a direct-bearer credential; client_credentials with no
 // env names (shape-only — the broker fails at use, recorded).
 func TestIntegrityValidateTlog(t *testing.T) {
@@ -362,7 +363,7 @@ func TestIntegrityValidateTlog(t *testing.T) {
 		{"3g grant before source", tlog(IntegrityBackend{URL: url, Credential: BackendCredential{CredentialSource: "vault", GrantType: "token_exchange"}}), `anchor_backend.credential: grant_type "token_exchange" is not supported for an anchor backend (want client_credentials, or a direct bearer via token_env)`},
 		{"3c before 3e", tlog(IntegrityBackend{Kind: "rfc3161"}), `anchor_backend kind "rfc3161" is reserved and not yet supported in this build (only transparency-log is implemented)`},
 		{"3e before 3g", tlog(IntegrityBackend{Credential: BackendCredential{GrantType: "token_exchange"}}), `anchor_backend.url is required for anchor: tlog (the Sigstore public-good log is https://rekor.sigstore.dev)`},
-		{"rule 7 unchanged", Integrity{Anchor: "none", AnchorBackend: IntegrityBackend{URL: url}}, `anchor_backend is set but anchor is none; backend coordinates are reserved for tlog and signed`},
+		{"anchor_backend set while anchor none", Integrity{Anchor: "none", AnchorBackend: IntegrityBackend{URL: url}}, `anchor_backend is set but anchor is none; backend coordinates are reserved for tlog and signed`},
 		{"sink still first", Integrity{Sink: "worm", Anchor: "tlog", AnchorBackend: IntegrityBackend{URL: url}}, `sink "worm" is reserved and not yet supported in this build (only local is implemented)`},
 	}
 	for _, c := range cases {

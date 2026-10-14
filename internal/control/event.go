@@ -123,18 +123,17 @@ type Anchor struct {
 	// the TSA endpoint, or a key URI — the proof is verifiable against.
 	// A string on purpose: never to become an object. Never a secret.
 	Backend string `json:"backend,omitempty"`
-	// Ref is an opaque, backend-kind-defined LOCATOR for the proof: a
-	// transparency-log entry index, or the sha256 of a proof kept beside the
+	// Ref is an opaque, backend-kind-defined LOCATOR for the entry: a
+	// transparency-log entry id, or the sha256 of a proof kept beside the
 	// ledger. Never a secret. Present on every successful anchor; absent on
 	// a failed attempt, which has nothing to locate.
 	Ref string `json:"ref,omitempty"`
-	// Proof is a small, bounded proof that rides on the record itself — an
-	// RFC-3161 timestamp token (DER, 1–4 KB) or a signature (64–96 B), as
-	// standard base64 — for the backends whose proof is not fetchable from
-	// the service (a TSA keeps no tokens; a signature is bytes). Bounded
-	// (the first anchoring writer fixes the cap and refuses above it); never
-	// a secret. Alternative, equally additive: Ref = sha256 of a proof in a
-	// sibling store — the first anchoring writer chooses per backend kind.
+	// Proof is a small, bounded proof that rides on the record itself, as
+	// standard base64. For a transparency log it is the inclusion proof and
+	// signed checkpoint, so the anchor verifies offline under a trusted key —
+	// permanently, outliving the log's read API. For a TSA it is the RFC-3161
+	// timestamp token (DER, 1–4 KB). Bounded (the first anchoring writer fixes
+	// the cap and refuses above it); never a secret.
 	Proof string `json:"proof,omitempty"`
 	// BackendKeyID is the identity of the key the backend signed for this
 	// entry with — lowercase hex SHA-256 of its PKIX DER (a transparency

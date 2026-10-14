@@ -61,9 +61,9 @@ stdout 'seq 4 .*head anchored: seq 3 [0-9a-f]{64} \(tlog\) — dana@example.com 
 ! stdout 'proof'
 
 # The covered head is the head BEFORE the record (anchor.seq 3, asserted
-# above), and the new head is one past it. (The seq:hash form of
-# --expect-head that turns the anchored: line into a verifier input arrives
-# with the verify extension; its script asserts it.)
+# above), and the new head is one past it. The seq:hash form of --expect-head
+# that turns the anchored: line into a verifier input is exercised in
+# control_anchor_verify.txtar.
 exec agenthof audit verify control --control-log control.jsonl
 stdout 'control head: seq=4'
 
