@@ -18,6 +18,7 @@ import (
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
+	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/obs"
 	"github.com/agenthof/agenthof/internal/registry"
 )
@@ -181,11 +182,20 @@ type testServer struct {
 
 func newTestServer(t *testing.T, host *fakeHost, auth Authenticator, maxRuns int) *testServer {
 	t.Helper()
+	return newTestServerWith(t, host, auth, maxRuns, investigate.Options{})
+}
+
+// newTestServerWith is newTestServer with the investigate options fixed at
+// construction: handler goroutines read cfg, so a test never writes it
+// after New.
+func newTestServerWith(t *testing.T, host *fakeHost, auth Authenticator, maxRuns int, opts investigate.Options) *testServer {
+	t.Helper()
 	logDir := filepath.Join(t.TempDir(), "runs")
 	logs := &bytes.Buffer{}
 	cfgHost := &fakeConfigHost{}
 	srv, err := New(Config{
 		Auth: auth, Host: host, Config: cfgHost, LogDir: logDir, ControlLog: filepath.Join(filepath.Dir(logDir), "control.jsonl"),
+		Investigate:       opts,
 		MaxConcurrentRuns: maxRuns, ServerHost: "127.0.0.1:0", Logger: obs.New(logs, slog.LevelDebug, obs.FormatText),
 	})
 	if err != nil {

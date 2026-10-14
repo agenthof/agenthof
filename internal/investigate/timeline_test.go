@@ -52,7 +52,7 @@ func TestTimelineMergeDeterministic(t *testing.T) {
 	missingControl := filepath.Join(t.TempDir(), "control.jsonl")
 
 	for i := 0; i < 3; i++ {
-		res, err := Timeline(dir, missingControl, Filter{})
+		res, err := Timeline(dir, missingControl, Filter{}, Options{})
 		if err != nil {
 			t.Fatalf("run %d: Timeline: %v", i, err)
 		}
@@ -91,7 +91,7 @@ func TestTimelineMergeControlBeforeRunAtTiedTime(t *testing.T) {
 		{Time: tiedTime, Type: "workflow_started", Binding: engine.Binding{RunID: "r-aaa"}},
 	})
 
-	res, err := Timeline(dir, controlPath, Filter{})
+	res, err := Timeline(dir, controlPath, Filter{}, Options{})
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestTimelineFilters(t *testing.T) {
 	missingControl := filepath.Join(t.TempDir(), "control.jsonl")
 
 	t.Run("agent", func(t *testing.T) {
-		res, err := Timeline(dir, missingControl, Filter{Agent: "coder"})
+		res, err := Timeline(dir, missingControl, Filter{Agent: "coder"}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -133,7 +133,7 @@ func TestTimelineFilters(t *testing.T) {
 	})
 
 	t.Run("outcome", func(t *testing.T) {
-		res, err := Timeline(dir, missingControl, Filter{Outcome: "failed"})
+		res, err := Timeline(dir, missingControl, Filter{Outcome: "failed"}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -143,7 +143,7 @@ func TestTimelineFilters(t *testing.T) {
 	})
 
 	t.Run("invoker", func(t *testing.T) {
-		res, err := Timeline(dir, missingControl, Filter{Invoker: "ops@example.com"})
+		res, err := Timeline(dir, missingControl, Filter{Invoker: "ops@example.com"}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -154,7 +154,7 @@ func TestTimelineFilters(t *testing.T) {
 
 	t.Run("time window since inclusive until exclusive", func(t *testing.T) {
 		since, until := t1, t2
-		res, err := Timeline(dir, missingControl, Filter{Since: &since, Until: &until})
+		res, err := Timeline(dir, missingControl, Filter{Since: &since, Until: &until}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -190,7 +190,7 @@ func TestTimelineTornRunContributesValidPrefix(t *testing.T) {
 	}
 
 	missingControl := filepath.Join(t.TempDir(), "control.jsonl")
-	res, err := Timeline(dir, missingControl, Filter{})
+	res, err := Timeline(dir, missingControl, Filter{}, Options{})
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestTimelineMtimePrefilterSinceOnly(t *testing.T) {
 
 	since := time.Now().Add(-1 * time.Hour) // recent Since; file mtime is 48h old.
 	missingControl := filepath.Join(t.TempDir(), "control.jsonl")
-	res, err := Timeline(dir, missingControl, Filter{Since: &since})
+	res, err := Timeline(dir, missingControl, Filter{Since: &since}, Options{})
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestTimelineMtimeAfterUntilStillContributes(t *testing.T) {
 	since := base.Add(-1 * time.Hour) // well before mtime; must not itself cause a skip.
 	until := base.Add(1 * time.Hour)  // cutoff long before the future mtime.
 	missingControl := filepath.Join(t.TempDir(), "control.jsonl")
-	res, err := Timeline(dir, missingControl, Filter{Since: &since, Until: &until})
+	res, err := Timeline(dir, missingControl, Filter{Since: &since, Until: &until}, Options{})
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestTimelineMissingControlLogOmitted(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "nope-control.jsonl")
 
-	res, err := Timeline(dir, missing, Filter{})
+	res, err := Timeline(dir, missing, Filter{}, Options{})
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestTimelineMissingLogDirReturnsEmptyResult(t *testing.T) {
 	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
 	missingControl := filepath.Join(t.TempDir(), "control.jsonl")
 
-	res, err := Timeline(missingDir, missingControl, Filter{})
+	res, err := Timeline(missingDir, missingControl, Filter{}, Options{})
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestTimelineMissingLogDirStillLoadsControl(t *testing.T) {
 		t.Fatalf("control.Append: %v", err)
 	}
 
-	res, err := Timeline(missingDir, controlPath, Filter{})
+	res, err := Timeline(missingDir, controlPath, Filter{}, Options{})
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestTimelineNeverReadsTheControlLedgerAsARun(t *testing.T) {
 	ctl := filepath.Join(dir, "ledger.jsonl")
 	writeControl(t, ctl)
 	oneRun(t, dir)
-	res, err := Timeline(dir, ctl, Filter{})
+	res, err := Timeline(dir, ctl, Filter{}, Options{})
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestTimelineSkipsTheControlLedgerThroughASymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	oneRun(t, dir)
-	res, err := Timeline(dir, link, Filter{})
+	res, err := Timeline(dir, link, Filter{}, Options{})
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestTimelineUnstattableControlLogStillEnumeratesRuns(t *testing.T) {
 	dir := t.TempDir()
 	oneRun(t, dir)
 	bad := filepath.Join(t.TempDir(), "nope", "control.jsonl")
-	res, err := Timeline(dir, bad, Filter{})
+	res, err := Timeline(dir, bad, Filter{}, Options{})
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}

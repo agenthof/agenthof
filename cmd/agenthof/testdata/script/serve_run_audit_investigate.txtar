@@ -5,6 +5,10 @@
 env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER
 env AGENTHOF_OIDC_CLIENT_ID=agenthof
 
+# The root is anchored: the server pins the anchor.pub beside its own ledger.
+rekor posture integrity.yaml
+rekor pubkey anchor.pub
+
 # serve starts with nothing installed and refuses every run until an apply
 # lands; the client authenticates with --token here because AGENTHOF_TOKEN is
 # set only AFTER the apply below (resolveInvoker would take the token — dana,
@@ -17,6 +21,8 @@ stdout 'run r-[0-9a-f]{16} refused: no configuration installed'
 # the apply is picked up by the next POST — no restart
 exec agenthof apply --config config --as tester --control-log control.jsonl --groups platform-eng
 stdout 'registry ok: 1 agents, 1 workflows, 3 roles'
+exec agenthof audit anchor --control-log control.jsonl --as tester --groups platform-eng
+stdout 'anchored: seq=1 sha256=[0-9a-f]{64}'
 env AGENTHOF_TOKEN=$OIDC_TOKEN
 
 # a run over the API prints exactly what a local run prints
@@ -38,14 +44,28 @@ cp stdout local-audit.txt
 exec agenthof audit $RUNID --server $SERVER
 cmp stdout local-audit.txt
 
-# investigate/1 from the server is the local document
+# investigate/1 from the server is the local document — the anchor's facts
+# and its offline verdict included, pinned …
 exec agenthof investigate --log-dir logs --control-log control.jsonl --json
+stdout '"verdict": "verified"'
 cp stdout local-investigate.json
 exec agenthof investigate --server $SERVER --json
 cmp stdout local-investigate.json
+exec agenthof investigate --server $SERVER
+stdout 'verdict=verified\]'
+stdout 'integrity: OK\nanchors: 1 \(1 verified, 0 mismatch, 0 unverifiable\)'
 exec agenthof investigate --run $RUNID --server $SERVER
 stdout $RUNID
 stdout 'workflow_finished'
+! stdout 'anchors:'
+# … and unpinned, resolved per request: no restart.
+rm anchor.pub
+exec agenthof investigate --log-dir logs --control-log control.jsonl --json
+stdout '"verdict": "unverifiable"'
+stdout '"cause": "no key to verify under \(unpinned, offline\)"'
+cp stdout unpinned-investigate.json
+exec agenthof investigate --server $SERVER --json
+cmp stdout unpinned-investigate.json
 
 # an authenticated invoker outside the role's groups is refused synchronously —
 # the same reason the local path prints — and the refusal is a recorded run
@@ -85,7 +105,7 @@ allowed_groups: [finance]
 -- config/roles/ops.yaml --
 name: platform-admin
 allowed_groups: [platform-eng]
-control: [apply, enable, disable, repair]
+control: [apply, enable, disable, repair, anchor]
 -- config/gateway.yaml --
 models:
   fast:

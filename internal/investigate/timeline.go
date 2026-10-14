@@ -1,6 +1,7 @@
 package investigate
 
 import (
+	"crypto/ecdsa"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/anchorverify"
+	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/ledger"
 )
@@ -35,6 +38,73 @@ type Source struct {
 type Result struct {
 	Events  []Record
 	Sources []Source
+}
+
+// Options parameterizes what Timeline may use beyond the two ledgers. The
+// zero value is a complete, honest reader: anchors are checked structurally
+// and, unpinned, offline — every transparency-log anchor the chain
+// reproduces is then "unverifiable — no key to verify under".
+type Options struct {
+	// AnchorKey resolves the pinned log key: --anchor-key, else anchor.pub
+	// beside the control ledger, else nil. Called at most once, only when
+	// there is an anchor to check. nil means unpinned.
+	AnchorKey func() (*ecdsa.PublicKey, error)
+	// AnchorBackend builds the verify-side backend; nil means anchorverify.Default.
+	AnchorBackend anchorverify.Factory
+}
+
+// The cause every success anchor record carries when the control chain is
+// not valid — split three ways, because the repair command fixes only a
+// torn tail. No seq is named: the source line already names the damage.
+const (
+	causeTorn       = "control ledger torn: no verdict; run: agenthof audit repair control, then audit verify control"
+	causeBroken     = "control ledger broken: no verdict; a well-formed record mid-file does not chain — not repairable by audit repair control; restore the ledger from a copy and run audit verify control"
+	causeUnreadable = "control ledger unreadable: no verdict; fix the read error named on the source line and run audit verify control"
+)
+
+// unverifiableCause maps a non-valid control verdict to its cause.
+func unverifiableCause(verdict string) string {
+	switch verdict {
+	case "torn":
+		return causeTorn
+	case "broken":
+		return causeBroken
+	default:
+		return causeUnreadable
+	}
+}
+
+// anchorVerdicts decides every success anchor record, keyed by the
+// record's own seq. On a chain that verifies — tainted included: a repair
+// is a verdict about history, the chain itself is valid — the shared
+// verifier decides, offline by construction (no caller can put this reader
+// on the network) under o's pin. On a torn, broken or unreadable chain
+// nothing is checked: such a chain has no positions to reproduce heads at,
+// the ruling audit verify control makes with its exit 1 — and every success
+// anchor record in the valid prefix, payload or not, is unverifiable with
+// the state and its remedy as the cause, so a success record never lacks a
+// verdict. Nothing is read but the records and the events.
+func anchorVerdicts(records []ledger.Record, events []control.DecodedEvent, verdict string, o Options) map[int]*anchorverify.Result {
+	out := map[int]*anchorverify.Result{}
+	switch verdict {
+	case "verified", "tainted":
+		results := anchorverify.Verify(records, anchorverify.Options{
+			ResolveKey: o.AnchorKey, Factory: o.AnchorBackend,
+			Offline: true, Timeout: anchorverify.DefaultTimeout,
+		})
+		for i := range results {
+			out[results[i].Check.RecordSeq] = &results[i]
+		}
+	default:
+		cause := unverifiableCause(verdict)
+		for _, d := range events {
+			if d.Action != "anchor" || d.Outcome != "success" {
+				continue
+			}
+			out[d.Seq] = &anchorverify.Result{Check: control.AnchorCheck{RecordSeq: d.Seq, Anchor: d.Anchor}, State: anchorverify.StateUnverifiable, Cause: cause}
+		}
+	}
+	return out
 }
 
 // runLog is one run ledger as read: the id from its file name, its source
@@ -88,8 +158,9 @@ func selectRuns(runs []runLog, root string) map[string]bool {
 // loaded independently of run-log enumeration, so a runs directory that
 // doesn't exist yet (nothing has run) means zero run sources, not an empty
 // timeline — a control log that already has recorded applies must still
-// surface.
-func Timeline(logDir, controlLog string, f Filter) (Result, error) {
+// surface. o supplies the anchor pin and backend; the zero value is a
+// complete, unpinned, offline reader.
+func Timeline(logDir, controlLog string, f Filter, o Options) (Result, error) {
 	var records []Record
 	var sources []Source
 
@@ -185,14 +256,15 @@ func Timeline(logDir, controlLog string, f Filter) (Result, error) {
 		records = append(records, rl.records...)
 	}
 
-	controlEvents, verdict, ok := LoadControl(controlLog)
+	ctlRecords, controlEvents, verdict, ok := loadControl(controlLog)
 	if ok {
 		// A missing control log (ok==false) means "nothing recorded" and
 		// is omitted from Sources entirely (spec §5) — never listed with
 		// a synthetic "missing" integrity value.
 		sources = append(sources, Source{Path: controlLog, Kind: "control", Integrity: verdict, Count: len(controlEvents)})
+		verdicts := anchorVerdicts(ctlRecords, controlEvents, verdict, o)
 		for _, d := range controlEvents {
-			records = append(records, normalizeControl(d))
+			records = append(records, normalizeControl(d, verdicts[d.Seq]))
 		}
 	}
 

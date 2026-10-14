@@ -155,6 +155,7 @@ func cmdServe(ctx context.Context, args []string, out, stderr io.Writer) int {
 	cfgHost := &configHost{controlLog: *controlLog, allowBootstrap: *allowAPIBootstrap, logger: logger}
 	srv, err := serve.New(serve.Config{
 		Auth: auth, Host: host, Config: cfgHost, LogDir: *logDir, ControlLog: *controlLog,
+		Investigate:       investigateOptions(*controlLog, ""),
 		MaxConcurrentRuns: *maxRuns, ServerHost: ln.Addr().String(), Logger: logger,
 	})
 	if err != nil {

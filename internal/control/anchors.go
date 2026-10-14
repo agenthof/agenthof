@@ -23,7 +23,8 @@ type AnchorCheck struct {
 // CheckAnchors walks records in chain order and returns one AnchorCheck per
 // record with action "anchor" and outcome "success". A failed or refused
 // anchor tried or covered nothing and is skipped. For each success: the record
-// must carry a payload; the covered seq must be before the record; and
+// must carry a payload; the recorded hash must be 64 lowercase hex; the
+// covered seq must be before the record; and
 // sha256(records[Seq-1].Raw) must equal the recorded hash. A record that does
 // not decode is skipped, as every reader in this package skips it.
 func CheckAnchors(records []ledger.Record) []AnchorCheck {
@@ -37,6 +38,12 @@ func CheckAnchors(records []ledger.Record) []AnchorCheck {
 		switch a := rec.Anchor; {
 		case a == nil:
 			c.Mismatch = "anchor record without coverage"
+		case !anchorHashRE.MatchString(a.Hash):
+			// Judged before the position: a planted record is refused on the
+			// value it recorded, with a cause that embeds nothing from it, so
+			// no reader prints an unvalidated hash and a record wrong on both
+			// counts has one deterministic cause.
+			c.Mismatch = "anchor hash is not a lowercase hex sha256"
 		case a.Seq < 1 || a.Seq >= rec.Seq || a.Seq > len(records):
 			c.Mismatch = fmt.Sprintf("anchor covers seq %d, which is not before the record (seq %d)", a.Seq, rec.Seq)
 		default:

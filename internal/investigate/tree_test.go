@@ -54,7 +54,7 @@ func TestTimelineRunFilterExpandsToDescendants(t *testing.T) {
 	writeRun(t, dir, "r-gc", treeEvents("r-gc", "r-child", 2, t0.Add(4*time.Second)))
 	writeRun(t, dir, "r-other", treeEvents("r-other", "", 0, t0.Add(6*time.Second)))
 
-	res, err := Timeline(dir, dir+"/control.jsonl", Filter{Run: "r-root"})
+	res, err := Timeline(dir, dir+"/control.jsonl", Filter{Run: "r-root"}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,21 +65,21 @@ func TestTimelineRunFilterExpandsToDescendants(t *testing.T) {
 	if len(res.Sources) != 3 {
 		t.Fatalf("sources = %d, want only the selected runs listed", len(res.Sources))
 	}
-	res, err = Timeline(dir, dir+"/control.jsonl", Filter{Run: "r-child"})
+	res, err = Timeline(dir, dir+"/control.jsonl", Filter{Run: "r-child"}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := runIDs(res); len(got) != 2 || got["r-child"] != 2 || got["r-gc"] != 2 {
 		t.Fatalf("--run r-child selected %v, want the child and the grandchild", got)
 	}
-	res, err = Timeline(dir, dir+"/control.jsonl", Filter{Run: "r-other"})
+	res, err = Timeline(dir, dir+"/control.jsonl", Filter{Run: "r-other"}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := runIDs(res); len(got) != 1 || got["r-other"] != 2 {
 		t.Fatalf("--run r-other selected %v, want only itself", got)
 	}
-	res, err = Timeline(dir, dir+"/control.jsonl", Filter{})
+	res, err = Timeline(dir, dir+"/control.jsonl", Filter{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestTimelineRunFilterExpandsToDescendants(t *testing.T) {
 func TestTimelineOrphanChildSelectsUnderMissingParent(t *testing.T) {
 	dir := t.TempDir()
 	writeRun(t, dir, "r-child", treeEvents("r-child", "r-gone", 1, time.Unix(100, 0).UTC()))
-	res, err := Timeline(dir, dir+"/control.jsonl", Filter{Run: "r-gone"})
+	res, err := Timeline(dir, dir+"/control.jsonl", Filter{Run: "r-gone"}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

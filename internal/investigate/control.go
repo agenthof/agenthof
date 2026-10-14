@@ -23,13 +23,22 @@ import (
 // the same as "missing"/"torn"/"broken" (spec §5: an IO error on an
 // existing source is treated like torn/broken).
 func LoadControl(path string) (events []control.DecodedEvent, verdict string, ok bool) {
+	_, events, verdict, ok = loadControl(path)
+	return events, verdict, ok
+}
+
+// loadControl is LoadControl with the valid-prefix records kept beside the
+// decoded events: the anchor verdict hashes record bytes
+// (control.CheckAnchors), so Timeline needs them, while LoadControl's other
+// callers do not.
+func loadControl(path string) (records []ledger.Record, events []control.DecodedEvent, verdict string, ok bool) {
 	recs, _, err := ledger.ReadVerify(path, ledger.Locked)
 	if err != nil {
 		var torn *ledger.TornError
 		var broken *ledger.ChainBrokenError
 		switch {
 		case errors.Is(err, os.ErrNotExist):
-			return nil, "missing", false
+			return nil, nil, "missing", false
 		case errors.As(err, &torn):
 			verdict = "torn"
 		case errors.As(err, &broken):
@@ -53,7 +62,7 @@ func LoadControl(path string) (events []control.DecodedEvent, verdict string, ok
 		}
 		events = append(events, d)
 	}
-	return events, verdict, true
+	return recs, events, verdict, true
 }
 
 // ConfigJoin renders the join line for a run whose workflow_started carries

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/anchor"
 	"github.com/agenthof/agenthof/internal/anchor/anchortest"
+	"github.com/agenthof/agenthof/internal/anchorverify"
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/control"
@@ -529,5 +531,192 @@ func TestVerifyControlIsPostureBlind(t *testing.T) {
 	}
 	if _, got := verifyControl(t, "--control-log", ctl, "--offline"); got != want || strings.Contains(got, "integrity ") {
 		t.Fatalf("deleted: output differs or names the posture\n%s", got)
+	}
+}
+
+// TestVerifyControlOutputGolden pins the whole stdout of audit verify control
+// --offline, as literals, on a stub-anchored root: clean, a flipped proof
+// byte, a pinned key that cannot be loaded, a forged covered hash, a planted
+// payload-less anchor record, a backend that cannot answer, the production
+// dispatch for a kind this build does not construct, and a root with no
+// anchors. Compared with ==, never Contains: this is the byte-identity proof
+// the anchor verifier must keep.
+func TestVerifyControlOutputGolden(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, stub := anchoredViaStub(t)
+	recs, head, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil || len(recs) != 2 {
+		t.Fatalf("%v %d", err, len(recs))
+	}
+	d, err := control.Decode(recs[1].Raw)
+	if err != nil || d.Anchor == nil {
+		t.Fatalf("%v %+v", err, d)
+	}
+	a := d.Anchor
+	installedHash, installed, err := config.InstalledHash(installedStore(ctl))
+	if err != nil || !installed {
+		t.Fatalf("%v %v", err, installed)
+	}
+	prefix := func(headHash string) string {
+		return fmt.Sprintf("control head: seq=2 sha256=%s\ninstalled config: %s — matches the last recorded install (apply)\n", headHash, installedHash)
+	}
+	where := fmt.Sprintf("anchor seq 1 %s → http://stub.invalid entry %s", a.Hash, a.Ref)
+	if anchortest.StubBackend != "http://stub.invalid" {
+		t.Fatalf("the stub's backend moved: %q", anchortest.StubBackend)
+	}
+
+	// clean: exit 0
+	want := prefix(head.Hash) + where + ": verified (log key as served by the log — unpinned; pin it in anchor.pub or --anchor-key to verify independently; offline: presence not checked)\n" +
+		"anchors: 1 (1 verified, 0 mismatch, 0 unverifiable)\n"
+	if code, got := verifyControl(t, "--control-log", ctl, "--offline"); code != 0 || got != want {
+		t.Fatalf("clean: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+
+	// one byte of the proof flipped on disk, chain recomputed: exit 6
+	good, _ := os.ReadFile(ctl)
+	rewriteTail(t, ctl, 2, func(seq int, m map[string]any) {
+		p := m["anchor"].(map[string]any)["proof"].(string)
+		m["anchor"].(map[string]any)["proof"] = "A" + p[1:]
+	})
+	_, head2, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = prefix(head2.Hash) + where + ": MISMATCH — proof does not hash to the recorded ref\n" +
+		"anchors: 1 (0 verified, 1 mismatch, 0 unverifiable)\n"
+	if code, got := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorMismatch || got != want {
+		t.Fatalf("flipped proof: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+	if err := os.WriteFile(ctl, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// a pinned key that cannot be loaded: every anchor unverifiable, exit 7
+	want = prefix(head.Hash) + where + ": unverifiable — pinned log key /nope/missing.pub: open /nope/missing.pub: no such file or directory\n" +
+		"anchors: 1 (0 verified, 0 mismatch, 1 unverifiable)\n"
+	if code, got := verifyControl(t, "--control-log", ctl, "--offline", "--anchor-key", "/nope/missing.pub"); code != exitAnchorUnverifiable || got != want {
+		t.Fatalf("missing key: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+
+	// the recorded covered hash forged, chain recomputed: the structural
+	// check refuses before any backend is asked: exit 6
+	rewriteTail(t, ctl, 2, func(seq int, m map[string]any) {
+		if seq == 2 {
+			m["anchor"].(map[string]any)["hash"] = strings.Repeat("ff", 32)
+		}
+	})
+	_, head3, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = prefix(head3.Hash) + "anchor seq 1 " + strings.Repeat("ff", 32) + " → http://stub.invalid entry " + a.Ref + ": MISMATCH — the chain does not reproduce the recorded head at seq 1 (chain " + a.Hash + ", recorded " + strings.Repeat("ff", 32) + ")\n" +
+		"anchors: 1 (0 verified, 1 mismatch, 0 unverifiable)\n"
+	if code, got := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorMismatch || got != want {
+		t.Fatalf("forged hash: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+	if err := os.WriteFile(ctl, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// a success anchor record with no payload, planted and chained on: exit 6
+	plantSuccessAnchor(t, ctl)
+	_, head4, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = fmt.Sprintf("control head: seq=3 sha256=%s\ninstalled config: %s — matches the last recorded install (apply)\n", head4.Hash, installedHash) +
+		where + ": verified (log key as served by the log — unpinned; pin it in anchor.pub or --anchor-key to verify independently; offline: presence not checked)\n" +
+		"anchor record seq 3: MISMATCH — anchor record without coverage\n" +
+		"anchors: 2 (1 verified, 1 mismatch, 0 unverifiable)\n"
+	if code, got := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorMismatch || got != want {
+		t.Fatalf("payload-less anchor: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+	if err := os.WriteFile(ctl, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// the backend cannot answer: exit 7
+	stub.Fail()
+	want = prefix(head.Hash) + where + ": unverifiable — stub: unavailable\n" +
+		"anchors: 1 (0 verified, 0 mismatch, 1 unverifiable)\n"
+	if code, got := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorUnverifiable || got != want {
+		t.Fatalf("Fail: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+
+	// production dispatch: rfc3161 is not constructed by this build: exit 7
+	prev := newAnchorBackend
+	newAnchorBackend = anchorBackendFor
+	t.Cleanup(func() { newAnchorBackend = prev })
+	want = prefix(head.Hash) + where + ": unverifiable — anchor backend kind \"rfc3161\" is not implemented\n" +
+		"anchors: 1 (0 verified, 0 mismatch, 1 unverifiable)\n"
+	if code, got := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorUnverifiable || got != want {
+		t.Fatalf("not implemented: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+
+	// a root with no anchors: the note, exit 0
+	plain := applied(t, writeSample(t))
+	_, head1, err := ledger.ReadVerify(plain, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainHash, _, err := config.InstalledHash(installedStore(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = fmt.Sprintf("control head: seq=1 sha256=%s\ninstalled config: %s — matches the last recorded install (apply)\n", head1.Hash, plainHash) +
+		"anchors: none (if this root is meant to be anchored — integrity.yaml anchor: tlog — run: agenthof audit anchor)\n"
+	if code, got := verifyControl(t, "--control-log", plain, "--offline"); code != 0 || got != want {
+		t.Fatalf("no anchors: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+}
+
+// TestVerifyControlPlantedHashNeverReachesTheTerminalRaw: a hand-written
+// ledger can carry any bytes as the recorded hash. The gate's line strips
+// control characters from it, the verdict is the structural hex refusal
+// (exit 6), and no byte of the planted value that could drive a terminal
+// is printed.
+func TestVerifyControlPlantedHashNeverReachesTheTerminalRaw(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _ := anchoredViaStub(t)
+	rewriteTail(t, ctl, 2, func(seq int, m map[string]any) {
+		m["anchor"].(map[string]any)["hash"] = "\x07nope\x1b[31m"
+	})
+	code, out := verifyControl(t, "--control-log", ctl, "--offline")
+	if code != exitAnchorMismatch {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if strings.ContainsAny(out, "\x07\x1b") {
+		t.Fatalf("a control character reached the output:\n%q", out)
+	}
+	if !strings.Contains(out, "anchor seq 1 nope[31m → http://stub.invalid entry ") || !strings.Contains(out, ": MISMATCH — anchor hash is not a lowercase hex sha256\n") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
+// TestVerifyBackendFactoryAgreesWithDefault: the CLI's dispatch and
+// anchorverify.Default return the same "not implemented" text for an unknown
+// kind and both build a *anchor.Rekor for transparency-log, so a verdict
+// cannot depend on which view built the backend.
+func TestVerifyBackendFactoryAgreesWithDefault(t *testing.T) {
+	for _, kind := range []string{"rfc3161", "kms", ""} {
+		_, e1 := anchorverify.Default(kind, "https://x.example", nil, true)
+		_, e2 := verifyBackendFactory(kind, "https://x.example", nil, true)
+		if e1 == nil || e2 == nil || e1.Error() != e2.Error() {
+			t.Fatalf("%q: Default %v, cmd %v", kind, e1, e2)
+		}
+	}
+	b1, err := anchorverify.Default("transparency-log", "https://rekor.sigstore.dev/", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := verifyBackendFactory("transparency-log", "https://rekor.sigstore.dev/", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b1.(*anchor.Rekor); !ok {
+		t.Fatalf("Default: %T", b1)
+	}
+	if _, ok := b2.(*anchor.Rekor); !ok {
+		t.Fatalf("cmd: %T", b2)
 	}
 }

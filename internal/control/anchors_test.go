@@ -67,3 +67,37 @@ func TestCheckAnchors(t *testing.T) {
 		t.Fatal("no anchors → no checks")
 	}
 }
+
+// TestCheckAnchorsRefusesANonHexHash: a planted success record whose hash is
+// not 64 lowercase hex is a mismatch with one fixed cause that embeds nothing
+// from the record — judged before the covered seq, so a record wrong on both
+// counts (hash "nope", seq 99) has the hash cause, never the seq one. A
+// failed attempt with such a hash is skipped as every failed attempt is.
+func TestCheckAnchorsRefusesANonHexHash(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
+	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc"}); err != nil {
+		t.Fatal(err)
+	}
+	recs, _, err := ledger.ReadVerify(p, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const cause = "anchor hash is not a lowercase hex sha256"
+	recs = append(recs,
+		recAnchor(2, "success", "", `{"seq":1,"hash":"nope","kind":"tlog","backend_kind":"transparency-log","backend":"https://log.example","ref":"1","proof":"AQID"}`),
+		recAnchor(3, "success", "", `{"seq":99,"hash":"nope","kind":"tlog"}`),
+		recAnchor(4, "success", "", `{"seq":1,"hash":"`+strings.Repeat("A", 64)+`","kind":"tlog"}`),
+		recAnchor(5, "success", "", `{"seq":1,"hash":"\u0007\u001b[31m","kind":"tlog"}`),
+		recAnchor(6, "error", "", `{"seq":1,"hash":"nope","kind":"tlog"}`),
+	)
+	got := control.CheckAnchors(recs)
+	if len(got) != 4 {
+		t.Fatalf("want 4 checks (the error record is skipped), got %d: %+v", len(got), got)
+	}
+	for i, c := range got {
+		if c.Mismatch != cause || c.Anchor == nil || c.RecordSeq != i+2 {
+			t.Fatalf("check %d: %+v, want cause %q", i, c, cause)
+		}
+	}
+}

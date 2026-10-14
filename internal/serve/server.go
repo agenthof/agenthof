@@ -20,6 +20,7 @@ import (
 	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
+	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/obs"
 )
 
@@ -130,6 +131,11 @@ type Config struct {
 	Config     ConfigHost
 	LogDir     string
 	ControlLog string
+	// Investigate is what GET /v1/investigate may use beyond the two
+	// ledgers: the pinned log key and the verify-side backend for the
+	// anchor verdicts. Resolved per request. The zero value is a complete,
+	// unpinned, offline reader.
+	Investigate investigate.Options
 	// MaxConcurrentRuns caps runs in flight; a POST beyond it answers 429.
 	MaxConcurrentRuns int
 	// ServerHost is the host:port the server answers on, recorded as

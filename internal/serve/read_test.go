@@ -2,17 +2,22 @@ package serve
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/anchor"
+	"github.com/agenthof/agenthof/internal/anchor/anchortest"
 	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/audit"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
 )
@@ -159,4 +164,67 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition never held")
+}
+
+// TestInvestigateEndpointCarriesAnchorVerdicts: the server decides every
+// anchor with the options it was configured with, per request — the
+// document is the local document byte for byte, and a backend that stops
+// answering is seen on the next request without a restart.
+func TestInvestigateEndpointCarriesAnchorVerdicts(t *testing.T) {
+	stub := anchortest.NewStub([]byte("s"))
+	opts := investigate.Options{AnchorBackend: func(string, string, *ecdsa.PublicKey, bool) (anchor.Backend, error) { return stub, nil }}
+	ts := newTestServerWith(t, &fakeHost{}, fakeAuth{}, 1, opts)
+	ctl := ts.srv.cfg.ControlLog
+	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
+	head, err := control.Append(ctl, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcpt, err := stub.Submit(context.Background(), anchor.Head{Seq: head.Count, Hash: head.Hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.Append(ctl, control.Event{Action: "anchor", Outcome: "success", Invoker: inv, Witness: w,
+		Anchor: &control.Anchor{Seq: head.Count, Hash: head.Hash, Kind: "tlog", BackendKind: stub.Kind(), Backend: rcpt.Backend, Ref: rcpt.Ref, Proof: rcpt.Proof}}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := ts.do(t, http.MethodGet, "/v1/investigate", goodToken, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("%d %s", resp.StatusCode, body)
+	}
+	local, err := investigate.Timeline(ts.logDir, ctl, investigate.Filter{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := investigate.RenderJSON(local, investigate.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != want {
+		t.Fatalf("server document differs from the local one:\n%s\n--- want ---\n%s", body, want)
+	}
+	res, err := investigate.DecodeJSON(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *investigate.Anchor
+	for _, e := range res.Events {
+		if e.Kind == "anchor" {
+			got = e.Anchor
+		}
+	}
+	wantAnchor := &investigate.Anchor{Seq: 1, Hash: head.Hash, Kind: "tlog", BackendKind: "rfc3161", Backend: anchortest.StubBackend, Ref: rcpt.Ref, Verdict: "verified"}
+	if !reflect.DeepEqual(got, wantAnchor) {
+		t.Fatalf("anchor: %+v\nwant %+v", got, wantAnchor)
+	}
+	if !strings.Contains(investigate.RenderText(res), "\nanchors: 1 (1 verified, 0 mismatch, 0 unverifiable)\n") {
+		t.Fatalf("text:\n%s", investigate.RenderText(res))
+	}
+
+	stub.Fail()
+	_, body = ts.do(t, http.MethodGet, "/v1/investigate", goodToken, nil)
+	if !strings.Contains(string(body), `"verdict": "unverifiable"`) || !strings.Contains(string(body), `"cause": "stub: unavailable"`) {
+		t.Fatalf("per request: %s", body)
+	}
 }

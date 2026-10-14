@@ -1,0 +1,126 @@
+# investigate shows every anchor record's facts and an offline verdict under
+# the pinned log key — the verdict audit verify control reaches, by the same
+# code — and never gates on it: the exit is 0 throughout, re-forged and
+# unpinned included. It never reads integrity.yaml and never contacts the log.
+
+exec agenthof apply --config config --control-log control.jsonl --as dana@example.com --groups platform-eng
+rekor posture integrity.yaml
+rekor pubkey anchor.pub
+cp anchor.pub old.pub
+exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+anchorref control.jsonl
+cp control.jsonl good.jsonl
+
+# The facts and the verdict, in the document and on the line; the trailer
+# after the integrity line; no proof, no summary key.
+exec agenthof investigate --log-dir runs --control-log control.jsonl --json
+stdout '"verdict": "verified"'
+stdout '"ref": "'$REF'"'
+stdout '"hash": "'$AHASH'"'
+stdout '"backend_kind": "transparency-log"'
+! stdout '"proof"'
+! stdout '"anchors"'
+! stdout '"cause"'
+exec agenthof investigate --log-dir runs --control-log control.jsonl
+stdout 'control anchor — dana@example.com \(asserted\) \[outcome=success anchor='$ASEQ':'$AHASH' backend=http://127\.0\.0\.1:[0-9]+ ref='$REF' verdict=verified\]'
+stdout 'integrity: OK\nanchors: 1 \(1 verified, 0 mismatch, 0 unverifiable\)'
+
+# A whole-root rewrite from the anchored seq: the chain verifies, the anchor
+# says otherwise — shown, counted, and still exit 0 (the gate is verify control).
+reforge control.jsonl 1
+exec agenthof investigate --log-dir runs --control-log control.jsonl
+stdout 'verdict=mismatch cause=the chain does not reproduce the recorded head at seq 1 \(chain [0-9a-f]{64}, recorded '$AHASH'\)\]'
+stdout 'integrity: OK\nanchors: 1 \(0 verified, 1 mismatch, 0 unverifiable\)'
+! exec agenthof audit verify control --control-log control.jsonl --offline
+cp good.jsonl control.jsonl
+
+# Key identity is unverifiable, never a mismatch: the log rotates, the new
+# key is pinned, the stored checkpoint is under the old one.
+rekor rotate
+rekor pubkey anchor.pub
+exec agenthof investigate --log-dir runs --control-log control.jsonl
+stdout 'verdict=unverifiable cause=log key differs from the pinned key — update anchor.pub, or pass --anchor-key, to decide\]'
+! stdout 'verdict=mismatch'
+stdout 'anchors: 1 \(0 verified, 0 mismatch, 1 unverifiable\)'
+# Unpinned: nothing to verify under; the log's key is never fetched.
+rm anchor.pub
+exec agenthof investigate --log-dir runs --control-log control.jsonl
+stdout 'verdict=unverifiable cause=no key to verify under \(unpinned, offline\)\]'
+stdout 'anchors: 1 \(0 verified, 0 mismatch, 1 unverifiable\)'
+# The key that signed, passed by hand: verified. A missing one: a verdict, not a usage error.
+exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key old.pub
+stdout 'verdict=verified\]'
+exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key missing.pub
+stdout 'verdict=unverifiable cause=pinned log key missing\.pub: open missing\.pub: no such file or directory\]'
+
+# --anchor-key is local-only: a server pins the anchor.pub beside its own ledger.
+! exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key old.pub --server http://127.0.0.1:9
+stdout 'investigate: --anchor-key is local-only; the server pins anchor.pub beside its own ledger'
+env AGENTHOF_SERVER=http://127.0.0.1:9
+! exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key old.pub
+stdout 'investigate: --anchor-key is local-only'
+env AGENTHOF_SERVER=
+
+# Posture-blind: integrity.yaml may say anything, or be gone; the document
+# is byte-identical and never names the file.
+exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key old.pub --json
+cp stdout with-posture.json
+rm integrity.yaml
+exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key old.pub --json
+cmp stdout with-posture.json
+exec sh -c 'printf "anchor: none\n" > integrity.yaml'
+exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key old.pub --json
+cmp stdout with-posture.json
+exec sh -c 'printf "{{garbage" > integrity.yaml'
+exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key old.pub --json
+cmp stdout with-posture.json
+! stdout 'integrity\.yaml'
+
+# A failed attempt carries what it tried — no ref, no verdict — and is not
+# counted in the trailer.
+rekor reset
+rekor posture integrity.yaml
+rekor fail 503
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key old.pub
+stdout '\[outcome=error reason=status 503 from 127\.0\.0\.1:[0-9]+ anchor=2:[0-9a-f]{64} backend=http://127\.0\.0\.1:[0-9]+\]'
+stdout 'anchors: 1 \(1 verified, 0 mismatch, 0 unverifiable\)'
+
+# A view whose filter drops the control events states nothing about anchors.
+exec agenthof investigate --log-dir runs --control-log control.jsonl --outcome succeeded
+! stdout 'anchors:'
+! stdout 'verdict='
+stdout 'integrity: OK'
+
+# No network: every investigate call is offline, pinned, unpinned or by hand.
+rekor reset
+exec agenthof investigate --log-dir runs --control-log control.jsonl
+exec agenthof investigate --log-dir runs --control-log control.jsonl --json
+exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key old.pub
+exec agenthof investigate --log-dir runs --control-log control.jsonl --anchor-key missing.pub
+rekor requests 0
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, prune, anchor]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

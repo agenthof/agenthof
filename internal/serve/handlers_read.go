@@ -97,7 +97,10 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, _ identity.Inv
 }
 
 // investigate is `agenthof investigate --json` over both ledgers. since
-// and until are RFC3339 only; the client resolves durations.
+// and until are RFC3339 only; the client resolves durations. Every success
+// anchor record carries its offline verdict under the anchor.pub beside the
+// server's ledger — the API carries no key parameter — the pin is the server's
+// own anchor.pub, read on each request.
 func (s *Server) investigate(w http.ResponseWriter, r *http.Request, _ identity.Invoker, _ string) {
 	q := apiclient.InvestigateQueryFrom(r.URL.Query())
 	f := investigate.Filter{Invoker: q.Invoker, Agent: q.Agent, Outcome: q.Outcome, Run: q.Run, ConfigHash: q.ConfigHash}
@@ -119,7 +122,7 @@ func (s *Server) investigate(w http.ResponseWriter, r *http.Request, _ identity.
 		t = t.UTC()
 		f.Until = &t
 	}
-	res, err := investigate.Timeline(s.cfg.LogDir, s.cfg.ControlLog, f)
+	res, err := investigate.Timeline(s.cfg.LogDir, s.cfg.ControlLog, f, s.cfg.Investigate)
 	if err != nil {
 		s.logger.Error("investigate failed", "err", err)
 		http.Error(w, "investigation failed", http.StatusInternalServerError)

@@ -80,8 +80,10 @@ func issueLine(s Source) string {
 
 // RenderText renders r as an operator-facing plain-text timeline: a header,
 // one integrity summary line per source, one line per event, and a trailing
-// overall integrity line. It never claims more than the evidence supports —
-// a torn or broken source is named as a gap in the record, not papered over.
+// overall integrity line, and — whenever an event in the view carries an
+// anchor verdict — a trailing count of those verdicts. It never claims more
+// than the evidence supports — a torn or broken source is named as a gap in
+// the record, not papered over.
 func RenderText(r Result) string {
 	var b strings.Builder
 
@@ -110,6 +112,29 @@ func RenderText(r Result) string {
 		if e.ParentRunID != "" {
 			tags = append(tags, "parent="+e.ParentRunID)
 		}
+		// An anchor record's facts and verdict, each present iff recorded:
+		// a failed attempt shows what it tried; a planted success record
+		// without a payload shows its verdict and cause only. cause= is last:
+		// it carries spaces, as reason= already does. The hash is printed
+		// whole — it is the value an operator compares with the anchored:
+		// line shipped off the box.
+		if a := e.Anchor; a != nil {
+			if a.Seq != 0 || a.Hash != "" {
+				tags = append(tags, fmt.Sprintf("anchor=%d:%s", a.Seq, a.Hash))
+			}
+			if a.Backend != "" {
+				tags = append(tags, "backend="+a.Backend)
+			}
+			if a.Ref != "" {
+				tags = append(tags, "ref="+a.Ref)
+			}
+			if a.Verdict != "" {
+				tags = append(tags, "verdict="+a.Verdict)
+			}
+			if a.Cause != "" {
+				tags = append(tags, "cause="+a.Cause)
+			}
+		}
 		if len(tags) > 0 {
 			fmt.Fprintf(&b, " [%s]", strings.Join(tags, " "))
 		}
@@ -121,6 +146,33 @@ func RenderText(r Result) string {
 		b.WriteString("integrity: OK\n")
 	} else {
 		fmt.Fprintf(&b, "integrity: %s\n", strings.Join(issues, "; "))
+	}
+
+	// The honesty trailer: an unqualified "integrity: OK" after a whole-root
+	// re-forge would imply more trust than this view earns — the re-forged
+	// chain verifies; only the anchor line says mismatch. So whenever the
+	// view carries an anchor verdict, one more line states the count, in the
+	// gate's own summary phrase. Counted over the events in the view and
+	// nothing else, so a document decoded from JSON prints the same trailer
+	// from the same events; a verdict word this build does not know counts
+	// as unverifiable, never as verified.
+	var anchors, verified, mismatch, unverifiable int
+	for _, e := range r.Events {
+		if e.Anchor == nil || e.Anchor.Verdict == "" {
+			continue
+		}
+		anchors++
+		switch e.Anchor.Verdict {
+		case "verified":
+			verified++
+		case "mismatch":
+			mismatch++
+		default:
+			unverifiable++
+		}
+	}
+	if anchors > 0 {
+		fmt.Fprintf(&b, "anchors: %d (%d verified, %d mismatch, %d unverifiable)\n", anchors, verified, mismatch, unverifiable)
 	}
 
 	return b.String()
