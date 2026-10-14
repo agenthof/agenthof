@@ -415,7 +415,7 @@ func decodeSingleEntry(raw []byte) (string, logEntryAnon, error) {
 	for id, e := range m {
 		id = strings.ToLower(id)
 		if !entryIDRE.MatchString(id) {
-			return "", logEntryAnon{}, fmt.Errorf("names entry id %q, not an 80-hex entry id", id)
+			return "", logEntryAnon{}, errors.New("names an entry id that is not 80 hex")
 		}
 		return id, e, nil
 	}

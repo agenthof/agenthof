@@ -280,3 +280,35 @@ func TestRekorHTTPHygiene(t *testing.T) {
 		t.Fatalf("oversized body: %v", err)
 	}
 }
+
+// TestRekorSubmitDoesNotLeakServerControlledEntryID: a 201 whose single entry
+// key is not 80 hex must not place that key into the error — the error is
+// recorded verbatim in the control ledger (spec §8 step 7: fixed phrases +
+// status + URL host, never response content).
+func TestRekorSubmitDoesNotLeakServerControlledEntryID(t *testing.T) {
+	body := []byte(`{"` + anchortest.Sentinel + `":{"body":"","integratedTime":0,"logIndex":0,"logID":"x","verification":{"inclusionProof":{"logIndex":0,"treeSize":1,"rootHash":"","hashes":[],"checkpoint":{"envelope":""}}}}}`)
+	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Status:     "201 Created",
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	rk, err := anchor.NewRekor("http://log.example", anchor.RekorOptions{Client: &http.Client{Transport: rt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = rk.Submit(context.Background(), head41)
+	if err == nil {
+		t.Fatal("want an error on an id that is not 80 hex")
+	}
+	if strings.Contains(err.Error(), anchortest.Sentinel) {
+		t.Fatalf("server-controlled id leaked into recorded error: %v", err)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
