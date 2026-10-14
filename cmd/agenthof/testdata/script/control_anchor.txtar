@@ -1,0 +1,163 @@
+# audit anchor pins the control-ledger head into a transparency log: an
+# authorized control action (role grant anchor), recorded whether it succeeded,
+# failed or was refused. The posture is law: no anchor_backend, no network. A
+# refused caller causes no public entry; a failed backend call is recorded,
+# never fatal to the ledger.
+
+exec agenthof apply --config config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 3 roles'
+cp control.jsonl floor.jsonl
+
+# Floor root (no integrity.yaml): a valid posture under which there is nothing
+# to do — exit 1, nothing recorded, zero network.
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'audit anchor: no anchor configured in .*integrity.yaml \(anchor: none\); set anchor: tlog and anchor_backend to anchor this ledger'
+! stdout 'control head:'
+cmp control.jsonl floor.jsonl
+rekor requests 0
+
+# A reserved posture and an incomplete tlog posture are root faults: exit 2.
+exec sh -c 'printf "anchor: signed\n" > integrity.yaml'
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'audit anchor: integrity .*integrity.yaml: anchor "signed" is reserved'
+exec sh -c 'printf "anchor: tlog\nanchor_backend:\n  kind: transparency-log\n" > integrity.yaml'
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'audit anchor: integrity .*integrity.yaml: anchor_backend.url is required for anchor: tlog'
+cmp control.jsonl floor.jsonl
+rekor requests 0
+
+# A complete tlog posture naming this script's fake.
+rekor posture integrity.yaml
+
+# Authorization: finance has no anchor grant → refused, recorded WITHOUT an
+# anchor payload, and the log saw nothing.
+! exec agenthof audit anchor --control-log control.jsonl --as mallory@example.com --groups finance
+stdout 'audit anchor: not authorized: no role grants anchor to the invoker'
+stdout 'control head: seq=2'
+grep '"action":"anchor","outcome":"refused","reason":{"code":"not_authorized"' control.jsonl
+! grep '"outcome":"refused".*"anchor":{' control.jsonl
+rekor requests 0
+
+# A refused token: recorded refused, zero network.
+env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER
+! exec agenthof audit anchor --control-log control.jsonl --token not-a-jwt
+stdout 'audit anchor: token authentication failed'
+stdout 'control head: seq=3'
+grep '"outcome":"refused","reason":{"code":"token_verification_failed","message":"token verification failed"}' control.jsonl
+env AGENTHOF_OIDC_ISSUER=
+rekor requests 0
+
+# The write path, unpinned (as served): the three lines, then the head.
+exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'anchored: seq=3 sha256=[0-9a-f]{64}'
+stdout '  log: http://127\.0\.0\.1:[0-9]+  entry: [0-9a-f]{80}  log key: [0-9a-f]{64} \(as served\)'
+stdout '  index: 0  integrated: 20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z  \(as reported by the log\)'
+stdout 'control head: seq=4 sha256=[0-9a-f]{64}'
+grep '"action":"anchor","outcome":"success"' control.jsonl
+grep '"anchor":{"seq":3,"hash":"[0-9a-f]{64}","kind":"tlog","backend_kind":"transparency-log","backend":"http://127\.0\.0\.1:[0-9]+","ref":"[0-9a-f]{80}","proof":"[A-Za-z0-9+/=]+","backend_key_id":"[0-9a-f]{64}"}' control.jsonl
+rekor requests 2
+exec agenthof audit control --control-log control.jsonl
+stdout 'seq 4 .*head anchored: seq 3 [0-9a-f]{64} \(tlog\) — dana@example.com \(asserted\)'
+! stdout 'proof'
+
+# The covered head is the head BEFORE the record (anchor.seq 3, asserted
+# above), and the new head is one past it. (The seq:hash form of
+# --expect-head that turns the anchored: line into a verifier input arrives
+# with the verify extension; its script asserts it.)
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'control head: seq=4'
+
+# Failure is recorded, not fatal: every non-201 identically, no response text.
+rekor reset
+rekor fail 501
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'audit anchor: status 501 from 127\.0\.0\.1:[0-9]+'
+! stdout SENTINEL
+stdout 'control head: seq=5'
+grep '"action":"anchor","outcome":"error","reason":{"code":"anchor_failed","message":"status 501 from 127\.0\.0\.1:[0-9]+"}' control.jsonl
+grep '"message":"status 501 from [^"]*"},"invoker":.*"anchor":{"seq":4,"hash":"[0-9a-f]{64}","kind":"tlog","backend_kind":"transparency-log","backend":"http://127\.0\.0\.1:[0-9]+"},"prev"' control.jsonl
+! grep 'SENTINEL' control.jsonl
+rekor fail 405
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'audit anchor: status 405 from'
+rekor drop
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'audit anchor: 127\.0\.0\.1:[0-9]+: '
+rekor start
+exec sh -c 'test "$(grep -c "\"code\":\"anchor_failed\"" control.jsonl)" = 3'
+
+# A 201 the client cannot verify is an error, never a success.
+rekor corruptnext
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'audit anchor: entry does not verify: log entry leaf hash differs from the recorded ref'
+exec sh -c 'test "$(grep -c "\"outcome\":\"success\",\"invoker\"" control.jsonl)" = 2'
+
+# The pointer and the store never move on a failed anchor.
+exec agenthof audit verify control --control-log control.jsonl
+stdout 'matches the last recorded install'
+
+# A credential the broker cannot resolve: recorded, names the env NAME, no request.
+rekor reset
+rekor posture integrity.yaml clientcreds
+env ANCHOR_CLIENT_ID=
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'ANCHOR_CLIENT_ID'
+grep '"code":"anchor_failed","message":"[^"]*ANCHOR_CLIENT_ID' control.jsonl
+rekor requests 0
+
+# Pinned: anchor.pub holds the log's key; the line says so. After the log
+# rotates its key, a pinned anchor is refused and recorded — never a success
+# under a key the operator did not pin.
+rekor posture integrity.yaml
+rekor pubkey anchor.pub
+exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'log key: [0-9a-f]{64} \(pinned\)'
+rekor rotate
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'audit anchor: log key differs from the pinned key — update anchor.pub, or pass --anchor-key, to decide'
+grep '"message":"log key differs from the pinned key' control.jsonl
+
+# A malformed pin is a root fault: exit 2, unrecorded.
+cp control.jsonl pinned.jsonl
+exec sh -c 'printf "garbage" > anchor.pub'
+! exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'audit anchor: pinned log key .*anchor.pub: not a PEM PUBLIC KEY block'
+cmp control.jsonl pinned.jsonl
+
+# The quickstart's operator role grants anchor; on its floor root (its own
+# directory — no integrity.yaml beside it) the command exits 1 with nothing to
+# do and zero network.
+rekor reset
+exec agenthof apply --config examples/config --control-log quick/control.jsonl --as dana@example.com --groups platform-eng
+! exec agenthof audit anchor --control-log quick/control.jsonl --as dana@example.com --groups platform-eng
+stdout 'no anchor configured'
+rekor requests 0
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, anchor]
+-- config/roles/auditor.yaml --
+name: auditor
+allowed_groups: [finance]
+control: [prune]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

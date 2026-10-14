@@ -49,7 +49,8 @@ Usage:
   agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--allow-api-bootstrap] [--addr-file <path>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--max-concurrent-runs <n>] [--shutdown-timeout <dur>] [--log-level ...] [--log-format ...]  (AGENTHOF_OIDC_ISSUER required)
   agenthof audit <run-id> [--log-dir <dir>] [--server <url>] [--token <jwt>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
-  agenthof audit verify control [--control-log <path>] [--expect-head <hex>]
+  agenthof audit verify control [--control-log <path>] [--expect-head <hex>|<seq>:<hex>] [--anchor-key <path>] [--offline] [--anchor-timeout 30s]
+  agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout 30s]  (pins the control-ledger head into the transparency log integrity.yaml names; an authorized control action, recorded whether it succeeded or failed; prints the anchored head and entry to ship off the box)
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
@@ -1227,6 +1228,11 @@ func cmdAudit(args []string, out io.Writer) int {
 	// rather than a separate cmdAuditRepair layer.
 	if args[0] == "repair" {
 		return cmdAuditRepairControl(args[1:], out)
+	}
+	// "anchor" is disambiguated the same way: a run id is always "r-<hex>"
+	// (engine.NewRunID), which "anchor" can never match.
+	if args[0] == "anchor" {
+		return cmdAuditAnchor(args[1:], out)
 	}
 	runID := args[0]
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
