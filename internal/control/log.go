@@ -44,31 +44,100 @@ type record struct {
 	FragmentSHA string           `json:"fragment_sha256,omitempty"`
 	Origin      *origin.Origin   `json:"origin,omitempty"`
 	Detail      string           `json:"detail,omitempty"`
-	// Anchor is read back by the readers (Render, IsTainted); Append does not
-	// copy it in this build — the guard below returns before a record is
-	// built — so the copy lands with the first anchoring writer.
+	// Anchor is the payload of an action "anchor" record, copied from the
+	// Event once the permit below admits it.
 	Anchor *Anchor `json:"anchor,omitempty"`
 	Prev   string  `json:"prev"`
 	LogID  string  `json:"log_id,omitempty"`
 }
 
-// Append refuses an anchor record (reserved; see Event.Anchor) and rejects
-// any non-"success" Event with a nil Reason: every
-// control-plane denial must explain itself, and this is the one place
-// that rule is enforced, rather than scattered across call sites. It
-// then opens the control log at path Locked (ledger.Open verifies the
-// chain and fails on a torn or broken log), assigns seq=Count()+1,
-// time=now UTC, and prev=the current head, sets a fresh log_id on the
-// genesis record only, marshals the record, and appends it. It returns
-// the chain's new Head.
+// MaxAnchorProofLen bounds Anchor.Proof on a record: 8192 bytes of standard
+// base64 — a transparency log's inclusion proof with its signed checkpoint
+// (≈4 KB for a tree of 2^32 entries), an RFC-3161 token (≤5.5 KB) and a
+// tile-backed log entry (≈1.5 KB) all fit. Fixed here by the first anchoring
+// writer; internal/anchor.MaxProofLen is documented as equal and a test in
+// cmd/agenthof pins the equality — this package imports nothing of anchor.
+const MaxAnchorProofLen = 8192
+
+var anchorHashRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// checkAnchorShape is Append's permit for an anchor record — the structural
+// rules decidable before the ledger is opened, so a malformed anchor appends
+// nothing and, on a fresh root, creates no file. There is no caller-identity
+// check: Go cannot tell audit anchor from another caller honestly, and a
+// structural rule every writer must meet is the narrowest permit that is also
+// enforceable. Append does not check Anchor.Hash against the chain — that is
+// the verifier's job (CheckAnchors).
+func checkAnchorShape(e Event) error {
+	if e.Anchor != nil && e.Action != "anchor" {
+		return fmt.Errorf("control: anchor payload on a %q record", e.Action)
+	}
+	if e.Action != "anchor" {
+		return nil
+	}
+	if e.Outcome == "success" && e.Anchor == nil {
+		return errors.New("control: a successful anchor must say what it covers")
+	}
+	if e.Outcome == "refused" && e.Anchor != nil {
+		// A refusal happens before the head is read; a payload there would be invented.
+		return errors.New("control: a refused anchor tried nothing and covers nothing")
+	}
+	if e.ConfigHash != "" {
+		return errors.New("control: an anchor installs nothing and carries no config_hash")
+	}
+	a := e.Anchor
+	if a == nil {
+		return nil
+	}
+	if !anchorHashRE.MatchString(a.Hash) {
+		return fmt.Errorf("control: anchor hash %q is not a lowercase hex sha256", a.Hash)
+	}
+	if len(a.Proof) > MaxAnchorProofLen {
+		return fmt.Errorf("control: anchor proof is %d bytes; the cap is %d", len(a.Proof), MaxAnchorProofLen)
+	}
+	if e.Outcome != "success" {
+		return nil
+	}
+	switch {
+	case a.Kind == "":
+		return errors.New("control: successful anchor record is incomplete (kind)")
+	case a.Kind != "tlog" && a.Kind != "signed":
+		return fmt.Errorf("control: anchor kind %q is not tlog or signed", a.Kind)
+	case a.BackendKind == "":
+		return errors.New("control: successful anchor record is incomplete (backend_kind)")
+	case a.Backend == "":
+		return errors.New("control: successful anchor record is incomplete (backend)")
+	case a.Ref == "":
+		return errors.New("control: successful anchor record is incomplete (ref)")
+	case a.Proof == "":
+		return errors.New("control: successful anchor record is incomplete (proof)")
+	}
+	return nil
+}
+
+// checkAnchorCoverage is the one permit rule that needs the chain: the
+// covered seq must exist, 1 ≤ Seq ≤ Count, read under the exclusive flock so
+// it holds across any head advance since the caller read the head. A refusal
+// here appends nothing — on a fresh root the file now exists and is empty,
+// which is "no record appended", the honest statement of unchanged.
+func checkAnchorCoverage(a *Anchor, count int) error {
+	if a != nil && (a.Seq < 1 || a.Seq > count) {
+		return fmt.Errorf("control: anchor covers seq %d but the chain has %d records", a.Seq, count)
+	}
+	return nil
+}
+
+// Append admits an anchor record only through checkAnchorShape and
+// checkAnchorCoverage, and rejects any non-"success" Event with a nil Reason:
+// every control-plane denial must explain itself, and this is the one place
+// that rule is enforced, rather than scattered across call sites. It then
+// opens the control log at path Locked (ledger.Open verifies the chain and
+// fails on a torn or broken log), assigns seq=Count()+1, time=now UTC, and
+// prev=the current head, sets a fresh log_id on the genesis record only,
+// marshals the record, and appends it. It returns the chain's new Head.
 func Append(path string, e Event) (ledger.Head, error) {
-	// Anchor records are reserved: no anchoring backend exists in this build,
-	// so a record claiming one would be a false guarantee. Refused before the
-	// ledger is opened — nothing is written, no genesis on a fresh root — and
-	// before the reason rule, so an anchor is always refused as an anchor,
-	// whatever else it carries. The action and the payload are each enough.
-	if e.Action == "anchor" || e.Anchor != nil {
-		return ledger.Head{}, errors.New("control: anchor records are reserved; nothing anchors in this build")
+	if err := checkAnchorShape(e); err != nil {
+		return ledger.Head{}, err
 	}
 	if e.Outcome != "success" && e.Reason == nil {
 		return ledger.Head{}, fmt.Errorf("control: outcome %q requires a reason", e.Outcome)
@@ -78,6 +147,9 @@ func Append(path string, e Event) (ledger.Head, error) {
 		return ledger.Head{}, err
 	}
 	defer func() { _ = c.Close() }()
+	if err := checkAnchorCoverage(e.Anchor, c.Count()); err != nil {
+		return ledger.Head{}, err
+	}
 
 	rec := record{
 		V:           "control/1",
@@ -96,6 +168,7 @@ func Append(path string, e Event) (ledger.Head, error) {
 		FragmentSHA: e.FragmentSHA,
 		Origin:      e.Origin.Sanitized(),
 		Detail:      origin.Clean(e.Detail),
+		Anchor:      e.Anchor,
 		Prev:        c.Prev(),
 	}
 	if c.Count() == 0 {

@@ -24,6 +24,13 @@ const (
 	// CodeNotOnRecord is the reason the control ledger does not vouch for the
 	// installed pointer the action would be authorized against.
 	CodeNotOnRecord = "not_on_record"
+	// CodeAnchorFailed is the reason an anchor record carries when the
+	// anchoring backend did not take, or did not prove, the head — a
+	// transport failure, any non-201 from the log, a proof that did not
+	// verify, a log key other than the pinned one, a credential the broker
+	// could not resolve, a proof over the cap. Recorded, never fatal to the
+	// ledger.
+	CodeAnchorFailed = "anchor_failed"
 )
 
 // Reason explains a non-success outcome.
@@ -49,8 +56,7 @@ type Witness struct {
 // Event is a control/1 record. Callers set Action, Agent, Outcome, Reason,
 // Invoker, AssertedAs, Witness, ConfigHash, Bootstrap (apply and
 // enable/disable), Origin (an API-recorded action; nil from the CLI),
-// Detail (runs prune and vouch), (anchor only, reserved — no writer in this
-// build) Anchor, and (repair only) FragmentLen/FragmentSHA. V, and the
+// Detail (runs prune and vouch), (anchor only) Anchor, and (repair only) FragmentLen/FragmentSHA. V, and the
 // seq/time/prev/log_id fields on the wire, are set by Append; callers never
 // set them.
 type Event struct {
@@ -91,20 +97,18 @@ type Event struct {
 	// absent on every record written before it existed and on every record
 	// that does not set it.
 	Detail string `json:"detail,omitempty"`
-	// Anchor is the reserved payload of an action "anchor" record: the head
-	// an external proof covers, and where that proof is — never a secret
-	// (Article III bans secrets and artifact bodies from an event, nothing
-	// else; a small proof is neither). Nothing in this build writes one
-	// (Append refuses the action); it is defined so every reader handles the
-	// record correctly before the first writer exists. An anchor is not an
+	// Anchor is the payload of an action "anchor" record, written by
+	// "audit anchor": the head an external proof covers, and where that proof
+	// is — never a secret (Article III bans secrets and artifact bodies from
+	// an event, nothing else; a small proof is neither). Append admits it only
+	// under a structural permit. An anchor is not an
 	// install: it carries no config_hash and Installing never accepts it.
 	// Additive and omitempty (Article VI).
 	Anchor *Anchor `json:"anchor,omitempty"`
 }
 
-// Anchor is what an "anchor" record says about the head it pins. Every
-// field is reserved for the first anchoring writer (anchor: tlog); none is
-// written in this build. One head per record: Hash is a single head hash; a
+// Anchor is what an "anchor" record says about the head it pins, written by
+// "audit anchor". One head per record: Hash is a single head hash; a
 // batch over several heads would add a root field, never change Hash.
 type Anchor struct {
 	Seq  int    `json:"seq"`  // the covered head: seq of the last record the proof covers (1 ≤ Seq < this record's seq)
@@ -132,6 +136,14 @@ type Anchor struct {
 	// a secret. Alternative, equally additive: Ref = sha256 of a proof in a
 	// sibling store — the first anchoring writer chooses per backend kind.
 	Proof string `json:"proof,omitempty"`
+	// BackendKeyID is the identity of the key the backend signed for this
+	// entry with — lowercase hex SHA-256 of its PKIX DER (a transparency
+	// log's log id). Forensic, not protective: it records which key the log
+	// presented at anchor time so a later change is visible; the writer who
+	// owns this file can rewrite it, and only a key pinned by the verifier
+	// protects. Empty for a backend kind without a stable signing identity
+	// (the test stub). Additive and omitempty.
+	BackendKeyID string `json:"backend_key_id,omitempty"`
 }
 
 // CaptureWitness captures the local OS user (preferring $USER, falling
