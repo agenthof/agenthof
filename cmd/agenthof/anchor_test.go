@@ -535,10 +535,12 @@ func TestVerifyControlIsPostureBlind(t *testing.T) {
 }
 
 // TestVerifyControlOutputGolden pins the whole stdout of audit verify control
-// --offline, as literals, on a stub-anchored root: clean, a flipped proof byte,
-// a backend that cannot answer, the production dispatch for a kind this build
-// does not construct, and a root with no anchors. Compared with ==, never
-// Contains: this is the byte-identity proof the anchor verifier must keep.
+// --offline, as literals, on a stub-anchored root: clean, a flipped proof
+// byte, a pinned key that cannot be loaded, a forged covered hash, a planted
+// payload-less anchor record, a backend that cannot answer, the production
+// dispatch for a kind this build does not construct, and a root with no
+// anchors. Compared with ==, never Contains: this is the byte-identity proof
+// the anchor verifier must keep.
 func TestVerifyControlOutputGolden(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	ctl, stub := anchoredViaStub(t)
@@ -584,6 +586,50 @@ func TestVerifyControlOutputGolden(t *testing.T) {
 		"anchors: 1 (0 verified, 1 mismatch, 0 unverifiable)\n"
 	if code, got := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorMismatch || got != want {
 		t.Fatalf("flipped proof: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+	if err := os.WriteFile(ctl, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// a pinned key that cannot be loaded: every anchor unverifiable, exit 7
+	want = prefix(head.Hash) + where + ": unverifiable — pinned log key /nope/missing.pub: open /nope/missing.pub: no such file or directory\n" +
+		"anchors: 1 (0 verified, 0 mismatch, 1 unverifiable)\n"
+	if code, got := verifyControl(t, "--control-log", ctl, "--offline", "--anchor-key", "/nope/missing.pub"); code != exitAnchorUnverifiable || got != want {
+		t.Fatalf("missing key: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+
+	// the recorded covered hash forged, chain recomputed: the structural
+	// check refuses before any backend is asked: exit 6
+	rewriteTail(t, ctl, 2, func(seq int, m map[string]any) {
+		if seq == 2 {
+			m["anchor"].(map[string]any)["hash"] = strings.Repeat("ff", 32)
+		}
+	})
+	_, head3, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = prefix(head3.Hash) + "anchor seq 1 " + strings.Repeat("ff", 32) + " → http://stub.invalid entry " + a.Ref + ": MISMATCH — the chain does not reproduce the recorded head at seq 1 (chain " + a.Hash + ", recorded " + strings.Repeat("ff", 32) + ")\n" +
+		"anchors: 1 (0 verified, 1 mismatch, 0 unverifiable)\n"
+	if code, got := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorMismatch || got != want {
+		t.Fatalf("forged hash: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
+	}
+	if err := os.WriteFile(ctl, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// a success anchor record with no payload, planted and chained on: exit 6
+	plantSuccessAnchor(t, ctl)
+	_, head4, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = fmt.Sprintf("control head: seq=3 sha256=%s\ninstalled config: %s — matches the last recorded install (apply)\n", head4.Hash, installedHash) +
+		where + ": verified (log key as served by the log — unpinned; pin it in anchor.pub or --anchor-key to verify independently; offline: presence not checked)\n" +
+		"anchor record seq 3: MISMATCH — anchor record without coverage\n" +
+		"anchors: 2 (1 verified, 1 mismatch, 0 unverifiable)\n"
+	if code, got := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorMismatch || got != want {
+		t.Fatalf("payload-less anchor: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
 	}
 	if err := os.WriteFile(ctl, good, 0o600); err != nil {
 		t.Fatal(err)
