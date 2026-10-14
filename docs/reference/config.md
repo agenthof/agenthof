@@ -1292,7 +1292,7 @@ then exits by precedence **1, 6, 3, 4, 5, 7**:
 
 The anchor lines print together after every anchor is checked, so against an
 unreachable log the command is silent for up to `--anchor-timeout` per anchor
-before printing — the whole run is bounded by anchors × calls × timeout.
+before printing — the whole run is bounded by anchors × calls × timeout. `--anchor-timeout` bounds each anchor's log call (default 30s); a non-positive value (`0` or negative) uses that default — to skip the log entirely, pass `--offline`.
 
 `agenthof audit anchor`:
 
@@ -1473,7 +1473,7 @@ Field notes:
   contract.
 - `anchor` is present on every control `anchor` attempt that recorded what it
   tried, and on every success `anchor` record. Its fields, all `omitempty`:
-  `seq` and `hash` (the covered head), `kind` (`tlog` or `signed`),
+  `seq` and `hash` (the covered head), `kind` (`tlog`; `signed` is reserved),
   `backend_kind` (the proof format, promised on a success record),
   `backend`, `ref` (absent on a failed attempt), `backend_key_id`, and — on
   a success record only — `verdict`, one of `verified`, `mismatch` or
