@@ -31,12 +31,16 @@ func writeIntegrity(t *testing.T, ctl, body string) string {
 
 // reservedPosture is the one reserved file every CLI test uses, and
 // reservedFault is the exact line a command prints for it (after its own
-// "<command>: " prefix).
-const reservedPosture = "anchor: tlog\n"
+// "<command>: " prefix). signed is the value still reserved in this build.
+const reservedPosture = "anchor: signed\n"
 
 func reservedFault(path string) string {
-	return "integrity " + path + `: anchor "tlog" is reserved and not yet supported in this build (only none is implemented)`
+	return "integrity " + path + `: anchor "signed" is reserved and not yet supported in this build (only none and tlog are implemented)`
 }
+
+// tlogPosture is a complete, accepted tlog posture naming a log nothing in
+// these tests ever dials: the writers must proceed without contacting it.
+const tlogPosture = "anchor: tlog\nanchor_backend:\n  url: http://127.0.0.1:9\n"
 
 // TestIntegrityPathIsBesideTheControlLedger: derived from the ledger's
 // directory and nowhere else, like installed.lock and verify.pub.
@@ -197,6 +201,64 @@ func TestControlWritersRefuseAReservedPosture(t *testing.T) {
 		}
 		if readPointer(t, ctl) != pointer {
 			t.Fatalf("%s: the pointer must not move", c.name)
+		}
+	}
+}
+
+// TestControlWritersProceedOnATlogRoot: with a complete tlog posture beside
+// the ledger, apply, both flips, config vouch, gateway provision, runs prune
+// and serve's startup all proceed exactly as at the floor — unanchored — and
+// write their usual records with no "anchor" key and no mention of the
+// posture: anchoring is a separate, operator-triggered action.
+func TestControlWritersProceedOnATlogRoot(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+	root := budgetedSample(t)
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	writeIntegrity(t, ctl, tlogPosture)
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("apply: %d\n%s", code, out.String())
+	}
+	for _, flip := range []string{"disable", "enable"} {
+		out.Reset()
+		if code := cmdRegistry([]string{flip, "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+			t.Fatalf("%s: %d\n%s", flip, code, out.String())
+		}
+	}
+	crashGap(t, root, ctl)
+	vouchAs(t, ctl)
+	srv, _ := adminMock(t, 0, "")
+	t.Chdir(t.TempDir())
+	out.Reset()
+	if code := cmdGateway(provisionArgs(ctl, srv.URL), &out); code != 0 {
+		t.Fatalf("provision: %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir()), &out); code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if logs := startServeOnce(t, ctl); strings.Contains(logs, "integrity") {
+		t.Fatalf("serve must start silently on a tlog root:\n%s", logs)
+	}
+	recs, _, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, r := range recs {
+		if strings.Contains(string(r.Raw), `"anchor"`) {
+			t.Fatalf("a writer on a tlog root must not emit an anchor key: %s", r.Raw)
+		}
+		d, err := control.Decode(r.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[d.Action] = true
+	}
+	for _, action := range []string{"apply", "disable", "enable", "vouch", "provision", "prune"} {
+		if !seen[action] {
+			t.Fatalf("no %q record (saw %v)", action, seen)
 		}
 	}
 }

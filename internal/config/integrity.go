@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,11 +14,11 @@ import (
 // integrity design: Sink is where the ledger's bytes live (prevention), Anchor
 // is what pins its head (third-party attestation, layerable on any sink). It
 // is read from integrity.yaml beside the control ledger; absent means the
-// floor. Only the floor — sink "local", anchor "none", nothing else set — is
-// implemented: it is exactly the hash-chained local file the constitution
-// describes. Every other value is RESERVED: parsed, named, and refused by
-// Validate, never read as the floor (a posture nothing honours would be a
-// false guarantee). Backend coordinates are broker references — env-var
+// floor. The floor — sink "local", anchor "none", nothing else set — and
+// anchor "tlog" with a transparency-log backend are implemented: the floor is
+// exactly the hash-chained local file the constitution describes. Every other
+// value is RESERVED: parsed, named, and refused by Validate, never read as
+// the floor (a posture nothing honours would be a false guarantee). Backend coordinates are broker references — env-var
 // NAMES, never values (Article II).
 type Integrity struct {
 	Sink   string `yaml:"sink"`   // "" | "local" (the floor) | "worm" | "external" (reserved)
@@ -25,15 +26,16 @@ type Integrity struct {
 	// Duplicate is reserved: further sinks written in parallel with Sink
 	// (a separately stored duplicate copy). Must be empty.
 	Duplicate []IntegrityBackend `yaml:"duplicate"`
-	// SinkBackend and AnchorBackend are reserved: the coordinates of a worm
-	// or external sink, and of a transparency log / timestamp authority /
-	// signing key. Must be unset while Sink is local and Anchor is none.
+	// SinkBackend is reserved: the coordinates of a worm or external sink.
+	// Must be unset while Sink is local. AnchorBackend holds the coordinates
+	// of a transparency log (anchor: tlog); the other anchor kinds (timestamp
+	// authority, signing key) are reserved. Must be unset while Anchor is none.
 	SinkBackend   IntegrityBackend `yaml:"sink_backend"`
 	AnchorBackend IntegrityBackend `yaml:"anchor_backend"`
 }
 
 // IntegrityBackend names an external integrity service and how to reach it.
-// Reserved in full: no kind is implemented. URL is the service's public
+// Kind "transparency-log" is implemented for anchor: tlog; every other kind is reserved. URL is the service's public
 // endpoint or key URI (a KMS key ARN/URI fits; never a secret, and never a
 // parallel key field later); Credential is the broker reference it
 // authenticates with.
@@ -52,7 +54,7 @@ func (b IntegrityBackend) IsSet() bool { return b != (IntegrityBackend{}) }
 // shape (credential_source × grant_type × client_auth) ToolResource already
 // spells, field for field, so an operator learns one credential vocabulary.
 // Every secret coordinate is an environment-variable NAME. It maps onto
-// broker.CredentialRef at the point of use (none in this build).
+// broker.CredentialRef at the point of use — `audit anchor` is its first consumer.
 type BackendCredential struct {
 	CredentialSource string `yaml:"credential_source"` // "static_env" | reserved
 	TokenEnv         string `yaml:"token_env"`         // direct-bearer: env NAME
@@ -70,9 +72,11 @@ type BackendCredential struct {
 // Integrity built in Go: the fixed-order rules below, first fault
 // only — sink, then anchor, then duplicate, then the two backends. A value is
 // matched exactly (case-sensitive, no trimming): config is law, not a guess.
-// Since every non-floor sink and anchor is refused first, the backend rules
-// can only fire at the floor — coordinates naming a backend nothing consumes
-// would be a false signal to a reader of the file.
+// Since every reserved sink and anchor is refused first, the backend rules
+// can only fire at the floor — except anchor_backend under anchor: tlog,
+// which is that anchor's own coordinates and is judged by rule 3. Coordinates
+// naming a backend nothing consumes would be a false signal to a reader of
+// the file.
 func (i Integrity) Validate() error {
 	switch i.Sink {
 	case "", "local":
@@ -87,10 +91,14 @@ func (i Integrity) Validate() error {
 	}
 	switch i.Anchor {
 	case "", "none":
-	case "tlog", "signed":
-		return fmt.Errorf("anchor %q is reserved and not yet supported in this build (only none is implemented)", i.Anchor)
+	case "signed":
+		return errors.New(`anchor "signed" is reserved and not yet supported in this build (only none and tlog are implemented)`)
+	case "tlog":
+		if err := validateAnchorBackend(i.AnchorBackend); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("anchor %q is not an integrity anchor (want none; tlog and signed are reserved)", i.Anchor)
+		return fmt.Errorf("anchor %q is not an integrity anchor (want none or tlog; signed is reserved)", i.Anchor)
 	}
 	if n := len(i.Duplicate); n > 0 {
 		return fmt.Errorf("duplicate names %d sink(s); duplicate sinks are reserved and not yet supported in this build", n)
@@ -98,10 +106,57 @@ func (i Integrity) Validate() error {
 	if i.SinkBackend.IsSet() {
 		return errors.New("sink_backend is set but sink is local; backend coordinates are reserved for worm and external")
 	}
-	if i.AnchorBackend.IsSet() {
+	if i.Anchor != "tlog" && i.AnchorBackend.IsSet() {
 		return errors.New("anchor_backend is set but anchor is none; backend coordinates are reserved for tlog and signed")
 	}
 	return nil
+}
+
+// validateAnchorBackend is rule 3 for anchor: tlog — the coordinates the
+// anchoring command consumes, in the fixed first-fault order 3b–3g. Rule 3g
+// is shape-only on purpose: it does not check that client_credentials has
+// its endpoint and env names — the broker fails at use with its own named
+// error, and audit anchor records that as an anchor error. Validation is
+// syntactic: no network, no DNS; the first contact with the log is the
+// command.
+func validateAnchorBackend(b IntegrityBackend) error {
+	if !b.IsSet() {
+		return errors.New("anchor is tlog but anchor_backend is not set; name the transparency log (kind transparency-log, url)")
+	}
+	switch b.Kind {
+	case "", "transparency-log":
+	case "rfc3161":
+		return errors.New(`anchor_backend kind "rfc3161" is reserved and not yet supported in this build (only transparency-log is implemented)`)
+	default:
+		return fmt.Errorf("anchor_backend kind %q is not an anchor backend kind (want transparency-log; rfc3161 is reserved)", b.Kind)
+	}
+	if b.URL == "" {
+		return errors.New("anchor_backend.url is required for anchor: tlog (the Sigstore public-good log is https://rekor.sigstore.dev)")
+	}
+	if !isBackendURL(b.URL) {
+		return fmt.Errorf("anchor_backend.url %q is not an absolute http(s) URL without credentials", b.URL)
+	}
+	c := b.Credential
+	switch c.GrantType {
+	case "", "client_credentials":
+	default:
+		return fmt.Errorf("anchor_backend.credential: grant_type %q is not supported for an anchor backend (want client_credentials, or a direct bearer via token_env)", c.GrantType)
+	}
+	switch c.CredentialSource {
+	case "", "static_env":
+	default:
+		return fmt.Errorf("anchor_backend.credential: credential_source %q is not supported for an anchor backend (want static_env)", c.CredentialSource)
+	}
+	return nil
+}
+
+// isBackendURL admits an absolute http or https URL with a host and no
+// userinfo, query or fragment — the same rule the anchoring client applies
+// to a URL read back from a record. Kept here rather than imported so this
+// package stays a leaf of its own.
+func isBackendURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" && u.User == nil && u.RawQuery == "" && !u.ForceQuery && u.Fragment == ""
 }
 
 // The allowed-key lists, in the order the error texts name them. A future
@@ -256,6 +311,12 @@ func ParseIntegrity(data []byte) (Integrity, error) {
 	}
 	if err := in.Validate(); err != nil { // the value rules
 		return Integrity{}, err
+	}
+	if in.Anchor == "tlog" && in.AnchorBackend.Kind == "" {
+		// The one default: a tlog root names a transparency log unless it says
+		// otherwise. Harmless because url is still required above, and applied
+		// after validation so Validate judges exactly what the file said.
+		in.AnchorBackend.Kind = "transparency-log"
 	}
 	return in, nil
 }

@@ -31,8 +31,7 @@ func TestIntegrityValidateRejectsByName(t *testing.T) {
 		sinkWorm      = `sink "worm" is reserved and not yet supported in this build (only local is implemented)`
 		sinkExternal  = `sink "external" is reserved and not yet supported in this build (only local is implemented)`
 		sinkDuplicate = `sink "duplicate" is reserved and not yet supported in this build; when it is, it is written as the duplicate: list, not as the sink value`
-		anchorTlog    = `anchor "tlog" is reserved and not yet supported in this build (only none is implemented)`
-		anchorSigned  = `anchor "signed" is reserved and not yet supported in this build (only none is implemented)`
+		anchorSigned  = `anchor "signed" is reserved and not yet supported in this build (only none and tlog are implemented)`
 		dupOne        = `duplicate names 1 sink(s); duplicate sinks are reserved and not yet supported in this build`
 		dupTwo        = `duplicate names 2 sink(s); duplicate sinks are reserved and not yet supported in this build`
 		sinkBackend   = `sink_backend is set but sink is local; backend coordinates are reserved for worm and external`
@@ -49,9 +48,8 @@ func TestIntegrityValidateRejectsByName(t *testing.T) {
 		{"sink Local is not the floor", Integrity{Sink: "Local"}, `sink "Local" is not an integrity sink (want local; worm, external and duplicate are reserved)`},
 		{"sink with a space is not the floor", Integrity{Sink: " local"}, `sink " local" is not an integrity sink (want local; worm, external and duplicate are reserved)`},
 		{"sink s3", Integrity{Sink: "s3"}, `sink "s3" is not an integrity sink (want local; worm, external and duplicate are reserved)`},
-		{"anchor tlog", Integrity{Anchor: "tlog"}, anchorTlog},
 		{"anchor signed", Integrity{Anchor: "signed"}, anchorSigned},
-		{"anchor TLOG", Integrity{Anchor: "TLOG"}, `anchor "TLOG" is not an integrity anchor (want none; tlog and signed are reserved)`},
+		{"anchor TLOG", Integrity{Anchor: "TLOG"}, `anchor "TLOG" is not an integrity anchor (want none or tlog; signed is reserved)`},
 		{"one duplicate entry, even empty", Integrity{Duplicate: []IntegrityBackend{{}}}, dupOne},
 		{"two duplicate entries", Integrity{Duplicate: []IntegrityBackend{{Kind: "local"}, {Kind: "s3-object-lock"}}}, dupTwo},
 		{"sink_backend kind at the floor", Integrity{SinkBackend: IntegrityBackend{Kind: "s3-object-lock"}}, sinkBackend},
@@ -59,7 +57,7 @@ func TestIntegrityValidateRejectsByName(t *testing.T) {
 		{"anchor_backend reached through its credential", Integrity{AnchorBackend: IntegrityBackend{Credential: BackendCredential{TokenEnv: "TSA_TOKEN"}}}, anchorBackend},
 		// Order: the FIRST fault in the fixed order, never a later one.
 		{"sink before anchor", Integrity{Sink: "worm", Anchor: "tlog"}, sinkWorm},
-		{"anchor before duplicate", Integrity{Anchor: "tlog", Duplicate: []IntegrityBackend{{}}}, anchorTlog},
+		{"anchor before duplicate", Integrity{Anchor: "signed", Duplicate: []IntegrityBackend{{}}}, anchorSigned},
 		{"duplicate before sink_backend", Integrity{Duplicate: []IntegrityBackend{{}}, SinkBackend: IntegrityBackend{Kind: "x"}}, dupOne},
 		{"sink_backend before anchor_backend", Integrity{SinkBackend: IntegrityBackend{Kind: "x"}, AnchorBackend: IntegrityBackend{Kind: "y"}}, sinkBackend},
 	}
@@ -182,10 +180,10 @@ func TestParseIntegrityRejectsReservedValuesThroughYAML(t *testing.T) {
 		"worm":                               {"sink: worm\n", `sink "worm" is reserved and not yet supported in this build (only local is implemented)`},
 		"external":                           {"sink: external\n", `sink "external" is reserved and not yet supported in this build (only local is implemented)`},
 		"sink duplicate":                     {"sink: duplicate\n", `sink "duplicate" is reserved and not yet supported in this build; when it is, it is written as the duplicate: list, not as the sink value`},
-		"tlog":                               {"anchor: tlog\n", `anchor "tlog" is reserved and not yet supported in this build (only none is implemented)`},
-		"signed":                             {"anchor: signed\n", `anchor "signed" is reserved and not yet supported in this build (only none is implemented)`},
+		"tlog":                               {"anchor: tlog\n", `anchor is tlog but anchor_backend is not set; name the transparency log (kind transparency-log, url)`},
+		"signed":                             {"anchor: signed\n", `anchor "signed" is reserved and not yet supported in this build (only none and tlog are implemented)`},
 		"Local":                              {"sink: Local\n", `sink "Local" is not an integrity sink (want local; worm, external and duplicate are reserved)`},
-		"TLOG":                               {"anchor: TLOG\n", `anchor "TLOG" is not an integrity anchor (want none; tlog and signed are reserved)`},
+		"TLOG":                               {"anchor: TLOG\n", `anchor "TLOG" is not an integrity anchor (want none or tlog; signed is reserved)`},
 		"s3":                                 {"sink: s3\n", `sink "s3" is not an integrity sink (want local; worm, external and duplicate are reserved)`},
 		"one duplicate":                      {"duplicate:\n  - kind: local\n    url: file:///mnt/copy\n", `duplicate names 1 sink(s); duplicate sinks are reserved and not yet supported in this build`},
 		"empty entry":                        {"duplicate: [{}]\n", `duplicate names 1 sink(s); duplicate sinks are reserved and not yet supported in this build`},
@@ -318,5 +316,81 @@ func TestParseIntegrityRoundTrip(t *testing.T) {
 				t.Fatalf("round trip %+v → %+v", in, got)
 			}
 		})
+	}
+}
+
+// TestIntegrityValidateTlog pins rules 3a–3g with their exact strings and
+// their order (first fault only), and the accepted shapes: kind empty or
+// transparency-log; a direct-bearer credential; client_credentials with no
+// env names (shape-only — the broker fails at use, recorded).
+func TestIntegrityValidateTlog(t *testing.T) {
+	tlog := func(b IntegrityBackend) Integrity { return Integrity{Anchor: "tlog", AnchorBackend: b} }
+	url := "https://rekor.sigstore.dev"
+	for name, in := range map[string]Integrity{
+		"kind empty":                  tlog(IntegrityBackend{URL: url}),
+		"kind transparency-log":       tlog(IntegrityBackend{Kind: "transparency-log", URL: url}),
+		"http in-cluster":             tlog(IntegrityBackend{URL: "http://rekor.internal:3000"}),
+		"path prefix":                 tlog(IntegrityBackend{URL: "https://logs.example/rekor"}),
+		"direct bearer":               tlog(IntegrityBackend{URL: url, Credential: BackendCredential{TokenEnv: "REKOR_TOKEN"}}),
+		"static_env spelled":          tlog(IntegrityBackend{URL: url, Credential: BackendCredential{CredentialSource: "static_env", TokenEnv: "REKOR_TOKEN"}}),
+		"client_credentials, no envs": tlog(IntegrityBackend{URL: url, Credential: BackendCredential{GrantType: "client_credentials"}}),
+	} {
+		if err := in.Validate(); err != nil {
+			t.Errorf("%s: Validate = %v, want nil", name, err)
+		}
+	}
+	cases := []struct {
+		name string
+		in   Integrity
+		want string
+	}{
+		{"3a signed", Integrity{Anchor: "signed"}, `anchor "signed" is reserved and not yet supported in this build (only none and tlog are implemented)`},
+		{"3a signed with coordinates", Integrity{Anchor: "signed", AnchorBackend: IntegrityBackend{URL: url}}, `anchor "signed" is reserved and not yet supported in this build (only none and tlog are implemented)`},
+		{"3b no backend", Integrity{Anchor: "tlog"}, `anchor is tlog but anchor_backend is not set; name the transparency log (kind transparency-log, url)`},
+		{"3c rfc3161", tlog(IntegrityBackend{Kind: "rfc3161", URL: "https://tsa.example/tsr"}), `anchor_backend kind "rfc3161" is reserved and not yet supported in this build (only transparency-log is implemented)`},
+		{"3d other kind", tlog(IntegrityBackend{Kind: "kms", URL: url}), `anchor_backend kind "kms" is not an anchor backend kind (want transparency-log; rfc3161 is reserved)`},
+		{"3d case", tlog(IntegrityBackend{Kind: "Transparency-Log", URL: url}), `anchor_backend kind "Transparency-Log" is not an anchor backend kind (want transparency-log; rfc3161 is reserved)`},
+		{"3e url empty", tlog(IntegrityBackend{Kind: "transparency-log"}), `anchor_backend.url is required for anchor: tlog (the Sigstore public-good log is https://rekor.sigstore.dev)`},
+		{"3e credential only", tlog(IntegrityBackend{Credential: BackendCredential{TokenEnv: "X"}}), `anchor_backend.url is required for anchor: tlog (the Sigstore public-good log is https://rekor.sigstore.dev)`},
+		{"3f relative", tlog(IntegrityBackend{URL: "rekor.sigstore.dev"}), `anchor_backend.url "rekor.sigstore.dev" is not an absolute http(s) URL without credentials`},
+		{"3f ftp", tlog(IntegrityBackend{URL: "ftp://rekor.sigstore.dev"}), `anchor_backend.url "ftp://rekor.sigstore.dev" is not an absolute http(s) URL without credentials`},
+		{"3f userinfo", tlog(IntegrityBackend{URL: "https://u:p@rekor.sigstore.dev"}), `anchor_backend.url "https://u:p@rekor.sigstore.dev" is not an absolute http(s) URL without credentials`},
+		{"3f query", tlog(IntegrityBackend{URL: url + "/?treeID=1"}), `anchor_backend.url "https://rekor.sigstore.dev/?treeID=1" is not an absolute http(s) URL without credentials`},
+		{"3f fragment", tlog(IntegrityBackend{URL: url + "#x"}), `anchor_backend.url "https://rekor.sigstore.dev#x" is not an absolute http(s) URL without credentials`},
+		{"3g token_exchange", tlog(IntegrityBackend{URL: url, Credential: BackendCredential{GrantType: "token_exchange"}}), `anchor_backend.credential: grant_type "token_exchange" is not supported for an anchor backend (want client_credentials, or a direct bearer via token_env)`},
+		{"3g source", tlog(IntegrityBackend{URL: url, Credential: BackendCredential{CredentialSource: "vault", TokenEnv: "X"}}), `anchor_backend.credential: credential_source "vault" is not supported for an anchor backend (want static_env)`},
+		{"3g grant before source", tlog(IntegrityBackend{URL: url, Credential: BackendCredential{CredentialSource: "vault", GrantType: "token_exchange"}}), `anchor_backend.credential: grant_type "token_exchange" is not supported for an anchor backend (want client_credentials, or a direct bearer via token_env)`},
+		{"3c before 3e", tlog(IntegrityBackend{Kind: "rfc3161"}), `anchor_backend kind "rfc3161" is reserved and not yet supported in this build (only transparency-log is implemented)`},
+		{"3e before 3g", tlog(IntegrityBackend{Credential: BackendCredential{GrantType: "token_exchange"}}), `anchor_backend.url is required for anchor: tlog (the Sigstore public-good log is https://rekor.sigstore.dev)`},
+		{"rule 7 unchanged", Integrity{Anchor: "none", AnchorBackend: IntegrityBackend{URL: url}}, `anchor_backend is set but anchor is none; backend coordinates are reserved for tlog and signed`},
+		{"sink still first", Integrity{Sink: "worm", Anchor: "tlog", AnchorBackend: IntegrityBackend{URL: url}}, `sink "worm" is reserved and not yet supported in this build (only local is implemented)`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.in.Validate()
+			if err == nil || err.Error() != c.want {
+				t.Fatalf("Validate(%+v)\n got %v\nwant %q", c.in, err, c.want)
+			}
+			if strings.Contains(err.Error(), "REKOR_TOKEN") || strings.Contains(err.Error(), "tsa.example") {
+				t.Fatalf("error must not echo a credential name or a reserved coordinate: %q", err)
+			}
+		})
+	}
+}
+
+// TestParseIntegrityTlogDefaultsKind: a file naming only the url parses with
+// Kind "transparency-log" — the one default, harmless because url is still
+// required; a spelled kind is kept; a floor file still has an empty kind.
+func TestParseIntegrityTlogDefaultsKind(t *testing.T) {
+	in, err := ParseIntegrity([]byte("anchor: tlog\nanchor_backend:\n  url: https://rekor.sigstore.dev\n"))
+	if err != nil || in.Anchor != "tlog" || in.AnchorBackend.Kind != "transparency-log" || in.AnchorBackend.URL != "https://rekor.sigstore.dev" {
+		t.Fatalf("%+v %v", in, err)
+	}
+	in, err = ParseIntegrity([]byte("anchor: tlog\nanchor_backend: {kind: transparency-log, url: http://rekor.internal:3000}\n"))
+	if err != nil || in.AnchorBackend.Kind != "transparency-log" {
+		t.Fatalf("%+v %v", in, err)
+	}
+	if in, err := ParseIntegrity([]byte("sink: local\nanchor: none\n")); err != nil || in.AnchorBackend.Kind != "" {
+		t.Fatalf("floor must not gain a kind: %+v %v", in, err)
 	}
 }
