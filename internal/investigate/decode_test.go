@@ -27,7 +27,7 @@ func TestDecodeJSONRoundTripsRenderJSON(t *testing.T) {
 		}
 	}
 	_ = log.Close()
-	res, err := Timeline(dir, filepath.Join(dir, "control.jsonl"), Filter{})
+	res, err := Timeline(dir, filepath.Join(dir, "control.jsonl"), Filter{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

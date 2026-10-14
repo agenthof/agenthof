@@ -1925,7 +1925,7 @@ func cmdInvestigate(args []string, out io.Writer) int {
 		return investigateViaServer(base, serverToken(*token), q, *jsonOut, out)
 	}
 
-	res, err := investigate.Timeline(*logDir, *controlLog, f)
+	res, err := investigate.Timeline(*logDir, *controlLog, f, investigate.Options{})
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)
 		return 1

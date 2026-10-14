@@ -119,7 +119,7 @@ func (s *Server) investigate(w http.ResponseWriter, r *http.Request, _ identity.
 		t = t.UTC()
 		f.Until = &t
 	}
-	res, err := investigate.Timeline(s.cfg.LogDir, s.cfg.ControlLog, f)
+	res, err := investigate.Timeline(s.cfg.LogDir, s.cfg.ControlLog, f, investigate.Options{})
 	if err != nil {
 		s.logger.Error("investigate failed", "err", err)
 		http.Error(w, "investigation failed", http.StatusInternalServerError)
