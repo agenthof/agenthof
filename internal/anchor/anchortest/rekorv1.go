@@ -1,6 +1,7 @@
 package anchortest
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,6 +53,7 @@ type RekorV1 struct {
 	lastPosted  []byte
 	failNext    int
 	corruptNext bool
+	garbageNext bool
 	dropping    bool // Drop/Stop: close every connection until Start
 	delay       time.Duration
 	cosign      bool
@@ -81,6 +84,9 @@ func (f *RekorV1) Fail(status int) { f.mu.Lock(); f.failNext = status; f.mu.Unlo
 
 // CorruptNext makes the next 201 serve a body whose hash differs from its entry id.
 func (f *RekorV1) CorruptNext() { f.mu.Lock(); f.corruptNext = true; f.mu.Unlock() }
+
+// GarbageNext makes the NEXT request answer 200 with Sentinel as a non-JSON body.
+func (f *RekorV1) GarbageNext() { f.mu.Lock(); f.garbageNext = true; f.mu.Unlock() }
 
 // Drop closes every connection without a response until Start. It is sticky
 // because Go's transport retries an idempotent request whose reused
@@ -127,7 +133,7 @@ func (f *RekorV1) RotateKey() {
 func (f *RekorV1) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.failNext, f.corruptNext, f.dropping, f.delay, f.cosign, f.pad = 0, false, false, 0, false, 0
+	f.failNext, f.corruptNext, f.garbageNext, f.dropping, f.delay, f.cosign, f.pad = 0, false, false, false, 0, false, 0
 	f.corrupt, f.forgotten, f.requests = map[string]bool{}, map[string]bool{}, nil
 }
 
@@ -158,6 +164,14 @@ func (f *RekorV1) PublicKey() *ecdsa.PublicKey {
 	return &f.priv.PublicKey
 }
 
+// PrivateKey returns the key the log currently signs with, so a test can
+// forge an honestly signed checkpoint.
+func (f *RekorV1) PrivateKey() *ecdsa.PrivateKey {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.priv
+}
+
 // PublicKeyPEM returns the current key as a PEM "PUBLIC KEY" block.
 func (f *RekorV1) PublicKeyPEM() []byte {
 	der, err := x509.MarshalPKIXPublicKey(f.PublicKey())
@@ -184,6 +198,30 @@ func SignNote(priv *ecdsa.PrivateKey, name, text string) ([]byte, error) {
 	var hb [4]byte
 	binary.BigEndian.PutUint32(hb[:], h)
 	return []byte("— " + name + " " + base64.StdEncoding.EncodeToString(append(hb[:], sig...)) + "\n"), nil
+}
+
+// FlipSignature flips the final byte of the decoded signature on the note's
+// last signature line — past the 4-byte key hash — and re-encodes it, so the
+// key hash still matches and only the signature is wrong. (Flipping a base64
+// character instead can yield an invalid character and a malformed note.)
+func FlipSignature(msg []byte) ([]byte, error) {
+	i := bytes.LastIndex(msg, []byte("\n— "))
+	if i < 0 || !bytes.HasSuffix(msg, []byte("\n")) {
+		return nil, errors.New("no signature line")
+	}
+	name, b64, ok := strings.Cut(strings.TrimPrefix(string(msg[i+1:len(msg)-1]), "— "), " ")
+	if !ok {
+		return nil, errors.New("malformed signature line")
+	}
+	sig, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, err
+	}
+	if len(sig) <= 4 {
+		return nil, errors.New("signature is too short to flip")
+	}
+	sig[len(sig)-1] ^= 0x01
+	return append(msg[:i+1:i+1], []byte("— "+name+" "+base64.StdEncoding.EncodeToString(sig)+"\n")...), nil
 }
 
 // --- RFC 6962 tree math (RFC 6962 §2.1), recursive, fine for test sizes ---
@@ -319,8 +357,8 @@ func (f *RekorV1) entry(i int) (logEntryAnon, error) {
 func (f *RekorV1) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
-	drop, fail, delay := f.dropping, f.failNext, f.delay
-	f.failNext = 0
+	drop, fail, delay, garbage := f.dropping, f.failNext, f.delay, f.garbageNext
+	f.failNext, f.garbageNext = 0, false
 	f.mu.Unlock()
 
 	if delay > 0 {
@@ -342,6 +380,10 @@ func (f *RekorV1) handle(w http.ResponseWriter, r *http.Request) {
 	if fail != 0 {
 		w.Header().Set("Location", Sentinel)
 		w.WriteHeader(fail)
+		_, _ = io.WriteString(w, Sentinel)
+		return
+	}
+	if garbage {
 		_, _ = io.WriteString(w, Sentinel)
 		return
 	}

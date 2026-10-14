@@ -87,6 +87,8 @@ func NewRekor(rawURL string, o RekorOptions) (*Rekor, error) {
 	return &Rekor{url: u, host: parsed.Host, client: &c, key: o.Key, bearer: o.Bearer, offline: o.Offline}, nil
 }
 
+var _ Backend = (*Rekor)(nil)
+
 // Kind is the IntegrityBackend.Kind vocabulary for a transparency log.
 func (r *Rekor) Kind() string { return "transparency-log" }
 
@@ -403,6 +405,106 @@ func (r *Rekor) Submit(ctx context.Context, head Head) (Receipt, error) {
 		integrated = time.Unix(e.IntegratedTime, 0).UTC()
 	}
 	return Receipt{Ref: ref, Proof: proofB64, Backend: r.url, BackendKeyID: keyID, IntegratedTime: integrated, LogIndex: e.LogIndex}, nil
+}
+
+// Verify checks the recorded anchor OFFLINE first — the stored proof under
+// the trusted key — and only then, unless Offline, asks the log whether the
+// entry is still there (a courtesy to the operator, never the verdict about
+// the chain). Verdict ladder (the CLI prints Cause verbatim):
+//
+//   - the ref is not an 80-hex entry id, or the proof does not decode → *Mismatch
+//   - the key: pinned → used; unpinned and Offline → *Unavailable "no key to
+//     verify under"; unpinned → fetched for the ref's tree, and its id must
+//     equal the recorded BackendKeyID, else *Unavailable "… recorded at
+//     anchor time …"; a fetch failure → *Unavailable
+//   - verifyProofOffline's verdict, if any
+//   - Offline → nil; else the presence check: 200 with the stored body → nil;
+//     200 with another body → *Mismatch; 404 → *Mismatch (the recorded entry
+//     is absent from the recorded log); anything else → *Unavailable whose
+//     cause says the proof verified offline.
+func (r *Rekor) Verify(ctx context.Context, head Head, rcpt Receipt) error {
+	// The ref comes from a possibly hostile ledger: it is judged before
+	// anything slices it or puts it on a URL.
+	ref := strings.ToLower(rcpt.Ref)
+	if !entryIDRE.MatchString(ref) {
+		return &Mismatch{Cause: fmt.Sprintf("ref %q is not an 80-hex entry id", rcpt.Ref)}
+	}
+	raw, err := base64.StdEncoding.DecodeString(rcpt.Proof)
+	if err != nil {
+		return &Mismatch{Cause: "proof does not decode"}
+	}
+	var env rekorProof
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return &Mismatch{Cause: "proof does not decode"}
+	}
+	treeID, err := treeIDOf(ref)
+	if err != nil {
+		return &Mismatch{Cause: fmt.Sprintf("ref %q is not an 80-hex entry id", rcpt.Ref)}
+	}
+
+	key, keyDiffers := r.key, msgKeyDiffersPinned
+	if key == nil {
+		if r.offline {
+			return &Unavailable{Cause: "no key to verify under (unpinned, offline)"}
+		}
+		served, id, err := r.servedKey(ctx, treeID, false)
+		if err != nil {
+			return &Unavailable{Cause: err.Error()}
+		}
+		if id != rcpt.BackendKeyID {
+			return &Unavailable{Cause: msgKeyDiffersRecorded}
+		}
+		key, keyDiffers = served, msgKeyDiffersRecorded
+	}
+	if err := r.verifyProofOffline(head, ref, env, key, keyDiffers); err != nil {
+		return err
+	}
+	if r.offline {
+		return nil
+	}
+	return r.presence(ctx, ref, env.Body)
+}
+
+// presence is the non-load-bearing "still there" check (GET by entry id).
+func (r *Rekor) presence(ctx context.Context, ref, storedBody string) error {
+	unavailable := func(cause string) error {
+		return &Unavailable{Cause: cause + " (proof verified offline; presence not checked)"}
+	}
+	status, raw, err := r.do(ctx, http.MethodGet, "/api/v1/log/entries/"+ref, nil, false)
+	if err != nil {
+		return unavailable(err.Error())
+	}
+	switch status {
+	case http.StatusOK:
+		id, e, err := decodeSingleEntry(raw)
+		if err != nil || id != ref {
+			return unavailable(fmt.Sprintf("malformed answer from %s", r.host))
+		}
+		if e.bodyString() != storedBody {
+			return &Mismatch{Cause: "log serves a different body for the recorded entry"}
+		}
+		return nil
+	case http.StatusNotFound:
+		return &Mismatch{Cause: "recorded entry is absent from the log (404)"}
+	default:
+		return unavailable(fmt.Sprintf("status %d from %s", status, r.host))
+	}
+}
+
+// ServedKey fetches, anonymously, the key the log serves for the tree an entry
+// id names, with its id — what an operator pins (anchor.pub / --anchor-key)
+// to verify offline. ref must be an 80-hex entry id; nothing is requested
+// otherwise.
+func (r *Rekor) ServedKey(ctx context.Context, ref string) (*ecdsa.PublicKey, string, error) {
+	ref = strings.ToLower(ref)
+	if !entryIDRE.MatchString(ref) {
+		return nil, "", fmt.Errorf("ref %q is not an 80-hex entry id", ref)
+	}
+	treeID, err := treeIDOf(ref)
+	if err != nil {
+		return nil, "", fmt.Errorf("ref %q is not an 80-hex entry id", ref)
+	}
+	return r.servedKey(ctx, treeID, false)
 }
 
 // decodeSingleEntry parses a LogEntry — a JSON object with exactly one key,
