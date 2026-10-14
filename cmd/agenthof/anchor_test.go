@@ -21,6 +21,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/anchor"
 	"github.com/agenthof/agenthof/internal/anchor/anchortest"
+	"github.com/agenthof/agenthof/internal/anchorverify"
 	"github.com/agenthof/agenthof/internal/broker"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/control"
@@ -643,5 +644,33 @@ func TestVerifyControlPlantedHashNeverReachesTheTerminalRaw(t *testing.T) {
 	}
 	if !strings.Contains(out, "anchor seq 1 nope[31m → http://stub.invalid entry ") || !strings.Contains(out, ": MISMATCH — anchor hash is not a lowercase hex sha256\n") {
 		t.Fatalf("output:\n%s", out)
+	}
+}
+
+// TestVerifyBackendFactoryAgreesWithDefault: the CLI's dispatch and
+// anchorverify.Default return the same "not implemented" text for an unknown
+// kind and both build a *anchor.Rekor for transparency-log, so a verdict
+// cannot depend on which view built the backend.
+func TestVerifyBackendFactoryAgreesWithDefault(t *testing.T) {
+	for _, kind := range []string{"rfc3161", "kms", ""} {
+		_, e1 := anchorverify.Default(kind, "https://x.example", nil, true)
+		_, e2 := verifyBackendFactory(kind, "https://x.example", nil, true)
+		if e1 == nil || e2 == nil || e1.Error() != e2.Error() {
+			t.Fatalf("%q: Default %v, cmd %v", kind, e1, e2)
+		}
+	}
+	b1, err := anchorverify.Default("transparency-log", "https://rekor.sigstore.dev/", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := verifyBackendFactory("transparency-log", "https://rekor.sigstore.dev/", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b1.(*anchor.Rekor); !ok {
+		t.Fatalf("Default: %T", b1)
+	}
+	if _, ok := b2.(*anchor.Rekor); !ok {
+		t.Fatalf("cmd: %T", b2)
 	}
 }
