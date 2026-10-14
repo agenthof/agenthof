@@ -457,7 +457,7 @@ and groups are used outside of `apply`).
 ### `control`
 
 Optional. The control-plane operations this role's `allowed_groups` members
-may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull` — the seven fixed
+may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor` — the eight fixed
 operations, named individually. There is no wildcard spelling and no
 operation is granted by omission — the one implication is that `apply`
 includes `pull`; nothing else is implied: a role with no `control` key (or `control:`
@@ -473,7 +473,9 @@ its members run `gateway provision`, which mints provider keys for the
 installed roles; `prune` lets them run `runs prune`. `pull` lets its members
 read the installed configuration over the API — `config pull --server`,
 `GET /v1/config` — so an execution point can enforce it; a grant of `apply`
-includes it. `vouch` is not a grantable operation (`control-bad-op`): `config
+includes it. `anchor` lets its members run `audit anchor`, which pins the
+control-ledger head into the transparency log the root's `integrity.yaml`
+names (see `audit anchor` below). `vouch` is not a grantable operation (`control-bad-op`): `config
 vouch` is authorized against no role by design, because the roles' own
 provenance is what it restores.
 
@@ -484,7 +486,7 @@ refusal records, and the honest limits — is in
 ```yaml
 name: platform-admin
 allowed_groups: [platform-eng]
-control: [apply, enable, disable, repair, provision, prune]
+control: [apply, enable, disable, repair, provision, prune, anchor]
 ```
 
 ### `budget_usd_month`
@@ -843,7 +845,8 @@ the life of an on-behalf-of call.
 ## Control-plane CLI
 
 `agenthof apply`, `agenthof registry enable|disable` — the kill switch —
-`agenthof gateway provision` and `agenthof runs prune` record every attempt
+`agenthof gateway provision`, `agenthof runs prune` and `agenthof audit
+anchor` record every attempt
 to a hash-chained control log, and `agenthof audit`
 gains three verbs to read and, if needed, recover it. See
 [`docs/concepts.md`](../concepts.md#control-plane-audit) for what gets
@@ -867,8 +870,9 @@ authorized against no role, permitted for any identity the host resolves (see
 | `agenthof config vouch [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--as`, `--groups`, `--token` |
 | `agenthof registry enable\|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | same |
 | `agenthof audit control [--control-log <path>]` | `--control-log` |
-| `agenthof audit verify control [--control-log <path>] [--expect-head <hex>]` | `--control-log`, `--expect-head` |
+| `agenthof audit verify control [--control-log <path>] [--expect-head <hex>\|<seq>:<hex>] [--anchor-key <path>] [--offline] [--anchor-timeout <dur>]` | `--control-log`, `--expect-head`, `--anchor-key`, `--offline`, `--anchor-timeout` |
 | `agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--config`, `--as`, `--groups`, `--token` |
+| `agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout <dur>]` | `--control-log`, `--as`, `--groups`, `--token`, `--timeout` |
 | `agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]` | `--control-log`, `--as`, `--groups`, `--token`, `--admin-base` |
 | `agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--older-than`, `--log-dir`, `--artifact-dir`, `--control-log`, `--as`, `--groups`, `--token` |
 | `agenthof investigate [--since <dur\|ts>] [--until <dur\|ts>] [--invoker <id>] [--agent <name>] [--outcome <value>] [--run <run-id>] [--config-hash <sha256:…>] [--json] [--log-dir <dir>] [--control-log <path>]` | `--since`, `--until`, `--invoker`, `--agent`, `--outcome`, `--run`, `--config-hash`, `--json`, `--log-dir`, `--control-log` |
@@ -966,15 +970,17 @@ beside it too: `<dir>/integrity.yaml`, operator-written — Agenthof never write
 it. It has two knobs — `sink` (where the ledger's bytes live) and `anchor`
 (what pins its head) — and, absent, means the floor: `sink: local`, `anchor:
 none`, which is exactly the hash-chained local file the control ledger is
-today. The floor is the only posture this build honors; every other value is
-reserved and refused by name:
+today. Two postures are honored: the floor, and `anchor: tlog` with an
+`anchor_backend` naming a transparency log. Every other value is reserved
+and refused by name:
 
-| key | accepted in this build | reserved — refused in this build |
+| key | accepted | reserved — refused |
 |---|---|---|
 | `sink` | absent, `""`, `local` | `worm`, `external` (and `duplicate`, which when it ships is written as the `duplicate:` list, not as the sink) |
-| `anchor` | absent, `""`, `none` | `tlog`, `signed` |
+| `anchor` | absent, `""`, `none`, `tlog` | `signed` |
 | `duplicate` | absent, `null`, `[]` | any entry — a list of further sinks written in parallel with `sink` |
-| `sink_backend`, `anchor_backend` | absent, `null`, `{}` | any set field — the coordinates of a reserved sink or anchor: `kind`, `url`, and a `credential` block |
+| `sink_backend` | absent, `null`, `{}` | any set field |
+| `anchor_backend` | with `anchor: tlog`: `kind` absent or `transparency-log`, `url` **required** — an absolute `http(s)` URL with no credentials, query or fragment (the Sigstore public-good log is `https://rekor.sigstore.dev`; it is never defaulted, so nothing is published to a service you did not name) — and an optional `credential` (direct bearer via `token_env`, or `grant_type: client_credentials`) | `kind: rfc3161`; any other kind; `grant_type: token_exchange`; a `credential_source` other than `static_env`; any set field while `anchor` is `none` |
 
 A backend's `credential` is the same broker-reference vocabulary a tool
 resource's credential uses — `credential_source`, `token_env`, `grant_type`,
@@ -989,11 +995,31 @@ touches the ledger and, on a posture it cannot honor or a file it cannot read
 or parse, prints `<command>: integrity <path>: <fault>` and exits 2, recording
 nothing; `serve` reads it once at startup and refuses to start the same way (a
 change to the file takes effect on restart). A missing file is the floor; a
-present file that cannot be read is never treated as missing. The readers —
-`audit control`, `audit verify control`, `investigate` — do not consult it.
-Writing a reserved value today stops every control write; it anchors and
-stores nothing. The floor adds no guarantee beyond the chain itself, and
-nothing in this file changes what the chain can and cannot detect.
+present file that cannot be read is never treated as missing.
+
+A `tlog` root is honored by every writer by **proceeding**: `apply`, the kill
+switch, `config vouch`, `gateway provision`, `runs prune` and `serve` write
+exactly as at the floor, unanchored — anchoring is a separate,
+operator-triggered action, `agenthof audit anchor`, usually run from cron.
+Between anchors the chain is evidenced by its hash links alone. The
+`credential` block is shape-checked only; a `client_credentials` grant
+missing its endpoint or environment names fails when `audit anchor` runs,
+recorded as an `anchor` `error`, never silently. The readers — `audit
+control`, `audit verify control`, `investigate` — never read this file:
+`audit verify control` verifies anchors from the records themselves.
+
+The **pinned log key**, when present, lives beside the ledger too:
+`<dir>/anchor.pub` — the transparency log's checkpoint-signing public key
+(PEM, ECDSA P-256 only; `verify.pub` is a different key for a different
+purpose and is never read here), operator-written, obtained from the log's
+own trust root or out of band — or passed as `audit verify control
+--anchor-key <path>` for a verifier on another machine. With a key pinned,
+anchors verify **offline from the proof stored on the record**, and `audit
+anchor` refuses a log presenting any other key. Without one, the key the log
+serves is used and recorded (`backend_key_id`), and every line says `as
+served` / `unpinned`: that is trust in the log's own word, not independent
+verification. A pinned key other than the one that signed is reported as
+**unverifiable** (exit 7) with the fix named — never as tampering.
 
 ### `--config`
 
@@ -1128,6 +1154,14 @@ stdout after some earlier append, saved somewhere off this machine (see
 [`docs/concepts.md`](../concepts.md#control-plane-audit)). Only the hash is
 compared; the accompanying event count is informational.
 
+Two forms. `<hex>`: the current head must be this hash. `<seq>:<hex>`: the
+chain must still reproduce `<hex>` at position `<seq>` — exactly the
+`anchored: seq=K sha256=H` line `audit anchor` prints, so a line saved off
+this machine checks a copy of the chain from anywhere, with or without the
+log. Either form failing is exit 4 (`expect-head mismatch: want <hex> at seq
+<seq>, got <hex>` / `… but the chain has <N> records`); a value that is not
+64 lowercase hex, optionally prefixed `<seq>:`, is a usage error.
+
 ### `--since`, `--until`
 
 `agenthof investigate` only. Each takes either a bare duration — a Go
@@ -1223,16 +1257,31 @@ configure the operational log on stderr — see [`logging.md`](logging.md).
 | `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain — a torn or broken chain still renders whatever valid prefix was recovered, with the failure named in the trailing integrity line |
 | `2` | Usage error |
 
-`agenthof audit verify control`, checked in this order:
+`agenthof audit verify control` computes every verdict, prints every line,
+then exits by precedence **1, 6, 3, 4, 5, 7**:
 
 | Exit | Meaning |
 |---|---|
-| `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain |
-| `3` | The chain is tainted — a `repair` event has ever been appended to it (checked, and reported, before `--expect-head` is) |
-| `4` | `--expect-head` was given and does not match the verified head |
-| `5` | The installed pointer (`installed/current` beside the log) does not name the last recorded install (the last successful `apply`, kill-switch flip, or `config vouch`) — an install whose event was never appended or whose record was lost (`config vouch` is the remedy) — or the pointer itself is damaged (unreadable or malformed). Only the pointer is read, never the snapshot directory, so a matching pointer whose snapshot bytes were deleted is still exit 0. Checked last, after `3` and `4` |
-| `0` | None of the above — the chain is clean, `--expect-head` (if given) matched, and the installed pointer (if any) matches |
-| `2` | Usage error |
+| `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain — checked first and alone; no anchor is examined |
+| `6` | **Anchor mismatch** — a definitive content disagreement for at least one anchor the chain records: the chain no longer reproduces the recorded head at the recorded position (a rewritten root); or, under the trusted log key, the stored entry names another hash, its leaf hash is not the recorded entry, the inclusion proof fails, the checkpoint names another tree or its signature is invalid; or the log serves a different body or `404` for the recorded entry. Every anchor is still listed |
+| `3` | Tainted — a `repair` event has ever been appended |
+| `4` | `--expect-head` did not hold (either form) |
+| `5` | The installed pointer (`installed/current` beside the log) does not name the last recorded install (the last successful `apply`, kill-switch flip, or `config vouch`) — an install whose event was never appended or whose record was lost (`config vouch` is the remedy) — or the pointer itself is damaged (unreadable or malformed). Only the pointer is read, never the snapshot directory, so a matching pointer whose snapshot bytes were deleted is still exit 0 |
+| `7` | **Anchor unverifiable** — no verdict could be reached for at least one anchor and none mismatched: the log unreachable, slow, redirecting, or answering anything but the entry; a log key the verifier does not hold (the proof's signer is not the pinned key, or the served key is not the one recorded at anchor time); no key at all (`--offline` without a pin); `anchor.pub`/`--anchor-key` missing, malformed or not ECDSA P-256; a proof format or backend kind this build does not read. Never tamper detected: retry, or pin a key, as the line says |
+| `0` | None of the above |
+| `2` | Usage, including an `--expect-head` outside its grammar |
+
+`agenthof audit anchor`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Anchored and recorded: an `anchor` `success` event carrying the covered head (`seq`, `hash`), the log (`backend`), the entry (`ref`), the log's inclusion proof and signed checkpoint (`proof`) and the log key's id (`backend_key_id`). Prints `anchored: seq=K sha256=H` (ship this line and the `entry:` reference off the box — they are the inputs to `audit verify control --expect-head K:H` and to anyone checking the log), the log, entry, key mode (`pinned` / `as served`), and the log's own index and integration time *as reported by the log* — Agenthof does not verify time |
+| `1` | A recorded `refused` (no role grants `anchor`; a failed token; nothing installed; a pointer the ledger does not vouch for — none of these contacts the log) or `error` (reason `anchor_failed`: the log answered anything but created — `status N from <host>` — could not be reached, returned a proof that does not verify or over the size cap, presented a key other than the pinned one, or the credential could not be resolved — the event records what it tried to cover; the ledger is otherwise untouched); or, unrecorded: the root's posture is `anchor: none` or absent (`no anchor configured …`), the ledger is busy or damaged, the ledger is empty, or the entry was created but the record could not be appended (`anchored at <ref> but NOT recorded` — harmless; the next run records a new one) |
+| `2` | Usage; `--token` without `AGENTHOF_OIDC_ISSUER`; an `integrity.yaml` that cannot be read or does not validate; an `anchor.pub` that is not an ECDSA P-256 public key |
+
+`--as`/`--groups` are self-asserted (DEV ONLY), as everywhere; a production
+cron presents `--token` or `AGENTHOF_TOKEN`. `--timeout` (default `30s`)
+bounds the whole exchange with the log.
 
 `agenthof audit repair control`:
 
