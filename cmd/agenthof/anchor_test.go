@@ -399,3 +399,135 @@ func TestVerifyControlPrintsTaintAndExpectHeadTogether(t *testing.T) {
 		t.Fatalf("exit %d\n%s", code, text)
 	}
 }
+
+// anchoredViaStub applies a root whose operator role may anchor, anchors once
+// through the stub, and returns the ledger path and the stub.
+func anchoredViaStub(t *testing.T) (string, *anchortest.Stub) {
+	t.Helper()
+	stub := useStub(t)
+	ctl := applied(t, anchorSample(t))
+	tlogPostureFor(t, ctl, "http://stub.invalid")
+	var out bytes.Buffer
+	if code := cmdAudit([]string{"anchor", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("anchor: %d\n%s", code, out.String())
+	}
+	return ctl, stub
+}
+
+// TestVerifyControlViaStub: the stub's record verifies offline → 0; one byte
+// of its proof flipped on disk (chain recomputed) passes the structural check
+// and fails the backend → 6; Fail → 7; and a kind this build does not
+// construct → 7 "is not implemented", never a mismatch.
+func TestVerifyControlViaStub(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, stub := anchoredViaStub(t)
+	if code, out := verifyControl(t, "--control-log", ctl, "--offline"); code != 0 || !strings.Contains(out, "anchor seq 1 ") || !strings.Contains(out, ": verified (log key as served by the log") || !strings.Contains(out, "anchors: 1 (1 verified, 0 mismatch, 0 unverifiable)") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	cp, _ := os.ReadFile(ctl)
+	rewriteTail(t, ctl, 2, func(seq int, m map[string]any) {
+		a := m["anchor"].(map[string]any)
+		p := a["proof"].(string)
+		a["proof"] = "A" + p[1:]
+	})
+	if code, out := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorMismatch || !strings.Contains(out, "MISMATCH — proof does not hash to the recorded ref") {
+		t.Fatalf("flipped proof: exit %d\n%s", code, out)
+	}
+	if err := os.WriteFile(ctl, cp, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stub.Fail()
+	if code, out := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorUnverifiable || !strings.Contains(out, "unverifiable — stub: unavailable") {
+		t.Fatalf("Fail: exit %d\n%s", code, out)
+	}
+	prev := newAnchorBackend
+	newAnchorBackend = anchorBackendFor // production dispatch: rfc3161 is not implemented
+	t.Cleanup(func() { newAnchorBackend = prev })
+	if code, out := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorUnverifiable || !strings.Contains(out, `unverifiable — anchor backend kind "rfc3161" is not implemented`) {
+		t.Fatalf("not implemented: exit %d\n%s", code, out)
+	}
+}
+
+// TestVerifyControlComputesAllThenDecides: tainted + good anchor → 3 with the
+// anchor line printed; tainted + forged anchor → 6 with the TAINTED line
+// printed; tainted + wrong --expect-head + forged anchor → 6; unverifiable +
+// pointer moved → 5; unverifiable + wrong --expect-head → 4; unverifiable
+// alone → 7.
+func TestVerifyControlComputesAllThenDecides(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, stub := anchoredViaStub(t)
+	// Tear and repair: the ledger is now tainted (repair at seq 3).
+	f, err := os.OpenFile(ctl, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"v":"control/1","seq":3,"partial`)
+	_ = f.Close()
+	var out bytes.Buffer
+	if code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", writeSample(t), "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("repair: %d\n%s", code, out.String())
+	}
+	code, text := verifyControl(t, "--control-log", ctl, "--offline")
+	if code != 3 || !strings.Contains(text, "TAINTED") || !strings.Contains(text, "anchor seq 1 ") || !strings.Contains(text, ": verified") {
+		t.Fatalf("tainted + good: exit %d\n%s", code, text)
+	}
+	good, _ := os.ReadFile(ctl)
+	rewriteTail(t, ctl, 2, func(seq int, m map[string]any) {
+		if seq == 2 {
+			m["anchor"].(map[string]any)["hash"] = strings.Repeat("ff", 32)
+		}
+	})
+	code, text = verifyControl(t, "--control-log", ctl, "--offline")
+	if code != exitAnchorMismatch || !strings.Contains(text, "TAINTED") || !strings.Contains(text, "MISMATCH — the chain does not reproduce") {
+		t.Fatalf("tainted + forged: exit %d\n%s", code, text)
+	}
+	code, text = verifyControl(t, "--control-log", ctl, "--offline", "--expect-head", strings.Repeat("0", 64))
+	if code != exitAnchorMismatch || !strings.Contains(text, "expect-head mismatch") {
+		t.Fatalf("6 outranks 3 and 4: exit %d\n%s", code, text)
+	}
+	if err := os.WriteFile(ctl, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stub.Fail() // every anchor now unverifiable
+	code, text = verifyControl(t, "--control-log", ctl, "--offline")
+	if code != 3 {
+		t.Fatalf("3 outranks 7: exit %d\n%s", code, text)
+	}
+	// A fresh, untainted root for the 5 / 4 / 7 cases.
+	ctl2, stub2 := anchoredViaStub(t)
+	stub2.Fail()
+	if code, text := verifyControl(t, "--control-log", ctl2, "--offline"); code != exitAnchorUnverifiable || !strings.Contains(text, "anchors: 1 (0 verified, 0 mismatch, 1 unverifiable)") {
+		t.Fatalf("7 alone: exit %d\n%s", code, text)
+	}
+	if code, _ := verifyControl(t, "--control-log", ctl2, "--offline", "--expect-head", strings.Repeat("0", 64)); code != 4 {
+		t.Fatalf("4 outranks 7: exit %d", code)
+	}
+	if err := os.WriteFile(filepath.Join(installedStore(ctl2), config.InstalledPointer), []byte("sha256:"+strings.Repeat("0", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, text := verifyControl(t, "--control-log", ctl2, "--offline"); code != exitInstalledMismatch || !strings.Contains(text, "unverifiable") {
+		t.Fatalf("5 outranks 7 and still prints the anchor line: exit %d\n%s", code, text)
+	}
+}
+
+// TestVerifyControlIsPostureBlind: deleting integrity.yaml, setting
+// anchor: none, or writing garbage into it leaves audit verify control's
+// output byte-identical.
+func TestVerifyControlIsPostureBlind(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _ := anchoredViaStub(t)
+	_, want := verifyControl(t, "--control-log", ctl, "--offline")
+	for name, body := range map[string]string{"none": "anchor: none\n", "garbage": "{{{"} {
+		writeIntegrity(t, ctl, body)
+		if _, got := verifyControl(t, "--control-log", ctl, "--offline"); got != want {
+			t.Fatalf("%s: output differs\n%s\n---\n%s", name, got, want)
+		}
+	}
+	if err := os.Remove(integrityPath(ctl)); err != nil {
+		t.Fatal(err)
+	}
+	if _, got := verifyControl(t, "--control-log", ctl, "--offline"); got != want || strings.Contains(got, "integrity ") {
+		t.Fatalf("deleted: output differs or names the posture\n%s", got)
+	}
+}

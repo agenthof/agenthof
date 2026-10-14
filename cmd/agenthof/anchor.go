@@ -375,3 +375,80 @@ func expectHeadMismatch(expect string, records []ledger.Record, head ledger.Head
 	}
 	return ""
 }
+
+// anchorVerdicts counts audit verify control's three per-anchor outcomes.
+type anchorVerdicts struct{ verified, mismatch, unverifiable int }
+
+// verifyAnchors checks every successful anchor record the chain carries and
+// prints one line per anchor plus a summary. Structural first
+// (control.CheckAnchors — pure, posture-blind), then the backend built from
+// the RECORD's own backend_kind and backend — never integrity.yaml — under the
+// pinned log key (--anchor-key, else anchor.pub beside the ledger), or as
+// served when neither is present. A key that cannot be loaded makes every
+// anchor unverifiable, never exit 2: a reader never exits 2 on root state.
+// The pin is resolved only when there is an anchor to verify.
+func verifyAnchors(controlLog string, records []ledger.Record, anchorKey string, offline bool, timeout time.Duration, out io.Writer) anchorVerdicts {
+	checks := control.CheckAnchors(records)
+	if len(checks) == 0 {
+		_, _ = fmt.Fprintln(out, "anchors: none (if this root is meant to be anchored — integrity.yaml anchor: tlog — run: agenthof audit anchor)")
+		return anchorVerdicts{}
+	}
+	pub, keyErr := pinnedLogKey(controlLog, anchorKey)
+	keyMode := "log key as served by the log — unpinned; pin it in anchor.pub or --anchor-key to verify independently"
+	if pub != nil {
+		keyMode = "log key pinned"
+	}
+	presence := ""
+	if offline {
+		presence = "; offline: presence not checked"
+	}
+	var v anchorVerdicts
+	for _, c := range checks {
+		if c.Anchor == nil {
+			_, _ = fmt.Fprintf(out, "anchor record seq %d: MISMATCH — %s\n", c.RecordSeq, c.Mismatch)
+			v.mismatch++
+			continue
+		}
+		a := c.Anchor
+		where := fmt.Sprintf("anchor seq %d %s → %s entry %s", a.Seq, a.Hash, a.Backend, a.Ref)
+		switch {
+		case c.Mismatch != "":
+			_, _ = fmt.Fprintf(out, "%s: MISMATCH — %s\n", where, c.Mismatch)
+			v.mismatch++
+			continue
+		case keyErr != nil:
+			_, _ = fmt.Fprintf(out, "%s: unverifiable — %v\n", where, keyErr)
+			v.unverifiable++
+			continue
+		}
+		be, err := newAnchorBackend(backendSpec{Kind: a.BackendKind, URL: a.Backend, Key: pub, Offline: offline})
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "%s: unverifiable — %v\n", where, err)
+			v.unverifiable++
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		verr := be.Verify(ctx, anchor.Head{Seq: a.Seq, Hash: a.Hash}, anchor.Receipt{Ref: a.Ref, Proof: a.Proof, Backend: a.Backend, BackendKeyID: a.BackendKeyID})
+		cancel()
+		var m *anchor.Mismatch
+		var u *anchor.Unavailable
+		switch {
+		case verr == nil:
+			_, _ = fmt.Fprintf(out, "%s: verified (%s%s)\n", where, keyMode, presence)
+			v.verified++
+		case errors.As(verr, &m):
+			_, _ = fmt.Fprintf(out, "%s: MISMATCH — %s\n", where, m.Cause)
+			v.mismatch++
+		case errors.As(verr, &u):
+			_, _ = fmt.Fprintf(out, "%s: unverifiable — %s\n", where, u.Cause)
+			v.unverifiable++
+		default:
+			// A backend that broke its contract: the absence of a verdict,
+			// never tamper detected.
+			_, _ = fmt.Fprintf(out, "%s: unverifiable — %v\n", where, verr)
+			v.unverifiable++
+		}
+	}
+	_, _ = fmt.Fprintf(out, "anchors: %d (%d verified, %d mismatch, %d unverifiable)\n", len(checks), v.verified, v.mismatch, v.unverifiable)
+	return v
+}

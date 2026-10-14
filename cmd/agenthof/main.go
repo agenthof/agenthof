@@ -1377,17 +1377,25 @@ func cmdAuditControl(args []string, out io.Writer) int {
 // verdict, a repaired root still shows an --expect-head mismatch and a
 // pointer mismatch. A missing log, any other open/IO failure, and a
 // torn/broken chain exit 1 first and stop: such a chain has no positions to
-// reproduce heads at. Then, in precedence order: 3 tainted (control.IsTainted
+// reproduce heads at. Every recorded anchor is then checked (verifyAnchors:
+// the structural check, then the stored proof under the pinned log key, then
+// a presence check unless --offline) and its line printed. Then, in
+// precedence order: 6 an anchor disagrees with the chain or the log; 3 tainted (control.IsTainted
 // — a "repair" record was ever appended); 4 --expect-head did not hold
 // (either form: <hex> is the current head, <seq>:<hex> is the head the chain
 // must reproduce at seq); 5 the installed pointer
 // (<dir of --control-log>/installed/current) does not name the last recorded
 // install (control.Installing) — an install whose event was never appended,
-// or whose record was lost; 0 otherwise; 2 usage.
+// or whose record was lost; 7 an anchor could not be decided (an unreachable
+// log, a key the verifier does not hold) — never a tamper verdict, and
+// outranked by every definitive one; 0 otherwise; 2 usage.
 func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit verify control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
 	expectHead := fs.String("expect-head", "", "expected control ledger head: <hex> (the current head) or <seq>:<hex> (the head the chain must reproduce at seq)")
+	anchorKey := fs.String("anchor-key", "", "pin the transparency log's checkpoint key at this path (PEM, ECDSA P-256) instead of anchor.pub beside the ledger; absent or unreadable fails closed")
+	offline := fs.Bool("offline", false, "verify anchors from their stored proofs only: no served-key fetch, no presence check (needs a pinned key)")
+	anchorTimeout := fs.Duration("anchor-timeout", 30*time.Second, "bound on each call to a log while verifying anchors")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1417,6 +1425,7 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	}
 	line, pointerMismatch := installedPointerLine(*controlLog, records)
 	_, _ = fmt.Fprint(out, line)
+	anchors := verifyAnchors(*controlLog, records, *anchorKey, *offline, *anchorTimeout, out)
 	tainted, taintSeq := control.IsTainted(records)
 	if tainted {
 		_, _ = fmt.Fprintf(out, "control ledger TAINTED: repaired at seq %d\n", taintSeq)
@@ -1429,12 +1438,16 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 		}
 	}
 	switch {
+	case anchors.mismatch > 0:
+		return exitAnchorMismatch
 	case tainted:
 		return 3
 	case expectFailed:
 		return 4
 	case pointerMismatch:
 		return exitInstalledMismatch
+	case anchors.unverifiable > 0:
+		return exitAnchorUnverifiable
 	}
 	return 0
 }
