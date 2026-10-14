@@ -622,3 +622,26 @@ func TestVerifyControlOutputGolden(t *testing.T) {
 		t.Fatalf("no anchors: exit %d\n--- got ---\n%s--- want ---\n%s", code, got, want)
 	}
 }
+
+// TestVerifyControlPlantedHashNeverReachesTheTerminalRaw: a hand-written
+// ledger can carry any bytes as the recorded hash. The gate's line strips
+// control characters from it, the verdict is the structural hex refusal
+// (exit 6), and no byte of the planted value that could drive a terminal
+// is printed.
+func TestVerifyControlPlantedHashNeverReachesTheTerminalRaw(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _ := anchoredViaStub(t)
+	rewriteTail(t, ctl, 2, func(seq int, m map[string]any) {
+		m["anchor"].(map[string]any)["hash"] = "\x07nope\x1b[31m"
+	})
+	code, out := verifyControl(t, "--control-log", ctl, "--offline")
+	if code != exitAnchorMismatch {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if strings.ContainsAny(out, "\x07\x1b") {
+		t.Fatalf("a control character reached the output:\n%q", out)
+	}
+	if !strings.Contains(out, "anchor seq 1 nope[31m → http://stub.invalid entry ") || !strings.Contains(out, ": MISMATCH — anchor hash is not a lowercase hex sha256\n") {
+		t.Fatalf("output:\n%s", out)
+	}
+}

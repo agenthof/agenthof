@@ -411,10 +411,11 @@ func verifyAnchors(controlLog string, records []ledger.Record, anchorKey string,
 			continue
 		}
 		a := c.Anchor
-		// a.Backend and a.Ref come from the ledger, which an attacker may have
-		// written; origin.Clean strips control characters before they reach a
-		// terminal. a.Hash is validated 64-hex; a.Seq is an int.
-		where := fmt.Sprintf("anchor seq %d %s → %s entry %s", a.Seq, a.Hash, origin.Clean(a.Backend), origin.Clean(a.Ref))
+		// a.Hash, a.Backend and a.Ref come from the ledger, which an attacker
+		// may have written; origin.Clean strips control characters before any
+		// of them reaches a terminal (an honest 64-hex hash is unchanged).
+		// a.Seq is an int.
+		where := fmt.Sprintf("anchor seq %d %s → %s entry %s", a.Seq, origin.Clean(a.Hash), origin.Clean(a.Backend), origin.Clean(a.Ref))
 		switch {
 		case c.Mismatch != "":
 			_, _ = fmt.Fprintf(out, "%s: MISMATCH — %s\n", where, c.Mismatch)
