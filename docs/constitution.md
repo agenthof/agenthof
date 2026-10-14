@@ -53,11 +53,7 @@ full delegation binding. The ledger is hash-chained: each event carries the
 SHA-256 of the exact bytes of its predecessor's line (genesis: empty
 string), and `audit` verifies the chain. The chain makes accidental
 corruption — and any edit, deletion, or reordering of committed events that
-does not recompute every later link — detectable. It does not by itself
-detect truncation of the tail or wholesale regeneration of the file; those
-are detectable only against a chain head recorded off the machine; Agenthof
-prints the control-log head after each append but does not store it. No Agenthof document may describe the ledger as
-tamper-proof. Artifact bodies never enter the ledger — only a SHA-256 hash
+does not recompute every later link — detectable. It does not by itself detect truncation of the tail or wholesale regeneration of the file; those are detectable only against a chain head recorded off the machine. Agenthof prints the control-log head after each append and does not store it itself. Where a control root declares `anchor: tlog`, the operator may pin the control-log head to an external append-only transparency log (`audit anchor`); the ledger then records which head was anchored, which log entry holds it, the log's proof of inclusion, and which log key signed for it — never a credential, never a secret. A head so anchored is tamper-evident and independently verifiable: whoever holds the anchor's reference and the log's public key can check, against the log's own proof, that exactly that head was entered, with the integration time the log records; `audit verify control` fails on any anchor the chain records whose head it no longer reproduces, and a reference held off the machine is checked with `--expect-head seq:hash`. The guarantee is bounded, and Agenthof states the bounds: records appended after the last anchor are evidenced only by the chain until the next anchor; a verifier that takes the log's key from the log, or the log's address from the root being verified, trusts what it was handed and is not independent; a log the verifier cannot reach, or a log key other than the one the verifier trusts, is reported as unverifiable, never as tampering; and the ephemeral key that signs a log entry proves nothing beyond the log's requirement for one. No Agenthof document may describe the ledger as tamper-proof, immutable, or write-once. Artifact bodies never enter the ledger — only a SHA-256 hash
 and a preview of at most 200 characters; bodies live in a separate,
 prunable store. Secrets and full artifact bodies are never written to an
 event, under any circumstance.
@@ -109,10 +105,10 @@ Schema changes must be backward compatible: additive only,
 never a breaking change to an existing field's meaning. Engine capability
 may grow (e.g. linear+fail-back today, DAG execution later) behind schemas
 that do not change shape for existing users. Control-plane actions (apply, the enable/disable kill switch, control-ledger
-repair, provisioning a role's provider key, and pruning run ledgers and
-artifacts under retention) are themselves authorized — default-deny, against
+repair, provisioning a role's provider key, pruning run ledgers and
+artifacts under retention, and anchoring the control-log head to an external log) are themselves authorized — default-deny, against
 the `control` operations a role declares — and recorded in a hash-chained
-control ledger. Reading the installed configuration out of the control plane,
+control ledger. Anchoring is such an action and not a vouch: it appends to the ledger and publishes to a log outside it, attributed on the ledger to the invoker, so it is granted by a role's `anchor` operation and recorded as its own event, whether it succeeded or failed. Reading the installed configuration out of the control plane,
 to distribute it to the execution points that enforce it, is authorized the
 same way — the `pull` operation, which a grant of `apply` includes — and, as a
 read, is not recorded. The operator's signature over an installed
