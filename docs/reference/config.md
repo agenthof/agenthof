@@ -893,8 +893,10 @@ the installed-config store, or anything else left in a misconfigured
 `--log-dir`/`--artifact-dir` is still the tidy layout.
 
 The **installed-configuration store** lives beside it: `<dir>/installed/`
-(default `.agenthof/installed/`), holding one immutable snapshot directory per
-applied configuration, named by its `config_hash`, and a one-line pointer file
+(default `.agenthof/installed/`), holding one snapshot directory per applied
+configuration, named by its `config_hash` — `apply` writes each snapshot once
+and never rewrites one, and every read verifies its bytes against the pointer —
+and a one-line pointer file
 `current` (`sha256:<hex>`) naming the installed one. `apply` writes it; the
 control commands read it to decide who may act (see `--config` below); `run`
 reads the installed configuration from `installed/` beside it — this is the
@@ -990,7 +992,8 @@ values: no field in this file can hold a secret. An unknown key at any level,
 a document that is not a mapping, and a file holding more than one YAML
 document are refused too, so a typo can never read as the floor. Every control
 writer — `apply`, `registry enable|disable`, `config vouch`, `gateway
-provision`, `runs prune`, `audit repair control` — reads the file before it
+provision`, `runs prune`, `audit repair control`, `audit anchor` — reads the
+file before it
 touches the ledger and, on a posture it cannot honor or a file it cannot read
 or parse, prints `<command>: integrity <path>: <fault>` and exits 2, recording
 nothing; `serve` reads it once at startup and refuses to start the same way (a
@@ -998,9 +1001,10 @@ change to the file takes effect on restart). A missing file is the floor; a
 present file that cannot be read is never treated as missing.
 
 A `tlog` root is honored by every writer by **proceeding**: `apply`, the kill
-switch, `config vouch`, `gateway provision`, `runs prune` and `serve` write
-exactly as at the floor, unanchored — anchoring is a separate,
-operator-triggered action, `agenthof audit anchor`, usually run from cron.
+switch, `config vouch`, `gateway provision`, `runs prune`, `audit repair
+control` and `serve` write exactly as at the floor, unanchored — anchoring is a
+separate, operator-triggered action, `agenthof audit anchor`, usually run from
+cron.
 Between anchors the chain is evidenced by its hash links alone. The
 `credential` block is shape-checked only; a `client_credentials` grant
 missing its endpoint or environment names fails when `audit anchor` runs,
@@ -1155,10 +1159,10 @@ stdout after some earlier append, saved somewhere off this machine (see
 compared; the accompanying event count is informational.
 
 Two forms. `<hex>`: the current head must be this hash. `<seq>:<hex>`: the
-chain must still reproduce `<hex>` at position `<seq>` — exactly the
-`anchored: seq=K sha256=H` line `audit anchor` prints, so a line saved off
-this machine checks a copy of the chain from anywhere, with or without the
-log. Either form failing is exit 4 (`expect-head mismatch: want <hex> at seq
+chain must still reproduce `<hex>` at position `<seq>` — the two values the
+`anchored: seq=K sha256=H` line `audit anchor` prints, handed back as `K:H`, so
+a head saved off this machine checks a copy of the chain from anywhere, with or
+without the log. Either form failing is exit 4 (`expect-head mismatch: want <hex> at seq
 <seq>, got <hex>` / `… but the chain has <N> records`); a value that is not
 64 lowercase hex, optionally prefixed `<seq>:`, is a usage error.
 
