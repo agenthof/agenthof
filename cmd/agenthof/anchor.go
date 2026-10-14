@@ -23,6 +23,7 @@ import (
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/origin"
 )
 
 // audit verify control's two anchor exit codes, beside exitInstalledMismatch
@@ -410,7 +411,10 @@ func verifyAnchors(controlLog string, records []ledger.Record, anchorKey string,
 			continue
 		}
 		a := c.Anchor
-		where := fmt.Sprintf("anchor seq %d %s → %s entry %s", a.Seq, a.Hash, a.Backend, a.Ref)
+		// a.Backend and a.Ref come from the ledger, which an attacker may have
+		// written; origin.Clean strips control characters before they reach a
+		// terminal. a.Hash is validated 64-hex; a.Seq is an int.
+		where := fmt.Sprintf("anchor seq %d %s → %s entry %s", a.Seq, a.Hash, origin.Clean(a.Backend), origin.Clean(a.Ref))
 		switch {
 		case c.Mismatch != "":
 			_, _ = fmt.Fprintf(out, "%s: MISMATCH — %s\n", where, c.Mismatch)

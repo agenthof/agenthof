@@ -1395,7 +1395,7 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	expectHead := fs.String("expect-head", "", "expected control ledger head: <hex> (the current head) or <seq>:<hex> (the head the chain must reproduce at seq)")
 	anchorKey := fs.String("anchor-key", "", "pin the transparency log's checkpoint key at this path (PEM, ECDSA P-256) instead of anchor.pub beside the ledger; absent or unreadable fails closed")
 	offline := fs.Bool("offline", false, "verify anchors from their stored proofs only: no served-key fetch, no presence check (needs a pinned key)")
-	anchorTimeout := fs.Duration("anchor-timeout", 30*time.Second, "bound on each call to a log while verifying anchors")
+	anchorTimeout := fs.Duration("anchor-timeout", 30*time.Second, "per-anchor bound on the log calls made while verifying anchors")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
