@@ -7,7 +7,10 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"os"
@@ -276,5 +279,123 @@ func TestAuditAnchorNotRecordedAfterSubmit(t *testing.T) {
 	code := cmdAudit([]string{"anchor", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
 	if code != 1 || !strings.Contains(out.String(), "audit anchor: anchored at ") || !strings.Contains(out.String(), " but NOT recorded") {
 		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+}
+
+func verifyControl(t *testing.T, args ...string) (int, string) {
+	t.Helper()
+	var out bytes.Buffer
+	code := cmdAudit(append([]string{"verify", "control"}, args...), &out)
+	return code, out.String()
+}
+
+// TestVerifyControlExpectHeadGrammar (Review Focus 5): anything outside
+// ^([0-9]+:)?[0-9a-f]{64}$ is usage, exit 2, before the ledger is read.
+func TestVerifyControlExpectHeadGrammar(t *testing.T) {
+	ctl := applied(t, writeSample(t))
+	for _, bad := range []string{"deadbeef", "x:y", "1:" + strings.Repeat("a", 63), "-1:" + strings.Repeat("a", 64), strings.Repeat("A", 64), "1:1:" + strings.Repeat("a", 64)} {
+		code, out := verifyControl(t, "--control-log", ctl, "--expect-head", bad)
+		if code != 2 || !strings.Contains(out, "--expect-head must be <hex> or <seq>:<hex> (64 lowercase hex)") || strings.Contains(out, "control head:") {
+			t.Fatalf("%q: exit %d\n%s", bad, code, out)
+		}
+	}
+}
+
+// TestVerifyControlExpectHeadAtSeq (spec test 17): K:H holds now and after
+// more records (the chain still reproduces it); after the tail from K is
+// re-forged it is exit 4 "want H at seq K, got …"; K beyond Count is exit 4
+// "but the chain has N records"; the <hex> form is unchanged.
+func TestVerifyControlExpectHeadAtSeq(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	recs, head1, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil || len(recs) != 1 {
+		t.Fatal(err)
+	}
+	ref := "1:" + head1.Hash
+	if code, out := verifyControl(t, "--control-log", ctl, "--expect-head", ref); code != 0 {
+		t.Fatalf("fresh: exit %d\n%s", code, out)
+	}
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("disable: %d\n%s", code, out.String())
+	}
+	if code, out := verifyControl(t, "--control-log", ctl, "--expect-head", ref); code != 0 {
+		t.Fatalf("after more records: exit %d\n%s", code, out)
+	}
+	_, head2, _ := ledger.ReadVerify(ctl, ledger.Locked)
+	if code, out := verifyControl(t, "--control-log", ctl, "--expect-head", head2.Hash); code != 0 {
+		t.Fatalf("hex form: exit %d\n%s", code, out)
+	}
+	if code, out := verifyControl(t, "--control-log", ctl, "--expect-head", "7:"+head1.Hash); code != 4 || !strings.Contains(out, "expect-head mismatch: want "+head1.Hash+" at seq 7, but the chain has 2 records") {
+		t.Fatalf("beyond count: exit %d\n%s", code, out)
+	}
+	rewriteTail(t, ctl, 1, func(int, map[string]any) {})
+	code, text := verifyControl(t, "--control-log", ctl, "--expect-head", ref)
+	if code != 4 || !strings.Contains(text, "expect-head mismatch: want "+head1.Hash+" at seq 1, got ") || strings.Contains(text, "got "+head1.Hash) {
+		t.Fatalf("re-forged: exit %d\n%s", code, text)
+	}
+}
+
+// rewriteTail re-forges records from seq on: the witness is replaced (so the
+// bytes change), mutate may edit the decoded record, prev is recomputed, so
+// the chain stays valid while every head from seq on differs. The txtar
+// reforge command is its twin.
+func rewriteTail(t *testing.T, ctl string, from int, mutate func(seq int, m map[string]any)) {
+	t.Helper()
+	recs, _, err := ledger.ReadVerify(ctl, ledger.Unlocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	prev := ""
+	for i, r := range recs {
+		raw := r.Raw
+		if i+1 >= from {
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatal(err)
+			}
+			m["prev"] = prev
+			m["witness"] = map[string]any{"os_user": "forger", "hostname": "elsewhere"}
+			mutate(i+1, m)
+			if raw, err = json.Marshal(m); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out.Write(raw)
+		out.WriteByte('\n')
+		sum := sha256.Sum256(raw)
+		prev = hex.EncodeToString(sum[:])
+	}
+	if err := os.WriteFile(ctl, out.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestVerifyControlPrintsTaintAndExpectHeadTogether (spec test 16, taint
+// half): a repaired (tainted) ledger with a wrong --expect-head prints BOTH the
+// TAINTED line and the expect-head mismatch, and exits 3 — taint outranks the
+// operator's note, but nothing is hidden.
+func TestVerifyControlPrintsTaintAndExpectHeadTogether(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := writeSample(t)
+	ctl := applied(t, root)
+	f, err := os.OpenFile(ctl, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"v":"control/1","seq":2,"partial`); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	var out bytes.Buffer
+	if code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("repair: %d\n%s", code, out.String())
+	}
+	code, text := verifyControl(t, "--control-log", ctl, "--expect-head", strings.Repeat("0", 64))
+	if code != 3 || !strings.Contains(text, "control ledger TAINTED: repaired at seq 2") || !strings.Contains(text, "expect-head mismatch: want "+strings.Repeat("0", 64)+", got ") {
+		t.Fatalf("exit %d\n%s", code, text)
 	}
 }

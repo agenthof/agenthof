@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -344,4 +347,31 @@ func cmdAuditAnchor(args []string, out io.Writer) int {
 		fmt.Sprintf("  index: %s  integrated: %s  (as reported by the log)", index, integrated),
 	}
 	return record("success", nil, payload, 0)
+}
+
+// expectHeadRE is --expect-head's grammar: the current head (<hex>) or the
+// head the chain must reproduce at a position (<seq>:<hex>) — the latter is
+// exactly the "anchored: seq=K sha256=H" line audit anchor prints, so a
+// reference shipped off the box is a verifier input.
+var expectHeadRE = regexp.MustCompile(`^([0-9]+:)?[0-9a-f]{64}$`)
+
+// expectHeadMismatch judges --expect-head (already grammar-checked) against
+// the verified chain and returns the line to print, or "" when it holds.
+func expectHeadMismatch(expect string, records []ledger.Record, head ledger.Head) string {
+	seqPart, hash, ok := strings.Cut(expect, ":")
+	if !ok {
+		if expect != head.Hash {
+			return fmt.Sprintf("expect-head mismatch: want %s, got %s", expect, head.Hash)
+		}
+		return ""
+	}
+	n, err := strconv.Atoi(seqPart)
+	if err != nil || n < 1 || n > len(records) {
+		return fmt.Sprintf("expect-head mismatch: want %s at seq %s, but the chain has %d records", hash, seqPart, len(records))
+	}
+	sum := sha256.Sum256(records[n-1].Raw)
+	if got := hex.EncodeToString(sum[:]); got != hash {
+		return fmt.Sprintf("expect-head mismatch: want %s at seq %d, got %s", hash, n, got)
+	}
+	return ""
 }

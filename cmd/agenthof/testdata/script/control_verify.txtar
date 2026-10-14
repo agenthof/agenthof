@@ -8,10 +8,13 @@ stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
 exec agenthof audit verify control --control-log control.jsonl
 stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
 
-# --expect-head mismatched against an otherwise-clean chain exits 4.
-! exec agenthof audit verify control --control-log control.jsonl --expect-head deadbeef
+# --expect-head mismatched against an otherwise-clean chain exits 4; the
+# value must be 64 lowercase hex (or <seq>:<hex>), so a short value is usage.
+! exec agenthof audit verify control --control-log control.jsonl --expect-head 0000000000000000000000000000000000000000000000000000000000000000
 stdout 'control head: seq=1 sha256=[0-9a-f]{64}'
-stdout 'expect-head mismatch: want deadbeef, got [0-9a-f]{64}'
+stdout 'expect-head mismatch: want 0000000000000000000000000000000000000000000000000000000000000000, got [0-9a-f]{64}'
+! exec agenthof audit verify control --control-log control.jsonl --expect-head deadbeef
+stdout 'audit verify control: --expect-head must be <hex> or <seq>:<hex> \(64 lowercase hex\)'
 
 # A control log that was never written to reports plainly, not a raw
 # open error, and exits nonzero.

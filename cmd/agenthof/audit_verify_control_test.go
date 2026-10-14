@@ -82,7 +82,7 @@ func TestAuditVerifyControlExpectHeadMismatchExitsFour(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := cmdAuditVerify([]string{"control", "--control-log", controlLog, "--expect-head", "deadbeef"}, &out)
+	code := cmdAuditVerify([]string{"control", "--control-log", controlLog, "--expect-head", strings.Repeat("0", 64)}, &out)
 	if code != 4 {
 		t.Fatalf("exit = %d, want 4: %s", code, out.String())
 	}
@@ -161,7 +161,7 @@ func TestAuditVerifyControlTaintedExitsThree(t *testing.T) {
 
 	// Taint must take precedence over an expect-head mismatch.
 	out.Reset()
-	code = cmdAuditVerify([]string{"control", "--control-log", controlLog, "--expect-head", "deadbeef"}, &out)
+	code = cmdAuditVerify([]string{"control", "--control-log", controlLog, "--expect-head", strings.Repeat("0", 64)}, &out)
 	if code != 3 {
 		t.Fatalf("exit = %d, want 3 (taint precedes expect-head mismatch): %s", code, out.String())
 	}
