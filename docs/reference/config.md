@@ -875,7 +875,7 @@ authorized against no role, permitted for any identity the host resolves (see
 | `agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout <dur>]` | `--control-log`, `--as`, `--groups`, `--token`, `--timeout` |
 | `agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]` | `--control-log`, `--as`, `--groups`, `--token`, `--admin-base` |
 | `agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--older-than`, `--log-dir`, `--artifact-dir`, `--control-log`, `--as`, `--groups`, `--token` |
-| `agenthof investigate [--since <dur\|ts>] [--until <dur\|ts>] [--invoker <id>] [--agent <name>] [--outcome <value>] [--run <run-id>] [--config-hash <sha256:…>] [--json] [--log-dir <dir>] [--control-log <path>]` | `--since`, `--until`, `--invoker`, `--agent`, `--outcome`, `--run`, `--config-hash`, `--json`, `--log-dir`, `--control-log` |
+| `agenthof investigate [--since <dur\|ts>] [--until <dur\|ts>] [--invoker <id>] [--agent <name>] [--outcome <value>] [--run <run-id>] [--config-hash <sha256:…>] [--json] [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>]` | `--since`, `--until`, `--invoker`, `--agent`, `--outcome`, `--run`, `--config-hash`, `--json`, `--log-dir`, `--control-log`, `--anchor-key` |
 
 ### `--control-log`
 
@@ -1016,14 +1016,17 @@ The **pinned log key**, when present, lives beside the ledger too:
 `<dir>/anchor.pub` — the transparency log's checkpoint-signing public key
 (PEM, ECDSA P-256 only; `verify.pub` is a different key for a different
 purpose and is never read here), operator-written, obtained from the log's
-own trust root or out of band — or passed as `audit verify control
---anchor-key <path>` for a verifier on another machine. With a key pinned,
-anchors verify **offline from the proof stored on the record**, and `audit
-anchor` refuses a log presenting any other key. Without one, the key the log
-serves is used and recorded (`backend_key_id`), and every line says `as
+own trust root or out of band — or passed as `--anchor-key <path>` to `audit
+verify control` or `investigate` for a verifier on another machine. With a key
+pinned, anchors verify **offline from the proof stored on the record**, and
+`audit anchor` refuses a log presenting any other key. Without one, the key the
+log serves is used and recorded (`backend_key_id`), and every line says `as
 served` / `unpinned`: that is trust in the log's own word, not independent
 verification. A pinned key other than the one that signed is reported as
 **unverifiable** (exit 7) with the fix named — never as tampering.
+`investigate` reads the same pin, as a pin and never as a posture: every success
+`anchor` record in its timeline carries the verdict reached offline under it
+(see the `investigate` exit codes and the `investigate/1` contract below).
 
 ### `--config`
 
@@ -1221,6 +1224,18 @@ reads every `<log-dir>/r-*.jsonl` run log it finds there, in addition to
 `--control-log`. Not to be confused with `--log-level` / `--log-format`, which
 configure the operational log on stderr — see [`logging.md`](logging.md).
 
+### `--anchor-key`
+
+`audit verify control` and `investigate`. The transparency log's
+checkpoint key to verify anchors under (PEM, ECDSA P-256), instead of
+`anchor.pub` beside the control ledger; given, it is the pin whether or not
+the file exists. For `audit verify control` an absent or unreadable key makes
+every anchor unverifiable (exit 7). For `investigate` it is the same
+per-anchor verdict and never a usage error — the exit stays what the chains
+say — and the flag is local-only: with `--server` (or `AGENTHOF_SERVER`)
+`investigate` exits 2, because the server pins `anchor.pub` beside its own ledger
+and a pin you named would otherwise be silently ignored.
+
 ### Exit codes
 
 `agenthof apply` / `agenthof registry enable|disable`:
@@ -1275,6 +1290,10 @@ then exits by precedence **1, 6, 3, 4, 5, 7**:
 | `0` | None of the above |
 | `2` | Usage, including an `--expect-head` outside its grammar |
 
+The anchor lines print together after every anchor is checked, so against an
+unreachable log the command is silent for up to `--anchor-timeout` per anchor
+before printing — the whole run is bounded by anchors × calls × timeout.
+
 `agenthof audit anchor`:
 
 | Exit | Meaning |
@@ -1286,6 +1305,11 @@ then exits by precedence **1, 6, 3, 4, 5, 7**:
 `--as`/`--groups` are self-asserted (DEV ONLY), as everywhere; a production
 cron presents `--token` or `AGENTHOF_TOKEN`. `--timeout` (default `30s`)
 bounds the whole exchange with the log.
+
+The record's `ref`, `backend`, `backend_kind` and `backend_key_id` are
+bounded at 256, 2048, 64 and 128 bytes (and `proof` at 8192); a larger value
+is refused before the ledger is opened. Nothing an honest log produces comes
+near these.
 
 `agenthof audit repair control`:
 
@@ -1323,6 +1347,54 @@ bounds the whole exchange with the log.
 `--json` never changes this exit code — it only changes the rendering — and
 the JSON envelope's `integrity.ok` always equals `(exit == 0)`.
 
+An anchor's verdict is shown on its event and never changes the exit code or `integrity.ok`;
+`audit verify control` is the gate (exits 6 and 7).
+`integrity.ok` is about the chains this reader verified from their bytes; it
+stays `true` on a root whose anchors prove a rewrite. Read the `anchors:`
+trailer, or select `.events[].anchor.verdict`, for that.
+
+### Anchors in the timeline
+
+Every control `anchor` record in the text timeline carries its facts as tags
+after `outcome=` and `reason=`: `anchor=<seq>:<hash>` (the covered head,
+printed whole — the value on the `anchored: seq=K sha256=H` line you shipped
+off the box), `backend=`, `ref=`, and — on a success record — `verdict=`
+and, unless verified, `cause=` last. A failed attempt shows `anchor=` and
+`backend=` only: it claimed nothing. A success record the ledger carries
+without a payload shows `verdict=mismatch cause=anchor record without
+coverage` and nothing else.
+
+The verdict is one of `verified`, `mismatch` or `unverifiable`, reached
+**offline** from the proof stored on the record under the key you pin
+(`anchor.pub` beside the control ledger, or `--anchor-key`), by the same
+code `audit verify control` runs. `verified`: the chain still reproduces the
+recorded head and the proof verifies under the pinned key. `mismatch`: a
+definitive disagreement — the chain no longer reproduces the recorded head
+(a rewritten root), or the stored proof does not stand behind it.
+`unverifiable`: no verdict could be reached — no key pinned, a key other than
+the one that signed, a proof format this build does not read, or a torn, broken
+or unreadable control ledger — never tampering; the `cause` names the fix.
+Whether the entry is still in the log today is `audit verify control`'s
+question (without `--offline`), not this view's: `investigate` makes no
+request and never reads `integrity.yaml`. Without a pin every
+transparency-log anchor is `unverifiable`: a reader that took the key from
+the log it is verifying would not be independent.
+
+Whenever the view carries at least one verdict, one more line follows the
+integrity line — the gate's own summary phrase:
+
+```
+integrity: OK
+anchors: N (a verified, b mismatch, c unverifiable)
+```
+
+counted over the events shown. A view whose filter drops the control events
+(`--run`, `--outcome succeeded`, a `--since` after the last anchor) shows no
+anchor lines and no trailer: it states nothing about anchors because it shows
+none. A torn or broken control source prints the trailer too — its anchors
+are counted `unverifiable` under an integrity line that already names the
+damage.
+
 ### The `investigate/1` JSON contract
 
 `--json` renders this envelope instead of the text timeline:
@@ -1350,6 +1422,24 @@ the JSON envelope's `integrity.ok` always equals `(exit == 0)`.
       "workflow": "fix-bug",
       "outcome": "refused",
       "reason": "configuration invalid: ..."
+    },
+    {
+      "time": "2026-09-20T18:10:00Z",
+      "source": "control",
+      "kind": "anchor",
+      "invoker": { "subject": "anchor-cron@example.com", "issuer": "https://issuer.example", "method": "oidc" },
+      "outcome": "success",
+      "seq": 3,
+      "anchor": {
+        "seq": 2,
+        "hash": "9f1c…64 hex…",
+        "kind": "tlog",
+        "backend_kind": "transparency-log",
+        "backend": "https://rekor.sigstore.dev",
+        "ref": "24296fb2…80 hex…",
+        "backend_key_id": "c0d23d6a…64 hex…",
+        "verdict": "verified"
+      }
     }
   ],
   "integrity": { "ok": true, "issues": [] }
@@ -1381,6 +1471,19 @@ Field notes:
   event recorded with `--as` — `asserted_as`. All timestamps are RFC3339
   UTC. There is **no `witness` field** — it is deliberately left out of this
   contract.
+- `anchor` is present on every control `anchor` attempt that recorded what it
+  tried, and on every success `anchor` record. Its fields, all `omitempty`:
+  `seq` and `hash` (the covered head), `kind` (`tlog` or `signed`),
+  `backend_kind` (the proof format, promised on a success record),
+  `backend`, `ref` (absent on a failed attempt), `backend_key_id`, and — on
+  a success record only — `verdict`, one of `verified`, `mismatch` or
+  `unverifiable`, with `cause` when not verified. A success record without a
+  payload carries `verdict` and `cause` only. `proof` is never in the document.
+  The verdict is reached offline from the stored proof under the
+  key you pin; whether the entry is still in the log is `audit verify
+  control`'s question. `cause` is operator-facing prose with the same caveat
+  as `integrity.issues[]`: key off `verdict`, never parse `cause`. There is
+  no anchor summary at the envelope or source level.
 - `integrity.ok` mirrors the exit code exactly: `true` iff the exit code is
   `0`. `integrity.issues[]` is **operator-facing prose** (e.g. `"control
   ledger TORN at .agenthof/control.jsonl"`) meant for a human reading the
