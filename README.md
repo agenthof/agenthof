@@ -41,7 +41,14 @@ the door rather than trusting the agent.
   [`deploy/refbox`](deploy/refbox), but that containment guarantee is the
   sandbox's, not Agenthof's;
 - the ledger is **tamper-evident, not tamper-proof** — hash-chaining makes edits
-  _detectable_, not impossible;
+  _detectable_, not impossible. Operator signing of the installed
+  configuration and external anchoring of the ledger head *extend* that
+  evidence — an install the ledger does not vouch for is refused at every
+  execution read, a pinned execution point also refuses one signed by another
+  key, unsigned, replayed, or rolled back, and a rewrite of the whole control
+  root is
+  detectable by anyone holding an anchored head's reference and the log's key —
+  and none of it makes the ledger tamper-proof;
 - **only shipped items are guarantees** — what is shipped versus coming is in the
   [roadmap](ROADMAP.md).
 
@@ -78,6 +85,27 @@ Pre-release, and the governed core is real and runnable today:
   its own hash-chained control ledger, attributed to the human who invoked
   it, with `audit control`, `audit verify control`, and `audit repair
   control`;
+- **a control-plane API** — `agenthof serve` hosts concurrent runs as a
+  long-lived process, verifies the human's OIDC token on every call, and
+  takes `apply` and `config pull` over the network — `apply` under a
+  compare-and-swap on the installed hash (see
+  [`docs/reference/serve.md`](docs/reference/serve.md));
+- **installed, content-addressed configuration** — `apply` installs a
+  validated snapshot under its hash, and `run`, `serve` and the control
+  commands execute and authorize against that snapshot, its bytes verified
+  against the hash on every read — never the working directory;
+- **integrity in layers, each with its bound stated** — the execution and
+  authorization reads require the control ledger to vouch for the installed
+  pointer as its last recorded install; the install can be signed by the
+  operator and verified against a pinned key at the execution point before
+  it runs; and the control-ledger head can be anchored into a transparency
+  log (`anchor: tlog`, `audit anchor`) and checked by `audit verify control`,
+  which fails only on a head the chain no longer reproduces, a proof that
+  fails under a verified key, or a log answering with a different body for the
+  recorded entry, and reports a log it cannot reach or a key it does not hold
+  as unverifiable, never as tampering (see
+  [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md) and
+  [`docs/reference/config.md`](docs/reference/config.md));
 - incident investigation — `agenthof investigate` merges the control log and
   every run log into one filterable, time-ordered timeline (human or `--json`),
   and `audit <run-id>` names the exact `apply` that put a run's config on record.
@@ -206,7 +234,8 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   a governed child run under the same human, in compartments of its own,
   bounded and linked to its parent.
 - [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md) — the
-  life of a control action: apply, the kill switch, and the control ledger.
+  life of a control action: apply, the kill switch, the control ledger, and
+  the life of an anchor that pins its head to a transparency log.
 - [`docs/reference/config.md`](docs/reference/config.md) — every YAML field,
   required/optional, defaults, and validation rules.
 - [`docs/reference/logging.md`](docs/reference/logging.md) — the operational

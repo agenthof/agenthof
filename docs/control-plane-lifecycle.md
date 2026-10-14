@@ -15,9 +15,10 @@ a later version, it says so — only shipped behavior is a guarantee.
 
 ## The commands
 
-Six commands write to the control plane — one of them, `apply`, can
-also arrive over the network, and one, `config vouch`, is a recovery act rather
-than a change:
+Seven commands write to the control plane — one of them, `apply`, can
+also arrive over the network; one, `config vouch`, is a recovery act rather
+than a change; and one, `audit anchor`, changes no configuration at all but
+pins the ledger's own head outside the machine:
 
 ```
 agenthof apply --config ./config --as dana@example.com --groups platform-eng                   # adopt a configuration
@@ -27,6 +28,7 @@ agenthof audit repair control --config ./config --as dana@example.com --groups p
 agenthof gateway provision --as dana@example.com --groups platform-eng                           # mint provider keys for the installed roles
 agenthof runs prune --older-than 180d --as dana@example.com --groups platform-eng               # remove aged run ledgers and artifact bodies
 agenthof config vouch --control-log .agenthof/control.jsonl --as dana@example.com              # record the install event the ledger lacks for the snapshot already installed (recovery)
+agenthof audit anchor --control-log .agenthof/control.jsonl --as dana@example.com --groups platform-eng  # pin the ledger's head into a transparency log (anchor: tlog) — see "The life of an anchor"
 agenthof apply --server https://agenthof.example --token $TOKEN --if-installed sha256:…  # the same apply, over the API (serve)
 agenthof config pull --server https://agenthof.example --token $TOKEN --out ./pulled           # read the installed configuration back, for an execution point (a read: not recorded)
 ```
@@ -46,7 +48,7 @@ unrecorded install" below.
 ## The journey at a glance
 
 ```
-  agenthof apply / registry enable|disable / audit repair control / gateway provision / runs prune
+  agenthof apply / registry enable|disable / audit repair control / gateway provision / runs prune / audit anchor
       │
       ▼
   1. Who is changing it?   authenticate  ──►  Invoker {subject, issuer, method}
@@ -98,7 +100,7 @@ non-zero.
 Knowing who asked is not the same as letting them. Every control action is
 **authorized, default-deny**, from two facts: the invoker's groups and the
 roles in the configuration directory. A role may carry a `control:` grant —
-any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, named one by one, no wildcard —
+any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor`, named one by one, no wildcard —
 and the action is allowed only if some role both names one of the invoker's
 groups in `allowed_groups` **and** lists that operation. Membership and grant,
 never the grant alone. One grant includes another: a grant of `apply`
@@ -112,22 +114,24 @@ workflows at all — an operator who changes governance but runs nothing.
 # config/roles/platform-admin.yaml
 name: platform-admin
 allowed_groups: [platform-eng]
-control: [apply, enable, disable, repair, provision, prune]
+control: [apply, enable, disable, repair, provision, prune, anchor]
 ```
 
-Two of the operations guard commands that change no configuration but are
-control-plane actions all the same. `gateway provision` mints a provider key
+Three of the operations guard commands that change no configuration but are
+control-plane actions all the same. `anchor` guards `audit anchor`, which pins
+the ledger's head into a transparency log — see "The life of an anchor" below. `gateway provision` mints a provider key
 at the model gateway for every **installed** role that owns workflows — what
 the last `apply` installed, never a directory — and records `provision`
 with the installed configuration's hash; that record is not an install
 (`audit verify control` and a run's config-join ignore it). `runs prune`
 removes aged run ledgers and artifact bodies and records `prune` with a
 one-line `detail` of what it removed and no hash: it installs nothing and
-reads no configuration. Both refuse, recorded, when nothing is installed —
-there are no roles to authorize against, and prune has no directory to fall
-back to (the kill switch and repair do, while nothing is installed, because
-each has a directory in hand) — so after removing `installed/current` a
-retention job is refused until the re-bootstrap apply lands. A provision
+reads no configuration. All three refuse, recorded, when nothing is installed —
+there are no roles to authorize against, and neither prune nor anchor has a
+directory to fall back to (the kill switch and repair do, while nothing is
+installed, because each has a directory in hand) — so after removing
+`installed/current` a retention job or an anchoring cron is refused until the
+re-bootstrap apply lands. A provision
 that fails on one role stops there: keys minted for earlier roles persist,
 one `error` record names the role that failed, and a re-run finds the
 earlier keys valid. A provision or prune whose success event could not be
@@ -194,7 +198,7 @@ nothing. Second, the **pointer must be the install the control ledger records
 last** — the last successful `apply`, kill-switch flip, or `config vouch` on
 record — or the action is refused, recorded, `configuration not on record`;
 this is the same vouch the execution read performs, and `apply`, the kill
-switch, `gateway provision` and `runs prune` all require it. `audit repair
+switch, `gateway provision`, `runs prune` and `audit anchor` all require it. `audit repair
 control` is the one exception: it verifies the bytes but does not consult the
 ledger, because the ledger it would consult is the one it exists to repair.
 Third, the roles are **parsed leniently** — roles only, never the full
@@ -230,7 +234,7 @@ on a mismatch (`installed config <hash>: snapshot hashes as <got>, not as its
 pointer`), so tampered bytes are neither executed, nor authorized from, nor
 re-installed under a new name, nor distributed. The pointer itself is held to
 the ledger: `run` and `serve` execute, and `apply`, the kill switch, `gateway
-provision` and `runs prune` authorize against, only a snapshot the control
+provision`, `runs prune` and `audit anchor` authorize against, only a snapshot the control
 ledger records as its **last install**, and refuse — recorded, `configuration
 not on record` — a pointer re-aimed by hand, a dropped-in snapshot, or an
 install whose record never landed; a damaged ledger refuses runs and control
@@ -422,12 +426,13 @@ external anchoring: `agenthof audit anchor` pins the current head into the
 transparency log the posture names — an authorized `anchor` control action,
 recorded as its own `anchor` event — and `audit verify control` checks every
 recorded anchor against the chain, failing (exit 6) only on a head the chain no
-longer reproduces under a key that verified, and reporting an unreachable log
-or a rotated key as unverifiable (exit 7), never as tampering. A posture naming
+longer reproduces, or a stored proof that fails under a key that verified, and
+reporting an unreachable log or a rotated key as unverifiable (exit 7), never
+as tampering. A posture naming
 a still-reserved sink or anchor (`worm`, `external`, `signed`) is one the build
 cannot honour, so every control write — `apply`, a `registry` flip, `config
-vouch`, `gateway provision`, `runs prune`, `audit repair control` — refuses
-before it opens the ledger, and `serve` refuses to start; a running server
+vouch`, `gateway provision`, `runs prune`, `audit repair control`, `audit
+anchor` — refuses before it opens the ledger, and `serve` refuses to start; a running server
 keeps the posture it read, so a change takes effect on restart. The `anchor`
 record was reserved by the schema before it was ever written; a root without
 `anchor: tlog` configured still never writes one.
@@ -676,7 +681,7 @@ operator's* key, is reserved.
 ```
 agenthof audit control                          # render the chain + an integrity line
 agenthof config pull [--control-log <path>] [--out <dir>] [--json]   # the installed configuration, as it would be served
-agenthof audit verify control [--expect-head H] # verify, and optionally check the head
+agenthof audit verify control [--expect-head H | K:H] [--anchor-key <path>] [--offline]   # verify, check the head, check every recorded anchor
 agenthof audit repair control [--config <dir>]  # repair a torn tail (see below)
 agenthof config vouch [--control-log <path>]    # put an unrecorded install on record (see "Recovering an unrecorded install")
 ```
@@ -698,6 +703,267 @@ disk access from editing the file, but it makes any such edit *show* — the cha
 breaks, or the repair that papered over it leaves a permanent taint. The limits
 are the point, and they are documented rather than glossed over (Article I/III).
 
+## The life of an anchor
+
+The chain above shows when a record was edited *in place*. It cannot, on its
+own, show that the whole file was regenerated or its tail cut off: that takes
+a head held somewhere the writer of this file cannot reach — which is why §5
+asks you to save the head off the machine. `anchor: tlog` makes that a
+recorded, repeatable act. `agenthof audit anchor` pins the ledger's current
+head into a **transparency log** the operator names — an append-only log
+outside this machine's trust domain, that hands back a proof that the head was
+entered — and
+records on the ledger itself which head was pinned, where the log put it, and
+the log's own proof. This section follows one anchor from the head to the
+verdict a later reader gets. Everything in it ships today unless marked
+reserved.
+
+```
+  integrity.yaml beside the ledger:   anchor: tlog
+                                      anchor_backend: { kind: transparency-log, url: https://<the log you name> }
+      │
+      ▼
+  agenthof audit anchor            (a cron, with --token; or an operator at the terminal)
+      │
+      ▼
+  1. Who? / May they?    authenticate ──► the installed snapshot's bytes, the ledger's vouch, then
+      │                   default-deny on the role grant `anchor`  ──► no ──► refused (recorded; no network)
+      ▼
+  2. The head            read and verify the chain  ──►  Head { seq=K, sha256=H_K }
+      │
+      ▼
+  3. Submit              sign H_K with a fresh throwaway key; POST the entry to the log
+      │                   ◄── the log answers: entry id, inclusion proof, signed checkpoint
+      │                   verify that proof here, under the log's key, BEFORE anything is recorded
+      │                   any failure ──► anchor / error (recorded, with what it tried to cover); ledger otherwise untouched
+      ▼
+  4. Record it           append anchor / success { seq=K, hash=H_K, kind, backend, ref, proof, backend_key_id }
+      │
+      ▼
+  5. Ship the line       anchored: seq=K sha256=H_K      ◄── a verifier input; save it off the box
+      │
+      ▼
+  6. Verify later        agenthof audit verify control [--expect-head K:H_K] [--anchor-key <log key>] [--offline]
+                           the chain must still reproduce H_K at seq K, and the stored proof must verify
+                           under the pinned log key  ──►  verified | MISMATCH (exit 6) | unverifiable (exit 7)
+```
+
+### Naming the log
+
+The posture lives in `integrity.yaml` beside the control ledger — operator
+written, never written by Agenthof. `anchor: tlog` turns anchoring on, and
+`anchor_backend.url` names the log; **there is no default endpoint**, so
+nothing is ever published to a service you did not name (the Sigstore
+public-good log is one choice; a log you run yourself is another — see the
+bounds below). `kind` defaults to `transparency-log`, the only kind this build
+accepts (`rfc3161` is reserved and refused by name), and an
+optional `credential` is a broker reference — environment-variable *names* for
+a direct bearer or a `client_credentials` grant, never a value; the public-good
+log needs none. The file is checked for shape only: the first contact with the
+log is the command. Every other writer — `apply`, the kill switch, `config
+vouch`, `gateway provision`, `runs prune`, `audit repair control`, `serve` —
+reads a `tlog` posture and proceeds exactly as at the floor, unanchored;
+**nothing anchors but `audit anchor`**. The reference for every field is in
+[`reference/config.md`](reference/config.md).
+
+### Who, and may they?
+
+`audit anchor` is a control action, not a maintenance script, and it is
+treated like every other one in this document. The invoker is resolved as
+§1 above describes (`--as`/`--groups`, or a verified `--token`), and the
+command answers the same questions in the same order: the posture is read
+first (a file that cannot be read or does not validate exits 2; a root without
+`anchor: tlog` exits 1 — both before anything is recorded and without touching
+the network); the ledger must be writable (busy or damaged exits 1,
+unrecorded); a token that fails verification is recorded as `refused`; and
+then the authorization read of §2 above runs under a shared hold of the configuration lock —
+the installed snapshot's bytes verified against the pointer, the control
+ledger required to vouch for that pointer as its last install, and the
+invoker's groups checked, default-deny, against a role that grants `anchor`.
+Nothing installed, an unvouched pointer, and a caller no role grants are each
+a **recorded refusal** — and each stops before any network call, so a refused
+caller never causes an entry in a public log.
+
+### The head
+
+The lock is released and the chain is read and verified once more; the head
+that comes back — `seq=K` and the SHA-256 of record K's exact bytes, `H_K` —
+is what gets anchored. The hash *is* the anchored object: the log is handed
+the digest and nothing else, never the record's bytes. An empty ledger has no
+head and exits 1, unrecorded. Because the record will name `(K, H_K)`
+explicitly, the head is free to advance under the command: an anchor pins the
+head that was read, not whatever is current when the record lands.
+
+### Submit, and verify the answer before trusting it
+
+Agenthof generates a fresh ECDSA P-256 key, signs `H_K` with it, and posts
+the entry — the digest, the signature and the key's public half — to the log.
+That key lives for the length of the call and is then dropped; it is never
+stored. **It proves nothing.** It exists because this kind of log requires an
+entry to carry a signature; the lift comes from the log's *inclusion* of the
+digest, not from who signed it (Article III says the same).
+
+The log answers with an entry id, an inclusion proof (the Merkle path from
+the entry to the log's root) and a signed checkpoint (the root, the tree
+size, the log's signature over them). Agenthof verifies that answer **before
+returning anything**: the entry the ref locates names `H_K`; the checkpoint
+opens under the log's key; the checkpoint names the
+entry's tree and the proof's root and size; and the inclusion proof verifies.
+Which key is "the log's key" is the operator's call: with `anchor.pub`
+present beside the ledger, the checkpoint must open under *that* pinned key
+and the command refuses a log presenting any other; without it, the key the
+log serves for the entry's tree is used and its id recorded, and the printed
+line says `as served` — trust in the log's own word, not yet independent
+verification. The proof is also size-capped so that a record can never carry
+an oversized one.
+
+A failure anywhere here — the log unreachable or slow past `--timeout`, any
+answer but *created*, a proof that does not verify or is over the cap, a key
+other than the pinned one, a credential the broker could not resolve — is
+recorded as an `anchor` `error` (reason `anchor_failed`) that names what it
+tried to cover (the seq, the hash and the log), and the command exits 1. **A
+backend failure never blocks or corrupts the ledger**: the ledger is otherwise
+untouched, every other writer keeps working, and the next tick simply tries
+again. No success record ever carries a proof that did not verify at anchor
+time.
+
+### Record it
+
+The success is one `control/1` record, `action: anchor`, under the three
+identities of §1 above, whose `anchor` payload carries:
+
+| field | what it is |
+|---|---|
+| `seq`, `hash` | the covered head, `(K, H_K)` — the chain must reproduce this hash at this position |
+| `kind` | which knob produced it: `tlog` |
+| `backend_kind`, `backend` | the proof format (`transparency-log`) and the log's URL as configured, so a verifier reads the record alone and never `integrity.yaml` (which may have changed since) |
+| `ref` | the log's entry id — a locator, so anyone can find the entry in the log |
+| `proof` | the entry body as the log served it, the inclusion path, and the signed checkpoint — everything a verifier needs, stored **on the record** so the anchor verifies offline, for as long as the record exists, outliving the log's read API |
+| `backend_key_id` | the identity of the log key that signed the checkpoint — forensic, not protective: it records which key the log presented, so a later change is visible; only a key *you* pin protects |
+
+Nothing in it is a secret, and none of it is a configuration: an anchor
+carries no `config_hash`, is never an install, and no reader treats it as one
+(`audit <run-id>`'s config-join and the vouch ignore it). The append is held
+to a permit — a successful anchor must say what it covers, the covered seq
+must exist in the chain (judged under the writer lock, so it holds even if
+the head advanced), the proof must fit the cap — so a malformed anchor
+appends nothing. `audit control` renders it as `head anchored: seq K <hash>
+(tlog)`; a failed attempt renders as `anchor error`.
+
+One gap is named rather than hidden, as in §4 above: if the log took the entry
+but the record could not be appended, the command prints `anchored at <ref>
+but NOT recorded` and exits 1. That entry is harmless — a public digest with
+nothing pointing at it — and the next run records a new one.
+
+### Ship the line
+
+On success the command prints, in this order, `anchored: seq=K sha256=H_K`,
+the log, the entry id and the log key (with `pinned` or `as served`), the
+log's own index and integration time *as reported by the log* — Agenthof
+verifies the proof, never the time — and finally the new control head. The
+`anchored:` line is the artifact: it carries exactly the two values
+`audit verify control --expect-head <seq>:<hex>` takes — hand them back as
+`K:H` — so a cron that ships it off the box every tick leaves a trail of heads
+that the box cannot rewrite.
+
+### Verify later
+
+`audit verify control` checks every anchor the chain records, after it has
+verified the chain itself, and prints one line per anchor and a summary
+(`anchors: N (v verified, m mismatch, u unverifiable)`; `anchors: none` when
+there are none). Each anchor is judged in two steps:
+
+1. **Against the chain** — from the records alone, no posture, no network:
+   the record must carry a payload, the covered seq must come before the
+   record, and the chain must reproduce the recorded hash at the recorded
+   position. Editing or deleting `integrity.yaml` cannot silence an anchor
+   the chain carries.
+2. **Against the log** — from the stored proof, under a key the verifier
+   trusts. The key is `--anchor-key <path>`, else `anchor.pub` beside the
+   ledger, else — unpinned — the key the log serves for the entry's tree,
+   which must have the id the record names. The proof is verified **offline
+   first**, exactly as at anchor time; only then, unless `--offline`, the log
+   is asked whether the entry is still there — a courtesy to the operator,
+   **never what makes an anchor verified**: it can only tighten a verified
+   anchor into a mismatch (a 200 with a different body), never produce a pass;
+   any failure to answer, a *not found* included, is reported as unverifiable
+   with *proof verified offline; presence not checked*.
+
+The verdicts are kept honestly apart, and the exit codes never fold one into
+the other:
+
+- **exit 6, mismatch** — only for a definitive content disagreement: the
+  chain no longer reproduces a recorded head (a rewritten root), or, under a
+  key that verified, the stored entry names another hash, the proof or the
+  checkpoint does not hold, or the log serves a different body for the
+  recorded entry.
+- **exit 7, unverifiable** — no verdict could be reached and none mismatched:
+  the log unreachable; a key the verifier does not hold (the pinned key is not
+  the one that signed; the served key is not the one recorded at anchor time);
+  `--offline` with no key pinned; a key file missing or malformed; a proof
+  format or backend kind this build does not read. **A log that is down, a
+  rotated key, or a missing pin is never tampering** — the line names the fix
+  (pin a key, update `anchor.pub`, retry) and every definitive verdict outranks
+  it in the exit precedence.
+
+Both are in the exit-code table in [`reference/config.md`](reference/config.md).
+
+A verifier on **another machine** needs three things, none of them from the
+box under suspicion: a copy of the ledger, the `anchored: seq=K sha256=H_K`
+line it shipped earlier, and the log's public key obtained from the log's own
+trust root. Then `audit verify control --control-log <copy> --expect-head K:H_K
+--anchor-key <log key> --offline` answers from the proofs on the records with
+no network at all (a bare copy of the ledger, with no `installed/` beside it,
+gets no pointer verdict — there is no pointer to compare): exit 6 if an anchor
+the copy carries no longer matches the chain or its proof fails under the key;
+exit 4 if the copy does not reproduce `H_K` at `K` and carries no anchor for
+it — a root rewritten from scratch; 0 if every anchor stands.
+
+### Honest bounds
+
+What an anchor proves is bounded, and the bounds are the point (Article III):
+
+- **Between anchors, the head rests on the chain alone.** Records appended
+  after the last anchor are evidenced only by their hash links until the next
+  one. Cadence is the operator's: `audit anchor` is run from a cron (or by
+  hand), and nothing in `serve` or any other writer anchors on its own.
+- **A rewrite that drops the anchor records reads `anchors: none`.** The
+  verifier checks the anchors the chain *carries*; a root regenerated from
+  scratch carries none. That rewrite is caught by the `anchored:` line held
+  off the box (`--expect-head K:H`), or by anyone who finds the entry in the
+  log and asks the box to reproduce its head — which is why the line is
+  printed and why the entry is findable in the log.
+- **"Independently verifiable" has a condition.** The verdict is the stored
+  proof under a key the verifier trusts. A verifier that takes the log's key
+  from the log, or the log's address from the root it is verifying, trusts what
+  it was handed and is not independent — which is why the record's `backend`
+  URL drives only the non-load-bearing presence check and the unpinned
+  served-key fetch, and why `--anchor-key` exists: the lift is a key pinned
+  off the box.
+- **The ephemeral entry key proves nothing** beyond the log's requirement for
+  one; the log's inclusion is the evidence. The log's integration time is
+  reported, not verified.
+- **A public log is public.** What it exposes is opaque: the hash of one
+  ledger record, and when it was entered — never a record's content, never a
+  configuration, never an identity. If even the timing of your control
+  changes is sensitive, run a log of your own in a different trust domain —
+  it is that separation from the box, not publicity, that makes a log a
+  witness — or wait for the reserved timestamp-authority backend.
+  Which log, and therefore which trust, is yours to choose by the `url` you
+  name.
+
+### Shipped today vs reserved
+
+Shipped: `anchor: tlog` with a `transparency-log` backend, `audit anchor`,
+the `anchor` record with its proof, `audit control`'s rendering of it, and
+`audit verify control`'s per-anchor verdicts with `--expect-head K:H`,
+`--anchor-key`, `--offline` and `--anchor-timeout`. Reserved, and refused by
+name today if you write them: an RFC 3161 timestamp-authority backend (`kind:
+rfc3161`), the storage sinks (`sink: worm`, `sink: external`) and `anchor:
+signed`. Reserved, and simply not there yet: a periodic or `serve`-driven
+cadence, and an anchor join in the `investigate/1` timeline. Only shipped
+behavior is a guarantee.
+
 ## The config_hash bridge to runs
 
 The `config_hash` on an `apply` record is the seam that ties the control plane
@@ -718,7 +984,7 @@ adopted. Because both carry the same key:
 
 | Shipped today | Reserved for later |
 |---|---|
-| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune`, `config vouch` | policy-as-config approval workflows |
+| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune`, `config vouch`, `audit anchor` | policy-as-config approval workflows |
 | operator signing of the installed snapshot: `config keygen` mints the Ed25519 pair on the host, every install signs (opt-in), and `serve` returns the signature on the pull and verifies it as it serves — 200 only when the ledger vouches **and** a matching signature verifies, else a retryable *not yet signed*; `config sign` (re)signs an install; the public key is pinned at the edge | a recorded key-lifecycle event for rotation and revocation |
 | `run` and `serve` verify the installed configuration against a pinned key (`verify.pub` / `run --verify-key`) before executing — unsigned/wrong-key/tampered/stale/foreign refused and recorded, a held lock a retryable busy, a persisted `verify.floor` bounding rollback; opt-in and fail-closed; Article VI names it | carrying the operator's signature with a pulled configuration so a consuming edge verifies the operator's key (today a point verifies only installs made on its own root); `--verify-floor` to relocate the floor outside a backup set; a `--max-age` bound on `installed_at` |
 | `apply` over the API (`POST /v1/config/apply`) with a required compare-and-swap on the installed hash, authorization at the API against the installed roles, one writer lock across apply and the kill switch, and `origin` on the record; pulling the installed configuration over the API (`GET /v1/config`, `GET /v1/config/hash`, `config pull`), authorized by `pull` (or `apply`, which includes it), content-addressed, unrecorded | `registry enable\|disable` and `audit repair control` over the API; `audit control --server` |
