@@ -231,7 +231,8 @@ novel claims. The design aligns with — honestly, *alignment* not certification
 - **Access control & audit** — NIST SP 800-53 (AC/AU families); NIST RBAC.
 - **Identity** — OpenID Connect + OAuth 2.0 client-credentials.
 - **Tamper-evident audit** — Schneier–Kelsey and Crosby–Wallach; Certificate
-  Transparency (RFC 9162) for the reserved external-anchoring tier.
+  Transparency (RFC 9162) for external anchoring of the control-ledger head
+  (`anchor: tlog`).
 - **Tool / MCP security** — the MCP Authorization spec's no-token-passthrough
   mandate.
 - **AI governance & agent threats** — OWASP Top 10 for Agentic Applications,

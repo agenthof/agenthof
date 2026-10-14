@@ -104,7 +104,8 @@ The governed core is real and runnable today:
   undefended is a consistent rewrite of both the pointer and the ledger, which
   a head saved off the machine catches today (`audit verify control
   --expect-head`), a pinned key refuses unless the writer also holds the
-  signing key, and external anchoring (reserved) would prove to a third party.
+  signing key, and external anchoring to a transparency log (`anchor: tlog`)
+  proves to a third party.
 - **Tool / MCP gateway** — an allowlisted, logged catalog: fronted agents
   reach declared MCP tool resources only through Agenthof, which mirrors a
   whole resource (written `tools: ["*"], mode: read-write` — every-tool
@@ -192,6 +193,19 @@ The governed core is real and runnable today:
   host would refuse it. Today the key a host pins is the one its own installs
   are signed with; carrying the operator's signature along the pull path is the
   next step (below).
+- **External anchoring of the control-ledger head** — `agenthof audit anchor`
+  pins the current head into a transparency log the operator names
+  (`anchor: tlog` in `integrity.yaml`, signed with an ephemeral per-anchor key),
+  and `audit verify control` checks every recorded anchor against the live
+  chain — failing only on a head the chain no longer reproduces, and reporting
+  an unreachable log or a rotated key as *unverifiable*, never as tampering.
+  This makes a determined whole-root rewrite — the one gap the local hash chain
+  cannot close — provable to a third party. The guarantee is bounded and stated
+  plainly: between anchors the head rests on the chain alone (cadence is the
+  operator's cron); independence holds only when the log's key and address do
+  not both come from the root being verified; and a public-good log exposes
+  opaque head hashes and their timing. A non-erasable storage sink for the
+  whole ledger (`sink: worm`/`external`) and `anchor: signed` remain reserved.
 
 ## Next
 
@@ -216,7 +230,7 @@ The governed core is real and runnable today:
   is provably the operator's, end to end. On its own root an execution point
   already executes only the install its control ledger records (above); what
   that cannot catch — a consistent rewrite of pointer and ledger together — is
-  what the external anchoring under *Exploring* is for.
+  what external anchoring of the head (`anchor: tlog`, above) is for.
 - **More confinement backends** — the reference runtime's confinement becomes a
   selection seam with OS-native backends beyond rootless podman (for example
   macOS Seatbelt, Linux Landlock), chosen per host with a fail-closed default
@@ -239,8 +253,6 @@ Earlier-stage ideas we're thinking through; the least settled tier.
   data source, with per-resource read/write scope and per-resource provenance.
 - **Agent discovery** — surfacing agents running across an organization that
   aren't yet in the registry ("the registry as radar").
-- **Stronger tamper-evidence** — signing or externally anchoring the ledger
-  head so tampering is provable to a third party, not just detectable locally.
 
 ---
 
