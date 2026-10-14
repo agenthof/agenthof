@@ -190,8 +190,8 @@ func useStub(t *testing.T) *anchortest.Stub {
 	return stub
 }
 
-// TestAuditAnchorViaStubWritesAProofCarryingRecord (spec test 21, write half):
-// through the override, audit anchor records a success anchor whose
+// TestAuditAnchorViaStubWritesAProofCarryingRecord: through the
+// newAnchorBackend override, audit anchor records a success anchor whose
 // backend_kind is the backend's own kind (rfc3161), with a proof and no key
 // id, and prints "log key: none".
 func TestAuditAnchorViaStubWritesAProofCarryingRecord(t *testing.T) {
@@ -289,7 +289,7 @@ func verifyControl(t *testing.T, args ...string) (int, string) {
 	return code, out.String()
 }
 
-// TestVerifyControlExpectHeadGrammar (Review Focus 5): anything outside
+// TestVerifyControlExpectHeadGrammar: anything outside
 // ^([0-9]+:)?[0-9a-f]{64}$ is usage, exit 2, before the ledger is read.
 func TestVerifyControlExpectHeadGrammar(t *testing.T) {
 	ctl := applied(t, writeSample(t))
@@ -301,7 +301,7 @@ func TestVerifyControlExpectHeadGrammar(t *testing.T) {
 	}
 }
 
-// TestVerifyControlExpectHeadAtSeq (spec test 17): K:H holds now and after
+// TestVerifyControlExpectHeadAtSeq: K:H holds now and after
 // more records (the chain still reproduces it); after the tail from K is
 // re-forged it is exit 4 "want H at seq K, got …"; K beyond Count is exit 4
 // "but the chain has N records"; the <hex> form is unchanged.
@@ -374,8 +374,8 @@ func rewriteTail(t *testing.T, ctl string, from int, mutate func(seq int, m map[
 	}
 }
 
-// TestVerifyControlPrintsTaintAndExpectHeadTogether (spec test 16, taint
-// half): a repaired (tainted) ledger with a wrong --expect-head prints BOTH the
+// TestVerifyControlPrintsTaintAndExpectHeadTogether: a repaired (tainted)
+// ledger with a wrong --expect-head prints BOTH the
 // TAINTED line and the expect-head mismatch, and exits 3 — taint outranks the
 // operator's note, but nothing is hidden.
 func TestVerifyControlPrintsTaintAndExpectHeadTogether(t *testing.T) {
