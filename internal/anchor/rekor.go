@@ -426,9 +426,8 @@ func (r *Rekor) Submit(ctx context.Context, head Head) (Receipt, error) {
 //     anchor time …"; a fetch failure → *Unavailable
 //   - verifyProofOffline's verdict, if any
 //   - Offline → nil; else the presence check: 200 with the stored body → nil;
-//     200 with another body → *Mismatch; 404 → *Mismatch (the recorded entry
-//     is absent from the recorded log); anything else → *Unavailable whose
-//     cause says the proof verified offline.
+//     200 with another body → *Mismatch; any non-200 (404 included) →
+//     *Unavailable whose cause says the proof verified offline.
 func (r *Rekor) Verify(ctx context.Context, head Head, rcpt Receipt) error {
 	// The ref comes from a possibly hostile ledger: it is judged before
 	// anything slices it or puts it on a URL.
@@ -491,20 +490,14 @@ func (r *Rekor) presence(ctx context.Context, ref, storedBody string) error {
 			return &Mismatch{Cause: "log serves a different body for the recorded entry"}
 		}
 		return nil
-	case http.StatusNotFound:
-		// A 404 is a mismatch only when the log itself reports the entry
-		// absent, via Rekor's JSON error body ({"code":404,...}). A bare or
-		// HTML 404 — a decommissioned host whose domain still answers, a
-		// proxy, the eventual v1 sunset — is "could not check", never
-		// "tampered"; the stored proof has already decided offline.
-		var rekErr struct {
-			Code int `json:"code"`
-		}
-		if json.Unmarshal(raw, &rekErr) == nil && rekErr.Code == http.StatusNotFound {
-			return &Mismatch{Cause: "recorded entry is absent from the log (404)"}
-		}
-		return unavailable(fmt.Sprintf("status 404 from %s without a log error body", r.host))
 	default:
+		// Every non-200, 404 included, is "could not check", never "tampered".
+		// Rekor v1 gives no reliable way to tell a genuinely absent entry from
+		// a vanished route: a real absent entry answers 404 with no body, while
+		// a re-homed/proxied URL or the eventual v1 read-route removal answers
+		// 404 with go-swagger's generic {"code":404} — the opposite of a tamper
+		// signal. The presence check is non-load-bearing by design; the stored
+		// proof, verified offline under the pinned key, is the verdict.
 		return unavailable(fmt.Sprintf("status %d from %s", status, r.host))
 	}
 }

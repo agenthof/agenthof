@@ -165,9 +165,6 @@ func TestRekorVerifyContentIsMismatch(t *testing.T) {
 	wantMismatch(t, rk.Verify(ctx, head41, anchor.Receipt{Ref: r.Ref, Proof: reencode(t, otherTree)}), "checkpoint names tree")
 
 	online := newRekor(t, f, anchor.RekorOptions{Key: f.PublicKey()})
-	f.Forget(r.Ref)
-	wantMismatch(t, online.Verify(ctx, head41, r), "absent from the log (404)")
-	f.Reset()
 	f.Corrupt(r.Ref)
 	wantMismatch(t, online.Verify(ctx, head41, r), "log serves a different body")
 }
@@ -187,10 +184,16 @@ func TestRekorVerifyPresenceFailuresAreUnavailable(t *testing.T) {
 	wantUnavailable(t, rk.Verify(ctx, head41, r), "proof verified offline")
 	cancel()
 	f.Reset()
-	// 404 included: a bare 404 (no Rekor JSON error body — a decommissioned
-	// host whose domain still answers, the eventual v1 sunset) is "could not
-	// check", NOT "tampered"; only the log's own {"code":404} error is a
-	// mismatch (pinned in TestRekorVerifyContentIsMismatch via Forget).
+	// A 404 is "could not check", never "tampered": Rekor v1 cannot reliably
+	// distinguish a genuinely absent entry (bodyless 404) from a vanished route
+	// (generic {"code":404}), so neither is a tamper signal — the stored proof
+	// decides offline. Both a forgotten entry and a generic Fail(404) are
+	// unavailable.
+	f.Forget(r.Ref)
+	fErr := rk.Verify(context.Background(), head41, r)
+	wantUnavailable(t, fErr, "status 404 from")
+	wantUnavailable(t, fErr, "proof verified offline")
+	f.Reset()
 	for _, status := range []int{500, 302, 401, 501, 404} {
 		f.Fail(status)
 		err := rk.Verify(context.Background(), head41, r)

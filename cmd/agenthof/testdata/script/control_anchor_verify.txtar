@@ -44,9 +44,13 @@ rekor corrupt $REF
 ! exec agenthof audit verify control --control-log control.jsonl
 stdout 'MISMATCH — log serves a different body for the recorded entry'
 rekor reset
+# A forgotten entry answers 404 — but a 404 is "could not check" (Rekor v1
+# cannot tell a genuinely absent entry from a vanished route), never tampering;
+# the run is a 7, and never MISMATCH.
 rekor forget $REF
 ! exec agenthof audit verify control --control-log control.jsonl
-stdout 'MISMATCH — recorded entry is absent from the log \(404\)'
+stdout 'unverifiable — status 404 from 127\.0\.0\.1:[0-9]+ \(proof verified offline; presence not checked\)'
+! stdout 'MISMATCH'
 rekor reset
 
 # Key identity is 7, never 6: the log rotates; the operator pins the NEW key;

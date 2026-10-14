@@ -533,12 +533,10 @@ func (f *RekorV1) get(w http.ResponseWriter, id string) {
 	defer f.mu.Unlock()
 	i, ok := f.index[id]
 	if !ok || f.forgotten[id] {
-		// Rekor reports a genuinely absent entry with its JSON error body;
-		// this is what makes a 404 a Mismatch rather than "could not check".
-		// A bare/HTML 404 (a decommissioned host) is reached via Fail(404).
-		w.Header().Set("Content-Type", "application/json")
+		// Rekor v1 answers a genuinely absent entry with a bodyless 404
+		// (getLogEntryByUUID's 404 carries no schema). The client treats any
+		// 404 as unverifiable, not as tampering.
 		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(map[string]any{"code": http.StatusNotFound, "message": "entry not found"})
 		return
 	}
 	e, err := f.entry(i)
