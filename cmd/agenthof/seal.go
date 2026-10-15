@@ -222,6 +222,8 @@ func printSealFailure(err error, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, "audit seal: the active segment is empty; nothing to seal")
 	case errors.Is(err, ledger.ErrLockHeld):
 		_, _ = fmt.Fprintf(out, "audit seal: %s\n", msgLockBusy)
+	case errors.Is(err, control.ErrUnsealable):
+		_, _ = fmt.Fprintf(out, "audit seal: %v\n", err)
 	case errors.As(err, &se) && (se.Step == control.SealStepManifest || se.Step == control.SealStepSwap):
 		_, _ = fmt.Fprintf(out, "audit seal: %v\n", err)
 		_, _ = fmt.Fprintln(out, "audit seal: sealed; rotation NOT completed — re-run: agenthof audit seal")

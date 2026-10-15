@@ -140,6 +140,9 @@ func checkSealPlacement(c *ledger.Chain, view View, e Event) error {
 	if e.Action != "seal" || e.Seal == nil {
 		return nil
 	}
+	if c.Count() < 1 {
+		return ErrNothingToSeal
+	}
 	if _, err := manifestLogID(view); err != nil {
 		return err
 	}
@@ -149,8 +152,6 @@ func checkSealPlacement(c *ledger.Chain, view View, e Event) error {
 	switch {
 	case s.Segment != want:
 		return fmt.Errorf("control: seal names segment %d; the active is segment %d", s.Segment, want)
-	case c.Count() < 1:
-		return ErrNothingToSeal
 	case s.FirstSeq != first:
 		return fmt.Errorf("control: seal first_seq %d; the active begins at %d", s.FirstSeq, first)
 	case s.HeadSeq != head:
