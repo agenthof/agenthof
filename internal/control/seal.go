@@ -21,6 +21,30 @@ var ErrNoHardLinks = errors.New("control: this filesystem does not support hard 
 
 var errNothingToComplete = errors.New("control: the active segment is open; nothing to complete")
 
+// ErrUnsealable is the seal's verdict on a root whose genesis carries no
+// log_id — one written before ledgers carried an identity. The manifest
+// every rotation writes requires the log_id, so a seal recorded on such a
+// root could never complete; it is refused before anything is linked or
+// recorded, and the root remains today's single, writable file. No remedy is
+// named because none exists short of editing the ledger.
+var ErrUnsealable = errors.New("control: the control ledger genesis carries no log_id; it cannot be sealed and remains a single file")
+
+// manifestLogID is the log_id the manifest for this View carries: the
+// manifest's own once one exists (identityCheck already bound it to the
+// genesis), else the genesis's. Every path that commits toward a rotation —
+// the placement permit, the seal, the repair that completes a seal — asks it
+// BEFORE touching the disk, so a root without one is refused whole.
+func manifestLogID(v View) (string, error) {
+	if v.LogID != "" {
+		return v.LogID, nil
+	}
+	id, err := GenesisLogID(v.Records)
+	if err != nil {
+		return "", fmt.Errorf("%w (%v)", ErrUnsealable, err)
+	}
+	return id, nil
+}
+
 // errStoppedByTestHook is what crashAt returns in place of the step it stops
 // before; it never appears outside a test.
 var errStoppedByTestHook = errors.New("stopped by AGENTHOF_TEST_CRASH_AT")
@@ -104,15 +128,20 @@ func checkSealShape(e Event) error {
 	return nil
 }
 
-// checkSealPlacement needs the open chain: the payload must describe exactly
-// the active this chain holds — segment N+1, first_seq Base+1, head_seq
-// Base+Count, head_hash the chain's head, at least one record, and
-// content_sha256 recomputed from the records read under the lock. A seal
-// that passes it is the one audit seal would write; nothing else can be
-// written as a seal.
+// checkSealPlacement needs the open chain: the root must have the identity a
+// rotation records (manifestLogID — a genesis without a log_id is
+// ErrUnsealable), and the payload must describe exactly the active this
+// chain holds — segment N+1, first_seq Base+1, head_seq Base+Count,
+// head_hash the chain's head, at least one record, and content_sha256
+// recomputed from the records read under the lock. A seal that passes it is
+// the one audit seal would write and one whose rotation can complete;
+// nothing else can be written as a seal.
 func checkSealPlacement(c *ledger.Chain, view View, e Event) error {
 	if e.Action != "seal" || e.Seal == nil {
 		return nil
+	}
+	if _, err := manifestLogID(view); err != nil {
+		return err
 	}
 	s := e.Seal
 	want := len(view.Sealed) + 1
@@ -162,6 +191,12 @@ func SealActive(controlLog string, e Event) (SealResult, error) {
 	sweepTemps(resolved)
 	if c.Count() == 0 {
 		return SealResult{}, ErrNothingToSeal
+	}
+	// The identity the manifest will record, judged before the link: a root
+	// without one is refused with nothing linked and nothing recorded (the
+	// permit in appendOn would refuse too, but only after the link).
+	if _, err := manifestLogID(v); err != nil {
+		return SealResult{}, err
 	}
 	n := len(v.Sealed) + 1
 	if err := linkSegment(resolved, n); err != nil {
@@ -235,13 +270,9 @@ func rotate(resolved string, v View) (SealResult, error) {
 		last, _ := decodeRecord(active[len(active)-1])
 		whole, size := segmentDigests(active)
 		seg = Segment{N: n, Path: SegmentPath(resolved, n), FirstSeq: v.Active.FirstSeq, HeadSeq: v.Head.Count, HeadHash: v.Head.Hash, SHA256: whole, Bytes: size, Records: len(active), SealedAt: last.Time}
-		logID := v.LogID
-		if logID == "" {
-			id, err := GenesisLogID(v.Records)
-			if err != nil {
-				return SealResult{}, &SealError{Step: SealStepManifest, Err: err}
-			}
-			logID = id
+		logID, err := manifestLogID(v)
+		if err != nil {
+			return SealResult{}, &SealError{Step: SealStepManifest, Err: err}
 		}
 		m := Manifest{V: ManifestVersion, LogID: logID}
 		for _, s := range append(v.Sealed, seg) {

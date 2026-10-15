@@ -375,9 +375,11 @@ func Repair(path string, op identity.Invoker, assertedAs string, witness Witness
 // sealToComplete finds the first successful seal among the active's verified
 // records: -1 when there is none (a torn tail is repaired as a torn tail).
 // A seal that is there must recompute — judged exactly as finishActive judges
-// a sealed-not-rotated active, over the records through the seal line — so
+// a sealed-not-rotated active, over the records through the seal line — and
+// the root must carry the identity the manifest records (manifestLogID), so
 // that the rotation repair is attempted only where it is known to complete;
-// a planted seal is its FaultManifest, refused before anything is touched.
+// a planted seal is its FaultManifest and a genesis without a log_id is
+// ErrUnsealable, both refused before anything is touched.
 func sealToComplete(v View, active []ledger.Record) (int, error) {
 	for i, r := range active {
 		rec, ok := decodeRecord(r)
@@ -389,6 +391,9 @@ func sealToComplete(v View, active []ledger.Record) (int, error) {
 		through.Active.Records = i + 1
 		through.Head = ledger.Head{Hash: hashOf(r.Raw), Count: rec.Seq}
 		if _, err := finishActive(through, len(v.Sealed)); err != nil {
+			return -1, err
+		}
+		if _, err := manifestLogID(through); err != nil {
 			return -1, err
 		}
 		return i, nil

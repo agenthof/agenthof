@@ -346,3 +346,39 @@ func TestApplyOnStateBOverTheAPI(t *testing.T) {
 		t.Fatal("nothing recorded")
 	}
 }
+
+// TestAuditSealRefusesGenesisWithoutLogID: a root older than the genesis
+// log_id authorizes (the vouch stops at LastInstalling) and is then refused
+// before anything is linked or recorded — it cannot be rotated, so it remains
+// a single, still-writable file; the message names no re-run.
+func TestAuditSealRefusesGenesisWithoutLogID(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := filepath.Join(t.TempDir(), "control.jsonl")
+	hash := installByHandWithPointer(t, ctl, map[string]string{"roles/ops.yaml": "name: platform-admin\nallowed_groups: [platform-eng]\ncontrol: [apply, seal]\n"})
+	c, err := ledger.Open(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"v":"control/1","seq":1,"time":"2026-10-09T02:12:01Z","action":"apply","outcome":"success","invoker":{"subject":"dana@example.com","issuer":"local","method":"asserted"},"witness":{"os_user":"dana","hostname":"h"},"config_hash":"` + hash + `","prev":""}`
+	if err := c.Append([]byte(line)); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	before, _ := os.ReadFile(ctl)
+	code, out := auditSeal(t, ctl)
+	if code != 1 || !strings.Contains(out, "audit seal: control: the control ledger genesis carries no log_id; it cannot be sealed and remains a single file") || strings.Contains(out, "re-run") || strings.Contains(out, "control head:") {
+		t.Fatalf("%d\n%s", code, out)
+	}
+	if after, _ := os.ReadFile(ctl); !bytes.Equal(before, after) {
+		t.Fatal("nothing recorded")
+	}
+	entries, _ := os.ReadDir(filepath.Dir(ctl))
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".seg") {
+			t.Fatalf("nothing linked: %s", e.Name())
+		}
+	}
+	if err := control.Writable(ctl); err != nil {
+		t.Fatalf("the root stays writable: %v", err)
+	}
+}

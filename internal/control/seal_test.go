@@ -286,3 +286,68 @@ func TestSealActiveHoldsOneChain(t *testing.T) {
 		t.Fatal("nothing recorded while busy")
 	}
 }
+
+// genesisWithoutLogID writes a root older than the genesis log_id: a hand
+// genesis without one, then n records through Append (which mints a log_id
+// on the genesis only, so the root stays without one).
+func genesisWithoutLogID(t *testing.T, p string, n int) {
+	t.Helper()
+	c, err := ledger.Open(p, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"v":"control/1","seq":1,"time":"2026-10-09T02:12:01Z","action":"apply","outcome":"success","invoker":{"subject":"dana@example.com","issuer":"local","method":"asserted"},"witness":{"os_user":"dana","hostname":"h"},"config_hash":"sha256:abc","prev":""}`
+	if err := c.Append([]byte(line)); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	appendN(t, p, n)
+}
+
+// TestSealRefusesGenesisWithoutLogID: a root whose genesis carries no log_id
+// cannot be rotated (the manifest requires one), so every path that commits
+// toward a rotation refuses BEFORE touching the disk: SealActive links and
+// records nothing and the root stays writable; Append refuses a correct seal
+// payload the same way; Repair on a seal with records after it (the
+// older-binary shape) truncates nothing and writes no fragment. The message
+// names no re-run.
+func TestSealRefusesGenesisWithoutLogID(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	genesisWithoutLogID(t, p, 2)
+	before, _ := os.ReadFile(p)
+	_, err := SealActive(p, sealEvent())
+	if !errors.Is(err, ErrUnsealable) || strings.Contains(err.Error(), "re-run") {
+		t.Fatalf("SealActive: %v", err)
+	}
+	if after, _ := os.ReadFile(p); !bytes.Equal(before, after) {
+		t.Fatal("nothing may be recorded")
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(p)); len(entries) != 1 {
+		t.Fatalf("nothing linked, no manifest: %v", entries)
+	}
+	if err := Writable(p); err != nil {
+		t.Fatalf("the root stays writable: %v", err)
+	}
+	appendN(t, p, 1)
+	v, _ := Read(p, ledger.Locked)
+	size := func() int64 { i, _ := os.Stat(p); return i.Size() }
+	was := size()
+	_, err = Append(p, Event{Action: "seal", Outcome: "success", Invoker: identity.Static("d"), Seal: &Seal{Segment: 1, FirstSeq: 1, HeadSeq: 4, HeadHash: v.Head.Hash, ContentSHA256: sealContentDigest(v.Records)}})
+	if !errors.Is(err, ErrUnsealable) || size() != was {
+		t.Fatalf("Append with a correct payload: %v (size %d → %d)", err, was, size())
+	}
+	q := filepath.Join(t.TempDir(), "control.jsonl")
+	genesisWithoutLogID(t, q, 2)
+	line := sealByHand(t, q, "B")
+	appendRaw(t, q, hashOf(line), 5)
+	raw, _ := os.ReadFile(q)
+	if _, err := repairIt(t, q); !errors.Is(err, ErrUnsealable) {
+		t.Fatalf("Repair: %v", err)
+	}
+	if now, _ := os.ReadFile(q); !bytes.Equal(raw, now) {
+		t.Fatal("the repair must truncate nothing")
+	}
+	if frags, _ := filepath.Glob(q + ".torn-*"); len(frags) != 0 {
+		t.Fatalf("no fragment: %v", frags)
+	}
+}
