@@ -144,6 +144,18 @@ func checkAnchorShape(e Event) error {
 	return nil
 }
 
+// checkSealShape is Append's permit for a seal record: there is none yet. A
+// seal record is written only by audit seal, on the chain it already holds
+// and after its placement checks; until that writer exists every Event that
+// says "seal" or carries a seal payload is refused outright, so a payload
+// can neither be dropped silently nor land on an ordinary record.
+func checkSealShape(e Event) error {
+	if e.Seal != nil || e.Action == "seal" {
+		return errors.New("control: seal records are written only by audit seal")
+	}
+	return nil
+}
+
 // checkAnchorCoverage is the one permit rule that needs the chain: the
 // covered seq must exist, 1 ≤ Seq ≤ Count, read under the exclusive flock so
 // it holds across any head advance since the caller read the head. A refusal
@@ -165,6 +177,9 @@ func checkAnchorCoverage(a *Anchor, count int) error {
 // prev=the current head, sets a fresh log_id on the genesis record only,
 // marshals the record, and appends it. It returns the chain's new Head.
 func Append(path string, e Event) (ledger.Head, error) {
+	if err := checkSealShape(e); err != nil {
+		return ledger.Head{}, err
+	}
 	if err := checkAnchorShape(e); err != nil {
 		return ledger.Head{}, err
 	}

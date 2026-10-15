@@ -86,10 +86,7 @@ func sealByHand(t *testing.T, p, stopAt string) []byte {
 		start = ledger.Start{Prev: prev.HeadHash, Base: uint64(prev.HeadSeq)}
 	}
 	active := activeRecords(v)
-	// content_sha256 is every byte before the seal line: the WHOLE digest of
-	// the pre-seal records (segmentDigests' content snapshot is taken before
-	// the last line it is given, which here would omit the last record).
-	_, content, _ := segmentDigests(active)
+	content := sealContentDigest(active)
 	rec := record{V: "control/1", Seq: v.Head.Count + 1, Time: time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC), Action: "seal", Outcome: "success",
 		Invoker: identity.Static("dana@example.com"), Witness: Witness{OSUser: "dana", Hostname: "host"},
 		Seal: &Seal{Segment: n, FirstSeq: v.Active.FirstSeq, HeadSeq: v.Head.Count, HeadHash: v.Head.Hash, ContentSHA256: content}, Prev: v.Head.Hash}
@@ -105,7 +102,7 @@ func sealByHand(t *testing.T, p, stopAt string) []byte {
 	if stopAt == "B" {
 		return line
 	}
-	_, whole, size := segmentDigests(append(append([]ledger.Record{}, active...), ledger.Record{Raw: line}))
+	whole, size := segmentDigests(append(append([]ledger.Record{}, active...), ledger.Record{Raw: line}))
 	logID, err := GenesisLogID(v.Records)
 	if err != nil {
 		t.Fatal(err)

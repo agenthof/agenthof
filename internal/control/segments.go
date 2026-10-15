@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/ledger"
@@ -82,25 +83,48 @@ type View struct {
 	LogID    string
 }
 
-// listSiblings globs resolved + ".seg-*" and returns ordinal → path. Any
-// match that is not exactly six digits is an unexpected segment: nothing in
-// the set is inferred from a glob, the glob only catches what the manifest
+// siblingNames lists the directory entries beside resolved whose name begins
+// with the active's base name + ".seg-" — a plain prefix match on a directory
+// listing, never a glob: filepath.Glob reads [, ], * and ? in the PATH as
+// pattern syntax, so a root under a directory named like "a[1]" would list
+// nothing with a nil error and every fault below would go silent. A missing
+// directory is no siblings.
+func siblingNames(resolved string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Dir(resolved))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	prefix := filepath.Base(resolved) + ".seg-"
+	var out []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			out = append(out, filepath.Join(filepath.Dir(resolved), e.Name()))
+		}
+	}
+	return out, nil
+}
+
+// listSiblings returns the .seg-* siblings as ordinal → path. Any sibling
+// whose suffix is not exactly six digits is an unexpected segment: nothing
+// in the set is inferred from the listing, it only catches what the manifest
 // does not explain.
 func listSiblings(resolved string) (map[int]string, error) {
-	matches, err := filepath.Glob(resolved + ".seg-*")
+	names, err := siblingNames(resolved)
 	if err != nil {
 		return nil, err
 	}
 	base := filepath.Base(resolved)
 	out := map[int]string{}
-	for _, m := range matches {
-		suffix := filepath.Base(m)[len(base):]
-		sub := segmentNameRE.FindStringSubmatch(suffix)
+	for _, p := range names {
+		sub := segmentNameRE.FindStringSubmatch(filepath.Base(p)[len(base):])
 		if sub == nil {
-			return nil, &SetError{Fault: FaultUnexpectedSegment, Path: m}
+			return nil, &SetError{Fault: FaultUnexpectedSegment, Path: p}
 		}
 		n, _ := strconv.Atoi(sub[1])
-		out[n] = m
+		out[n] = p
 	}
 	return out, nil
 }
@@ -116,13 +140,18 @@ func sortedOrdinals(siblings map[int]string) []int {
 	return ords
 }
 
-// hasHistory reports whether a manifest or any .seg-* sibling exists.
-func hasHistory(resolved string) bool {
+// hasHistory reports whether a manifest or any .seg-* sibling exists beside
+// resolved. A directory that cannot be listed is an error, never "no
+// history": the answer decides whether a missing active is recreated.
+func hasHistory(resolved string) (bool, error) {
 	if _, err := os.Lstat(ManifestPath(resolved)); err == nil {
-		return true
+		return true, nil
 	}
-	matches, _ := filepath.Glob(resolved + ".seg-*")
-	return len(matches) > 0
+	names, err := siblingNames(resolved)
+	if err != nil {
+		return false, err
+	}
+	return len(names) > 0, nil
 }
 
 func sameFile(path string, info os.FileInfo) bool {
@@ -134,6 +163,11 @@ func sameFile(path string, info os.FileInfo) bool {
 // non-nil, is a *SetError, the raw *fs.PathError of a root with no history
 // (nothing recorded yet), or a lock/IO error; Records/Head still carry the
 // valid prefix that verified before the fault, as ledger.ReadVerify does.
+//
+// The sealed walk runs under the reader's shared lock: a seal needs the
+// active's exclusive lock to commit, so while a reader holds LOCK_SH the
+// manifest and the sealed files it names cannot change under it, and the two
+// phases below see one consistent set with no re-check.
 func Read(controlLog string, mode ledger.LockMode) (View, error) {
 	resolved, err := resolveControlLog(controlLog)
 	if err != nil {
@@ -141,8 +175,14 @@ func Read(controlLog string, mode ledger.LockMode) (View, error) {
 	}
 	f, err := openByName(resolved, mode)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) && hasHistory(resolved) {
-			return View{}, activeMissing(resolved)
+		if errors.Is(err, fs.ErrNotExist) {
+			history, herr := hasHistory(resolved)
+			if herr != nil {
+				return View{}, herr
+			}
+			if history {
+				return View{}, activeMissing(resolved)
+			}
 		}
 		return View{}, err // ENOENT is the raw *fs.PathError: "nothing recorded yet"
 	}
@@ -152,7 +192,11 @@ func Read(controlLog string, mode ledger.LockMode) (View, error) {
 		}
 		_ = f.Close()
 	}()
-	return readSet(resolved, f, func(s ledger.Start) ([]ledger.Record, ledger.Head, error) {
+	w, err := walkSealed(resolved)
+	if err != nil {
+		return w.v, err
+	}
+	return readActive(resolved, f, w, func(s ledger.Start) ([]ledger.Record, ledger.Head, error) {
 		return ledger.VerifyReader(f, s)
 	})
 }
@@ -187,6 +231,9 @@ func openByName(resolved string, mode ledger.LockMode) (*os.File, error) {
 		}
 		fi, err := f.Stat()
 		if err != nil {
+			if mode == ledger.Locked {
+				ledger.Unlock(f)
+			}
 			_ = f.Close()
 			return nil, err
 		}
@@ -201,25 +248,66 @@ func openByName(resolved string, mode ledger.LockMode) (*os.File, error) {
 	return nil, fmt.Errorf("control: %s was rotated twice while opening it; retry", resolved)
 }
 
-// readSet is the read algorithm over an open, locked (or Unlocked-mode)
-// handle that IS the active. verifyActive is how the caller reads the handle
-// — ledger.VerifyReader for a reader, ledger.Resume for the writer — so the
-// handle is read exactly once either way.
-func readSet(resolved string, handle *os.File, verifyActive func(ledger.Start) ([]ledger.Record, ledger.Head, error)) (View, error) {
+// sealedWalk is the first phase of the read algorithm: the manifest and the
+// sealed segments it lists, verified in order. It needs no handle on the
+// active — sealed files are fixed and the manifest is replaced whole — so
+// the writer runs it BEFORE taking the active's exclusive lock (and holds
+// the lock for the active alone) while the reader runs it under its shared
+// lock. v carries the prefix so far (Records, Sealed, LogID; Head only when
+// the walk failed); start is the Start the active must continue from; m is
+// nil when the root has never sealed.
+type sealedWalk struct {
+	m     *Manifest
+	v     View
+	start ledger.Start
+}
+
+// walkSealed reads the manifest and verifies every sealed segment in its
+// order. On a fault the returned view holds the valid prefix and its head,
+// as ledger.ReadVerify does.
+func walkSealed(resolved string) (sealedWalk, error) {
+	w := sealedWalk{v: View{FirstSeq: 1, State: StateOpen}}
+	m, err := loadManifest(resolved)
+	if err != nil {
+		return w, err
+	}
+	if m == nil {
+		return w, nil
+	}
+	w.m, w.v.LogID = m, m.LogID
+	for i, e := range m.Segments {
+		k := i + 1
+		seg, recs, err := verifySealed(resolved, k, w.start, e)
+		w.v.Records = append(w.v.Records, recs...)
+		if err != nil {
+			w.v.Head = ledger.Head{Hash: w.start.Prev, Count: int(w.start.Base)}
+			if len(recs) > 0 {
+				w.v.Head = ledger.Head{Hash: hashOf(recs[len(recs)-1].Raw), Count: int(w.start.Base) + len(recs)}
+			}
+			return w, err
+		}
+		w.v.Sealed = append(w.v.Sealed, seg)
+		w.start = ledger.Start{Prev: seg.HeadHash, Base: uint64(seg.HeadSeq)}
+	}
+	return w, nil
+}
+
+// readActive is the second phase, over an open handle that IS the active
+// (locked, or Unlocked-mode): the siblings the manifest does not explain,
+// judged against the handle; state C; the active's one read — verifyActive
+// is ledger.VerifyReader for a reader and ledger.Resume for the writer; the
+// seal-terminal check; the identity check.
+func readActive(resolved string, handle *os.File, w sealedWalk, verifyActive func(ledger.Start) ([]ledger.Record, ledger.Head, error)) (View, error) {
+	v := w.v
 	hinfo, err := handle.Stat()
 	if err != nil {
-		return View{}, err
+		return v, err
 	}
-	v := View{FirstSeq: 1, State: StateOpen}
 	siblings, err := listSiblings(resolved)
 	if err != nil {
 		return v, err
 	}
-	m, err := loadManifest(resolved)
-	if err != nil {
-		return v, err
-	}
-	if m == nil {
+	if w.m == nil {
 		// Single-segment mode: any sibling is a fault, except the first
 		// seal's own link to this very inode (its state A′ or B).
 		for _, n := range sortedOrdinals(siblings) {
@@ -236,34 +324,14 @@ func readSet(resolved string, handle *os.File, verifyActive func(ledger.Start) (
 		}
 		return finishActive(v, 0)
 	}
-	return readSealedSet(resolved, hinfo, siblings, m, verifyActive)
-}
-
-// readSealedSet is the read algorithm with a manifest present: each sealed
-// segment in manifest order, the siblings the manifest does not explain, the
-// active (or state C), the seal-terminal check and the identity check.
-func readSealedSet(resolved string, hinfo os.FileInfo, siblings map[int]string, m *Manifest, verifyActive func(ledger.Start) ([]ledger.Record, ledger.Head, error)) (View, error) {
-	v := View{FirstSeq: 1, State: StateOpen, LogID: m.LogID}
-	start := ledger.Start{}
-	for i, e := range m.Segments {
-		k := i + 1
-		seg, recs, err := verifySealed(resolved, k, start, e)
-		v.Records = append(v.Records, recs...)
-		if err != nil {
-			v.Head = ledger.Head{Hash: start.Prev, Count: int(start.Base)}
-			if len(recs) > 0 {
-				v.Head = ledger.Head{Hash: hashOf(recs[len(recs)-1].Raw), Count: int(start.Base) + len(recs)}
-			}
-			return v, err
-		}
-		v.Sealed = append(v.Sealed, seg)
-		start = ledger.Start{Prev: seg.HeadHash, Base: uint64(seg.HeadSeq)}
-		delete(siblings, k)
-	}
-	n := len(m.Segments)
+	n := len(w.m.Segments)
+	start := w.start
 	// Siblings the manifest does not explain, judged against the handle: the
 	// one tolerated is the in-progress link of seal N+1 (states A′ and B).
 	for _, ord := range sortedOrdinals(siblings) {
+		if ord <= n {
+			continue
+		}
 		if ord == n+1 && sameFile(siblings[ord], hinfo) {
 			continue
 		}
@@ -272,10 +340,10 @@ func readSealedSet(resolved string, hinfo os.FileInfo, siblings map[int]string, 
 	v.Head = ledger.Head{Hash: start.Prev, Count: int(start.Base)}
 	// State C: the active name still refers to the sealed file. The logical
 	// active is empty; nothing more is read from the handle.
-	if n > 0 && sameFile(SegmentPath(resolved, n), hinfo) {
+	if sameFile(SegmentPath(resolved, n), hinfo) {
 		v.State = StateRotatedNotSwapped
 		v.Active = Segment{N: 0, Path: resolved, FirstSeq: int(start.Base) + 1, HeadSeq: int(start.Base), HeadHash: start.Prev}
-		return identityCheck(v, m)
+		return identityCheck(v, w.m)
 	}
 	recs, head, verr := verifyActive(start)
 	v.Records = append(v.Records, recs...)
@@ -286,11 +354,11 @@ func readSealedSet(resolved string, hinfo os.FileInfo, siblings map[int]string, 
 	if verr != nil {
 		return v, mapActiveFault(resolved, n, start, recs, verr)
 	}
-	v, err := finishActive(v, n)
+	v, err = finishActive(v, n)
 	if err != nil {
 		return v, err
 	}
-	return identityCheck(v, m)
+	return identityCheck(v, w.m)
 }
 
 // identityCheck: the manifest's log_id must be the genesis's — a manifest
@@ -340,7 +408,7 @@ func verifySealed(resolved string, k int, start ledger.Start, e ManifestEntry) (
 		return Segment{}, recs, verr
 	}
 	headSeq := int(start.Base) + head.Count
-	content, whole, size := segmentDigests(recs)
+	whole, size := segmentDigests(recs)
 	disagree := func(field string, recorded, verified any) error {
 		return &SetError{Fault: FaultManifest, Segment: k, Path: path, Err: fmt.Errorf("%s %v recorded, %v verified", field, recorded, verified)}
 	}
@@ -353,7 +421,7 @@ func verifySealed(resolved string, k int, start ledger.Start, e ManifestEntry) (
 		if i != len(recs)-1 {
 			return Segment{}, recs, &SetError{Fault: FaultSealNotLast, Segment: k, Path: path, Seq: rec.Seq + 1, want: strconv.Itoa(headSeq)}
 		}
-		want := Seal{Segment: k, FirstSeq: int(start.Base) + 1, HeadSeq: rec.Seq - 1, HeadHash: rec.Prev, ContentSHA256: content}
+		want := Seal{Segment: k, FirstSeq: int(start.Base) + 1, HeadSeq: rec.Seq - 1, HeadHash: rec.Prev, ContentSHA256: sealContentDigest(recs[:i])}
 		if rec.Seal == nil || *rec.Seal != want {
 			return Segment{}, recs, disagree("seal", rec.Seal, want)
 		}
@@ -410,8 +478,7 @@ func finishActive(v View, sealedCount int) (View, error) {
 		if i != len(active)-1 {
 			return v, &SetError{Fault: FaultSealNotLast, Segment: 0, Path: v.Active.Path, Seq: rec.Seq + 1, want: strconv.Itoa(v.Head.Count)}
 		}
-		content, _, _ := segmentDigests(active)
-		want := Seal{Segment: sealedCount + 1, FirstSeq: v.Active.FirstSeq, HeadSeq: rec.Seq - 1, HeadHash: rec.Prev, ContentSHA256: content}
+		want := Seal{Segment: sealedCount + 1, FirstSeq: v.Active.FirstSeq, HeadSeq: rec.Seq - 1, HeadHash: rec.Prev, ContentSHA256: sealContentDigest(active[:i])}
 		if rec.Seal == nil || *rec.Seal != want {
 			return v, &SetError{Fault: FaultManifest, Segment: sealedCount + 1, Path: v.Active.Path, Seq: rec.Seq, Err: fmt.Errorf("seal payload %+v recorded, %+v verified", rec.Seal, want)}
 		}
@@ -457,24 +524,27 @@ var (
 	betweenWalkAndOpen = func() {}
 )
 
-// openActive is the writer's entry. It opens and locks the active BY NAME,
-// decides what the locked handle is, verifies the set exactly as Read does
-// and returns the active chain (ledger.Resume over the locked handle) with
-// the View. It never uses the fused ledger.Open/OpenFrom: the Start is known
+// openActive is the writer's entry. It walks the sealed segments, then opens
+// and locks the active BY NAME, decides what the locked handle is, and
+// returns the active chain (ledger.Resume over the locked handle) with the
+// View. It never uses the fused ledger.Open/OpenFrom: the Start is known
 // only after the sealed walk, and a locked handle that turns out to be the
 // sealed file under the active's name (state C) must read as ErrSealed, not
-// as a damaged chain. Order: (a) resolve, Lstat — a missing active beside a
-// manifest or a sibling is FaultActiveMissing and nothing is created; with
-// no history, today's create-on-first-write stands; (b) read the manifest M;
-// (c) open by name, LOCK_EX; (d) re-stat; (e) re-read the manifest and
-// require it to equal M — a seal that ran to completion between (b) and (c)
-// left the name on a new, empty active that a stale Start would accept
-// vacuously, and this writer would then duplicate the sealed range;
-// (f) readSet over the locked handle: the sealed walk, the sibling check,
-// state C (reached before the handle is read, so Resume never runs on the
-// sealed inode), ledger.Resume as the active's one read, and the
-// seal-terminal check; a set in state B or C is ErrSealed. (d) and (e) retry
-// from (a) once.
+// as a damaged chain. Order: (a) resolve; Stat (following a symlink, as
+// ledger.Open's create-or-resume did) — a missing active beside a manifest
+// or a sibling is FaultActiveMissing and nothing is created; with no history,
+// today's create-on-first-write stands; (b) walkSealed — the manifest M and
+// every sealed segment, read without the active's lock (they are fixed
+// files), so the exclusive lock below is held for the active alone, not for
+// O(total bytes); (c) open by name, LOCK_EX; (d) re-stat; (e) re-read the
+// manifest and require it to equal M — a seal that ran to completion
+// between (b) and (c) left the name on a new, empty active that the stale
+// Start would accept vacuously, and this writer would then duplicate the
+// sealed range; (f) readActive over the locked handle: the sibling check,
+// state C (decided before the handle is read, so Resume never runs on the
+// sealed inode), ledger.Resume as the active's one read, the seal-terminal
+// check; a set in state B or C is ErrSealed. (d) and (e) retry from (a)
+// once.
 func openActive(controlLog string) (*ledger.Chain, View, error) {
 	resolved, err := resolveControlLog(controlLog)
 	if err != nil {
@@ -482,18 +552,22 @@ func openActive(controlLog string) (*ledger.Chain, View, error) {
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		create := false
-		if _, lerr := os.Lstat(resolved); lerr != nil {
-			if !errors.Is(lerr, fs.ErrNotExist) {
-				return nil, View{}, lerr
+		if _, serr := os.Stat(resolved); serr != nil {
+			if !errors.Is(serr, fs.ErrNotExist) {
+				return nil, View{}, serr
 			}
-			if hasHistory(resolved) {
+			history, herr := hasHistory(resolved)
+			if herr != nil {
+				return nil, View{}, herr
+			}
+			if history {
 				return nil, View{}, activeMissing(resolved)
 			}
 			create = true
 		}
-		m, merr := loadManifest(resolved)
-		if merr != nil {
-			return nil, View{}, merr
+		w, werr := walkSealed(resolved)
+		if werr != nil {
+			return nil, w.v, werr
 		}
 		betweenWalkAndOpen()
 		f, err := openForAppend(resolved, create)
@@ -517,13 +591,13 @@ func openActive(controlLog string) (*ledger.Chain, View, error) {
 			_ = f.Close()
 			return nil, View{}, merr
 		}
-		if !manifestEqual(m, m2) {
+		if !manifestEqual(w.m, m2) {
 			ledger.Unlock(f)
 			_ = f.Close()
 			continue
 		}
 		var chain *ledger.Chain
-		v, rerr := readSet(resolved, f, func(s ledger.Start) ([]ledger.Record, ledger.Head, error) {
+		v, rerr := readActive(resolved, f, w, func(s ledger.Start) ([]ledger.Record, ledger.Head, error) {
 			c, recs, err := ledger.Resume(f, ledger.Locked, s)
 			chain = c
 			head := ledger.Head{Hash: s.Prev}

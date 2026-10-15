@@ -115,22 +115,29 @@ func loadManifest(resolved string) (*Manifest, error) {
 
 // segmentDigests is the per-line hasher the reader and the writer share: for
 // a chain that verified, the file's bytes are exactly each record's Raw plus
-// '\n', so content is sha256 over every line but the last (the bytes before
-// the seal line), whole is sha256 over every line (the manifest's sha256),
-// and size is their length. A second SHA-256 pass over bytes already in
-// memory — one read of the file, stated plainly.
-func segmentDigests(records []ledger.Record) (content, whole string, size int64) {
+// '\n', so whole is sha256 over every line given (over a sealed segment's
+// records, seal line included, it is the manifest's sha256) and size is their
+// length. A second SHA-256 pass over bytes already in memory — one read of
+// the file, stated plainly.
+func segmentDigests(records []ledger.Record) (whole string, size int64) {
 	h := sha256.New()
-	for i, r := range records {
-		if i == len(records)-1 {
-			content = hex.EncodeToString(h.Sum(nil))
-		}
+	for _, r := range records {
 		_, _ = h.Write(r.Raw)
 		_, _ = h.Write([]byte{'\n'})
 		size += int64(len(r.Raw)) + 1
 	}
-	if len(records) == 0 {
-		content = hex.EncodeToString(h.Sum(nil))
-	}
-	return content, hex.EncodeToString(h.Sum(nil)), size
+	return hex.EncodeToString(h.Sum(nil)), size
+}
+
+// sealContentDigest is the seal payload's content_sha256: sha256 of every
+// byte of the segment BEFORE the seal line, newlines included — which is
+// segmentDigests' whole digest over the records the seal closes, the seal
+// record itself excluded. The recipe for a writer about to seal an active
+// with records R: content_sha256 = sealContentDigest(R); the manifest's
+// sha256 is then segmentDigests(append(R, sealLine)). A reader hands it the
+// segment's records with the seal line sliced off; both sides call this one
+// function, so neither can hash one line too few or too many.
+func sealContentDigest(preSeal []ledger.Record) string {
+	whole, _ := segmentDigests(preSeal)
+	return whole
 }
