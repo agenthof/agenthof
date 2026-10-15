@@ -122,7 +122,8 @@ func pullConfig(req pullRequest) pullOutcome {
 		}
 	}
 
-	records, _, verr := ledger.ReadVerify(req.ControlLog, ledger.Locked)
+	v, verr := control.Read(req.ControlLog, ledger.Locked)
+	records := v.Records
 	switch {
 	case errors.Is(verr, ledger.ErrLockHeld):
 		return pullOutcome{Kind: pullBusy, Err: verr}

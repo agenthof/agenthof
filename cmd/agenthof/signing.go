@@ -304,7 +304,8 @@ func buildSignature(controlLog string) (signatureInfo, error) {
 	if !installed {
 		return signatureInfo{}, errNothingInstalled
 	}
-	records, _, verr := ledger.ReadVerify(controlLog, ledger.Locked)
+	v, verr := control.Read(controlLog, ledger.Locked)
+	records := v.Records
 	switch {
 	case errors.Is(verr, ledger.ErrLockHeld):
 		return signatureInfo{}, verr
@@ -478,15 +479,15 @@ func signingStartupWarning(controlLog string) string {
 	if err != nil || !installed {
 		return ""
 	}
-	records, _, verr := ledger.ReadVerify(controlLog, ledger.Locked)
+	v, verr := control.Read(controlLog, ledger.Locked)
 	if verr != nil {
 		return ""
 	}
-	last, found := control.LastInstalling(records)
+	last, found := control.LastInstalling(v.Records)
 	if !found || last.ConfigHash != hash {
 		return ""
 	}
-	logID, err := control.GenesisLogID(records)
+	logID, err := control.GenesisLogID(v.Records)
 	if err != nil {
 		return ""
 	}

@@ -313,11 +313,12 @@ func cmdAuditAnchor(args []string, out io.Writer) int {
 
 	// The head. installed.lock is released; the record carries (seq, hash)
 	// explicitly, so the head is free to advance under us.
-	_, head, err := ledger.ReadVerify(*controlLog, ledger.Locked)
+	v, err := control.Read(*controlLog, ledger.Locked)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "audit anchor: %v\n", err)
 		return 1
 	}
+	head := v.Head
 	if head.Count == 0 {
 		_, _ = fmt.Fprintln(out, "audit anchor: the control ledger is empty; nothing to anchor")
 		return 1

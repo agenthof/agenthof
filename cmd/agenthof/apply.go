@@ -127,7 +127,7 @@ type applyKind int
 
 const (
 	applyInstalled            applyKind = iota // success recorded (Bootstrap when nothing was installed)
-	applyLedgerDamaged                         // ledger.Open failed; nothing recorded; the caller prints the repair hint
+	applyLedgerDamaged                         // control.Writable failed; nothing recorded; the caller prints the repair hint
 	applyBusy                                  // the writer lock (or the ledger flock) is held elsewhere; nothing recorded
 	applyRefused                               // recorded refused/not_authorized
 	applyPreconditionFailed                    // CAS mismatch; nothing recorded
@@ -177,15 +177,13 @@ func applyConfig(req applyRequest, out io.Writer) applyOutcome {
 
 	// 1. The control chain must be writable before anything is recorded.
 	// Contention on a healthy ledger is busy, never damage.
-	c, err := ledger.Open(req.ControlLog, ledger.Locked)
-	if err != nil {
+	if err := control.Writable(req.ControlLog); err != nil {
 		if errors.Is(err, ledger.ErrLockHeld) {
 			_, _ = fmt.Fprintf(out, "apply: %s\n", msgLockBusy)
 			return a.done(applyBusy)
 		}
 		return a.done(applyLedgerDamaged)
 	}
-	_ = c.Close()
 
 	// 2. The writer lock: every pointer writer — this apply, a concurrent
 	// apply in another process, the kill switch — serializes here, so the
