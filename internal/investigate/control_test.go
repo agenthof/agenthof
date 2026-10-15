@@ -277,3 +277,71 @@ func TestLoadControlDecodesAnAnchorRecord(t *testing.T) {
 		t.Fatalf("normalized: %+v", r)
 	}
 }
+
+// TestLoadControlVerdictsOverASet: a torn active is "torn"; a planted
+// unexpected segment is "broken" (never "missing"); a manifest beside a
+// missing active is "broken" (never "missing"); no root at all is "missing".
+func TestLoadControlVerdictsOverASet(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	inv := identity.Static("dana@example.com")
+	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness(), ConfigHash: "sha256:a"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"torn`)
+	_ = f.Close()
+	if ev, verdict, ok := LoadControl(p); verdict != "torn" || !ok || len(ev) != 1 {
+		t.Fatalf("torn active: %q %v %d", verdict, ok, len(ev))
+	}
+	if err := os.Truncate(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness(), ConfigHash: "sha256:a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(control.SegmentPath(p, 1), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ev, verdict, ok := LoadControl(p); verdict != "broken" || !ok || len(ev) != 0 {
+		t.Fatalf("unexpected segment: %q %v %d", verdict, ok, len(ev))
+	}
+	_ = os.Remove(control.SegmentPath(p, 1))
+	_ = os.WriteFile(control.ManifestPath(p), []byte(`{"v":"segments/1","log_id":"`+strings.Repeat("ab", 16)+`","segments":[]}`), 0o600)
+	_ = os.Remove(p)
+	if _, verdict, ok := LoadControl(p); verdict != "broken" || !ok {
+		t.Fatalf("active missing with a manifest: %q %v", verdict, ok)
+	}
+	if _, verdict, ok := LoadControl(filepath.Join(t.TempDir(), "none.jsonl")); verdict != "missing" || ok {
+		t.Fatalf("no root: %q %v", verdict, ok)
+	}
+}
+
+// TestLoadControlReadsAcrossASealedSegment: the events of a sealed segment
+// and of the continuation active are one chain — the seal event is in it,
+// the verdict is verified, and the records are the whole logical chain.
+func TestLoadControlReadsAcrossASealedSegment(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	inv := identity.Static("dana@example.com")
+	ev := control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness(), ConfigHash: "sha256:a"}
+	for i := 0; i < 2; i++ {
+		if _, err := control.Append(p, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := control.SealActive(p, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.Append(p, ev); err != nil {
+		t.Fatal(err)
+	}
+	recs, events, verdict, ok := loadControl(p)
+	if verdict != "verified" || !ok || len(recs) != 4 || len(events) != 4 {
+		t.Fatalf("%q %v %d %d", verdict, ok, len(recs), len(events))
+	}
+	if events[2].Action != "seal" || events[3].Seq != 4 {
+		t.Fatalf("%+v", events)
+	}
+}

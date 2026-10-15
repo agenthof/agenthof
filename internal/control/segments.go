@@ -1,12 +1,15 @@
 package control
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -357,7 +360,7 @@ func readActive(resolved string, handle *os.File, w sealedWalk, verifyActive fun
 		v.Records, v.Head = recs, head
 		v.Active = Segment{N: 0, Path: resolved, FirstSeq: 1, HeadSeq: head.Count, HeadHash: head.Hash, Bytes: hinfo.Size(), Records: head.Count}
 		if verr != nil {
-			return v, mapActiveFault(resolved, 0, ledger.Start{}, recs, verr)
+			return v, mapActiveFault(resolved, handle, 0, ledger.Start{}, recs, verr)
 		}
 		return finishActive(v, 0)
 	}
@@ -391,7 +394,7 @@ func readActive(resolved string, handle *os.File, w sealedWalk, verifyActive fun
 		v.Head = ledger.Head{Hash: head.Hash, Count: int(start.Base) + head.Count}
 	}
 	if verr != nil {
-		return v, mapActiveFault(resolved, n, start, recs, verr)
+		return v, mapActiveFault(resolved, handle, n, start, recs, verr)
 	}
 	v, err = finishActive(v, n)
 	if err != nil {
@@ -486,8 +489,13 @@ func verifySealed(resolved string, k int, start ledger.Start, e ManifestEntry) (
 
 // mapActiveFault translates the ledger's per-file error on the active into
 // the set's fault with the global seq. A ChainBrokenError on line 1 of a
-// continuation (Base > 0) is a boundary fault, never "broken".
-func mapActiveFault(resolved string, sealedCount int, start ledger.Start, prefix []ledger.Record, verr error) error {
+// continuation (Base > 0) is a boundary fault, never "broken"; when that
+// first record is a fresh genesis the fault names the older-binary cause
+// (an older writer, opening the empty active with a zero Start, minted its
+// own seq-1 genesis). The verifier returns no records on a line-1 fault, so
+// the first line is read from handle — on this fault path only, never on the
+// success path, which keeps the active's one read.
+func mapActiveFault(resolved string, handle io.ReaderAt, sealedCount int, start ledger.Start, prefix []ledger.Record, verr error) error {
 	var torn *ledger.TornError
 	var broken *ledger.ChainBrokenError
 	switch {
@@ -495,11 +503,29 @@ func mapActiveFault(resolved string, sealedCount int, start ledger.Start, prefix
 		return &SetError{Fault: FaultTorn, Segment: 0, Path: resolved, Seq: int(start.Base) + len(prefix) + 1, Err: verr}
 	case errors.As(verr, &broken):
 		if broken.Line == 1 && start.Base > 0 {
-			return &SetError{Fault: FaultBoundary, Segment: 0, Path: resolved, Seq: int(start.Base) + 1, Err: verr, want: strconv.Itoa(sealedCount)}
+			return &SetError{Fault: FaultBoundary, Segment: 0, Path: resolved, Seq: int(start.Base) + 1, Err: verr, want: strconv.Itoa(sealedCount), olderBinary: firstLineIsFreshGenesis(handle)}
 		}
 		return &SetError{Fault: FaultBroken, Segment: 0, Path: resolved, Seq: int(start.Base) + broken.Line, Err: verr}
 	}
 	return verr
+}
+
+// firstLineIsFreshGenesis reports whether the first line of r is what Append
+// mints on an empty ledger: an empty prev and a log_id of 32 lowercase hex. A
+// read or decode failure is "no" — the generic boundary text stands.
+func firstLineIsFreshGenesis(r io.ReaderAt) bool {
+	line, err := bufio.NewReader(io.NewSectionReader(r, 0, math.MaxInt64)).ReadBytes('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false
+	}
+	var first struct {
+		Prev  string `json:"prev"`
+		LogID string `json:"log_id"`
+	}
+	if json.Unmarshal(line, &first) != nil {
+		return false
+	}
+	return first.Prev == "" && genesisLogIDRE.MatchString(first.LogID)
 }
 
 // finishActive is the seal-terminal check over the active's records: a

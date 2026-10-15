@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/agenthof/agenthof/internal/control"
+	"github.com/agenthof/agenthof/internal/investigate"
 )
 
 // withHistory plants a manifest beside ctl and removes the active: a root
@@ -353,5 +355,84 @@ func TestAuditRepairControlRefusesAnIncompleteRotation(t *testing.T) {
 	}
 	if frags, _ := filepath.Glob(ctl + ".torn-*"); len(frags) != 0 {
 		t.Fatalf("no fragment on a refusal: %v", frags)
+	}
+}
+
+// TestInvestigateAcrossSegments: Sources[].count is the logical count, the
+// integrity verdict verified, the seal event present with kind seal, and a
+// boundary tamper reads broken.
+func TestInvestigateAcrossSegments(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := sealedRoot(t)
+	var out bytes.Buffer
+	if code := cmdInvestigate([]string{"--json", "--log-dir", t.TempDir(), "--control-log", ctl}, &out); code != 0 {
+		t.Fatalf("%d\n%s", code, out.String())
+	}
+	var doc struct {
+		Sources []struct {
+			Kind  string `json:"kind"`
+			Count int    `json:"count"`
+		} `json:"sources"`
+		Integrity struct {
+			OK bool `json:"ok"`
+		} `json:"integrity"`
+		Events []struct {
+			Kind string `json:"kind"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	seals := 0
+	for _, e := range doc.Events {
+		if e.Kind == "seal" {
+			seals++
+		}
+	}
+	if !doc.Integrity.OK || seals != 1 || len(doc.Sources) != 1 || doc.Sources[0].Count != 3 {
+		t.Fatalf("%+v", doc)
+	}
+	// Plant a foreign genesis, as an older binary would, in the empty active.
+	f, err := os.OpenFile(ctl, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"v":"control/1","seq":1,"time":"2026-10-15T10:00:00Z","action":"apply","outcome":"success","invoker":{"subject":"old","issuer":"local","method":"static"},"witness":{"os_user":"o","hostname":"h"},"prev":"","log_id":"` + strings.Repeat("cd", 16) + `"}` + "\n")
+	_ = f.Close()
+	out.Reset()
+	cmdInvestigate([]string{"--json", "--log-dir", t.TempDir(), "--control-log", ctl}, &out)
+	if !strings.Contains(out.String(), `"broken"`) {
+		t.Fatalf("a boundary tamper is broken:\n%s", out.String())
+	}
+	var buf bytes.Buffer
+	if code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 1 || !strings.Contains(buf.String(), "a writer older than this root's seals") || strings.Contains(buf.String(), "restore it from a copy") {
+		t.Fatalf("repair refuses with the cause: %d\n%s", code, buf.String())
+	}
+}
+
+// TestPruneSparesSegmentsAndManifest: runs prune pointed AT the control root
+// with a zero retention removes nothing of the ledger set — the segment and
+// manifest names never end in .jsonl, which is the enumerators' rule; the
+// active is spared by name and identity as today.
+func TestPruneSparesSegmentsAndManifest(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := sealedRoot(t)
+	dir := filepath.Dir(ctl)
+	before, _ := os.ReadDir(dir)
+	if n, err := pruneRuns(dir, 0, ctl); err != nil || n != 0 {
+		t.Fatalf("pruned %d, %v", n, err)
+	}
+	after, _ := os.ReadDir(dir)
+	if len(before) != len(after) {
+		t.Fatalf("prune removed something: %v → %v", before, after)
+	}
+	res, err := investigate.Timeline(dir, ctl, investigate.Filter{}, investigate.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range res.Sources {
+		if strings.Contains(s.Path, ".seg-") || strings.Contains(s.Path, ".segments") {
+			t.Fatalf("a segment listed as a run: %+v", s)
+		}
 	}
 }

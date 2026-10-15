@@ -519,3 +519,75 @@ func TestAppendFreshRootIsToday(t *testing.T) {
 		t.Fatalf("%v %+v", err, rec)
 	}
 }
+
+// TestOlderBinaryGenesisIsBoundaryWithCause: a fresh genesis (prev "", seq
+// 1, log_id) in the empty active of a rotated root → FaultBoundary{0} whose
+// message names the older-binary cause; errors.As(&broken) is false;
+// openActive refuses with the same error; the printed remedy works — move
+// the active aside, create an empty one → Read verifies with zero active
+// records and head = segment N's, and the next Append carries seq N+1,
+// prev = head_N.
+func TestOlderBinaryGenesisIsBoundaryWithCause(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	appendN(t, p, 3)
+	sealByHand(t, p, "")
+	c, err := ledger.Open(p, ledger.Locked) // what an older binary does: zero Start on the empty active
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, _ := json.Marshal(record{V: "control/1", Seq: 1, Action: "apply", Outcome: "success", Invoker: identity.Static("old"), Witness: Witness{}, Prev: "", LogID: strings.Repeat("cd", 16)})
+	if err := c.Append(line); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	_, err = Read(p, ledger.Locked)
+	var se *SetError
+	var broken *ledger.ChainBrokenError
+	if !errors.As(err, &se) || se.Fault != FaultBoundary || se.Segment != 0 || !strings.Contains(err.Error(), "a writer older than this root's seals") || !strings.Contains(err.Error(), "the chain continues from seq 4") || errors.As(err, &broken) {
+		t.Fatalf("%v", err)
+	}
+	if _, _, oerr := openActive(p); oerr == nil || oerr.Error() != err.Error() {
+		t.Fatalf("openActive: %v", oerr)
+	}
+	if err := os.Rename(p, p+".foreign"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v, err := Read(p, ledger.Locked)
+	if err != nil || v.Active.Records != 0 || v.Head != (ledger.Head{Hash: v.Sealed[0].HeadHash, Count: 4}) {
+		t.Fatalf("remedy: %v %+v", err, v.Head)
+	}
+	appendN(t, p, 1)
+	v, _ = Read(p, ledger.Locked)
+	rec, _ := decodeRecord(v.Records[4])
+	if rec.Seq != 5 || rec.Prev != v.Sealed[0].HeadHash || rec.LogID != "" {
+		t.Fatalf("%+v", rec)
+	}
+}
+
+// TestBoundaryWithoutFreshGenesisIsNotOlderBinary: a first record that is a
+// genesis in shape only (prev set, or no 32-hex log_id), or an empty-chain
+// mismatch, keeps the generic boundary text.
+func TestBoundaryWithoutFreshGenesisIsNotOlderBinary(t *testing.T) {
+	for name, line := range map[string]string{
+		"prev set":   `{"v":"control/1","seq":1,"action":"apply","outcome":"success","prev":"` + strings.Repeat("ee", 32) + `","log_id":"` + strings.Repeat("cd", 16) + `"}`,
+		"no log_id":  `{"v":"control/1","seq":1,"action":"apply","outcome":"success","prev":""}`,
+		"bad log_id": `{"v":"control/1","seq":1,"action":"apply","outcome":"success","prev":"","log_id":"zz"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "control.jsonl")
+			appendN(t, p, 3)
+			sealByHand(t, p, "")
+			if err := os.WriteFile(p, []byte(line+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Read(p, ledger.Locked)
+			var se *SetError
+			if !errors.As(err, &se) || se.Fault != FaultBoundary || se.olderBinary || strings.Contains(err.Error(), "a writer older than this root's seals") {
+				t.Fatalf("%v", err)
+			}
+		})
+	}
+}

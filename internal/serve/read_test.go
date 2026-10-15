@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -226,5 +227,52 @@ func TestInvestigateEndpointCarriesAnchorVerdicts(t *testing.T) {
 	_, body = ts.do(t, http.MethodGet, "/v1/investigate", goodToken, nil)
 	if !strings.Contains(string(body), `"verdict": "unverifiable"`) || !strings.Contains(string(body), `"cause": "stub: unavailable"`) {
 		t.Fatalf("per request: %s", body)
+	}
+}
+
+// TestInvestigateEndpointOverASealedRoot: sealing the server's control ledger
+// between two requests changes neither the chain nor the verdict — the second
+// answer reads across the sealed segment, verified, with the logical count.
+func TestInvestigateEndpointOverASealedRoot(t *testing.T) {
+	ts := newTestServer(t, &fakeHost{}, fakeAuth{}, 1)
+	ctl := ts.srv.cfg.ControlLog
+	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
+	for i := 0; i < 2; i++ {
+		if _, err := control.Append(ctl, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type doc struct {
+		Sources []struct {
+			Kind  string `json:"kind"`
+			Count int    `json:"count"`
+		} `json:"sources"`
+		Integrity struct {
+			OK bool `json:"ok"`
+		} `json:"integrity"`
+	}
+	get := func() doc {
+		t.Helper()
+		resp, body := ts.do(t, http.MethodGet, "/v1/investigate", goodToken, nil)
+		if resp.StatusCode != 200 {
+			t.Fatalf("%d %s", resp.StatusCode, body)
+		}
+		var d doc
+		if err := json.Unmarshal(body, &d); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	if d := get(); !d.Integrity.OK || len(d.Sources) != 1 || d.Sources[0].Count != 2 {
+		t.Fatalf("before the seal: %+v", d)
+	}
+	if _, err := control.SealActive(ctl, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.Append(ctl, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc"}); err != nil {
+		t.Fatal(err)
+	}
+	if d := get(); !d.Integrity.OK || len(d.Sources) != 1 || d.Sources[0].Count != 4 {
+		t.Fatalf("after the seal: %+v", d)
 	}
 }
