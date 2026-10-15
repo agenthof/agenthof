@@ -817,7 +817,7 @@ func TestValidateControlGrants(t *testing.T) {
 // from the gate; a role that grants the two new operations validates.
 func TestValidateControlMessagesDeriveFromControlOps(t *testing.T) {
 	want := "(" + strings.Join(authz.ControlOps, ", ") + ")"
-	if want != "(apply, enable, disable, repair, provision, prune, pull, anchor)" {
+	if want != "(apply, enable, disable, repair, provision, prune, pull, anchor, seal)" {
 		t.Fatalf("ControlOps = %v", authz.ControlOps)
 	}
 	msgFor := func(role config.RoleDef, code string) string {

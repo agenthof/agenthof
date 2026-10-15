@@ -4,7 +4,8 @@
 // (ControlAllows — the control-plane gate every control command enforces:
 // apply, the enable/disable kill switch, ledger repair, key provisioning,
 // retention pruning, anchoring the control-ledger head to an external log,
-// and reading the installed configuration for distribution). It is a leaf
+// and sealing the control ledger's active segment, and reading the installed
+// configuration for distribution). It is a leaf
 // package — it imports only config and identity — so the engine and the CLI
 // share one decision instead of two drifting copies.
 package authz
@@ -20,7 +21,7 @@ import (
 // may be granted through its control: list. The set is internal and fixed, so
 // there is no widest marker: a grant names each operation it confers. The
 // validation messages that enumerate the set are built from this slice.
-var ControlOps = []string{"apply", "enable", "disable", "repair", "provision", "prune", "pull", "anchor"}
+var ControlOps = []string{"apply", "enable", "disable", "repair", "provision", "prune", "pull", "anchor", "seal"}
 
 // KnownControlOp reports whether op is one of ControlOps.
 func KnownControlOp(op string) bool { return slices.Contains(ControlOps, op) }
