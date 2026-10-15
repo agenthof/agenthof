@@ -509,14 +509,15 @@ func TestVouchInstalledPreR14FlipRootRefusesUntilVouch(t *testing.T) {
 	}
 }
 
-// controlRecords is the verified chain, for the audit readers' line.
+// controlRecords is the verified chain — every sealed segment and the active
+// — for the audit readers' line.
 func controlRecords(t *testing.T, ctl string) []ledger.Record {
 	t.Helper()
-	recs, _, err := ledger.ReadVerify(ctl, ledger.Locked)
+	v, err := control.Read(ctl, ledger.Locked)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
 	}
-	return recs
+	return v.Records
 }
 
 // TestVouchInstalledAgreesWithTheAuditReaders is the seam pin: over every

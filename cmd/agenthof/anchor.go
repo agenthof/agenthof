@@ -29,16 +29,21 @@ import (
 	"github.com/agenthof/agenthof/internal/origin"
 )
 
-// audit verify control's two anchor exit codes, beside exitInstalledMismatch
-// (installed.go) in the fixed precedence 1, 6, 3, 4, 5, 7: 6 is a definitive
-// content disagreement — the chain does not reproduce a recorded head, or the
-// stored proof under the trusted key says otherwise; 7 is the absence of a
-// verdict — a log that could not be reached, a key the verifier does not
-// hold. 7 never reads as tamper detected, and every definitive verdict
-// outranks it.
+// audit verify control's exit codes beside exitInstalledMismatch (installed.go),
+// in the fixed precedence 1, 6, 3, 4, 5, 7, 8. 6 and 7 are the anchor
+// verdicts: 6 is a definitive content disagreement — the chain does not
+// reproduce a recorded head, or the stored proof under the trusted key says
+// otherwise; 7 is the absence of a verdict — a log that could not be reached,
+// a key the verifier does not hold. 7 never reads as tamper detected, and
+// every definitive verdict outranks it. 8 is no verdict on the chain at all:
+// a seal's rotation did not complete, so the chain is intact and an operator
+// step (agenthof audit seal) is owed; it is last, so a verdict on the chain
+// is never hidden behind it, and a cron that watches the exit code does not
+// see green while every writer is blocked.
 const (
 	exitAnchorMismatch     = 6
 	exitAnchorUnverifiable = 7
+	exitRotationIncomplete = 8
 )
 
 // anchorPubPath is the transparency log's pinned checkpoint key, BESIDE the

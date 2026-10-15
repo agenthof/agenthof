@@ -1340,11 +1340,15 @@ func cmdAuditVerify(args []string, out io.Writer) int {
 }
 
 // cmdAuditControl implements `audit control`: it renders the control
-// ledger (spec §3.6) as a human-readable audit trail via control.Render.
-// A missing control log (nothing has ever been recorded there) is
-// reported plainly rather than as a generic open error; a torn/broken
-// chain still renders whatever valid prefix ReadVerify recovered,
-// followed by the integrity line naming the failure, and exits nonzero.
+// ledger (spec §3.6) as a human-readable audit trail via control.RenderView,
+// across every sealed segment and the active as one chain. A missing control
+// log (nothing has ever been recorded there) is reported plainly rather than
+// as a generic open error, and so is a missing active beside a manifest or
+// segment files; any other segment-set fault still renders whatever valid
+// prefix control.Read recovered, followed by the integrity line naming the
+// failure, and exits nonzero. A seal whose rotation did not complete renders
+// its state line and exits 0: this is a read, and audit verify control owns
+// the exit code for it.
 // After the integrity line it reports the installed pointer's standing:
 // whether <dir of --control-log>/installed/current names the last recorded
 // install — the last successful apply or kill-switch flip on record
@@ -1359,23 +1363,24 @@ func cmdAuditControl(args []string, out io.Writer) int {
 		return 2
 	}
 	v, err := control.Read(*controlLog, ledger.Locked)
-	records, head := v.Records, v.Head
-	if err != nil {
-		var te *ledger.TornError
-		var be *ledger.ChainBrokenError
-		if !errors.As(err, &te) && !errors.As(err, &be) {
-			if os.IsNotExist(err) {
-				_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
-				return 1
-			}
-			// Some other open/IO failure, or a segment-set fault (its text
-			// names the segment, the global seq and the remedy): no ledger
-			// to render.
-			_, _ = fmt.Fprintln(out, err)
+	records := v.Records
+	if err != nil && !isChainFault(err) {
+		if os.IsNotExist(err) {
+			_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
 			return 1
 		}
+		// Some other open/IO failure, or a missing active with history (its
+		// text names the remedy): no ledger to render.
+		_, _ = fmt.Fprintln(out, err)
+		return 1
 	}
-	_, _ = fmt.Fprint(out, control.Render(records, head, err))
+	_, _ = fmt.Fprint(out, control.RenderView(v, err))
+	if se, ok := errors.AsType[*control.SetError](err); ok && se.Unwrap() == nil {
+		// A set fault the integrity line only names (not the active's own
+		// torn or broken chain, whose line is its whole story): the remedy is
+		// the error's text.
+		_, _ = fmt.Fprintln(out, err)
+	}
 	line, _ := installedPointerLine(*controlLog, records)
 	_, _ = fmt.Fprint(out, line)
 	if err != nil {
@@ -1392,9 +1397,12 @@ func cmdAuditControl(args []string, out io.Writer) int {
 // to cmdAuditVerify. It computes EVERYTHING, prints every line, and only then
 // picks the exit by precedence — unlike a check that returns at the first
 // verdict, a repaired root still shows an --expect-head mismatch and a
-// pointer mismatch. A missing log, any other open/IO failure, and a
-// torn/broken chain exit 1 first and stop: such a chain has no positions to
-// reproduce heads at. Every recorded anchor is then checked (verifyAnchors:
+// pointer mismatch. A missing log, any other open/IO failure, and any
+// segment-set fault (a torn or broken segment, a boundary, a missing or
+// unexpected segment, a manifest that disagrees) exit 1 first and stop,
+// after the head of the valid prefix: such a chain has no positions to
+// reproduce heads at. A set that verifies prints a line per sealed segment
+// and the active (segmentLines). Every recorded anchor is then checked (verifyAnchors:
 // the structural check, then the stored proof under the pinned log key, then
 // a presence check unless --offline) and its line printed. Then, in
 // precedence order: 6 an anchor disagrees with the chain or the log; 3 tainted (control.IsTainted
@@ -1405,7 +1413,9 @@ func cmdAuditControl(args []string, out io.Writer) int {
 // install (control.Installing) — an install whose event was never appended,
 // or whose record was lost; 7 an anchor could not be decided (an unreachable
 // log, a key the verifier does not hold) — never a tamper verdict, and
-// outranked by every definitive one; 0 otherwise; 2 usage.
+// outranked by every definitive one; 8 a seal's rotation did not complete
+// (the chain is intact; an operator step is owed — run audit seal), last,
+// so every integrity verdict outranks it; 0 otherwise; 2 usage.
 func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit verify control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
@@ -1423,24 +1433,23 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	}
 	v, err := control.Read(*controlLog, ledger.Locked)
 	records, head := v.Records, v.Head
-	if err != nil {
-		var te *ledger.TornError
-		var be *ledger.ChainBrokenError
-		if !errors.As(err, &te) && !errors.As(err, &be) {
-			if os.IsNotExist(err) {
-				_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
-				return 1
-			}
-			// Some other open/IO failure, or a segment-set fault: no ledger
-			// to report a head for.
-			_, _ = fmt.Fprintln(out, err)
+	if err != nil && !isChainFault(err) {
+		if os.IsNotExist(err) {
+			_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
 			return 1
 		}
+		// Some other open/IO failure, or a missing active with history: no
+		// ledger to report a head for.
+		_, _ = fmt.Fprintln(out, err)
+		return 1
 	}
 	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
+	}
+	for _, l := range segmentLines(v) {
+		_, _ = fmt.Fprintln(out, l)
 	}
 	line, pointerMismatch := installedPointerLine(*controlLog, records)
 	_, _ = fmt.Fprint(out, line)
@@ -1467,8 +1476,42 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 		return exitInstalledMismatch
 	case anchors.unverifiable > 0:
 		return exitAnchorUnverifiable
+	case v.State != control.StateOpen:
+		return exitRotationIncomplete
 	}
 	return 0
+}
+
+// isChainFault reports whether err from control.Read leaves a valid prefix
+// to report: any segment-set fault except a missing active, which leaves no
+// ledger at all (a root with history is never "nothing recorded yet").
+func isChainFault(err error) bool {
+	se, ok := errors.AsType[*control.SetError](err)
+	return ok && se.Fault != control.FaultActiveMissing
+}
+
+// segmentLines are audit verify control's per-segment lines — printed only
+// on a root that has sealed or whose rotation did not complete, so a
+// never-sealed root's output is unchanged. They are a verifier input: an
+// operator who ships them off the box can rewrite a damaged manifest from
+// them.
+func segmentLines(v control.View) []string {
+	if len(v.Sealed) == 0 && v.State == control.StateOpen {
+		return nil
+	}
+	var lines []string
+	for _, s := range v.Sealed {
+		lines = append(lines, fmt.Sprintf("segment %d: seq %d–%d sealed %s %s sha256=%s verified", s.N, s.FirstSeq, s.HeadSeq, s.SealedAt.UTC().Format(time.RFC3339), filepath.Base(s.Path), s.SHA256))
+	}
+	if v.Active.Records == 0 {
+		lines = append(lines, fmt.Sprintf("active: empty (next seq %d)", v.Active.FirstSeq))
+	} else {
+		lines = append(lines, fmt.Sprintf("active: seq %d–%d (%d events)", v.Active.FirstSeq, v.Active.HeadSeq, v.Active.Records))
+	}
+	if v.State != control.StateOpen {
+		lines = append(lines, fmt.Sprintf("control ledger: segment %d sealed, rotation not completed; run: agenthof audit seal", v.RotatingSegment()))
+	}
+	return lines
 }
 
 // cmdAuditRepairControl implements `audit repair control [--control-log

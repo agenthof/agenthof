@@ -109,6 +109,17 @@ type View struct {
 	LogID    string
 }
 
+// RotatingSegment is the ordinal of the segment whose rotation did not
+// complete: in state B the active IS the sealed-but-unlisted segment (the
+// manifest lists one fewer), in state C the manifest already lists it. It is
+// meaningful only when State is not StateOpen.
+func (v View) RotatingSegment() int {
+	if v.State == StateSealedNotRotated {
+		return len(v.Sealed) + 1
+	}
+	return len(v.Sealed)
+}
+
 // siblingNames lists the directory entries beside resolved whose name begins
 // with the active's base name + ".seg-" — a plain prefix match on a directory
 // listing, never a glob: filepath.Glob reads [, ], * and ? in the PATH as

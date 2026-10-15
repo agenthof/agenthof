@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -96,5 +99,166 @@ func TestWritablePrechecksClassify(t *testing.T) {
 	out.Reset()
 	if code := cmdApply([]string{"--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 1 || out.String() != "control ledger damaged; run: agenthof audit repair control --control-log "+ctl+" --config "+root+"\n" {
 		t.Fatalf("apply on a torn active must print exactly today's hint: %d\n%s", code, out.String())
+	}
+}
+
+// TestVerifyControlAcrossSegments: on a sealed root verify prints the head
+// (the seal record), one segment line, the active line and exits 0; the
+// pointer still matches (the install is inside the sealed segment);
+// --expect-head seq:hash with a seq inside the sealed segment holds, and a
+// wrong hash there is exit 4; audit control prints the segment line.
+func TestVerifyControlAcrossSegments(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := sealedRoot(t)
+	code, out := verifyControl(t, "--control-log", ctl, "--offline")
+	if code != 0 || !regexp.MustCompile(`(?m)^control head: seq=3 sha256=[0-9a-f]{64}\n`).MatchString(out) ||
+		!regexp.MustCompile(`(?m)^segment 1: seq 1–3 sealed \S+ control\.jsonl\.seg-000001 sha256=[0-9a-f]{64} verified\n`).MatchString(out) ||
+		!strings.Contains(out, "active: empty (next seq 4)\n") || !strings.Contains(out, "matches the last recorded install") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	recs := controlRecords(t, ctl)
+	sum := sha256.Sum256(recs[1].Raw)
+	if code, _ := verifyControl(t, "--control-log", ctl, "--offline", "--expect-head", "2:"+hex.EncodeToString(sum[:])); code != 0 {
+		t.Fatal("seq:hash inside a sealed segment must hold")
+	}
+	if code, _ := verifyControl(t, "--control-log", ctl, "--offline", "--expect-head", "2:"+strings.Repeat("0", 64)); code != 4 {
+		t.Fatal("a wrong hash inside a sealed segment is exit 4")
+	}
+	var buf bytes.Buffer
+	if code := cmdAudit([]string{"control", "--control-log", ctl}, &buf); code != 0 || !strings.Contains(buf.String(), "segment 1: seq 1–3 sealed") || !strings.Contains(buf.String(), "segment 1 sealed (seq 1–2)") || !strings.Contains(buf.String(), "verified (3 events, 1 sealed segments)") {
+		t.Fatalf("audit control: %d\n%s", code, buf.String())
+	}
+	// A never-sealed root prints no segment line (byte-identical goldens).
+	plain := applied(t, writeSample(t))
+	if _, out := verifyControl(t, "--control-log", plain, "--offline"); strings.Contains(out, "segment") || strings.Contains(out, "active:") {
+		t.Fatalf("never-sealed root must not print segment lines:\n%s", out)
+	}
+}
+
+// TestVerifyControlExitEightIsLast: state B alone → 8 with the state line;
+// state B + wrong --expect-head → 4; + moved pointer → 5; + taint → 3.
+func TestVerifyControlExitEightIsLast(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, sealSample(t))
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_manifest")
+	auditSeal(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	code, out := verifyControl(t, "--control-log", ctl, "--offline")
+	if code != exitRotationIncomplete || !strings.Contains(out, "control ledger: segment 1 sealed, rotation not completed; run: agenthof audit seal\n") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if code, _ := verifyControl(t, "--control-log", ctl, "--offline", "--expect-head", strings.Repeat("0", 64)); code != 4 {
+		t.Fatalf("4 outranks 8: %d", code)
+	}
+	repointTo(t, ctl, "sha256:"+strings.Repeat("ab", 32))
+	if code, _ := verifyControl(t, "--control-log", ctl, "--offline"); code != exitInstalledMismatch {
+		t.Fatalf("5 outranks 8: %d", code)
+	}
+	// State C → 8 too.
+	ctl2 := applied(t, sealSample(t))
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_manifest_before_swap")
+	auditSeal(t, ctl2)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if code, out := verifyControl(t, "--control-log", ctl2, "--offline"); code != exitRotationIncomplete || !strings.Contains(out, "rotation not completed") {
+		t.Fatalf("state C: %d\n%s", code, out)
+	}
+}
+
+// TestVerifyControlSetFaultExitsOneFirst: a torn sealed segment prints the
+// head of the valid prefix and the fault and exits 1 — no anchor line, no
+// pointer line, no segment lines.
+func TestVerifyControlSetFaultExitsOneFirst(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := sealedRoot(t)
+	seg := control.SegmentPath(ctl, 1)
+	data, _ := os.ReadFile(seg)
+	if err := os.WriteFile(seg, data[:len(data)-3], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out := verifyControl(t, "--control-log", ctl, "--offline")
+	if code != 1 || !strings.Contains(out, "control ledger segment 1 (control.jsonl.seg-000001) torn at seq 3") || strings.Contains(out, "anchors:") || strings.Contains(out, "installed config:") || strings.Contains(out, "segment 1: seq") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "control head: seq=2 ") {
+		t.Fatalf("the valid prefix's head prints first:\n%s", out)
+	}
+}
+
+// TestReadersAcrossASealedBoundary: vouchInstalled vouches for an install
+// inside a sealed segment with the global seq as the version; the anchor of
+// a sealed head is reproduced; IsTainted spans segments; pull and sign see
+// the global version.
+func TestReadersAcrossASealedBoundary(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	useStub(t)
+	ctl := sealedRoot(t)
+	tlogPostureFor(t, ctl, "http://stub.invalid")
+	records, last, refusal := vouchInstalled(ctl, readPointer(t, ctl))
+	if refusal != nil || last.Seq != 2 || len(records) != 3 {
+		t.Fatalf("%v %+v %d", refusal, last, len(records))
+	}
+	var out bytes.Buffer
+	if code := cmdAudit([]string{"anchor", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 || !strings.Contains(out.String(), "anchored: seq=3 ") {
+		t.Fatalf("anchor after a seal must cover the sealed head, not refuse 'the chain has 0 records': %d\n%s", code, out.String())
+	}
+	if code, out := verifyControl(t, "--control-log", ctl, "--offline"); code != 0 || !strings.Contains(out, "anchors: 1 (1 verified, 0 mismatch, 0 unverifiable)") {
+		t.Fatalf("%d\n%s", code, out)
+	}
+	inst, refusal := recordedInstall(ctl, readPointer(t, ctl))
+	if refusal != nil || inst.Version != 2 {
+		t.Fatalf("recordedInstall: %v %+v", refusal, inst)
+	}
+}
+
+// TestAuditControlOnARotationAndASetFault: audit control is a read — a seal
+// that was not rotated renders its state line and exits 0; a torn sealed
+// segment renders the valid prefix, the verdict and the fault's remedy, and
+// exits 1.
+func TestAuditControlOnARotationAndASetFault(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, sealSample(t))
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_manifest")
+	auditSeal(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	var buf bytes.Buffer
+	if code := cmdAudit([]string{"control", "--control-log", ctl}, &buf); code != 0 || !strings.Contains(buf.String(), "control ledger: segment 1 sealed, rotation not completed; run: agenthof audit seal\n") {
+		t.Fatalf("state B: %d\n%s", code, buf.String())
+	}
+
+	ctl = sealedRoot(t)
+	seg := control.SegmentPath(ctl, 1)
+	data, _ := os.ReadFile(seg)
+	if err := os.WriteFile(seg, data[:len(data)-3], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	code := cmdAudit([]string{"control", "--control-log", ctl}, &buf)
+	if code != 1 || !strings.Contains(buf.String(), "control ledger — 2 events") || !strings.Contains(buf.String(), "control ledger integrity: TORN (segment 1)\n") || !strings.Contains(buf.String(), "a sealed segment is never repaired in place") {
+		t.Fatalf("torn sealed segment: %d\n%s", code, buf.String())
+	}
+}
+
+// TestVerifyControlUnverifiableAnchorOutranksAnIncompleteRotation: with an
+// anchor on record and a seal stopped in state B, a verifier that holds the
+// anchor's proof exits 8 alone, and one that cannot decide the anchor exits
+// 7 — exit 8 is last.
+func TestVerifyControlUnverifiableAnchorOutranksAnIncompleteRotation(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	stub := useStub(t)
+	ctl := applied(t, sealSample(t))
+	tlogPostureFor(t, ctl, "http://stub.invalid")
+	var out bytes.Buffer
+	if code := cmdAudit([]string{"anchor", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("anchor: %d\n%s", code, out.String())
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_manifest")
+	auditSeal(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if code, text := verifyControl(t, "--control-log", ctl, "--offline"); code != exitRotationIncomplete || !strings.Contains(text, "anchors: 1 (1 verified, 0 mismatch, 0 unverifiable)") {
+		t.Fatalf("state B with a verified anchor: %d\n%s", code, text)
+	}
+	stub.Fail()
+	if code, text := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorUnverifiable || !strings.Contains(text, "rotation not completed") {
+		t.Fatalf("7 outranks 8: %d\n%s", code, text)
 	}
 }
