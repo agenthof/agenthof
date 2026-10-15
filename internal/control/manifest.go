@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/ledger"
@@ -19,7 +20,7 @@ import (
 // files/v1, investigate/1 convention). Unknown values are refused.
 const ManifestVersion = "segments/1"
 
-// Manifest is <controlLog>.segments: the ordered list of sealed segments with
+// Manifest is <controlLog>.segments: the ordered, non-empty list of sealed segments with
 // their Starts, heads and content hashes. It is an advisory index and the
 // list a future worm sink ships; every value in it is recomputed from the
 // files on every read and any disagreement refuses the read. It is never
@@ -49,7 +50,7 @@ type ManifestEntry struct {
 
 // ParseManifest decodes and validates a manifest for the ledger whose
 // RESOLVED active path is resolved. Unknown keys at any level, an unknown v,
-// a log_id that is not 32 lowercase hex, an n that is not its position+1, a
+// a log_id that is not 32 lowercase hex, an empty segments list, an n that is not its position+1, a
 // file that is not exactly Base(SegmentPath(resolved, n)), a first_seq that
 // does not continue the previous head_seq (1 for the first), a head_seq
 // below first_seq, a hash that is not 64 lowercase hex, or non-positive
@@ -70,6 +71,9 @@ func ParseManifest(data []byte, resolved string) (Manifest, error) {
 	}
 	if !genesisLogIDRE.MatchString(m.LogID) {
 		return Manifest{}, errors.New("manifest: log_id is not 32 lowercase hex")
+	}
+	if len(m.Segments) == 0 {
+		return Manifest{}, errors.New("manifest: segments is empty; a manifest exists only once a segment is sealed")
 	}
 	prevHead := 0
 	for i, e := range m.Segments {
@@ -140,4 +144,93 @@ func segmentDigests(records []ledger.Record) (whole string, size int64) {
 func sealContentDigest(preSeal []ledger.Record) string {
 	whole, _ := segmentDigests(preSeal)
 	return whole
+}
+
+// writeManifest writes m whole beside resolved: a temp in the same directory
+// (<base>.segments-*), fsync, rename over ManifestPath, fsync the directory —
+// the pointer's durability order. Never appended, never edited in place; mode
+// 0600. m is held to the reader's rules before anything touches the disk, so
+// a manifest the next Read would refuse (an empty segments list above all) is
+// never written.
+func writeManifest(resolved string, m Manifest) error {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	if _, err := ParseManifest(data, resolved); err != nil {
+		return err
+	}
+	return replaceFile(ManifestPath(resolved), filepath.Base(resolved)+".segments-*", data)
+}
+
+// swapActive puts a fresh, empty active under resolved's name: an empty 0600
+// temp (.<base>.next-*), fsync, rename over the name, fsync the directory.
+// The old inode lives on only under its segment link.
+func swapActive(resolved string) error {
+	return replaceFile(resolved, "."+filepath.Base(resolved)+".next-*", nil)
+}
+
+// replaceFile is the one atomic-replace recipe both writers share: a 0600
+// temp beside dest (named by pattern, which sweepTemps knows) holding data,
+// fsynced and closed, renamed over dest, the directory fsynced. On any
+// failure before the rename the temp is removed.
+func replaceFile(dest, pattern string, data []byte) error {
+	dir := filepath.Dir(dest)
+	tmp, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	fail := func(err error) error {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		return fail(err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, dest); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	fsyncDir(dir)
+	return nil
+}
+
+// sweepTemps removes manifest and swap temps an earlier crash left beside the
+// ledger: <base>.segments-* and .<base>.next-*, matched by name prefix on a
+// directory listing, never a glob (a path with [ or * in it is pattern syntax
+// to filepath.Glob and would sweep nothing). Best effort: a temp that cannot
+// be removed is harmless — siblingNames never reads it as a segment and the
+// next write makes its own.
+func sweepTemps(resolved string) {
+	dir, base := filepath.Dir(resolved), filepath.Base(resolved)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, base+".segments-") || strings.HasPrefix(name, "."+base+".next-") {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
+}
+
+// fsyncDir makes a rename or link in dir durable; best effort, as ledger.Open's.
+func fsyncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 }

@@ -366,9 +366,9 @@ func readActive(resolved string, handle *os.File, w sealedWalk, verifyActive fun
 	}
 	v.Head = ledger.Head{Hash: start.Prev, Count: int(start.Base)}
 	// State C: the active name still refers to the sealed file. The logical
-	// active is empty; nothing more is read from the handle. n > 0 keeps an
-	// empty manifest from ever matching a `.seg-000000` here.
-	if n > 0 && sameFile(SegmentPath(resolved, n), hinfo) {
+	// active is empty; nothing more is read from the handle. n >= 1: a
+	// manifest naming no segment is refused by ParseManifest.
+	if sameFile(SegmentPath(resolved, n), hinfo) {
 		v.State = StateRotatedNotSwapped
 		v.Active = Segment{N: 0, Path: resolved, FirstSeq: int(start.Base) + 1, HeadSeq: int(start.Base), HeadHash: start.Prev}
 		return identityCheck(v, w.m)
@@ -656,8 +656,6 @@ func manifestEqual(a, b *Manifest) bool {
 		return true
 	case a == nil || b == nil || len(a.Segments) != len(b.Segments):
 		return false
-	case len(a.Segments) == 0:
-		return true
 	}
 	return a.Segments[len(a.Segments)-1].HeadHash == b.Segments[len(b.Segments)-1].HeadHash
 }

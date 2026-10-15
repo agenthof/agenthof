@@ -28,9 +28,9 @@ func appendN(t *testing.T, p string, n int) {
 }
 
 // sealByHand turns the active at p into sealed segment N+1 and a fresh,
-// empty active, writing the seal record, the link, the manifest and the swap
-// directly — the on-disk shape the seal command produces, built without it so
-// the reader is tested before the writer exists. stopAt leaves the root in a
+// empty active: it writes the seal record by hand and composes the manifest
+// writer and the swap primitive (writeManifest, swapActive), so the reader
+// tests read the on-disk shape the seal command produces. stopAt leaves the root in a
 // crash state: "A'" after the link, "B" after the seal record, "C" after the
 // manifest; "" completes. It returns the seal line.
 func sealByHand(t *testing.T, p, stopAt string) []byte {
@@ -83,19 +83,13 @@ func sealByHand(t *testing.T, p, stopAt string) []byte {
 		m.Segments = append(m.Segments, ManifestEntry{N: s.N, File: filepath.Base(s.Path), FirstSeq: s.FirstSeq, HeadSeq: s.HeadSeq, HeadHash: s.HeadHash, SHA256: s.SHA256, Bytes: s.Bytes, SealedAt: s.SealedAt})
 	}
 	m.Segments = append(m.Segments, ManifestEntry{N: n, File: filepath.Base(seg), FirstSeq: v.Active.FirstSeq, HeadSeq: rec.Seq, HeadHash: hashLine(line), SHA256: whole, Bytes: size, SealedAt: rec.Time})
-	data, _ := json.Marshal(m)
-	if err := os.WriteFile(ManifestPath(resolved), data, 0o600); err != nil {
+	if err := writeManifest(resolved, m); err != nil {
 		t.Fatal(err)
 	}
 	if stopAt == "C" {
 		return line
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(resolved), "."+filepath.Base(resolved)+".next-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = tmp.Close()
-	if err := os.Rename(tmp.Name(), resolved); err != nil {
+	if err := swapActive(resolved); err != nil {
 		t.Fatal(err)
 	}
 	return line
@@ -300,10 +294,10 @@ func TestSetFaultsAcrossSegments(t *testing.T) {
 }
 
 // TestOrdinalZeroSiblingIsUnexpected: no manifest ever lists segment 0, so a
-// `.seg-000000` beside a manifest is an unexpected segment — beside a
-// populated manifest, and beside an empty one even when it is a hard link to
-// the active (which must never read as state C and lock every writer out
-// with ErrSealed).
+// `.seg-000000` beside a populated manifest is an unexpected segment. Beside
+// an empty manifest — itself refused by ParseManifest, so the fault is
+// FaultManifest, not the ordinal-0 one — even a hard link to the active must
+// never read as state C and lock every writer out with ErrSealed.
 func TestOrdinalZeroSiblingIsUnexpected(t *testing.T) {
 	p := twoSegments(t)
 	if err := os.WriteFile(SegmentPath(p, 0), []byte("x\n"), 0o600); err != nil {
@@ -330,10 +324,10 @@ func TestOrdinalZeroSiblingIsUnexpected(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, err = Read(q, ledger.Locked)
-	if v.State == StateRotatedNotSwapped || !errors.As(err, &se) || se.Fault != FaultUnexpectedSegment {
+	if v.State == StateRotatedNotSwapped || !errors.As(err, &se) || se.Fault != FaultManifest {
 		t.Fatalf("segment 0 linked to the active beside an empty manifest: state %d err %v", v.State, err)
 	}
-	if werr := Writable(q); errors.Is(werr, ErrSealed) || !errors.As(werr, &se) || se.Fault != FaultUnexpectedSegment {
+	if werr := Writable(q); errors.Is(werr, ErrSealed) || !errors.As(werr, &se) || se.Fault != FaultManifest {
 		t.Fatalf("the writer must not be locked out as sealed: %v", werr)
 	}
 }
