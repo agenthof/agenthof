@@ -203,18 +203,22 @@ func TestDanglingSymlinkBesideHistoryIsActiveMissing(t *testing.T) {
 	}
 }
 
-// TestAppendRefusesSealRecords: until the seal writer exists, an Event that
-// says "seal" or carries a seal payload is refused before the ledger is
-// opened — nothing is dropped silently and no file is created.
-func TestAppendRefusesSealRecords(t *testing.T) {
+// TestAppendRefusesMalformedSealBeforeOpening: a successful seal without its
+// payload, or a seal payload on another action, is refused by the structural
+// permit before the ledger is opened — nothing is dropped silently and, on a
+// fresh root, no file is created.
+func TestAppendRefusesMalformedSealBeforeOpening(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "control.jsonl")
 	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
-	for _, e := range []control.Event{
-		{Action: "seal", Outcome: "success", Invoker: inv, Witness: w},
-		{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc", Seal: &control.Seal{Segment: 1}},
+	for _, c := range []struct {
+		e    control.Event
+		want string
+	}{
+		{control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w}, "a successful seal must say what it closes"},
+		{control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc", Seal: &control.Seal{Segment: 1}}, `seal payload on a "apply" record`},
 	} {
-		if _, err := control.Append(p, e); err == nil || !strings.Contains(err.Error(), "written only by audit seal") {
-			t.Fatalf("%s: %v", e.Action, err)
+		if _, err := control.Append(p, c.e); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: %v (want %q)", c.e.Action, err, c.want)
 		}
 	}
 	if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {

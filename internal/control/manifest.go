@@ -212,7 +212,10 @@ func replaceFile(dest, pattern string, data []byte) error {
 // directory listing, never a glob (a path with [ or * in it is pattern syntax
 // to filepath.Glob and would sweep nothing). Best effort: a temp that cannot
 // be removed is harmless — siblingNames never reads it as a segment and the
-// next write makes its own.
+// next write makes its own. Call it only while holding the active's exclusive
+// lock: every writer of these temps holds that lock, so a temp seen under it
+// is stale by construction; a sweep outside it could remove a concurrent
+// seal's live temp and fail that seal's rename.
 func sweepTemps(resolved string) {
 	dir, base := filepath.Dir(resolved), filepath.Base(resolved)
 	entries, err := os.ReadDir(dir)

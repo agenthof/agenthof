@@ -552,34 +552,61 @@ var (
 	betweenWalkAndOpen = func() {}
 )
 
-// openActive is the writer's entry. It walks the sealed segments, then opens
-// and locks the active BY NAME, decides what the locked handle is, and
-// returns the active chain (ledger.Resume over the locked handle) with the
-// View. It never uses the fused ledger.Open/OpenFrom: the Start is known
-// only after the sealed walk, and a locked handle that turns out to be the
-// sealed file under the active's name (state C) must read as ErrSealed, not
-// as a damaged chain. Order: (a) resolve; Stat (following a symlink, as
+// openActive is the writer's entry: lockActive with ledger.Resume as the
+// active's one read, so the caller gets the active chain over the locked
+// handle, plus the writer's verdict — a set in state B or C is ErrSealed and
+// nothing is held. It never uses the fused ledger.Open/OpenFrom: the Start is
+// known only after the sealed walk, and a locked handle that turns out to be
+// the sealed file under the active's name (state C) must read as ErrSealed,
+// not as a damaged chain — in state C readActive never calls the verifier, so
+// Resume never runs on the sealed inode and chain stays nil.
+func openActive(controlLog string) (*ledger.Chain, View, error) {
+	var chain *ledger.Chain
+	f, v, err := lockActive(controlLog, true, func(f *os.File, s ledger.Start) ([]ledger.Record, ledger.Head, error) {
+		c, recs, err := ledger.Resume(f, ledger.Locked, s)
+		chain = c
+		head := ledger.Head{Hash: s.Prev}
+		if len(recs) > 0 {
+			head = ledger.Head{Hash: hashOf(recs[len(recs)-1].Raw), Count: len(recs)}
+		}
+		return recs, head, err
+	})
+	if err != nil {
+		return nil, v, err
+	}
+	if v.State != StateOpen {
+		ledger.Unlock(f)
+		_ = f.Close()
+		return nil, v, ErrSealed
+	}
+	return chain, v, nil
+}
+
+// lockActive walks the sealed segments, then opens and locks the active BY
+// NAME, decides what the locked handle is, and returns the handle (locked
+// LOCK_EX; the caller releases it) with the View in whatever rotation state
+// the set is — openActive adds the writer's verdict, CompleteSeal requires
+// state B or C. Order: (a) resolve; Stat (following a symlink, as
 // ledger.Open's create-or-resume did) — a missing active beside a manifest
 // or a sibling is FaultActiveMissing and nothing is created; with no history,
-// today's create-on-first-write stands; (b) walkSealed — the manifest M and
-// every sealed segment, read without the active's lock (they are fixed
-// files), so the exclusive lock below is held for the active alone, not for
-// O(total bytes); (c) open by name, LOCK_EX; (d) re-stat; (e) re-read the
-// manifest and require it to equal M — a seal that ran to completion
-// between (b) and (c) left the name on a new, empty active that the stale
-// Start would accept vacuously, and this writer would then duplicate the
-// sealed range; (f) readActive over the locked handle: the sibling check,
-// state C (decided before the handle is read, so Resume never runs on the
-// sealed inode), ledger.Resume as the active's one read, the seal-terminal
-// check; a set in state B or C is ErrSealed. (d) and (e) retry from (a)
-// once.
-func openActive(controlLog string) (*ledger.Chain, View, error) {
+// today's create-on-first-write stands when create is set, else the name's
+// own ENOENT; (b) walkSealed — the manifest M and every sealed segment, read
+// without the active's lock (they are fixed files), so the exclusive lock
+// below is held for the active alone, not for O(total bytes); (c) open by
+// name, LOCK_EX; (d) re-stat; (e) re-read the manifest and require it to
+// equal M — a seal that ran to completion between (b) and (c) left the name
+// on a new, empty active that the stale Start would accept vacuously, and
+// this writer would then duplicate the sealed range; (f) readActive over the
+// locked handle: the sibling check, state C (decided before the handle is
+// read), verifyActive as the active's one read, the seal-terminal check. (d)
+// and (e) retry from (a) once. On an error nothing is held.
+func lockActive(controlLog string, create bool, verifyActive func(*os.File, ledger.Start) ([]ledger.Record, ledger.Head, error)) (*os.File, View, error) {
 	resolved, err := resolveControlLog(controlLog)
 	if err != nil {
 		return nil, View{}, err
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		create := false
+		missing := false
 		if _, serr := os.Stat(resolved); serr != nil {
 			if !errors.Is(serr, fs.ErrNotExist) {
 				return nil, View{}, serr
@@ -591,14 +618,14 @@ func openActive(controlLog string) (*ledger.Chain, View, error) {
 			if history {
 				return nil, View{}, activeMissing(resolved)
 			}
-			create = true
+			missing = true
 		}
 		w, werr := walkSealed(resolved)
 		if werr != nil {
 			return nil, w.v, werr
 		}
 		betweenWalkAndOpen()
-		f, err := openForAppend(resolved, create)
+		f, err := openForAppend(resolved, missing && create)
 		if err != nil {
 			return nil, View{}, err
 		}
@@ -624,27 +651,15 @@ func openActive(controlLog string) (*ledger.Chain, View, error) {
 			_ = f.Close()
 			continue
 		}
-		var chain *ledger.Chain
 		v, rerr := readActive(resolved, f, w, func(s ledger.Start) ([]ledger.Record, ledger.Head, error) {
-			c, recs, err := ledger.Resume(f, ledger.Locked, s)
-			chain = c
-			head := ledger.Head{Hash: s.Prev}
-			if len(recs) > 0 {
-				head = ledger.Head{Hash: hashOf(recs[len(recs)-1].Raw), Count: len(recs)}
-			}
-			return recs, head, err
+			return verifyActive(f, s)
 		})
-		switch {
-		case rerr != nil:
+		if rerr != nil {
 			ledger.Unlock(f)
 			_ = f.Close()
 			return nil, v, rerr
-		case v.State != StateOpen:
-			ledger.Unlock(f)
-			_ = f.Close()
-			return nil, v, ErrSealed
 		}
-		return chain, v, nil
+		return f, v, nil
 	}
 	return nil, View{}, fmt.Errorf("control: %s was rotated twice while opening it; retry", resolved)
 }

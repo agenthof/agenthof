@@ -144,18 +144,6 @@ func checkAnchorShape(e Event) error {
 	return nil
 }
 
-// checkSealShape is Append's permit for a seal record: there is none yet. A
-// seal record is written only by audit seal, on the chain it already holds
-// and after its placement checks; until that writer exists every Event that
-// says "seal" or carries a seal payload is refused outright, so a payload
-// can neither be dropped silently nor land on an ordinary record.
-func checkSealShape(e Event) error {
-	if e.Seal != nil || e.Action == "seal" {
-		return errors.New("control: seal records are written only by audit seal")
-	}
-	return nil
-}
-
 // checkAnchorCoverage is the one permit rule that needs the chain: the
 // covered seq must exist, 1 ≤ Seq ≤ Count, read under the exclusive flock so
 // it holds across any head advance since the caller read the head. A refusal
@@ -169,18 +157,19 @@ func checkAnchorCoverage(a *Anchor, count int) error {
 }
 
 // Append admits an anchor record only through checkAnchorShape and
-// checkAnchorCoverage, and rejects any non-"success" Event with a nil Reason:
-// every control-plane denial must explain itself, and this is the one place
-// that rule is enforced, rather than scattered across call sites. It then
-// opens the active segment through the seam (openActive: a torn or broken
-// active, a sealed-not-rotated active — ErrSealed — or a damaged set
+// checkAnchorCoverage, a seal record only through checkSealShape and
+// checkSealPlacement (seal.go), and rejects any non-"success" Event with a
+// nil Reason: every control-plane denial must explain itself, and this is the
+// one place that rule is enforced, rather than scattered across call sites.
+// It then opens the active segment through the seam (openActive: a torn or
+// broken active, a sealed-not-rotated active — ErrSealed — or a damaged set
 // refuses), appends on the chain's logical position (appendOn), and closes.
 // It returns the chain's new Head, whose Count is the global seq.
 func Append(path string, e Event) (ledger.Head, error) {
-	if err := checkSealShape(e); err != nil {
+	if err := checkAnchorShape(e); err != nil {
 		return ledger.Head{}, err
 	}
-	if err := checkAnchorShape(e); err != nil {
+	if err := checkSealShape(e); err != nil {
 		return ledger.Head{}, err
 	}
 	if e.Outcome != "success" && e.Reason == nil {
@@ -196,17 +185,24 @@ func Append(path string, e Event) (ledger.Head, error) {
 }
 
 // appendOn is Append's body over a chain the caller already holds (openActive
-// gave it), so the seal can write its record on the chain it holds without a
-// second handle contending with the first. Every position is LOGICAL:
-// coverage is judged against Base+Count, seq is Base+Count+1, and log_id is
-// minted on the genesis — Base 0, Count 0 — and nowhere else: the first
-// record of a later segment continues the chain's identity, it does not
-// start one. The returned Head is logical too: Count is the chain's last
-// seq, which is what every writer prints as seq=. The marshalled line is
-// returned beside it for a caller that needs the bytes it wrote.
+// gave it, with the View read under its lock), so the seal can write its
+// record on the chain it holds without a second handle contending with the
+// first. The two permit rules that need the chain run here: anchor coverage
+// and seal placement (the payload must describe exactly the active this
+// chain holds — the View's sealed count and records are what it is judged
+// against). Every position is LOGICAL: coverage is judged against
+// Base+Count, seq is Base+Count+1, and log_id is minted on the genesis —
+// Base 0, Count 0 — and nowhere else: the first record of a later segment
+// continues the chain's identity, it does not start one. The returned Head is
+// logical too: Count is the chain's last seq, which is what every writer
+// prints as seq=. The marshalled line is returned beside it for a caller that
+// needs the bytes it wrote.
 func appendOn(c *ledger.Chain, view View, e Event) (ledger.Head, []byte, error) {
 	logical := int(c.Base()) + c.Count()
 	if err := checkAnchorCoverage(e.Anchor, logical); err != nil {
+		return ledger.Head{}, nil, err
+	}
+	if err := checkSealPlacement(c, view, e); err != nil {
 		return ledger.Head{}, nil, err
 	}
 	rec := record{
