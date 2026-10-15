@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"time"
@@ -292,13 +293,15 @@ type RepairResult struct {
 // existence alone means the ledger was once damaged, whatever the live
 // chain's taint says.
 //
-// Locking: Read's shared lock is released before the fragment is written,
-// so there is a window before the truncate in which another process could
-// act on the file. Accepted for V1 (single-admin operation; the command
-// holds installed.lock exclusively around this call, which keeps every
-// pointer writer out, and no writer appends to a torn or sealed active);
-// moveTailAside re-reads the bytes and refuses if the verified prefix is no
-// longer where Read saw it, so the window cannot truncate the wrong bytes.
+// Locking: Read's shared lock is released before anything is done; the
+// fragment and the truncate then run under the active's exclusive lock
+// (moveTailAside), which excludes every writer that respects it, and the
+// bytes are re-read under that lock and must still end at the verified
+// prefix, else the repair refuses. CompleteSeal and Append take their own
+// locks afterwards; a write that lands in between stays on disk and
+// surfaces as a set fault on the next read — nothing is cut off unseen. The
+// command holds installed.lock exclusively around the whole call, which
+// keeps every pointer writer out of the rotation.
 //
 // Residual risks: a crash between the truncate and the repair append leaves
 // a clean, shorter chain with no taint, the fragment its only evidence; in
@@ -393,15 +396,36 @@ func sealToComplete(v View, active []ledger.Record) (int, error) {
 	return -1, nil
 }
 
-// moveTailAside is the one destructive step of a repair: every byte of the
-// active from offset to end-of-file is copied to a fresh fragment file (the
-// evidence, synced before anything is removed), then the active is truncated
-// at offset. Before either, the bytes are re-read and the verified prefix
-// Read saw must still end exactly at offset — its last line, newline and
-// all, immediately before it — else the active changed under the repair and
-// nothing is touched.
+// moveTailAside is the one destructive step of a repair, and it runs under
+// the active's exclusive lock, as every writer does: the active is opened by
+// name, LOCK_EX taken (bounded; busy refuses), the handle re-stat'ed to be
+// the file the name still refers to (a rotation swapped under the name
+// refuses — a truncate by name would otherwise extend a fresh, empty
+// active), and the bytes read through that handle. The verified prefix Read
+// saw must still end exactly at offset — its last line, newline and all,
+// immediately before it — else the active changed under the repair and
+// nothing is touched. Only then is every byte from offset to end-of-file
+// copied to a fresh fragment file (the evidence, synced before anything is
+// removed) and the handle truncated at offset and synced. The lock is
+// released on return; CompleteSeal and Append take their own afterwards.
 func moveTailAside(resolved string, offset int64, prefix []ledger.Record) (RepairResult, error) {
-	raw, err := os.ReadFile(resolved)
+	f, err := os.OpenFile(resolved, os.O_RDWR, 0)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	defer func() { _ = f.Close() }()
+	if err := ledger.LockExclusive(f); err != nil {
+		return RepairResult{}, fmt.Errorf("control: repair %s: %w", resolved, err)
+	}
+	defer ledger.Unlock(f)
+	fi, err := f.Stat()
+	if err != nil {
+		return RepairResult{}, err
+	}
+	if !sameFile(resolved, fi) {
+		return RepairResult{}, fmt.Errorf("control: %s was rotated while it was being repaired; run audit verify control and retry", resolved)
+	}
+	raw, err := io.ReadAll(f)
 	if err != nil {
 		return RepairResult{}, err
 	}
@@ -420,7 +444,10 @@ func moveTailAside(resolved string, offset int64, prefix []ledger.Record) (Repai
 	if err := writeTornFragment(resolved, fragment); err != nil {
 		return RepairResult{}, err
 	}
-	if err := os.Truncate(resolved, offset); err != nil {
+	if err := f.Truncate(offset); err != nil {
+		return RepairResult{}, err
+	}
+	if err := f.Sync(); err != nil {
 		return RepairResult{}, err
 	}
 	return res, nil

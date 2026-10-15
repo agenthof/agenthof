@@ -345,3 +345,108 @@ func TestRepairRefusesSetFaults(t *testing.T) {
 		})
 	}
 }
+
+// TestRepairTornTailOnAnEmptyActiveOfARotatedRoot: the active of a rotated
+// root holds nothing but a torn write (Offset 0): the whole file is the
+// fragment, and the repair record lands at Base+1, the taint crossing the
+// sealed boundary.
+func TestRepairTornTailOnAnEmptyActiveOfARotatedRoot(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	appendN(t, p, 3)
+	sealByHand(t, p, "")
+	frag := tear(t, p, 5)
+	res, err := repairIt(t, p)
+	if err != nil || res.CompletedSegment != 0 || res.FragmentLen != len(frag) {
+		t.Fatalf("%v %+v", err, res)
+	}
+	frags, _ := filepath.Glob(p + ".torn-*")
+	if len(frags) != 1 {
+		t.Fatalf("one fragment: %v", frags)
+	}
+	if got, _ := os.ReadFile(frags[0]); !bytes.Equal(got, frag) {
+		t.Fatal("the whole file is the fragment")
+	}
+	v, err := Read(p, ledger.Locked)
+	if err != nil || len(v.Sealed) != 1 || v.Active.Records != 1 || v.Head.Count != 5 {
+		t.Fatalf("%v %+v", err, v)
+	}
+	rep, _ := decodeRecord(v.Records[4])
+	if rep.Action != "repair" || rep.Seq != 5 || rep.Prev != v.Sealed[0].HeadHash {
+		t.Fatalf("%+v", rep)
+	}
+	if tainted, seq := IsTainted(v.Records); !tainted || seq != 5 {
+		t.Fatalf("taint at Base+1: %v %d", tainted, seq)
+	}
+}
+
+// TestMoveTailAsideRefusesAChangedPrefix pins the guard the repair's
+// concurrency story rests on: under the active's exclusive lock the bytes
+// are re-read, and unless the verified prefix's last line sits immediately
+// before the offset — the prefix handed in altered, or the offset one byte
+// off — nothing is truncated and no fragment is written.
+func TestMoveTailAsideRefusesAChangedPrefix(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	appendN(t, p, 2)
+	tear(t, p, 3)
+	v, err := Read(p, ledger.Locked)
+	var torn *ledger.TornError
+	if !errors.As(err, &torn) {
+		t.Fatalf("fixture must be torn: %v", err)
+	}
+	before, _ := os.ReadFile(p)
+	altered := append([]ledger.Record{}, v.Records...)
+	altered[1] = ledger.Record{Raw: append(append([]byte{}, v.Records[1].Raw[:len(v.Records[1].Raw)-1]...), '!')}
+	for name, call := range map[string]func() (RepairResult, error){
+		"altered prefix": func() (RepairResult, error) { return moveTailAside(p, torn.Offset, altered) },
+		"offset off":     func() (RepairResult, error) { return moveTailAside(p, torn.Offset+1, v.Records) },
+	} {
+		if _, err := call(); err == nil || !strings.Contains(err.Error(), "changed while it was being repaired") {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if after, _ := os.ReadFile(p); !bytes.Equal(before, after) {
+			t.Fatalf("%s: bytes changed", name)
+		}
+		if frags, _ := filepath.Glob(p + ".torn-*"); len(frags) != 0 {
+			t.Fatalf("%s: a fragment was written: %v", name, frags)
+		}
+	}
+	if _, err := moveTailAside(p, torn.Offset, v.Records); err != nil {
+		t.Fatalf("the true prefix passes: %v", err)
+	}
+}
+
+// TestMoveTailAsideBusyUnderAHeldActiveLock: the truncate itself takes the
+// active's exclusive lock, bounded — a holder elsewhere makes it refuse busy
+// (ErrLockHeld) with nothing truncated and no fragment written. It calls
+// moveTailAside directly, past Read's own shared lock, so the pin is on the
+// destructive step and not on the read before it. Waits the real lock
+// timeout.
+func TestMoveTailAsideBusyUnderAHeldActiveLock(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	appendN(t, p, 2)
+	tear(t, p, 3)
+	v, err := Read(p, ledger.Locked)
+	var torn *ledger.TornError
+	if !errors.As(err, &torn) {
+		t.Fatalf("fixture must be torn: %v", err)
+	}
+	before, _ := os.ReadFile(p)
+	holder, err := os.OpenFile(p, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close() }()
+	if err := ledger.LockExclusive(holder); err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Unlock(holder)
+	if _, err := moveTailAside(p, torn.Offset, v.Records); !errors.Is(err, ledger.ErrLockHeld) {
+		t.Fatalf("busy: %v", err)
+	}
+	if after, _ := os.ReadFile(p); !bytes.Equal(before, after) {
+		t.Fatal("busy truncates nothing")
+	}
+	if frags, _ := filepath.Glob(p + ".torn-*"); len(frags) != 0 {
+		t.Fatalf("busy writes no fragment: %v", frags)
+	}
+}
