@@ -4,7 +4,7 @@
 // (ControlAllows — the control-plane gate every control command enforces:
 // apply, the enable/disable kill switch, ledger repair, key provisioning,
 // retention pruning, anchoring the control-ledger head to an external log,
-// and sealing the control ledger's active segment, and reading the installed
+// sealing the control ledger's active segment, and reading the installed
 // configuration for distribution). It is a leaf
 // package — it imports only config and identity — so the engine and the CLI
 // share one decision instead of two drifting copies.
