@@ -105,6 +105,26 @@ type Event struct {
 	// install: it carries no config_hash and Installing never accepts it.
 	// Additive and omitempty (Article VI).
 	Anchor *Anchor `json:"anchor,omitempty"`
+	// Seal is the payload of an action "seal" record: what the record says
+	// about the segment it closes. Written by audit seal through the seam;
+	// Append admits it only under a structural permit and a placement check
+	// against the open chain. A seal installs nothing (no config_hash) and
+	// Installing never accepts it. Additive and omitempty (Article VI).
+	Seal *Seal `json:"seal,omitempty"`
+}
+
+// Seal is what a "seal" record says about the segment it closes. head_seq and
+// head_hash equal this record's own seq-1 and prev; content_sha256 is
+// sha256(file[0, offset of this line)) — every byte of the segment before the
+// seal line, newlines included, never a whole-file hash (that is the
+// manifest's sha256). Redundant by construction, cross-checked at write and
+// recomputed at read; it identifies the unit, it adds no detection.
+type Seal struct {
+	Segment       int    `json:"segment"`        // the ordinal this record closes (1-based; the manifest's n)
+	FirstSeq      int    `json:"first_seq"`      // the segment's first seq (its Start.Base + 1)
+	HeadSeq       int    `json:"head_seq"`       // the last record before this one: this record's seq - 1
+	HeadHash      string `json:"head_hash"`      // its hash: this record's own prev
+	ContentSHA256 string `json:"content_sha256"` // sha256 of the segment's bytes before this line
 }
 
 // Anchor is what an "anchor" record says about the head it pins, written by

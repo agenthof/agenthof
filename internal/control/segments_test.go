@@ -1,0 +1,146 @@
+package control_test
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/agenthof/agenthof/internal/control"
+	"github.com/agenthof/agenthof/internal/identity"
+	"github.com/agenthof/agenthof/internal/ledger"
+)
+
+// fiveRecords appends five apply records to a fresh control log and returns
+// its path (the shape every seam test starts from).
+func fiveRecords(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
+	for i := 0; i < 5; i++ {
+		if _, err := control.Append(p, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return p
+}
+
+// TestReadSingleFileIsReadVerify: on a never-sealed root, Read returns
+// exactly ReadVerify's records and head, no sealed segments, state open,
+// FirstSeq 1, and creates no file; a torn or broken file yields a *SetError
+// whose text is today's ledger text and which unwraps to the ledger error.
+func TestReadSingleFileIsReadVerify(t *testing.T) {
+	p := fiveRecords(t)
+	want, wantHead, _ := ledger.ReadVerify(p, ledger.Locked)
+	v, err := control.Read(p, ledger.Locked)
+	if err != nil || v.Head != wantHead || len(v.Records) != len(want) || v.Sealed != nil || v.State != control.StateOpen || v.FirstSeq != 1 || v.LogID != "" {
+		t.Fatalf("Read: %v %+v", err, v)
+	}
+	for i := range want {
+		if string(want[i].Raw) != string(v.Records[i].Raw) {
+			t.Fatalf("record %d differs", i)
+		}
+	}
+	if v.Active.N != 0 || v.Active.FirstSeq != 1 || v.Active.HeadSeq != 5 || v.Active.HeadHash != wantHead.Hash || v.Active.Records != 5 {
+		t.Fatalf("active: %+v", v.Active)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(p))
+	if len(entries) != 1 {
+		t.Fatalf("Read must create nothing: %v", entries)
+	}
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	_, _ = f.WriteString(`{"v":"control/1","seq":6,"prev":""`)
+	_ = f.Close()
+	_, _, lerr := ledger.ReadVerify(p, ledger.Locked)
+	_, err = control.Read(p, ledger.Locked)
+	var se *control.SetError
+	var torn *ledger.TornError
+	if !errors.As(err, &se) || se.Fault != control.FaultTorn || se.Segment != 0 || se.Seq != 6 || err.Error() != lerr.Error() || !errors.As(err, &torn) {
+		t.Fatalf("torn active: %v (ledger: %v)", err, lerr)
+	}
+}
+
+// TestReadNoRootIsRawNotExist: no active, no manifest, no siblings → the raw
+// *fs.PathError, so os.IsNotExist and errors.Is(fs.ErrNotExist) hold.
+func TestReadNoRootIsRawNotExist(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	_, err := control.Read(p, ledger.Locked)
+	var pe *fs.PathError
+	if !errors.As(err, &pe) || !os.IsNotExist(err) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("no root: %T %v", err, err)
+	}
+	if _, serr := os.Lstat(p); !errors.Is(serr, fs.ErrNotExist) {
+		t.Fatal("Read must not create the active")
+	}
+}
+
+// TestSetErrorUnwrapIsActiveTornBrokenOnly: the Unwrap matrix — only a torn
+// or broken ACTIVE exposes its ledger error; every other (Fault, Segment)
+// pair unwraps to nothing, so errors.As(&torn/&broken) and
+// errors.Is(fs.ErrNotExist) are false for it even when Err is set.
+func TestSetErrorUnwrapIsActiveTornBrokenOnly(t *testing.T) {
+	torn := &ledger.TornError{Offset: 3}
+	broken := &ledger.ChainBrokenError{Line: 2}
+	notExist := &fs.PathError{Op: "open", Path: "x", Err: fs.ErrNotExist}
+	for _, f := range []control.Fault{control.FaultTorn, control.FaultBroken, control.FaultBoundary, control.FaultMissingSegment, control.FaultActiveMissing, control.FaultUnexpectedSegment, control.FaultManifest, control.FaultSealNotLast} {
+		for _, seg := range []int{0, 1, 2} {
+			for _, inner := range []error{torn, broken, notExist} {
+				err := error(&control.SetError{Fault: f, Segment: seg, Path: "/r/control.jsonl", Seq: 1, Err: inner})
+				var gotTorn *ledger.TornError
+				var gotBroken *ledger.ChainBrokenError
+				exposes := seg == 0 && (f == control.FaultTorn || f == control.FaultBroken)
+				if errors.As(err, &gotTorn) != (exposes && inner == torn) || errors.As(err, &gotBroken) != (exposes && inner == broken) || errors.Is(err, fs.ErrNotExist) != (exposes && inner == notExist) {
+					t.Fatalf("fault %d segment %d inner %T: unwrap exposure wrong", f, seg, inner)
+				}
+			}
+		}
+	}
+}
+
+// TestSiblingGlobMatchesSegmentsOnly: beside the ledger, the manifest, a
+// manifest temp, a swap temp and a torn fragment are never siblings; only
+// `.seg-` + six digits is a segment, and any other `.seg-*` spelling is an
+// unexpected segment (never silently ignored).
+func TestSiblingGlobMatchesSegmentsOnly(t *testing.T) {
+	p := fiveRecords(t)
+	dir := filepath.Dir(p)
+	for _, name := range []string{"control.jsonl.segments-abc123", ".control.jsonl.next-xyz", "control.jsonl.torn-1700000000"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := control.Read(p, ledger.Locked); err != nil {
+		t.Fatalf("temps and fragments are not siblings: %v", err)
+	}
+	for _, bad := range []string{"control.jsonl.seg-1", "control.jsonl.seg-0000001"} {
+		path := filepath.Join(dir, bad)
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := control.Read(p, ledger.Locked)
+		var se *control.SetError
+		if !errors.As(err, &se) || se.Fault != control.FaultUnexpectedSegment || !strings.Contains(err.Error(), bad) {
+			t.Fatalf("%s: %v", bad, err)
+		}
+		_ = os.Remove(path)
+	}
+	// A conforming segment file with no manifest is loud too — even over an
+	// empty active (the deleted-manifest case).
+	seg := control.SegmentPath(p, 2)
+	if err := os.WriteFile(seg, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := control.Read(p, ledger.Locked)
+	var se *control.SetError
+	if !errors.As(err, &se) || se.Fault != control.FaultUnexpectedSegment || !strings.Contains(err.Error(), "but no manifest control.jsonl.segments") {
+		t.Fatalf("segments without a manifest: %v", err)
+	}
+	if err := os.Truncate(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.Read(p, ledger.Locked); !errors.As(err, &se) || se.Fault != control.FaultUnexpectedSegment {
+		t.Fatalf("over an empty active the fault must still be loud: %v", err)
+	}
+}

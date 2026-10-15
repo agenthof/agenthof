@@ -32,6 +32,7 @@ type DecodedEvent struct {
 	Origin      *origin.Origin   `json:"origin,omitempty"`
 	Detail      string           `json:"detail,omitempty"`
 	Anchor      *Anchor          `json:"anchor,omitempty"`
+	Seal        *Seal            `json:"seal,omitempty"`
 }
 
 // Decode unmarshals a single control/1 log line into a DecodedEvent.

@@ -19,7 +19,7 @@ import (
 // record is the control/1 on-disk shape. Field order here is the wire
 // order (spec §3.2): v, seq, time, action, agent, outcome, reason,
 // invoker, asserted_as, witness, config_hash, bootstrap, fragment_len,
-// fragment_sha256, origin, detail, anchor, prev, log_id. It intentionally does not embed Event,
+// fragment_sha256, origin, detail, anchor, seal, prev, log_id. It intentionally does not embed Event,
 // since the wire order interleaves the writer-assigned fields (seq, time
 // up front; prev, log_id at the end) around the caller-assigned ones.
 //
@@ -47,8 +47,10 @@ type record struct {
 	// Anchor is the payload of an action "anchor" record, copied from the
 	// Event once the permit below admits it.
 	Anchor *Anchor `json:"anchor,omitempty"`
-	Prev   string  `json:"prev"`
-	LogID  string  `json:"log_id,omitempty"`
+	// Seal is the payload of an action "seal" record (control.Seal).
+	Seal  *Seal  `json:"seal,omitempty"`
+	Prev  string `json:"prev"`
+	LogID string `json:"log_id,omitempty"`
 }
 
 // MaxAnchorProofLen bounds Anchor.Proof on a record: 8192 bytes of standard
