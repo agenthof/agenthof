@@ -1,9 +1,11 @@
 package control_test
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/ledger"
@@ -344,6 +346,88 @@ func TestRenderShowsARealAnchorAndHidesItsLocator(t *testing.T) {
 	for _, hidden := range []string{a.Ref, a.Proof, a.BackendKeyID, a.Backend} {
 		if strings.Contains(out, hidden) {
 			t.Fatalf("render must not show %q:\n%s", hidden, out)
+		}
+	}
+}
+
+// TestControlRenderSealLabelAndSegments: a success seal renders
+// "segment N sealed (seq A–B)", a refused seal "seal refused"; RenderView
+// prints one segment line per sealed segment before the events and
+// "verified (N events, k sealed segments)" when k > 0; Render on a plain
+// View is byte-identical to today.
+func TestControlRenderSealLabelAndSegments(t *testing.T) {
+	raw := `{"v":"control/1","seq":6,"time":"2026-10-15T09:00:00Z","action":"seal","outcome":"success","invoker":{"subject":"dana","issuer":"local","method":"static"},"witness":{"os_user":"dana","hostname":"host"},"seal":{"segment":1,"first_seq":1,"head_seq":5,"head_hash":"h","content_sha256":"c"},"prev":"p"}`
+	v := control.View{Records: []ledger.Record{rec(1, "apply", "", "success", "dana", "static"), {Raw: []byte(raw)}, rec(7, "prune", "", "success", "dana", "static")}, Head: ledger.Head{Hash: "x", Count: 7}, FirstSeq: 1,
+		Sealed: []control.Segment{{N: 1, Path: "/r/control.jsonl.seg-000001", FirstSeq: 1, HeadSeq: 6, HeadHash: "hh", SHA256: "ff", SealedAt: time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)}},
+		Active: control.Segment{FirstSeq: 7, HeadSeq: 7, Records: 1}}
+	out := control.RenderView(v, nil)
+	for _, want := range []string{
+		"control ledger — 7 events\n",
+		"segment 1: seq 1–6 sealed 2026-10-15T09:00:00Z control.jsonl.seg-000001\n",
+		"seq 6  2026-10-15 09:00:00  segment 1 sealed (seq 1–5) — dana (static)\n",
+		"control ledger integrity: verified (7 events, 1 sealed segments)\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "segment 1: seq") > strings.Index(out, "seq 1  ") {
+		t.Fatal("segment lines print before the events")
+	}
+	plain := []ledger.Record{rec(1, "apply", "", "success", "dana", "static")}
+	if control.Render(plain, ledger.Head{Hash: "x", Count: 1}, nil) != control.RenderView(control.View{Records: plain, Head: ledger.Head{Hash: "x", Count: 1}}, nil) || strings.Contains(control.Render(plain, ledger.Head{Count: 1}, nil), "sealed segments") {
+		t.Fatal("a plain View renders exactly as Render did")
+	}
+	refusedRaw := `{"v":"control/1","seq":2,"time":"2026-10-15T09:00:00Z","action":"seal","outcome":"refused","invoker":{"subject":"m","issuer":"local","method":"static"},"witness":{},"prev":"p"}`
+	if out := control.Render([]ledger.Record{{Raw: []byte(refusedRaw)}}, ledger.Head{Count: 1}, nil); !strings.Contains(out, "  seal refused — m (static)") {
+		t.Fatalf("%s", out)
+	}
+}
+
+// TestRenderViewRotationState: a seal that was not rotated says so between
+// the segment lines and the events, naming the segment by its ordinal — the
+// active is that segment in state B, the manifest already lists it in state C.
+func TestRenderViewRotationState(t *testing.T) {
+	sealed := []control.Segment{{N: 1, Path: "/r/control.jsonl.seg-000001", FirstSeq: 1, HeadSeq: 4}}
+	b := control.RenderView(control.View{State: control.StateSealedNotRotated, Sealed: sealed, Head: ledger.Head{Count: 0}}, nil)
+	if !strings.Contains(b, "control ledger: segment 2 sealed, rotation not completed; run: agenthof audit seal\n") {
+		t.Fatalf("state B:\n%s", b)
+	}
+	c := control.RenderView(control.View{State: control.StateRotatedNotSwapped, Sealed: sealed}, nil)
+	if !strings.Contains(c, "control ledger: segment 1 sealed, rotation not completed; run: agenthof audit seal\n") {
+		t.Fatalf("state C:\n%s", c)
+	}
+	if strings.Contains(control.RenderView(control.View{Sealed: sealed}, nil), "rotation not completed") {
+		t.Fatal("an open set has no rotation state")
+	}
+}
+
+// TestIntegrityLineSetFaults: each set fault has its verdict; the active's
+// torn/broken lines are today's; the global seq is printed.
+func TestIntegrityLineSetFaults(t *testing.T) {
+	v := control.View{Head: ledger.Head{Count: 3}}
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{&control.SetError{Fault: control.FaultBroken, Segment: 0, Seq: 3, Err: &ledger.ChainBrokenError{Line: 3}}, "control ledger integrity: BROKEN at seq 3\n"},
+		{&control.SetError{Fault: control.FaultBroken, Segment: 0, Seq: 12, Err: &ledger.ChainBrokenError{Line: 2}}, "control ledger integrity: BROKEN at seq 12\n"},
+		{&control.SetError{Fault: control.FaultTorn, Segment: 0, Seq: 4, Err: &ledger.TornError{Offset: 10}}, "control ledger integrity: TORN — last record incomplete\n"},
+		{&control.SetError{Fault: control.FaultBroken, Segment: 2, Seq: 9}, "control ledger integrity: BROKEN at seq 9 (segment 2)\n"},
+		{&control.SetError{Fault: control.FaultTorn, Segment: 2, Seq: 9}, "control ledger integrity: TORN (segment 2)\n"},
+		{&control.SetError{Fault: control.FaultBoundary, Segment: 3, Seq: 11}, "control ledger integrity: BOUNDARY BROKEN between segments 2 and 3\n"},
+		{&control.SetError{Fault: control.FaultBoundary, Segment: 0, Seq: 11}, "control ledger integrity: BOUNDARY BROKEN between the last sealed segment and the active\n"},
+		{&control.SetError{Fault: control.FaultMissingSegment, Segment: 2}, "control ledger integrity: SEGMENT 2 MISSING\n"},
+		{&control.SetError{Fault: control.FaultUnexpectedSegment, Path: "/r/control.jsonl.seg-000004"}, "control ledger integrity: UNEXPECTED SEGMENT control.jsonl.seg-000004\n"},
+		{&control.SetError{Fault: control.FaultManifest, Segment: 2, Err: errors.New("head_hash a recorded, b verified")}, "control ledger integrity: MANIFEST disagrees with segment 2: head_hash a recorded, b verified\n"},
+		{&control.SetError{Fault: control.FaultManifest, Segment: 0, Err: errors.New("log_id a recorded, b verified")}, "control ledger integrity: MANIFEST invalid: log_id a recorded, b verified\n"},
+		{&control.SetError{Fault: control.FaultSealNotLast, Segment: 0, Seq: 8}, "control ledger integrity: SEAL NOT LAST in the active segment (seal at seq 7)\n"},
+		{&control.SetError{Fault: control.FaultSealNotLast, Segment: 2, Seq: 8}, "control ledger integrity: SEAL NOT LAST in segment 2 (seal at seq 7)\n"},
+		{&ledger.ChainBrokenError{Line: 2}, "control ledger integrity: BROKEN at seq 2\n"},
+		{&ledger.TornError{Offset: 1}, "control ledger integrity: TORN — last record incomplete\n"},
+	} {
+		if got := control.RenderView(v, tc.err); !strings.HasSuffix(got, tc.want) {
+			t.Fatalf("%v:\n%s\nwant suffix %q", tc.err, got, tc.want)
 		}
 	}
 }

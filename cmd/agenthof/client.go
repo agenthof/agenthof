@@ -262,6 +262,8 @@ func printApplyResult(res apiclient.ApplyResult, pre apiclient.Precondition, loc
 		head()
 	case apiclient.ApplyLedgerDamaged:
 		_, _ = fmt.Fprintln(out, "apply: control ledger damaged; an operator must run audit repair control on the server")
+	case apiclient.ApplyRotationIncomplete:
+		_, _ = fmt.Fprintln(out, "apply: control ledger rotation incomplete; an operator must run audit seal on the server")
 	case apiclient.ApplyInstalledNotRecorded:
 		_, _ = fmt.Fprintf(out, "registry ok: %d agents, %d workflows, %d roles\n", res.Agents, res.Workflows, res.Roles)
 		_, _ = fmt.Fprintln(out, msgInstalledNotRecorded)

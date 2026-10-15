@@ -269,8 +269,9 @@ current working directory — run
 these commands from the repository root, or pass `--control-log`
 explicitly. It is never written under `--log-dir`, and `runs prune` skips
 it and any `*.torn-<timestamp>` repair fragment (below) by name, and the exact file `--control-log` names by identity, whatever it is
-called. Nothing rotates or seals the control log today; it is kept in full,
-indefinitely, as the compliance record, not run ephemera. Its invoker
+called. `audit seal` may close the control log's active segment into a sealed file and
+open the next, the chain continuing across segments; every segment is kept in full,
+indefinitely, as the compliance record, not run ephemera — nothing is pruned. Its invoker
 subjects are personal data like any other identity the ledger records, so
 the self-hosting operator is the data controller for it, same as for the
 run ledger.

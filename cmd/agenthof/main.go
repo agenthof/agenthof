@@ -51,6 +51,7 @@ Usage:
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>|<seq>:<hex>] [--anchor-key <path>] [--offline] [--anchor-timeout 30s]
   agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout 30s]  (pins the control-ledger head into the transparency log integrity.yaml names; an authorized control action, recorded whether it succeeded or failed; prints the anchored head and entry to ship off the box)
+  agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>]  (closes the control ledger's active segment into a sealed file and opens the next; the chain and seq continue unbroken; an authorized control action, recorded whether it succeeded or failed)
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
@@ -313,16 +314,9 @@ func cmdApply(args []string, out io.Writer) int {
 	// branch would otherwise have run next. applyConfig repeats this check
 	// (it must never append to a ledger it has not verified); the second
 	// open costs one verify of a small file.
-	c, err := ledger.Open(*controlLog, ledger.Locked)
-	if err != nil {
-		if errors.Is(err, ledger.ErrLockHeld) {
-			_, _ = fmt.Fprintf(out, "apply: %s\n", msgLockBusy)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s --config %s\n", *controlLog, *cfgDir)
+	if !ledgerWritable("apply", *controlLog, *cfgDir, out) {
 		return 1
 	}
-	_ = c.Close()
 
 	if refused {
 		// Never echo the raw token, nor the go-oidc error text, into the
@@ -421,25 +415,47 @@ func truncateErr(err error) string {
 	return s
 }
 
-// controlLedgerWritable is the ledger-writable precheck gateway provision
-// and runs prune run before they record anything: the control chain must
-// open and verify. Contention is busy — printed after prefix, unrecorded,
-// the caller exits 1 — and anything else is damage: the repair hint,
-// unrecorded, exit 1. The hint names no --config, since neither command has
-// one (repair takes it only for its bootstrap fallback). false means the
-// caller returns 1 at once.
+// controlLedgerWritable is the ledger-writable precheck gateway provision,
+// runs prune, audit anchor and config vouch run before they record anything.
+// Its repair hint names no --config, since none of those commands has one
+// (repair takes it only for its bootstrap fallback). ledgerWritable is the
+// same check for apply and the kill switch, whose hint names --config.
 func controlLedgerWritable(prefix, controlLog string, out io.Writer) bool {
-	c, err := ledger.Open(controlLog, ledger.Locked)
-	if err != nil {
-		if errors.Is(err, ledger.ErrLockHeld) {
-			_, _ = fmt.Fprintf(out, "%s: %s\n", prefix, msgLockBusy)
-			return false
-		}
-		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s\n", controlLog)
-		return false
+	return ledgerWritable(prefix, controlLog, "", out)
+}
+
+// ledgerWritable classifies control.Writable's answer: contention is busy
+// (printed after prefix, unrecorded); a torn or broken ACTIVE prints the
+// repair hint (with --config when cfgDir is set); a sealed-not-rotated
+// active prints the completion hint; every other fault prints its own text,
+// which names the segment, the global seq and the remedy. false means the
+// caller returns 1 at once.
+func ledgerWritable(prefix, controlLog, cfgDir string, out io.Writer) bool {
+	err := control.Writable(controlLog)
+	if err == nil {
+		return true
 	}
-	_ = c.Close()
-	return true
+	printWritableFault(prefix, controlLog, cfgDir, err, out)
+	return false
+}
+
+// printWritableFault prints the one line for a writable check that failed
+// (the set is never read a second time to print it).
+func printWritableFault(prefix, controlLog, cfgDir string, err error, out io.Writer) {
+	var torn *ledger.TornError
+	var broken *ledger.ChainBrokenError
+	switch {
+	case errors.Is(err, ledger.ErrLockHeld):
+		_, _ = fmt.Fprintf(out, "%s: %s\n", prefix, msgLockBusy)
+	case errors.As(err, &torn) || errors.As(err, &broken):
+		hint := "control ledger damaged; run: agenthof audit repair control --control-log " + controlLog
+		if cfgDir != "" {
+			hint += " --config " + cfgDir
+		}
+		_, _ = fmt.Fprintln(out, hint)
+	default:
+		_, _ = fmt.Fprintf(out, "%s: %v\n", prefix, err)
+	}
 }
 
 // cmdRegistryFlip implements the audited write path for `registry
@@ -471,20 +487,13 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	// control ledger means the ledger itself is unwritable, so nothing
 	// past this point may flip state or record anything — the "audit
 	// repair control" hint must always be what a damaged ledger prints,
-	// regardless of which branch would otherwise have run next.
-	c, err := ledger.Open(controlLog, ledger.Locked)
-	if err != nil {
-		// Contention is not damage: another process holding the writer lock
-		// (an apply or a repair in progress) must print the retry line, not the
-		// repair hint — mirroring the apply path.
-		if errors.Is(err, ledger.ErrLockHeld) {
-			_, _ = fmt.Fprintf(out, "registry %s: %s\n", action, msgLockBusy)
-			return 1
-		}
-		_, _ = fmt.Fprintf(out, "control ledger damaged; run: agenthof audit repair control --control-log %s --config %s\n", controlLog, cfgDir)
+	// regardless of which branch would otherwise have run next. Contention is
+	// not damage: another process holding the writer lock (an apply or a
+	// repair in progress) prints the retry line, not the repair hint —
+	// mirroring the apply path.
+	if !ledgerWritable("registry "+action, controlLog, cfgDir, out) {
 		return 1
 	}
-	_ = c.Close()
 
 	// recordExit appends a terminal control event — a refusal or an error,
 	// never the success path (which carries a config hash and is built inline
@@ -1234,6 +1243,11 @@ func cmdAudit(args []string, out io.Writer) int {
 	if args[0] == "anchor" {
 		return cmdAuditAnchor(args[1:], out)
 	}
+	// "seal" is disambiguated the same way: a run id is always "r-<hex>"
+	// (engine.NewRunID), which "seal" can never match.
+	if args[0] == "seal" {
+		return cmdAuditSeal(args[1:], out)
+	}
 	runID := args[0]
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
@@ -1326,11 +1340,15 @@ func cmdAuditVerify(args []string, out io.Writer) int {
 }
 
 // cmdAuditControl implements `audit control`: it renders the control
-// ledger (spec §3.6) as a human-readable audit trail via control.Render.
-// A missing control log (nothing has ever been recorded there) is
-// reported plainly rather than as a generic open error; a torn/broken
-// chain still renders whatever valid prefix ReadVerify recovered,
-// followed by the integrity line naming the failure, and exits nonzero.
+// ledger (spec §3.6) as a human-readable audit trail via control.RenderView,
+// across every sealed segment and the active as one chain. A missing control
+// log (nothing has ever been recorded there) is reported plainly rather than
+// as a generic open error, and so is a missing active beside a manifest or
+// segment files; any other segment-set fault still renders whatever valid
+// prefix control.Read recovered, followed by the integrity line naming the
+// failure, and exits nonzero. A seal whose rotation did not complete renders
+// its state line and exits 0: this is a read, and audit verify control owns
+// the exit code for it.
 // After the integrity line it reports the installed pointer's standing:
 // whether <dir of --control-log>/installed/current names the last recorded
 // install — the last successful apply or kill-switch flip on record
@@ -1344,21 +1362,25 @@ func cmdAuditControl(args []string, out io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	records, head, err := ledger.ReadVerify(*controlLog, ledger.Locked)
-	if err != nil {
-		var te *ledger.TornError
-		var be *ledger.ChainBrokenError
-		if !errors.As(err, &te) && !errors.As(err, &be) {
-			if os.IsNotExist(err) {
-				_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
-				return 1
-			}
-			// Some other open/IO failure: no ledger to render.
-			_, _ = fmt.Fprintln(out, err)
+	v, err := control.Read(*controlLog, ledger.Locked)
+	records := v.Records
+	if err != nil && !isChainFault(err) {
+		if os.IsNotExist(err) {
+			_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
 			return 1
 		}
+		// Some other open/IO failure, or a missing active with history (its
+		// text names the remedy): no ledger to render.
+		_, _ = fmt.Fprintln(out, err)
+		return 1
 	}
-	_, _ = fmt.Fprint(out, control.Render(records, head, err))
+	_, _ = fmt.Fprint(out, control.RenderView(v, err))
+	if se, ok := errors.AsType[*control.SetError](err); ok && se.Unwrap() == nil {
+		// A set fault the integrity line only names (not the active's own
+		// torn or broken chain, whose line is its whole story): the remedy is
+		// the error's text.
+		_, _ = fmt.Fprintln(out, err)
+	}
 	line, _ := installedPointerLine(*controlLog, records)
 	_, _ = fmt.Fprint(out, line)
 	if err != nil {
@@ -1375,9 +1397,12 @@ func cmdAuditControl(args []string, out io.Writer) int {
 // to cmdAuditVerify. It computes EVERYTHING, prints every line, and only then
 // picks the exit by precedence — unlike a check that returns at the first
 // verdict, a repaired root still shows an --expect-head mismatch and a
-// pointer mismatch. A missing log, any other open/IO failure, and a
-// torn/broken chain exit 1 first and stop: such a chain has no positions to
-// reproduce heads at. Every recorded anchor is then checked (verifyAnchors:
+// pointer mismatch. A missing log, any other open/IO failure, and any
+// segment-set fault (a torn or broken segment, a boundary, a missing or
+// unexpected segment, a manifest that disagrees) exit 1 first and stop,
+// after the head of the valid prefix: such a chain has no positions to
+// reproduce heads at. A set that verifies prints a line per sealed segment
+// and the active (segmentLines). Every recorded anchor is then checked (verifyAnchors:
 // the structural check, then the stored proof under the pinned log key, then
 // a presence check unless --offline) and its line printed. Then, in
 // precedence order: 6 an anchor disagrees with the chain or the log; 3 tainted (control.IsTainted
@@ -1388,7 +1413,9 @@ func cmdAuditControl(args []string, out io.Writer) int {
 // install (control.Installing) — an install whose event was never appended,
 // or whose record was lost; 7 an anchor could not be decided (an unreachable
 // log, a key the verifier does not hold) — never a tamper verdict, and
-// outranked by every definitive one; 0 otherwise; 2 usage.
+// outranked by every definitive one; 8 a seal's rotation did not complete
+// (the chain is intact; an operator step is owed — run audit seal), last,
+// so every integrity verdict outranks it; 0 otherwise; 2 usage.
 func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit verify control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
@@ -1404,24 +1431,25 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, "audit verify control: --expect-head must be <hex> or <seq>:<hex> (64 lowercase hex)")
 		return 2
 	}
-	records, head, err := ledger.ReadVerify(*controlLog, ledger.Locked)
-	if err != nil {
-		var te *ledger.TornError
-		var be *ledger.ChainBrokenError
-		if !errors.As(err, &te) && !errors.As(err, &be) {
-			if os.IsNotExist(err) {
-				_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
-				return 1
-			}
-			// Some other open/IO failure: no ledger to report a head for.
-			_, _ = fmt.Fprintln(out, err)
+	v, err := control.Read(*controlLog, ledger.Locked)
+	records, head := v.Records, v.Head
+	if err != nil && !isChainFault(err) {
+		if os.IsNotExist(err) {
+			_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
 			return 1
 		}
+		// Some other open/IO failure, or a missing active with history: no
+		// ledger to report a head for.
+		_, _ = fmt.Fprintln(out, err)
+		return 1
 	}
 	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
+	}
+	for _, l := range segmentLines(v) {
+		_, _ = fmt.Fprintln(out, l)
 	}
 	line, pointerMismatch := installedPointerLine(*controlLog, records)
 	_, _ = fmt.Fprint(out, line)
@@ -1448,8 +1476,42 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 		return exitInstalledMismatch
 	case anchors.unverifiable > 0:
 		return exitAnchorUnverifiable
+	case v.State != control.StateOpen:
+		return exitRotationIncomplete
 	}
 	return 0
+}
+
+// isChainFault reports whether err from control.Read leaves a valid prefix
+// to report: any segment-set fault except a missing active, which leaves no
+// ledger at all (a root with history is never "nothing recorded yet").
+func isChainFault(err error) bool {
+	se, ok := errors.AsType[*control.SetError](err)
+	return ok && se.Fault != control.FaultActiveMissing
+}
+
+// segmentLines are audit verify control's per-segment lines — printed only
+// on a root that has sealed or whose rotation did not complete, so a
+// never-sealed root's output is unchanged. They are a verifier input: an
+// operator who ships them off the box can rewrite a damaged manifest from
+// them.
+func segmentLines(v control.View) []string {
+	if len(v.Sealed) == 0 && v.State == control.StateOpen {
+		return nil
+	}
+	var lines []string
+	for _, s := range v.Sealed {
+		lines = append(lines, fmt.Sprintf("segment %d: seq %d–%d sealed %s %s sha256=%s verified", s.N, s.FirstSeq, s.HeadSeq, s.SealedAt.UTC().Format(time.RFC3339), filepath.Base(s.Path), s.SHA256))
+	}
+	if v.Active.Records == 0 {
+		lines = append(lines, fmt.Sprintf("active: empty (next seq %d)", v.Active.FirstSeq))
+	} else {
+		lines = append(lines, fmt.Sprintf("active: seq %d–%d (%d events)", v.Active.FirstSeq, v.Active.HeadSeq, v.Active.Records))
+	}
+	if v.State != control.StateOpen {
+		lines = append(lines, fmt.Sprintf("control ledger: segment %d sealed, rotation not completed; run: agenthof audit seal", v.RotatingSegment()))
+	}
+	return lines
 }
 
 // cmdAuditRepairControl implements `audit repair control [--control-log
@@ -1461,10 +1523,15 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 // authentication refusal and like roles that cannot be read — is printed
 // and exits nonzero WITHOUT writing any control event, because the ledger
 // here may be exactly the torn file being repaired. Only an authorized
-// invoker reaches control.Repair, which moves the torn fragment aside,
-// truncates the live file, and appends the chained "repair" event that
-// taints the ledger forever (control.IsTainted; reported by a later
-// `audit verify control` as exit 3).
+// invoker reaches control.Repair, which decides over the whole segment set:
+// a torn tail of the active is moved aside, the active truncated, and the
+// chained "repair" event appended; bytes after a successful seal in the
+// active are moved aside and the rotation completed, the "repair" event
+// opening the next segment. Either way the ledger is tainted forever
+// (control.IsTainted; reported by a later `audit verify control` as exit
+// 3). An incomplete rotation (state B or C), a fault in a sealed segment, a
+// chain break and every structural fault are refused with their own remedy
+// and nothing changes — only a damaged tail of the ACTIVE is ever truncated.
 //
 // A missing control log is reported plainly rather than as a generic
 // open error, matching cmdAuditControl/cmdAuditVerifyControl. An
@@ -1539,34 +1606,63 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	// The root's integrity posture — read only now, after authorization and
 	// before the ledger is looked at: loading it earlier would print the
 	// root's posture and a root-local path to a caller who is not allowed to
-	// learn either. Nothing between the check above and the Stat below
+	// learn either. Nothing between the check above and the read below
 	// writes, so no repair ever runs on a root this build cannot honour.
 	if _, err := loadIntegrity(*controlLog); err != nil {
 		_, _ = fmt.Fprintf(out, "audit repair control: %v\n", err)
 		return 2
 	}
 
-	if _, statErr := os.Stat(*controlLog); statErr != nil {
-		if os.IsNotExist(statErr) {
-			_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
+	// A root with nothing recorded has nothing to repair; a root with history
+	// and no active file is a missing segment, never "nothing recorded", and
+	// is not repaired either. Every other verdict is control.Repair's to make.
+	if _, rerr := control.Read(*controlLog, ledger.Locked); rerr != nil {
+		var se *control.SetError
+		if !errors.As(rerr, &se) {
+			if os.IsNotExist(rerr) {
+				_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
+				return 1
+			}
+			_, _ = fmt.Fprintln(out, rerr)
 			return 1
 		}
-		_, _ = fmt.Fprintln(out, statErr)
-		return 1
+		if se.Fault == control.FaultActiveMissing {
+			_, _ = fmt.Fprintln(out, rerr)
+			return 1
+		}
 	}
 
-	fragLen, fragSHA, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness())
+	// installed.lock EXCLUSIVE around the repair: the post-seal case rotates
+	// the set, and the lock keeps every pointer writer out of that window.
+	// Lock order store → ledger, as every writer takes them.
+	unlock, lockErr := ledger.LockFile(installedLock(*controlLog))
+	if lockErr != nil {
+		if errors.Is(lockErr, ledger.ErrLockHeld) {
+			_, _ = fmt.Fprintf(out, "audit repair control: %s\n", msgLockBusy)
+			return 1
+		}
+		_, _ = fmt.Fprintln(out, lockErr)
+		return 1
+	}
+	res, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness())
+	unlock()
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
-	_, _ = fmt.Fprintf(out, "repaired: moved %d bytes (sha256=%s) to %s; control ledger tainted\n",
-		fragLen, fragSHA, latestTornFragmentPath(*controlLog))
-	records, head, verr := ledger.ReadVerify(*controlLog, ledger.Locked)
+	if res.CompletedSegment > 0 {
+		_, _ = fmt.Fprintf(out, "repaired: moved %d bytes (sha256=%s) to %s; rotation of segment %d completed; control ledger tainted\n",
+			res.FragmentLen, res.FragmentSHA, latestTornFragmentPath(*controlLog), res.CompletedSegment)
+	} else {
+		_, _ = fmt.Fprintf(out, "repaired: moved %d bytes (sha256=%s) to %s; control ledger tainted\n",
+			res.FragmentLen, res.FragmentSHA, latestTornFragmentPath(*controlLog))
+	}
+	v, verr := control.Read(*controlLog, ledger.Locked)
 	if verr != nil {
 		_, _ = fmt.Fprintln(out, verr)
 		return 1
 	}
+	records, head := v.Records, v.Head
 	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
 	if tainted, seq := control.IsTainted(records); tainted {
 		_, _ = fmt.Fprintf(out, "control ledger TAINTED: repaired at seq %d\n", seq)
@@ -1575,16 +1671,21 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 }
 
 // latestTornFragmentPath finds the most recently created
-// "<controlLog>.torn-<unix-seconds>" sibling file, for the human-readable
+// "<active>.torn-<unix-seconds>" sibling file, for the human-readable
 // message printed after a successful control.Repair. control.Repair
-// itself only returns the fragment's length and sha256 (spec §3.6's
-// interface), not the path it chose, so this glob-and-pick-newest
-// reconstructs it; timestamps are decimal Unix seconds of equal length
-// today, so the lexicographically greatest match is also the newest. A
-// failure here never fails the repair itself — it already succeeded —
-// so this just falls back to a glob pattern if, somehow, nothing matches.
+// itself only returns the fragment's length and sha256, not the path it
+// chose, so this glob-and-pick-newest reconstructs it beside the resolved
+// active — where the fragment is written, like every file of the segment
+// set; timestamps are decimal Unix seconds of equal length today, so the
+// lexicographically greatest match is also the newest. A failure here never
+// fails the repair itself — it already succeeded — so this just falls back
+// to a glob pattern if, somehow, nothing matches.
 func latestTornFragmentPath(controlLog string) string {
-	pattern := controlLog + ".torn-*"
+	resolved, err := filepath.EvalSymlinks(controlLog)
+	if err != nil {
+		resolved = controlLog
+	}
+	pattern := resolved + ".torn-*"
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) == 0 {
 		return pattern

@@ -86,7 +86,7 @@ func TestControlAllows(t *testing.T) {
 }
 
 func TestControlOpsFixedSet(t *testing.T) {
-	for _, op := range []string{"apply", "enable", "disable", "repair", "provision", "prune", "pull", "anchor"} {
+	for _, op := range []string{"apply", "enable", "disable", "repair", "provision", "prune", "pull", "anchor", "seal"} {
 		if !KnownControlOp(op) {
 			t.Fatalf("%q must be a control op", op)
 		}
@@ -118,6 +118,28 @@ func TestControlAllowsAnchor(t *testing.T) {
 	}
 	if KnownControlOp("vouch") {
 		t.Fatal("vouch is not a grantable operation")
+	}
+}
+
+// TestControlAllowsSeal: the ninth operation is granted exactly like the
+// other eight — membership AND grant; a public role grants no seal; apply,
+// repair and anchor do not imply it.
+func TestControlAllowsSeal(t *testing.T) {
+	inv := identity.Invoker{Subject: "dana@example.com", Groups: []string{"platform-eng"}}
+	if !ControlAllows([]config.RoleDef{{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"seal"}}}, inv, "seal") {
+		t.Fatal("membership AND grant must allow seal")
+	}
+	if ControlAllows([]config.RoleDef{{Name: "ops", AllowedGroups: []string{"finance"}, Control: []string{"seal"}}}, inv, "seal") {
+		t.Fatal("grant without membership must deny")
+	}
+	if ControlAllows([]config.RoleDef{{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"apply", "repair", "anchor"}}}, inv, "seal") {
+		t.Fatal("apply, repair and anchor do not imply seal")
+	}
+	if ControlAllows([]config.RoleDef{{Name: "pub", AllowedGroups: []string{"*"}, Control: []string{"seal"}}}, inv, "seal") {
+		t.Fatal("a public role grants no control operation")
+	}
+	if ControlOps[len(ControlOps)-1] != "seal" || len(ControlOps) != 9 {
+		t.Fatalf("seal is the ninth and last operation: %v", ControlOps)
 	}
 }
 

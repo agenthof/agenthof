@@ -1,12 +1,14 @@
 package control
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"time"
@@ -19,7 +21,7 @@ import (
 // record is the control/1 on-disk shape. Field order here is the wire
 // order (spec §3.2): v, seq, time, action, agent, outcome, reason,
 // invoker, asserted_as, witness, config_hash, bootstrap, fragment_len,
-// fragment_sha256, origin, detail, anchor, prev, log_id. It intentionally does not embed Event,
+// fragment_sha256, origin, detail, anchor, seal, prev, log_id. It intentionally does not embed Event,
 // since the wire order interleaves the writer-assigned fields (seq, time
 // up front; prev, log_id at the end) around the caller-assigned ones.
 //
@@ -47,8 +49,10 @@ type record struct {
 	// Anchor is the payload of an action "anchor" record, copied from the
 	// Event once the permit below admits it.
 	Anchor *Anchor `json:"anchor,omitempty"`
-	Prev   string  `json:"prev"`
-	LogID  string  `json:"log_id,omitempty"`
+	// Seal is the payload of an action "seal" record (control.Seal).
+	Seal  *Seal  `json:"seal,omitempty"`
+	Prev  string `json:"prev"`
+	LogID string `json:"log_id,omitempty"`
 }
 
 // MaxAnchorProofLen bounds Anchor.Proof on a record: 8192 bytes of standard
@@ -155,32 +159,57 @@ func checkAnchorCoverage(a *Anchor, count int) error {
 }
 
 // Append admits an anchor record only through checkAnchorShape and
-// checkAnchorCoverage, and rejects any non-"success" Event with a nil Reason:
-// every control-plane denial must explain itself, and this is the one place
-// that rule is enforced, rather than scattered across call sites. It then
-// opens the control log at path Locked (ledger.Open verifies the chain and
-// fails on a torn or broken log), assigns seq=Count()+1, time=now UTC, and
-// prev=the current head, sets a fresh log_id on the genesis record only,
-// marshals the record, and appends it. It returns the chain's new Head.
+// checkAnchorCoverage, a seal record only through checkSealShape and
+// checkSealPlacement (seal.go), and rejects any non-"success" Event with a
+// nil Reason: every control-plane denial must explain itself, and this is the
+// one place that rule is enforced, rather than scattered across call sites.
+// It then opens the active segment through the seam (openActive: a torn or
+// broken active, a sealed-not-rotated active — ErrSealed — or a damaged set
+// refuses), appends on the chain's logical position (appendOn), and closes.
+// It returns the chain's new Head, whose Count is the global seq.
 func Append(path string, e Event) (ledger.Head, error) {
 	if err := checkAnchorShape(e); err != nil {
+		return ledger.Head{}, err
+	}
+	if err := checkSealShape(e); err != nil {
 		return ledger.Head{}, err
 	}
 	if e.Outcome != "success" && e.Reason == nil {
 		return ledger.Head{}, fmt.Errorf("control: outcome %q requires a reason", e.Outcome)
 	}
-	c, err := ledger.Open(path, ledger.Locked)
+	c, view, err := openActive(path)
 	if err != nil {
 		return ledger.Head{}, err
 	}
 	defer func() { _ = c.Close() }()
-	if err := checkAnchorCoverage(e.Anchor, c.Count()); err != nil {
-		return ledger.Head{}, err
-	}
+	head, _, err := appendOn(c, view, e)
+	return head, err
+}
 
+// appendOn is Append's body over a chain the caller already holds (openActive
+// gave it, with the View read under its lock), so the seal can write its
+// record on the chain it holds without a second handle contending with the
+// first. The two permit rules that need the chain run here: anchor coverage
+// and seal placement (the payload must describe exactly the active this
+// chain holds — the View's sealed count and records are what it is judged
+// against). Every position is LOGICAL: coverage is judged against
+// Base+Count, seq is Base+Count+1, and log_id is minted on the genesis —
+// Base 0, Count 0 — and nowhere else: the first record of a later segment
+// continues the chain's identity, it does not start one. The returned Head is
+// logical too: Count is the chain's last seq, which is what every writer
+// prints as seq=. The marshalled line is returned beside it for a caller that
+// needs the bytes it wrote.
+func appendOn(c *ledger.Chain, view View, e Event) (ledger.Head, []byte, error) {
+	logical := int(c.Base()) + c.Count()
+	if err := checkAnchorCoverage(e.Anchor, logical); err != nil {
+		return ledger.Head{}, nil, err
+	}
+	if err := checkSealPlacement(c, view, e); err != nil {
+		return ledger.Head{}, nil, err
+	}
 	rec := record{
 		V:           "control/1",
-		Seq:         c.Count() + 1,
+		Seq:         logical + 1,
 		Time:        time.Now().UTC(),
 		Action:      e.Action,
 		Agent:       e.Agent,
@@ -196,120 +225,257 @@ func Append(path string, e Event) (ledger.Head, error) {
 		Origin:      e.Origin.Sanitized(),
 		Detail:      origin.Clean(e.Detail),
 		Anchor:      e.Anchor,
+		Seal:        e.Seal,
 		Prev:        c.Prev(),
 	}
-	if c.Count() == 0 {
+	if c.Base() == 0 && c.Count() == 0 {
 		id, err := newLogID()
 		if err != nil {
-			return ledger.Head{}, err
+			return ledger.Head{}, nil, err
 		}
 		rec.LogID = id
 	}
-
 	line, err := json.Marshal(rec)
 	if err != nil {
-		return ledger.Head{}, err
+		return ledger.Head{}, nil, err
 	}
 	if err := c.Append(line); err != nil {
-		return ledger.Head{}, err
+		return ledger.Head{}, nil, err
 	}
-	return ledger.Head{Hash: c.Prev(), Count: c.Count()}, nil
+	return ledger.Head{Hash: c.Prev(), Count: int(c.Base()) + c.Count()}, line, nil
 }
 
-// Repair recovers a torn-tail control ledger (spec §3.6). It reads the
-// live file with ledger.ReadVerify(path, ledger.Locked):
-//
-//   - nil error means the chain is already clean — there is nothing to
-//     repair, and Repair refuses rather than silently doing nothing.
-//   - a *ledger.ChainBrokenError means a well-formed record disagrees
-//     with the chain (wrong prev/seq, or a non-final syntax error) —
-//     that is not a simple "cut off the damaged tail" fix, so Repair
-//     refuses and names the offending line for a human to investigate.
-//   - only a *ledger.TornError (the final record looks like the tail of
-//     an interrupted write) is auto-repairable, and is the only case
-//     that falls through to the steps below.
-//
-// The fragment — every byte from the TornError's Offset (the end of the
-// last fully verified record) to end-of-file — is copied to a sibling
-// file "<path>.torn-<unix-seconds>" (mode 0600), created with O_EXCL so
-// a second repair landing in the same second never clobbers an earlier
-// fragment (it gets a "-2", "-3", ... suffix instead; see
-// writeTornFragment). That fragment file is NEVER pruned by anything in
-// this package or the CLI: it is the only remaining copy of whatever was
-// in the damaged tail, kept indefinitely as a forensic artifact for an
-// operator to inspect by hand.
-//
-// The live file is then truncated to Offset — removing the damaged tail
-// entirely, including a terminated-but-unparseable last line, which
-// counts as part of the fragment, not a kept record — and a chained
-// "repair" event is appended via Append, carrying the fragment's length
-// and sha256 so every future read of the ledger shows it was recovered
-// (see IsTainted; a repair record's presence taints the ledger forever).
-//
-// Locking note: ReadVerify above takes only a shared lock and releases
-// it before returning, so there is a small window before the truncate
-// and Append below where another process could act on the file. This is
-// accepted for V1 (single-admin operation) rather than adding
-// cross-process coordination beyond what ledger.Open/ReadVerify already
-// provide; the truncate and Append are run back-to-back to keep that
-// window as small as possible.
-//
-// Residual risk: if Truncate below succeeds but the following Append
-// then fails (e.g. disk full, or another process holds the ledger lock
-// past Append's own timeout), the live file is left as a valid, clean,
-// shorter chain with NO repair record — the taint is lost, even though
-// the fragment file (written before either of those steps) still exists
-// as evidence that a repair was attempted. Making truncate+append atomic
-// would need a write-new-file-then-rename, which is beyond V1's scope;
-// an operator hitting this should treat any "<path>.torn-*" file's
-// existence as itself meaning the ledger was once torn, regardless of
-// what the live file's own taint bit says.
-func Repair(path string, op identity.Invoker, assertedAs string, witness Witness) (fragmentLen int, fragmentSHA string, err error) {
-	_, _, verr := ledger.ReadVerify(path, ledger.Locked)
-	if verr == nil {
-		return 0, "", fmt.Errorf("control: ledger %s is not torn; nothing to repair", path)
-	}
-	var broken *ledger.ChainBrokenError
-	var torn *ledger.TornError
-	switch {
-	case errors.As(verr, &broken):
-		return 0, "", fmt.Errorf("control: chain break at line %d is not auto-repairable (only a torn tail can be repaired)", broken.Line)
-	case errors.As(verr, &torn):
-		// Only a torn tail is auto-repairable; fall through below.
-	default:
-		return 0, "", verr
-	}
+// RepairResult is what a repair did: the fragment it moved aside and, when
+// it completed a rotation, the segment it sealed (0 for a plain torn tail).
+type RepairResult struct {
+	FragmentLen      int
+	FragmentSHA      string
+	CompletedSegment int
+}
 
-	raw, err := os.ReadFile(path)
+// Repair recovers the control ledger's ACTIVE segment and nothing else. It
+// reads the whole set (Read, under the reader's shared lock) and decides
+// from the verdict; only two shapes are repaired, and in both the damaged
+// bytes are moved aside before anything is truncated:
+//
+//   - the active ends in a torn tail and its verified records hold no
+//     successful seal (state A, or a seal line cut mid-write — a torn seal is
+//     no seal): the tail from the TornError's Offset is moved to a fragment,
+//     the active truncated there, and a "repair" record appended on the
+//     active's logical position — the taint lands in the active segment and
+//     IsTainted finds it in the logical chain;
+//   - the active's verified records hold a successful seal that recomputes
+//     and bytes follow its line — records a writer older than this root's
+//     seals appended (FaultSealNotLast), a torn write, or both: every byte
+//     after the seal line is moved to a fragment, the active truncated at the
+//     end of the seal line (state B exactly), the rotation completed
+//     (CompleteSeal: link, manifest, swap — the same commit points), and the
+//     "repair" record appended as the new active's first record, prev the
+//     seal line's hash, seq the seal's + 1. A seal whose payload does not
+//     recompute is a planted seal: refused with that fault before anything
+//     is touched, because completing it would fail after the truncate.
+//
+// Everything else refuses with the fault's own remedy and changes nothing:
+// a clean set ("not torn; nothing to repair"); state B or C ("run audit
+// seal" — completing a rotation is not a repair); a chain break in the
+// active (the global seq; a well-formed record that disagrees with the chain
+// is not a tail to cut off); a boundary fault in the active (its cause's
+// remedy, never "run repair"); any fault in a sealed segment (a sealed
+// segment is the unit a copy exists of and the boundary every later segment
+// chains from, so it is never repaired in place); a missing, unexpected or
+// disagreeing segment or manifest.
+//
+// The fragment file "<active>.torn-<unix-seconds>" (mode 0600, O_EXCL — a
+// second repair in the same second gets a "-2", "-3", ... suffix; see
+// writeTornFragment) is the only remaining copy of the bytes moved aside.
+// Nothing in this package or the CLI ever prunes it: it is kept indefinitely
+// as a forensic artifact for an operator to inspect by hand, and its
+// existence alone means the ledger was once damaged, whatever the live
+// chain's taint says.
+//
+// Locking: Read's shared lock is released before anything is done; the
+// fragment and the truncate then run under the active's exclusive lock
+// (moveTailAside), which excludes every writer that respects it, and the
+// bytes are re-read under that lock and must still end at the verified
+// prefix, else the repair refuses. CompleteSeal and Append take their own
+// locks afterwards; a write that lands in between stays on disk and
+// surfaces as a set fault on the next read — nothing is cut off unseen. The
+// command holds installed.lock exclusively around the whole call, which
+// keeps every pointer writer out of the rotation.
+//
+// Residual risks: a crash between the truncate and the repair append leaves
+// a clean, shorter chain with no taint, the fragment its only evidence; in
+// the post-seal case a crash between the truncate and the rotation leaves
+// state B (audit seal completes it; the repair record is then owed, and a
+// re-run of repair refuses with "run audit seal") and a crash between the
+// rotation and the append leaves a clean rotated root with a fragment and no
+// taint. Making the steps atomic would need a write-new-set-then-rename,
+// beyond V1's scope.
+func Repair(path string, op identity.Invoker, assertedAs string, witness Witness) (RepairResult, error) {
+	resolved, err := resolveControlLog(path)
 	if err != nil {
-		return 0, "", err
+		return RepairResult{}, err
 	}
-	if torn.Offset < 0 || torn.Offset > int64(len(raw)) {
-		return 0, "", fmt.Errorf("control: torn offset %d out of range for %d-byte file %s", torn.Offset, len(raw), path)
+	v, verr := Read(path, ledger.Locked)
+	if verr == nil {
+		if v.State != StateOpen {
+			return RepairResult{}, fmt.Errorf("control: ledger %s: the active segment is sealed and not yet rotated; run audit seal to complete it — not a repair matter", path)
+		}
+		return RepairResult{}, fmt.Errorf("control: ledger %s is not torn; nothing to repair", path)
 	}
-	fragment := raw[torn.Offset:]
-	fragmentLen = len(fragment)
-	sum := sha256.Sum256(fragment)
-	fragmentSHA = hex.EncodeToString(sum[:])
+	var se *SetError
+	if !errors.As(verr, &se) || se.Segment != 0 {
+		return RepairResult{}, verr // not a set fault, or a fault in a sealed segment: its own text
+	}
+	switch se.Fault {
+	case FaultTorn, FaultSealNotLast:
+	case FaultBroken:
+		return RepairResult{}, fmt.Errorf("control: chain break at seq %d is not auto-repairable (only a torn tail can be repaired)", se.Seq)
+	default:
+		return RepairResult{}, verr
+	}
+	active := activeRecords(v)
+	sealAt, err := sealToComplete(v, active)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	if sealAt < 0 {
+		var torn *ledger.TornError
+		if !errors.As(se.Err, &torn) {
+			return RepairResult{}, fmt.Errorf("control: ledger %s: records after a seal were reported and no seal was found; run audit verify control", path)
+		}
+		res, err := moveTailAside(resolved, torn.Offset, active)
+		if err != nil {
+			return RepairResult{}, err
+		}
+		return res, appendRepair(resolved, res, op, assertedAs, witness)
+	}
+	var offset int64
+	for _, r := range active[:sealAt+1] {
+		offset += int64(len(r.Raw)) + 1
+	}
+	res, err := moveTailAside(resolved, offset, active[:sealAt+1])
+	if err != nil {
+		return RepairResult{}, err
+	}
+	if crashAt("repair_after_truncate_before_rotate") {
+		return RepairResult{}, errStoppedByTestHook
+	}
+	seal, err := CompleteSeal(resolved)
+	if err != nil {
+		return RepairResult{}, fmt.Errorf("control: moved %d bytes after the seal line aside and truncated the active at the seal, but completing the rotation failed: %w; run audit seal to complete it — the fragment file is the evidence of the repair", res.FragmentLen, err)
+	}
+	res.CompletedSegment = seal.Segment
+	if crashAt("repair_after_rotate_before_append") {
+		return RepairResult{}, errStoppedByTestHook
+	}
+	return res, appendRepair(resolved, res, op, assertedAs, witness)
+}
 
-	if err := writeTornFragment(path, fragment); err != nil {
-		return 0, "", err
+// sealToComplete finds the first successful seal among the active's verified
+// records: -1 when there is none (a torn tail is repaired as a torn tail).
+// A seal that is there must recompute — judged exactly as finishActive judges
+// a sealed-not-rotated active, over the records through the seal line — and
+// the root must carry the identity the manifest records (manifestLogID), so
+// that the rotation repair is attempted only where it is known to complete;
+// a planted seal is its FaultManifest and a genesis without a log_id is
+// ErrUnsealable, both refused before anything is touched.
+func sealToComplete(v View, active []ledger.Record) (int, error) {
+	for i, r := range active {
+		rec, ok := decodeRecord(r)
+		if !ok || rec.Action != "seal" || rec.Outcome != "success" {
+			continue
+		}
+		through := v
+		through.Records = v.Records[:len(v.Records)-len(active)+i+1]
+		through.Active.Records = i + 1
+		through.Head = ledger.Head{Hash: hashOf(r.Raw), Count: rec.Seq}
+		if _, err := finishActive(through, len(v.Sealed)); err != nil {
+			return -1, err
+		}
+		if _, err := manifestLogID(through); err != nil {
+			return -1, err
+		}
+		return i, nil
 	}
-	if err := os.Truncate(path, torn.Offset); err != nil {
-		return 0, "", err
+	return -1, nil
+}
+
+// moveTailAside is the one destructive step of a repair, and it runs under
+// the active's exclusive lock, as every writer does: the active is opened by
+// name, LOCK_EX taken (bounded; busy refuses), the handle re-stat'ed to be
+// the file the name still refers to (a rotation swapped under the name
+// refuses — a truncate by name would otherwise extend a fresh, empty
+// active), and the bytes read through that handle. The verified prefix Read
+// saw must still end exactly at offset — its last line, newline and all,
+// immediately before it — else the active changed under the repair and
+// nothing is touched. Only then is every byte from offset to end-of-file
+// copied to a fresh fragment file (the evidence, synced before anything is
+// removed) and the handle truncated at offset and synced. The lock is
+// released on return; CompleteSeal and Append take their own afterwards.
+func moveTailAside(resolved string, offset int64, prefix []ledger.Record) (RepairResult, error) {
+	f, err := os.OpenFile(resolved, os.O_RDWR, 0)
+	if err != nil {
+		return RepairResult{}, err
 	}
-	if _, err := Append(path, Event{
+	defer func() { _ = f.Close() }()
+	if err := ledger.LockExclusive(f); err != nil {
+		return RepairResult{}, fmt.Errorf("control: repair %s: %w", resolved, err)
+	}
+	defer ledger.Unlock(f)
+	fi, err := f.Stat()
+	if err != nil {
+		return RepairResult{}, err
+	}
+	if !sameFile(resolved, fi) {
+		return RepairResult{}, fmt.Errorf("control: %s was rotated while it was being repaired; run audit verify control and retry", resolved)
+	}
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	if offset < 0 || offset > int64(len(raw)) {
+		return RepairResult{}, fmt.Errorf("control: torn offset %d out of range for %d-byte file %s", offset, len(raw), resolved)
+	}
+	if len(prefix) > 0 {
+		last := append(append([]byte{}, prefix[len(prefix)-1].Raw...), '\n')
+		if !bytes.HasSuffix(raw[:offset], last) {
+			return RepairResult{}, fmt.Errorf("control: %s changed while it was being repaired; run audit verify control and retry", resolved)
+		}
+	}
+	fragment := raw[offset:]
+	sum := sha256.Sum256(fragment)
+	res := RepairResult{FragmentLen: len(fragment), FragmentSHA: hex.EncodeToString(sum[:])}
+	if err := writeTornFragment(resolved, fragment); err != nil {
+		return RepairResult{}, err
+	}
+	if err := f.Truncate(offset); err != nil {
+		return RepairResult{}, err
+	}
+	if err := f.Sync(); err != nil {
+		return RepairResult{}, err
+	}
+	return res, nil
+}
+
+// appendRepair appends the chained "repair" record carrying the fragment's
+// length and sha256, so every future read shows the ledger was recovered
+// (IsTainted; the taint is forever). It goes through Append, on the active's
+// logical position — after a completed rotation that is the new segment's
+// first record.
+func appendRepair(resolved string, res RepairResult, op identity.Invoker, assertedAs string, witness Witness) error {
+	if _, err := Append(resolved, Event{
 		Action:      "repair",
 		Outcome:     "success",
-		FragmentLen: fragmentLen,
-		FragmentSHA: fragmentSHA,
+		FragmentLen: res.FragmentLen,
+		FragmentSHA: res.FragmentSHA,
 		Invoker:     op,
 		AssertedAs:  assertedAs,
 		Witness:     witness,
 	}); err != nil {
-		return 0, "", err
+		return fmt.Errorf("control: moved %d bytes aside and truncated the active, but the repair record could not be appended: %w", res.FragmentLen, err)
 	}
-	return fragmentLen, fragmentSHA, nil
+	return nil
 }
 
 // maxTornFragmentAttempts bounds writeTornFragment's retry loop against

@@ -167,6 +167,7 @@ const (
 	ApplyPreconditionFailed   = "precondition_failed"
 	ApplyError                = "error"
 	ApplyLedgerDamaged        = "ledger_damaged"
+	ApplyRotationIncomplete   = "rotation_incomplete"
 	ApplyBusy                 = "busy"
 	ApplyInstalledNotRecorded = "installed_not_recorded"
 	ApplyInstalledNotSigned   = "installed_not_signed"
@@ -178,7 +179,11 @@ const (
 const (
 	ReasonStoreUnusable = "store unusable"
 	ReasonLedgerDamaged = "control ledger damaged"
-	ReasonNotRecorded   = "control event could not be recorded"
+	// ReasonRotationIncomplete is the 500 body when the control ledger's
+	// active segment is sealed and its rotation did not complete: a client
+	// cannot fix it, and the remedy is an operator's audit seal on the host.
+	ReasonRotationIncomplete = "control ledger rotation incomplete; an operator must run audit seal on the host"
+	ReasonNotRecorded        = "control event could not be recorded"
 	// ReasonNotOnRecord is the 403 body when the installed configuration is
 	// not the control ledger's last recorded install: a client cannot fix it,
 	// and the body names no hash and no path.

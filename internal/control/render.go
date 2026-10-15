@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/ledger"
 )
@@ -83,6 +85,16 @@ func label(rec record) string {
 			return "vouched for installed config " + rec.ConfigHash
 		}
 		return "vouch " + rec.Outcome
+	case "seal":
+		// A successful seal is the last record of the segment it closes; the
+		// label names the unit so a reader can find the segment by ordinal.
+		if rec.Outcome == "success" {
+			if rec.Seal == nil {
+				return "seal record without payload"
+			}
+			return fmt.Sprintf("segment %d sealed (seq %d–%d)", rec.Seal.Segment, rec.Seal.FirstSeq, rec.Seal.HeadSeq)
+		}
+		return "seal " + rec.Outcome
 	case "anchor":
 		// The record pins a PRIOR head; the label names which one, so a
 		// reader can find the covered record by seq. A success record
@@ -121,20 +133,34 @@ func flipLabel(verb, pastTense string, rec record) string {
 // integrityLine renders the control ledger's final integrity line(s).
 // Taint (IsTainted) is decidable independently of chain verification, so
 // it is checked regardless of verr: on an otherwise-clean chain it
-// replaces "verified" outright, and on a torn/broken chain it is reported
-// alongside the torn/broken fact, never instead of it (spec §3.6: "a
-// torn+tainted log shows both facts").
-func integrityLine(records []ledger.Record, head ledger.Head, verr error) string {
-	tainted, seq := IsTainted(records)
+// replaces "verified" outright, and on a failed one it is reported
+// alongside the fault, never instead of it (spec §3.6: "a torn+tainted log
+// shows both facts"). Every seq printed is the GLOBAL seq of the logical
+// chain, which is the line number on a never-sealed ledger.
+func integrityLine(v View, verr error) string {
+	tainted, seq := IsTainted(v.Records)
 	if verr == nil {
 		if tainted {
 			return fmt.Sprintf("control ledger integrity: TAINTED (repaired at seq %d)\n", seq)
 		}
-		return fmt.Sprintf("control ledger integrity: verified (%d events)\n", head.Count)
+		if len(v.Sealed) > 0 {
+			return fmt.Sprintf("control ledger integrity: verified (%d events, %d sealed segments)\n", v.Head.Count, len(v.Sealed))
+		}
+		return fmt.Sprintf("control ledger integrity: verified (%d events)\n", v.Head.Count)
 	}
 	var sb strings.Builder
 	if tainted {
 		fmt.Fprintf(&sb, "control ledger integrity: TAINTED (repaired at seq %d)\n", seq)
+	}
+	sb.WriteString(faultLine(verr))
+	return sb.String()
+}
+
+// faultLine is the integrity line for a ledger that did not verify. A bare
+// ledger error (a caller that reads one file) keeps today's two verdicts.
+func faultLine(verr error) string {
+	if se, ok := errors.AsType[*SetError](verr); ok {
+		return setFaultLine(se)
 	}
 	if broken, ok := errors.AsType[*ledger.ChainBrokenError](verr); ok {
 		// Unlike the run-log renderer (internal/audit), this renderer
@@ -142,29 +168,79 @@ func integrityLine(records []ledger.Record, head ledger.Head, verr error) string
 		// seq == line, so the first bad record IS broken.Line itself —
 		// printing Line-1 would point an auditor at the last good record
 		// instead of the actual break.
-		fmt.Fprintf(&sb, "control ledger integrity: BROKEN at seq %d\n", broken.Line)
-		return sb.String()
+		return fmt.Sprintf("control ledger integrity: BROKEN at seq %d\n", broken.Line)
 	}
 	if _, ok := errors.AsType[*ledger.TornError](verr); ok {
-		sb.WriteString("control ledger integrity: TORN — last record incomplete\n")
-		return sb.String()
+		return "control ledger integrity: TORN — last record incomplete\n"
 	}
-	sb.WriteString("control ledger integrity: BROKEN at event 0\n")
-	return sb.String()
+	return "control ledger integrity: BROKEN at event 0\n"
 }
 
-// Render renders the control ledger's valid prefix (records) as a
-// human-readable audit trail: a header, one line per event carrying its
-// derived label, invoker, and time, and a final integrity line (spec
-// §3.6). head and verr are ReadVerify's second and third return values —
-// verr is nil for a clean ledger, or the typed ledger error
-// (*ledger.TornError / *ledger.ChainBrokenError) describing where
-// verification stopped; either way, records is whatever valid prefix was
-// recovered and is rendered in full.
+// setFaultLine is the one-line verdict on each segment-set fault. The full
+// remedy is the SetError's own text; this line names the fault and where.
+func setFaultLine(se *SetError) string {
+	const p = "control ledger integrity: "
+	switch se.Fault {
+	case FaultBroken:
+		if se.Segment == 0 {
+			return fmt.Sprintf(p+"BROKEN at seq %d\n", se.Seq)
+		}
+		return fmt.Sprintf(p+"BROKEN at seq %d (segment %d)\n", se.Seq, se.Segment)
+	case FaultTorn:
+		if se.Segment == 0 {
+			return p + "TORN — last record incomplete\n"
+		}
+		return fmt.Sprintf(p+"TORN (segment %d)\n", se.Segment)
+	case FaultBoundary:
+		if se.Segment == 0 {
+			return p + "BOUNDARY BROKEN between the last sealed segment and the active\n"
+		}
+		return fmt.Sprintf(p+"BOUNDARY BROKEN between segments %d and %d\n", se.Segment-1, se.Segment)
+	case FaultMissingSegment:
+		return fmt.Sprintf(p+"SEGMENT %d MISSING\n", se.Segment)
+	case FaultUnexpectedSegment:
+		return fmt.Sprintf(p+"UNEXPECTED SEGMENT %s\n", filepath.Base(se.Path))
+	case FaultManifest:
+		if se.Segment == 0 {
+			return fmt.Sprintf(p+"MANIFEST invalid: %v\n", se.Err)
+		}
+		return fmt.Sprintf(p+"MANIFEST disagrees with segment %d: %v\n", se.Segment, se.Err)
+	case FaultSealNotLast:
+		if se.Segment == 0 {
+			return fmt.Sprintf(p+"SEAL NOT LAST in the active segment (seal at seq %d)\n", se.Seq-1)
+		}
+		return fmt.Sprintf(p+"SEAL NOT LAST in segment %d (seal at seq %d)\n", se.Segment, se.Seq-1)
+	}
+	// FaultActiveMissing never reaches the renderer: callers print its text
+	// instead, there being no ledger to render.
+	return "control ledger integrity: BROKEN at event 0\n"
+}
+
+// Render renders the control ledger's valid prefix (records) of a
+// never-sealed ledger; it is RenderView over a View that holds only them.
 func Render(records []ledger.Record, head ledger.Head, verr error) string {
+	return RenderView(View{Records: records, Head: head, FirstSeq: 1}, verr)
+}
+
+// RenderView renders the ledger as one logical chain, as a human-readable
+// audit trail (spec §3.6): a header, one `segment k: seq A–B sealed <time>
+// <file>` line per sealed segment (only when there is one), the rotation
+// state when a seal did not complete, one line per event carrying its
+// derived label, invoker, and time, and a final integrity line. verr is
+// Read's second return value — nil for a clean ledger, or the typed error
+// (*SetError, or a bare *ledger.TornError / *ledger.ChainBrokenError) where
+// verification stopped; either way, v holds whatever valid prefix was
+// recovered and it is rendered in full.
+func RenderView(v View, verr error) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "control ledger — %d events\n\n", head.Count)
-	for _, r := range records {
+	fmt.Fprintf(&sb, "control ledger — %d events\n\n", v.Head.Count)
+	for _, s := range v.Sealed {
+		fmt.Fprintf(&sb, "segment %d: seq %d–%d sealed %s %s\n", s.N, s.FirstSeq, s.HeadSeq, s.SealedAt.UTC().Format(time.RFC3339), filepath.Base(s.Path))
+	}
+	if v.State != StateOpen {
+		fmt.Fprintf(&sb, "control ledger: segment %d sealed, rotation not completed; run: agenthof audit seal\n", v.RotatingSegment())
+	}
+	for _, r := range v.Records {
 		var rec record
 		if err := json.Unmarshal(r.Raw, &rec); err != nil {
 			// ReadVerify only admits a record into the valid prefix once
@@ -192,6 +268,6 @@ func Render(records []ledger.Record, head ledger.Head, verr error) string {
 		}
 		fmt.Fprintf(&sb, "  seq %d  %s  %s — %s\n", rec.Seq, t, lbl, who)
 	}
-	sb.WriteString(integrityLine(records, head, verr))
+	sb.WriteString(integrityLine(v, verr))
 	return sb.String()
 }

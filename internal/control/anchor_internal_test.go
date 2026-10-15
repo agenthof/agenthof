@@ -27,3 +27,21 @@ func TestRecordWireOrderPutsAnchorBetweenDetailAndPrev(t *testing.T) {
 		t.Fatalf("absent anchor must be byte-absent:\n%s", without)
 	}
 }
+
+// TestRecordWireOrderPutsSealBetweenAnchorAndPrev: the seal payload sits
+// after anchor and before prev when present, and anchor…prev / detail…prev
+// stay adjacent when absent — no record written today changes by a byte.
+func TestRecordWireOrderPutsSealBetweenAnchorAndPrev(t *testing.T) {
+	with, err := json.Marshal(record{V: "control/1", Seq: 57, Action: "seal", Outcome: "success",
+		Seal: &Seal{Segment: 1, FirstSeq: 1, HeadSeq: 56, HeadHash: "h", ContentSHA256: "c"}, Prev: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"witness":{"os_user":"","hostname":""},"seal":{"segment":1,"first_seq":1,"head_seq":56,"head_hash":"h","content_sha256":"c"},"prev":"p"`; !strings.Contains(string(with), want) {
+		t.Fatalf("wire order:\n%s\nwant substring %s", with, want)
+	}
+	without, _ := json.Marshal(record{V: "control/1", Seq: 1, Action: "apply", Outcome: "success", Prev: "p"})
+	if strings.Contains(string(without), "seal") {
+		t.Fatalf("absent seal must be byte-absent:\n%s", without)
+	}
+}

@@ -318,7 +318,8 @@ const remedyNotOnRecord = "if this install is legitimate, run: agenthof config v
 // nothing is on record), so config vouch can name the install it supersedes;
 // on busy or not-verifiable they are zero.
 func vouchInstalled(controlLog, hash string) (records []ledger.Record, last control.DecodedEvent, refusal *verifyRefusal) {
-	records, _, verr := ledger.ReadVerify(controlLog, ledger.Locked)
+	v, verr := control.Read(controlLog, ledger.Locked)
+	records = v.Records
 	var torn *ledger.TornError
 	var broken *ledger.ChainBrokenError
 	switch {
