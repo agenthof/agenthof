@@ -172,6 +172,37 @@ func TestWritableCreatesThroughADanglingSymlink(t *testing.T) {
 	}
 }
 
+// TestDanglingSymlinkBesideHistoryIsActiveMissing: a link whose target was
+// deleted beside a manifest is a root with history and no active — the
+// history is sought beside the TARGET, so neither the reader nor the writer
+// treats the dangling name as "nothing recorded", and nothing is created.
+func TestDanglingSymlinkBesideHistoryIsActiveMissing(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real", "control.jsonl")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := `{"v":"segments/1","log_id":"` + strings.Repeat("ab", 16) + `","segments":[]}`
+	if err := os.WriteFile(control.ManifestPath(target), []byte(m), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "control.jsonl")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	var se *control.SetError
+	if err := control.Writable(link); !errors.As(err, &se) || se.Fault != control.FaultActiveMissing {
+		t.Fatalf("Writable through a dangling link beside history: %v", err)
+	}
+	if _, err := os.Lstat(target); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("the writer must not create the target beside history")
+	}
+	_, err := control.Read(link, ledger.Locked)
+	if !errors.As(err, &se) || se.Fault != control.FaultActiveMissing || os.IsNotExist(err) {
+		t.Fatalf("Read through a dangling link beside history: %v", err)
+	}
+}
+
 // TestAppendRefusesSealRecords: until the seal writer exists, an Event that
 // says "seal" or carries a seal payload is refused before the ledger is
 // opened — nothing is dropped silently and no file is created.

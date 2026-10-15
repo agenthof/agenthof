@@ -31,18 +31,42 @@ func ManifestPath(resolved string) string       { return resolved + ".segments" 
 // segmentNameRE is the one spelling of a segment: six digits, no more, no less.
 var segmentNameRE = regexp.MustCompile(`^\.seg-([0-9]{6})$`)
 
-// resolveControlLog resolves symlinks once. A name that does not exist (or a
-// dangling link) resolves to itself, so the caller's open reports the
-// name's own ENOENT.
+// resolveControlLog resolves symlinks once. A name that does not exist
+// resolves to itself, so the caller's open reports the name's own ENOENT. A
+// DANGLING link resolves to its target (the link read, made absolute against
+// the link's directory, that directory resolved): a sealed root's history
+// lives beside the target, so that is where hasHistory must look before a
+// writer is allowed to create — resolving to the link's own path would find
+// no history beside the link and re-found a fresh genesis beside the sealed
+// segments. The target is also what the writer's create-on-first-write makes
+// and what every later resolution of the same name returns.
 func resolveControlLog(controlLog string) (string, error) {
 	r, err := filepath.EvalSymlinks(controlLog)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return controlLog, nil
-		}
+	if err == nil {
+		return r, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
-	return r, nil
+	fi, lerr := os.Lstat(controlLog)
+	if lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return controlLog, nil
+	}
+	target, rerr := os.Readlink(controlLog)
+	if rerr != nil {
+		return "", rerr
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(controlLog), target)
+	}
+	dir, derr := filepath.EvalSymlinks(filepath.Dir(target))
+	if derr != nil {
+		if errors.Is(derr, fs.ErrNotExist) {
+			return target, nil
+		}
+		return "", derr
+	}
+	return filepath.Join(dir, filepath.Base(target)), nil
 }
 
 // State is the rotation state the set is found in.
