@@ -262,3 +262,46 @@ func TestVerifyControlUnverifiableAnchorOutranksAnIncompleteRotation(t *testing.
 		t.Fatalf("7 outranks 8: %d\n%s", code, text)
 	}
 }
+
+// TestVerifyControlIntegrityVerdictsOutrankAnIncompleteRotation: a root in
+// state B that is also anchor-mismatched exits 6, and one that is also
+// tainted exits 3 — a verdict on the chain is never hidden behind exit 8.
+func TestVerifyControlIntegrityVerdictsOutrankAnIncompleteRotation(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	crashSeal := func(ctl string) {
+		t.Helper()
+		t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_manifest")
+		auditSeal(t, ctl)
+		t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	}
+
+	// 6: an anchor whose proof was altered (chain recomputed), then the seal stops in state B.
+	useStub(t)
+	ctl := applied(t, sealSample(t))
+	tlogPostureFor(t, ctl, "http://stub.invalid")
+	var out bytes.Buffer
+	if code := cmdAudit([]string{"anchor", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("anchor: %d\n%s", code, out.String())
+	}
+	rewriteTail(t, ctl, 2, func(seq int, m map[string]any) {
+		p := m["anchor"].(map[string]any)["proof"].(string)
+		m["anchor"].(map[string]any)["proof"] = "A" + p[1:]
+	})
+	crashSeal(ctl)
+	if code, text := verifyControl(t, "--control-log", ctl, "--offline"); code != exitAnchorMismatch || !strings.Contains(text, "MISMATCH") || !strings.Contains(text, "rotation not completed") {
+		t.Fatalf("6 outranks 8: %d\n%s", code, text)
+	}
+
+	// 3: a repair record on the chain (a torn tail repaired), then the seal stops in state B.
+	root := sealSample(t)
+	ctl = applied(t, root)
+	tearTail(t, ctl)
+	out.Reset()
+	if code := cmdAudit([]string{"repair", "control", "--control-log", ctl, "--config", root, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("repair: %d\n%s", code, out.String())
+	}
+	crashSeal(ctl)
+	if code, text := verifyControl(t, "--control-log", ctl, "--offline"); code != 3 || !strings.Contains(text, "TAINTED") || !strings.Contains(text, "rotation not completed") {
+		t.Fatalf("3 outranks 8: %d\n%s", code, text)
+	}
+}
