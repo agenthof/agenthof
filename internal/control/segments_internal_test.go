@@ -27,35 +27,6 @@ func appendN(t *testing.T, p string, n int) {
 	}
 }
 
-// appendRaw appends n ordinary records to the active of a possibly-rotated
-// root WITHOUT Append — the active's Start comes from Read, the records are
-// marshalled here (seq = head+1, prev = head, no log_id) — so the reader can
-// be tested before Append goes through the seam.
-func appendRaw(t *testing.T, p string, n int) {
-	t.Helper()
-	for i := 0; i < n; i++ {
-		v, err := Read(p, ledger.Unlocked)
-		if err != nil {
-			t.Fatal(err)
-		}
-		start := ledger.Start{}
-		if k := len(v.Sealed); k > 0 {
-			start = ledger.Start{Prev: v.Sealed[k-1].HeadHash, Base: uint64(v.Sealed[k-1].HeadSeq)}
-		}
-		resolved, _ := filepath.EvalSymlinks(p)
-		c, err := ledger.OpenFrom(resolved, ledger.Locked, start)
-		if err != nil {
-			t.Fatal(err)
-		}
-		line, _ := json.Marshal(record{V: "control/1", Seq: v.Head.Count + 1, Time: time.Date(2026, 10, 15, 8, i, 0, 0, time.UTC), Action: "prune", Outcome: "success",
-			Invoker: identity.Static("dana@example.com"), Witness: Witness{OSUser: "dana", Hostname: "host"}, Prev: v.Head.Hash})
-		if err := c.Append(line); err != nil {
-			t.Fatal(err)
-		}
-		_ = c.Close()
-	}
-}
-
 // sealByHand turns the active at p into sealed segment N+1 and a fresh,
 // empty active, writing the seal record, the link, the manifest and the swap
 // directly — the on-disk shape the seal command produces, built without it so
@@ -138,9 +109,9 @@ func twoSegments(t *testing.T) string {
 	p := filepath.Join(t.TempDir(), "control.jsonl")
 	appendN(t, p, 5)
 	sealByHand(t, p, "")
-	appendRaw(t, p, 3)
+	appendN(t, p, 3)
 	sealByHand(t, p, "")
-	appendRaw(t, p, 2)
+	appendN(t, p, 2)
 	return p
 }
 
@@ -379,7 +350,7 @@ func TestStateMachineReads(t *testing.T) {
 			p := filepath.Join(t.TempDir(), "control.jsonl")
 			appendN(t, p, 5)
 			sealByHand(t, p, "")
-			appendRaw(t, p, 3)
+			appendN(t, p, 3)
 			sealLine := sealByHand(t, p, tc.stop)
 			v, err := Read(p, ledger.Locked)
 			if err != nil || v.State != tc.state {
@@ -472,7 +443,7 @@ func TestOpenActiveManifestRecheckClosesTheForkWindow(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "control.jsonl")
 	appendN(t, p, 5)
 	sealByHand(t, p, "")
-	appendRaw(t, p, 3)
+	appendN(t, p, 3)
 	prev := betweenWalkAndOpen
 	once := false
 	betweenWalkAndOpen = func() {
@@ -493,5 +464,64 @@ func TestOpenActiveManifestRecheckClosesTheForkWindow(t *testing.T) {
 	_ = c.Close()
 	if _, err := Read(p, ledger.Locked); err != nil {
 		t.Fatalf("the set must still verify: %v", err)
+	}
+}
+
+// TestAppendOnLogicalPosition: the first record after a seal carries
+// seq == sealed head + 1, prev == the sealed head, and NO log_id; a later
+// record continues; an anchor covering the sealed head is admitted (coverage
+// is judged on the logical count); the returned Head is logical.
+func TestAppendOnLogicalPosition(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	appendN(t, p, 5)
+	sealByHand(t, p, "")
+	head, err := Append(p, Event{Action: "prune", Outcome: "success", Invoker: identity.Static("dana@example.com"), Witness: Witness{}})
+	if err != nil || head.Count != 7 {
+		t.Fatalf("append after a seal: %v %+v", err, head)
+	}
+	v, err := Read(p, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := decodeRecord(v.Records[6])
+	if rec.Seq != 7 || rec.Prev != v.Sealed[0].HeadHash || rec.LogID != "" {
+		t.Fatalf("first record of segment 2: %+v", rec)
+	}
+	if head.Hash != hashOf(v.Records[6].Raw) {
+		t.Fatal("the returned head must be the new record's hash")
+	}
+	anchorOK := &Anchor{Seq: 6, Hash: v.Sealed[0].HeadHash, Kind: "tlog", BackendKind: "transparency-log", Backend: "https://log.test", Ref: strings.Repeat("0", 80), Proof: "AQID"}
+	if _, err := Append(p, Event{Action: "anchor", Outcome: "success", Invoker: identity.Static("x"), Witness: Witness{}, Anchor: anchorOK}); err != nil {
+		t.Fatalf("an anchor covering the sealed head must be admitted: %v", err)
+	}
+	if _, err := Append(p, Event{Action: "anchor", Outcome: "success", Invoker: identity.Static("x"), Witness: Witness{}, Anchor: &Anchor{Seq: 9, Hash: anchorOK.Hash, Kind: "tlog", BackendKind: "transparency-log", Backend: "https://log.test", Ref: strings.Repeat("0", 80), Proof: "AQID"}}); err == nil || !strings.Contains(err.Error(), "the chain has 8 records") {
+		t.Fatalf("coverage beyond the logical count must be refused with the logical count: %v", err)
+	}
+	v, err = Read(p, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range CheckAnchors(v.Records) {
+		if c.Mismatch != "" {
+			t.Fatalf("CheckAnchors across the boundary: %s", c.Mismatch)
+		}
+	}
+}
+
+// TestAppendFreshRootIsToday: on a root with no file, Append still creates the
+// active, writes the genesis with a log_id at seq 1, and leaves exactly one
+// file.
+func TestAppendFreshRootIsToday(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "nested", "control.jsonl")
+	appendN(t, p, 1)
+	entries, _ := os.ReadDir(filepath.Dir(p))
+	if len(entries) != 1 || entries[0].Name() != "control.jsonl" {
+		t.Fatalf("fresh root: %v", entries)
+	}
+	v, err := Read(p, ledger.Locked)
+	rec, _ := decodeRecord(v.Records[0])
+	if err != nil || rec.Seq != 1 || rec.LogID == "" {
+		t.Fatalf("%v %+v", err, rec)
 	}
 }

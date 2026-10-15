@@ -172,10 +172,10 @@ func checkAnchorCoverage(a *Anchor, count int) error {
 // checkAnchorCoverage, and rejects any non-"success" Event with a nil Reason:
 // every control-plane denial must explain itself, and this is the one place
 // that rule is enforced, rather than scattered across call sites. It then
-// opens the control log at path Locked (ledger.Open verifies the chain and
-// fails on a torn or broken log), assigns seq=Count()+1, time=now UTC, and
-// prev=the current head, sets a fresh log_id on the genesis record only,
-// marshals the record, and appends it. It returns the chain's new Head.
+// opens the active segment through the seam (openActive: a torn or broken
+// active, a sealed-not-rotated active — ErrSealed — or a damaged set
+// refuses), appends on the chain's logical position (appendOn), and closes.
+// It returns the chain's new Head, whose Count is the global seq.
 func Append(path string, e Event) (ledger.Head, error) {
 	if err := checkSealShape(e); err != nil {
 		return ledger.Head{}, err
@@ -186,18 +186,32 @@ func Append(path string, e Event) (ledger.Head, error) {
 	if e.Outcome != "success" && e.Reason == nil {
 		return ledger.Head{}, fmt.Errorf("control: outcome %q requires a reason", e.Outcome)
 	}
-	c, err := ledger.Open(path, ledger.Locked)
+	c, view, err := openActive(path)
 	if err != nil {
 		return ledger.Head{}, err
 	}
 	defer func() { _ = c.Close() }()
-	if err := checkAnchorCoverage(e.Anchor, c.Count()); err != nil {
-		return ledger.Head{}, err
-	}
+	head, _, err := appendOn(c, view, e)
+	return head, err
+}
 
+// appendOn is Append's body over a chain the caller already holds (openActive
+// gave it), so the seal can write its record on the chain it holds without a
+// second handle contending with the first. Every position is LOGICAL:
+// coverage is judged against Base+Count, seq is Base+Count+1, and log_id is
+// minted on the genesis — Base 0, Count 0 — and nowhere else: the first
+// record of a later segment continues the chain's identity, it does not
+// start one. The returned Head is logical too: Count is the chain's last
+// seq, which is what every writer prints as seq=. The marshalled line is
+// returned beside it for a caller that needs the bytes it wrote.
+func appendOn(c *ledger.Chain, view View, e Event) (ledger.Head, []byte, error) {
+	logical := int(c.Base()) + c.Count()
+	if err := checkAnchorCoverage(e.Anchor, logical); err != nil {
+		return ledger.Head{}, nil, err
+	}
 	rec := record{
 		V:           "control/1",
-		Seq:         c.Count() + 1,
+		Seq:         logical + 1,
 		Time:        time.Now().UTC(),
 		Action:      e.Action,
 		Agent:       e.Agent,
@@ -213,24 +227,24 @@ func Append(path string, e Event) (ledger.Head, error) {
 		Origin:      e.Origin.Sanitized(),
 		Detail:      origin.Clean(e.Detail),
 		Anchor:      e.Anchor,
+		Seal:        e.Seal,
 		Prev:        c.Prev(),
 	}
-	if c.Count() == 0 {
+	if c.Base() == 0 && c.Count() == 0 {
 		id, err := newLogID()
 		if err != nil {
-			return ledger.Head{}, err
+			return ledger.Head{}, nil, err
 		}
 		rec.LogID = id
 	}
-
 	line, err := json.Marshal(rec)
 	if err != nil {
-		return ledger.Head{}, err
+		return ledger.Head{}, nil, err
 	}
 	if err := c.Append(line); err != nil {
-		return ledger.Head{}, err
+		return ledger.Head{}, nil, err
 	}
-	return ledger.Head{Hash: c.Prev(), Count: c.Count()}, nil
+	return ledger.Head{Hash: c.Prev(), Count: int(c.Base()) + c.Count()}, line, nil
 }
 
 // Repair recovers a torn-tail control ledger (spec §3.6). It reads the
