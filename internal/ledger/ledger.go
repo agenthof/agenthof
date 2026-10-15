@@ -7,7 +7,8 @@
 // always over the literal on-disk bytes, never a re-marshaled form, so
 // even a stray '\r' from CRLF endings changes the hash and is caught.
 // Records may also embed "seq": if the first record has one, every
-// record must, contiguous from 1; if not, none may.
+// record must, contiguous from Base+1 (Base is 0 for a chain from
+// nothing); if not, none may.
 //
 // Open and ReadVerify classify any damage into exactly one bucket.
 // Torn (*TornError) is only ever the FINAL record: a missing trailing
@@ -94,6 +95,29 @@ func flockRetry(fd int, how int) error {
 	}
 }
 
+// Start is where a chain begins: the prev its first record must carry and
+// the number of records before it (Base). The zero Start — prev "", Base 0 —
+// is a chain from nothing: today's genesis rule. A non-zero Start is a
+// continuation of a chain whose earlier records live elsewhere; with Base > 0
+// the chain is in seq mode by construction (its first record must carry
+// seq == Base+1; one without seq is broken). Prev and Base are both set or
+// both zero; anything else is a programming error that fails closed
+// (ErrBadStart) and verifies nothing.
+type Start struct {
+	Prev string
+	Base uint64
+}
+
+// ErrBadStart is the pinned error for a mixed Start.
+var ErrBadStart = errors.New("ledger: invalid chain start: prev and base must both be set or both be zero")
+
+func (s Start) validate() error {
+	if (s.Prev == "") != (s.Base == 0) {
+		return ErrBadStart
+	}
+	return nil
+}
+
 // LockMode selects how Open coordinates access to the ledger file.
 type LockMode int
 
@@ -138,6 +162,7 @@ type Record struct{ Raw []byte }
 type Chain struct {
 	f              *os.File
 	mode           LockMode
+	base           uint64
 	prevHash       string
 	count          int
 	seqEstablished bool
@@ -169,8 +194,19 @@ func parseLineFields(raw []byte) (lineFields, error) {
 // Open opens (creating it if needed) the ledger at path and verifies
 // it, resuming the chain from wherever it left off. If the file is
 // torn or its chain is broken, Open returns the typed error and NO
-// Chain.
+// Chain. It is OpenFrom with the zero Start.
 func Open(path string, mode LockMode) (*Chain, error) {
+	return OpenFrom(path, mode, Start{})
+}
+
+// OpenFrom is Open for a chain that begins at s rather than from nothing: the
+// file's first record must carry s.Prev (and seq s.Base+1 when s.Base > 0),
+// and appends continue from there. A mixed Start is ErrBadStart and nothing
+// is created.
+func OpenFrom(path string, mode LockMode, s Start) (*Chain, error) {
+	if err := s.validate(); err != nil {
+		return nil, err
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
@@ -193,13 +229,13 @@ func Open(path string, mode LockMode) (*Chain, error) {
 			return nil, fmt.Errorf("ledger: open %s: %w", path, lerr)
 		}
 	}
-	_, head, seqEstablished, seqMode, err := loadChain(f)
+	_, head, seqEstablished, seqMode, err := loadChain(f, s)
 	if err != nil {
 		_ = f.Close()
 		return nil, err
 	}
 	return &Chain{
-		f: f, mode: mode,
+		f: f, mode: mode, base: s.Base,
 		prevHash: head.Hash, count: head.Count,
 		seqEstablished: seqEstablished, seqMode: seqMode,
 	}, nil
@@ -240,6 +276,10 @@ func (c *Chain) Prev() string { return c.prevHash }
 // Count returns the number of records verified/appended so far.
 func (c *Chain) Count() int { return c.count }
 
+// Base returns the number of records before the chain's Start (0 for a chain
+// from nothing); the next seq-carrying record must be Base+Count+1.
+func (c *Chain) Base() uint64 { return c.base }
+
 // Append writes line (WITHOUT a trailing newline) to the ledger. It
 // refuses (an anti-fork guard) if line's embedded "prev" does not
 // match the current head, and, once the chain's seq mode is
@@ -262,8 +302,8 @@ func (c *Chain) Append(line []byte) error {
 		seqMode = fields.Seq != nil
 	}
 	if seqMode {
-		if fields.Seq == nil || *fields.Seq != uint64(c.count+1) {
-			return fmt.Errorf("ledger: invalid record: seq must be %d", c.count+1)
+		if fields.Seq == nil || *fields.Seq != c.base+uint64(c.count+1) {
+			return fmt.Errorf("ledger: invalid record: seq must be %d", c.base+uint64(c.count+1))
 		}
 	} else if fields.Seq != nil {
 		return fmt.Errorf("ledger: invalid record: chain is not in seq mode")
@@ -348,6 +388,16 @@ func lockFile(path string, how int) (unlock func(), err error) {
 // another process holds the exclusive lock via Open(path, Locked), and
 // releases it before returning.
 func ReadVerify(path string, mode LockMode) ([]Record, Head, error) {
+	return ReadVerifyFrom(path, mode, Start{})
+}
+
+// ReadVerifyFrom is ReadVerify for a chain that begins at s. Head is per file:
+// Count is the records in this file and Hash the head (s.Prev when the file
+// is empty and s is non-zero). A mixed Start is ErrBadStart.
+func ReadVerifyFrom(path string, mode LockMode, s Start) ([]Record, Head, error) {
+	if err := s.validate(); err != nil {
+		return nil, Head{}, err
+	}
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, Head{}, err
@@ -359,15 +409,56 @@ func ReadVerify(path string, mode LockMode) ([]Record, Head, error) {
 		}
 		defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 	}
-	records, head, _, _, err := loadChain(f)
+	records, head, _, _, err := loadChain(f, s)
 	return records, head, err
 }
 
+// VerifyReader verifies r as a chain that begins at s and returns the valid
+// prefix, its per-file Head and the typed error, exactly as ReadVerifyFrom
+// does over a path. For a caller that already owns an open handle.
+func VerifyReader(r io.Reader, s Start) ([]Record, Head, error) {
+	if err := s.validate(); err != nil {
+		return nil, Head{}, err
+	}
+	records, head, _, _, err := loadChain(r, s)
+	return records, head, err
+}
+
+// Resume builds a writable Chain over a handle the CALLER already opened and
+// locked: it never creates, never locks and reads the handle exactly once,
+// returning the verified records beside the Chain. mode records what the
+// caller took, so Close releases it. A torn or broken handle returns the
+// valid prefix with the typed error and no Chain. It exists for a writer that
+// must decide what a locked handle is before verifying it.
+func Resume(f *os.File, mode LockMode, s Start) (*Chain, []Record, error) {
+	if err := s.validate(); err != nil {
+		return nil, nil, err
+	}
+	records, head, seqEstablished, seqMode, err := loadChain(f, s)
+	if err != nil {
+		return nil, records, err
+	}
+	return &Chain{
+		f: f, mode: mode, base: s.Base,
+		prevHash: head.Hash, count: head.Count,
+		seqEstablished: seqEstablished, seqMode: seqMode,
+	}, records, nil
+}
+
+// LockExclusive and LockShared take the ledger's bounded, non-blocking flock
+// on a handle the caller opened — LOCK_EX for a writer, LOCK_SH for a reader
+// — with the same retry and the same ErrLockHeld as Open and ReadVerify, so
+// a caller that opens by name (to inspect before it verifies) coordinates
+// exactly as they do. Unlock releases either.
+func LockExclusive(f *os.File) error { return flockRetry(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) }
+func LockShared(f *os.File) error    { return flockRetry(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB) }
+func Unlock(f *os.File)              { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }
+
 // loadChain reads r as newline-delimited records and verifies the
-// chain per the torn/broken matrix documented above. It always returns
-// the valid prefix found, that prefix's Head, and the resolved seq
-// mode, even on error.
-func loadChain(r io.Reader) (records []Record, head Head, seqEstablished, seqMode bool, err error) {
+// chain, beginning at s, per the torn/broken matrix documented above. It
+// always returns the valid prefix found, that prefix's Head, and the
+// resolved seq mode, even on error.
+func loadChain(r io.Reader, s Start) (records []Record, head Head, seqEstablished, seqMode bool, err error) {
 	type rawLine struct {
 		raw        []byte
 		terminated bool
@@ -398,14 +489,17 @@ func loadChain(r io.Reader) (records []Record, head Head, seqEstablished, seqMod
 		}
 	}
 	if len(lines) == 0 {
-		return nil, Head{}, false, false, nil
+		return nil, Head{Hash: s.Prev}, s.Base > 0, s.Base > 0, nil
 	}
 
-	var prevHash string
+	prevHash := s.Prev
 	var count int
 	var byteOffset int64
 	fail := func(e error) ([]Record, Head, bool, bool, error) {
 		return records, Head{Hash: prevHash, Count: count}, seqEstablished, seqMode, e
+	}
+	if s.Base > 0 {
+		seqEstablished, seqMode = true, true
 	}
 	n := len(lines)
 	for i, ln := range lines {
@@ -428,7 +522,7 @@ func loadChain(r io.Reader) (records []Record, head Head, seqEstablished, seqMod
 		} else if seqMode != (fields.Seq != nil) {
 			return fail(&ChainBrokenError{Line: i + 1})
 		}
-		if seqMode && *fields.Seq != uint64(i+1) {
+		if seqMode && *fields.Seq != s.Base+uint64(i+1) {
 			return fail(&ChainBrokenError{Line: i + 1})
 		}
 		if *fields.Prev != prevHash {
