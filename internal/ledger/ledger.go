@@ -126,7 +126,9 @@ const (
 	Unlocked LockMode = iota
 	// Locked takes a flock(2) on the ledger file to coordinate real,
 	// independent OS processes: exclusive (LOCK_EX) for Open, shared
-	// (LOCK_SH) for ReadVerify. See the package doc for details.
+	// (LOCK_SH) for ReadVerify. See the package doc for details. Resume
+	// reinterprets it: Locked there means the caller already holds the lock,
+	// and Chain.Close releases it.
 	Locked
 )
 
@@ -430,6 +432,11 @@ func VerifyReader(r io.Reader, s Start) ([]Record, Head, error) {
 // caller took, so Close releases it. A torn or broken handle returns the
 // valid prefix with the typed error and no Chain. It exists for a writer that
 // must decide what a locked handle is before verifying it.
+//
+// Resume verifies from the handle's CURRENT offset (it does not Seek(0)), so
+// the handle must not have been read from before it is passed in. On any error
+// the caller still owns the handle and its lock: Resume never took them and,
+// unlike OpenFrom, does not close the handle when verification fails.
 func Resume(f *os.File, mode LockMode, s Start) (*Chain, []Record, error) {
 	if err := s.validate(); err != nil {
 		return nil, nil, err

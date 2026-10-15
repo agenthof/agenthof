@@ -154,8 +154,15 @@ func TestAppendFromStart(t *testing.T) {
 	}
 	_ = rc.Close()
 	for _, bad := range []Start{{Prev: head.Hash, Base: 0}, {Prev: "", Base: 3}} {
-		if _, err := OpenFrom(filepath.Join(t.TempDir(), "x.jsonl"), Unlocked, bad); !errors.Is(err, ErrBadStart) {
+		x := filepath.Join(t.TempDir(), "sub", "x.jsonl")
+		if _, err := OpenFrom(x, Unlocked, bad); !errors.Is(err, ErrBadStart) {
 			t.Fatalf("OpenFrom(%+v) = %v, want ErrBadStart", bad, err)
+		}
+		// ErrBadStart creates nothing: neither the file nor its directory.
+		for _, created := range []string{x, filepath.Dir(x)} {
+			if _, err := os.Stat(created); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("OpenFrom(%+v): ErrBadStart must create nothing, but %s exists (stat err %v)", bad, created, err)
+			}
 		}
 		if _, _, err := ReadVerifyFrom(p, Unlocked, bad); !errors.Is(err, ErrBadStart) {
 			t.Fatalf("ReadVerifyFrom(%+v) = %v, want ErrBadStart", bad, err)
@@ -168,9 +175,6 @@ func TestAppendFromStart(t *testing.T) {
 			t.Fatalf("Resume(%+v) = %v, want ErrBadStart", bad, err)
 		}
 		_ = g.Close()
-	}
-	if _, err := os.Stat(filepath.Join(t.TempDir(), "never.jsonl")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("ErrBadStart must create nothing")
 	}
 }
 
