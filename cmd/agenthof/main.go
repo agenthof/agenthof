@@ -51,6 +51,7 @@ Usage:
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>|<seq>:<hex>] [--anchor-key <path>] [--offline] [--anchor-timeout 30s]
   agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout 30s]  (pins the control-ledger head into the transparency log integrity.yaml names; an authorized control action, recorded whether it succeeded or failed; prints the anchored head and entry to ship off the box)
+  agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>]  (closes the control ledger's active segment into a sealed file and opens the next; the chain and seq continue unbroken; an authorized control action, recorded whether it succeeded or failed)
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
@@ -1241,6 +1242,11 @@ func cmdAudit(args []string, out io.Writer) int {
 	// (engine.NewRunID), which "anchor" can never match.
 	if args[0] == "anchor" {
 		return cmdAuditAnchor(args[1:], out)
+	}
+	// "seal" is disambiguated the same way: a run id is always "r-<hex>"
+	// (engine.NewRunID), which "seal" can never match.
+	if args[0] == "seal" {
+		return cmdAuditSeal(args[1:], out)
 	}
 	runID := args[0]
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)

@@ -172,6 +172,8 @@ func (s *Server) answerApply(w http.ResponseWriter, inv identity.Invoker, res ap
 		}
 	case apiclient.ApplyLedgerDamaged:
 		res.Reason = apiclient.ReasonLedgerDamaged
+	case apiclient.ApplyRotationIncomplete:
+		res.Reason = apiclient.ReasonRotationIncomplete
 	case apiclient.ApplyInstalledNotRecorded, apiclient.ApplyInstalledNotSigned:
 		// the counts, hash and head are known: the install landed and was
 		// recorded; only the server's own follow-up failed

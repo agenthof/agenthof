@@ -38,6 +38,9 @@ func (h *configHost) Apply(inv identity.Invoker, files map[string][]byte, pre ap
 	if out.Kind == applyLedgerDamaged {
 		h.logger.Error("control ledger damaged; run: agenthof audit repair control --control-log " + h.controlLog)
 	}
+	if out.Kind == applyRotationIncomplete {
+		h.logger.Error("control ledger rotation incomplete; run: agenthof audit seal --control-log " + h.controlLog)
+	}
 	if out.Kind == applyInstalledNotSigned {
 		// The cause can name paths: logged here for the operator, never returned.
 		h.logger.Warn(msgInstalledNotSigned+"; "+signRemedy(h.controlLog, out.SignCause), "config_hash", out.ConfigHash, "err", out.SignCause)
@@ -71,6 +74,9 @@ func applyResult(o applyOutcome) apiclient.ApplyResult {
 		res.Reason = apiclient.ReasonLedgerDamaged
 	case applyBusy:
 		res = apiclient.ApplyResult{Status: apiclient.ApplyBusy}
+	case applyRotationIncomplete:
+		res.Status = apiclient.ApplyRotationIncomplete
+		res.Reason = apiclient.ReasonRotationIncomplete
 	case applyRefused:
 		res.Status = apiclient.ApplyRefused
 	case applyPreconditionFailed:

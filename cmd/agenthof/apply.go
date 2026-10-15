@@ -129,6 +129,7 @@ const (
 	applyInstalled            applyKind = iota // success recorded (Bootstrap when nothing was installed)
 	applyLedgerDamaged                         // control.Writable failed; nothing recorded; the caller prints the repair hint
 	applyBusy                                  // the writer lock (or the ledger flock) is held elsewhere; nothing recorded
+	applyRotationIncomplete                    // the active segment is sealed and not yet rotated; nothing recorded; the caller prints the completion hint
 	applyRefused                               // recorded refused/not_authorized
 	applyPreconditionFailed                    // CAS mismatch; nothing recorded
 	applyRejected                              // recorded rejected/validation_failed
@@ -176,11 +177,16 @@ func applyConfig(req applyRequest, out io.Writer) applyOutcome {
 	a := &applyRun{req: req, out: out}
 
 	// 1. The control chain must be writable before anything is recorded.
-	// Contention on a healthy ledger is busy, never damage.
+	// Contention on a healthy ledger is busy, never damage; a sealed, not
+	// yet rotated active is an owed completion (audit seal), never damage.
 	if err := control.Writable(req.ControlLog); err != nil {
-		if errors.Is(err, ledger.ErrLockHeld) {
+		switch {
+		case errors.Is(err, ledger.ErrLockHeld):
 			_, _ = fmt.Fprintf(out, "apply: %s\n", msgLockBusy)
 			return a.done(applyBusy)
+		case errors.Is(err, control.ErrSealed):
+			_, _ = fmt.Fprintf(out, "apply: %v\n", err)
+			return a.done(applyRotationIncomplete)
 		}
 		return a.done(applyLedgerDamaged)
 	}

@@ -227,6 +227,7 @@ func TestApplyConfigStatusMapping(t *testing.T) {
 		{"500 error hides OS text", apiclient.ApplyResult{Status: apiclient.ApplyError, Reason: "open /srv/.agenthof/installed/.staging-1: permission denied", Head: head}, 500, "", apiclient.ReasonStoreUnusable, false, ""},
 		{"500 append failed", apiclient.ApplyResult{Status: apiclient.ApplyError, Reason: "whatever"}, 500, "", apiclient.ReasonNotRecorded, false, ""},
 		{"500 ledger damaged", apiclient.ApplyResult{Status: apiclient.ApplyLedgerDamaged, Reason: "ledger torn at byte 9"}, 500, "", apiclient.ReasonLedgerDamaged, false, ""},
+		{"500 rotation incomplete", apiclient.ApplyResult{Status: apiclient.ApplyRotationIncomplete, Reason: "control: the active segment is sealed and not yet rotated; run: agenthof audit seal to complete the rotation"}, 500, "", apiclient.ReasonRotationIncomplete, false, ""},
 		{"500 installed not recorded", apiclient.ApplyResult{Status: apiclient.ApplyInstalledNotRecorded, ConfigHash: goodHash, Agents: 2, Workflows: 1, Roles: 2}, 500, "", "", false, ""},
 		{"500 installed not signed", apiclient.ApplyResult{Status: apiclient.ApplyInstalledNotSigned, ConfigHash: goodHash, Head: head, Agents: 2, Workflows: 1, Roles: 2}, 500, "", "", false, ""},
 	}

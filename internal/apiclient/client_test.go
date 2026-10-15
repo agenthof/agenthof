@@ -140,6 +140,7 @@ func TestClientApplySendsPreconditionAndDecodesEveryStatus(t *testing.T) {
 		{http.StatusUnprocessableEntity, `{"status":"rejected","errors":["a","b"]}`, ApplyRejected},
 		{http.StatusConflict, `{"status":"busy"}`, ApplyBusy},
 		{http.StatusInternalServerError, `{"status":"ledger_damaged","reason":"control ledger damaged"}`, ApplyLedgerDamaged},
+		{http.StatusInternalServerError, `{"status":"rotation_incomplete","reason":"control ledger rotation incomplete; an operator must run audit seal on the host"}`, ApplyRotationIncomplete},
 	} {
 		status, body = c2.code, c2.body
 		res, err := c.Apply(context.Background(), req, Precondition{ExpectNone: true})
