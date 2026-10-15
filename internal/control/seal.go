@@ -137,8 +137,9 @@ func checkSealPlacement(c *ledger.Chain, view View, e Event) error {
 
 // SealActive is steps 7–11 of audit seal on ONE held chain, in this order
 // under the active's exclusive lock: openActive (busy, damaged and ErrSealed
-// refuse here; an empty active is ErrNothingToSeal); sweep the temps an
-// earlier crash left; link the active under its segment name FIRST (a
+// refuse here); sweep the temps an earlier crash left (before any step, so
+// even an empty active's refusal leaves none behind); an empty active is
+// ErrNothingToSeal; link the active under its segment name FIRST (a
 // filesystem that cannot link fails with nothing recorded; EEXIST to the same
 // inode is a re-run after a crash and continues; EEXIST to another file is
 // FaultUnexpectedSegment); compute content_sha256 from the records read
@@ -157,11 +158,11 @@ func SealActive(controlLog string, e Event) (SealResult, error) {
 		return SealResult{}, err
 	}
 	defer func() { _ = c.Close() }()
+	resolved := v.Active.Path
+	sweepTemps(resolved)
 	if c.Count() == 0 {
 		return SealResult{}, ErrNothingToSeal
 	}
-	resolved := v.Active.Path
-	sweepTemps(resolved)
 	n := len(v.Sealed) + 1
 	if err := linkSegment(resolved, n); err != nil {
 		return SealResult{}, &SealError{Step: SealStepLink, Err: err}

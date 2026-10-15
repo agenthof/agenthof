@@ -331,6 +331,7 @@ func TestAuditSealThroughASymlink(t *testing.T) {
 // TestApplyOnStateBOverTheAPI: POST /v1/config/apply on a state-B root →
 // 500 {status:"rotation_incomplete"}, nothing recorded, never ledger_damaged.
 func TestApplyOnStateBOverTheAPI(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
 	ctl := applied(t, sealSample(t))
 	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_manifest")
 	auditSeal(t, ctl)

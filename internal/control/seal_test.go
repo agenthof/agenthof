@@ -97,11 +97,12 @@ func TestSealActiveRefusals(t *testing.T) {
 		t.Fatalf("empty: %v", err)
 	}
 	appendN(t, p, 2)
-	prev := linkFile
+	orig := linkFile
+	defer func() { linkFile = orig }()
 	linkFile = func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EPERM} }
 	before, _ := os.ReadFile(p)
 	_, err := SealActive(p, sealEvent())
-	linkFile = prev
+	linkFile = orig
 	var se *SealError
 	if !errors.Is(err, ErrNoHardLinks) || !errors.As(err, &se) || se.Step != SealStepLink {
 		t.Fatalf("no hard links: %v", err)
@@ -227,6 +228,8 @@ func TestSealPermit(t *testing.T) {
 		{"refused with payload", Event{Action: "seal", Outcome: "refused", Reason: NotAuthorized("seal"), Invoker: inv, Witness: w, Seal: &good}, "a refused seal closed nothing"},
 		{"config_hash", Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:x", Seal: &good}, "a seal installs nothing"},
 		{"head_hash", Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w, Seal: &Seal{Segment: 1, FirstSeq: 1, HeadSeq: 3, HeadHash: strings.Repeat("0", 64), ContentSHA256: content}}, "head_hash"},
+		{"first_seq", Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w, Seal: &Seal{Segment: 1, FirstSeq: 2, HeadSeq: 3, HeadHash: v.Head.Hash, ContentSHA256: content}}, "first_seq"},
+		{"head_seq", Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w, Seal: &Seal{Segment: 1, FirstSeq: 1, HeadSeq: 2, HeadHash: v.Head.Hash, ContentSHA256: content}}, "head_seq"},
 		{"segment", Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w, Seal: &Seal{Segment: 2, FirstSeq: 1, HeadSeq: 3, HeadHash: v.Head.Hash, ContentSHA256: content}}, "segment 2"},
 		{"content", Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w, Seal: &Seal{Segment: 1, FirstSeq: 1, HeadSeq: 3, HeadHash: v.Head.Hash, ContentSHA256: strings.Repeat("0", 64)}}, "content_sha256"},
 		{"not hex", Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w, Seal: &Seal{Segment: 1, FirstSeq: 1, HeadSeq: 3, HeadHash: "zz", ContentSHA256: content}}, "lowercase hex"},
