@@ -510,11 +510,17 @@ func mapActiveFault(resolved string, handle io.ReaderAt, sealedCount int, start 
 	return verr
 }
 
+// maxGenesisLine bounds the first-line read of firstLineIsFreshGenesis.
+const maxGenesisLine = 8 << 10
+
 // firstLineIsFreshGenesis reports whether the first line of r is what Append
 // mints on an empty ledger: an empty prev and a log_id of 32 lowercase hex. A
 // read or decode failure is "no" — the generic boundary text stands.
 func firstLineIsFreshGenesis(r io.ReaderAt) bool {
-	line, err := bufio.NewReader(io.NewSectionReader(r, 0, math.MaxInt64)).ReadBytes('\n')
+	// A genesis line is a few hundred bytes. The cap keeps a corrupt active
+	// with no newline from being buffered whole; a line that long is not a
+	// fresh genesis, and the unterminated, truncated read fails to decode.
+	line, err := bufio.NewReader(io.LimitReader(io.NewSectionReader(r, 0, math.MaxInt64), maxGenesisLine)).ReadBytes('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return false
 	}

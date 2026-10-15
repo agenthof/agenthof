@@ -591,3 +591,22 @@ func TestBoundaryWithoutFreshGenesisIsNotOlderBinary(t *testing.T) {
 		})
 	}
 }
+
+// TestOlderBinaryDetectionReadsABoundedFirstLine: a first line far longer
+// than any genesis is not read whole to decide the cause — it keeps the
+// generic boundary text even though, decoded whole, it would look like a
+// fresh genesis.
+func TestOlderBinaryDetectionReadsABoundedFirstLine(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	appendN(t, p, 3)
+	sealByHand(t, p, "")
+	line := `{"v":"control/1","seq":1,"action":"apply","outcome":"success","prev":"","log_id":"` + strings.Repeat("cd", 16) + `","pad":"` + strings.Repeat("x", 4*maxGenesisLine) + `"}`
+	if err := os.WriteFile(p, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Read(p, ledger.Locked)
+	var se *SetError
+	if !errors.As(err, &se) || se.Fault != FaultBoundary || se.olderBinary {
+		t.Fatalf("%v", err)
+	}
+}

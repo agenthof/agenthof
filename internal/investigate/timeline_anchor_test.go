@@ -291,3 +291,44 @@ func TestLoadControlUnchanged(t *testing.T) {
 		t.Fatalf("missing: %v %q", ok, verdict)
 	}
 }
+
+// TestTimelineAnchorVerdictsAcrossASeal: an anchor whose covered head sits in
+// a sealed segment still verifies once the ledger is sealed and has grown a
+// continuation, and so does an anchor recorded in the continuation that
+// covers the seal's own head — both with their global seqs.
+func TestTimelineAnchorVerdictsAcrossASeal(t *testing.T) {
+	stub := anchortest.NewStub([]byte("s"))
+	ctl, head, _ := anchoredLedger(t, stub) // seq 1 apply, seq 2 anchor (covers seq 1)
+	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
+	res, err := control.SealActive(ctl, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealHead := anchor.Head{Seq: res.HeadSeq, Hash: res.HeadHash}
+	rcpt, err := stub.Submit(context.Background(), sealHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := &control.Anchor{Seq: sealHead.Seq, Hash: sealHead.Hash, Kind: "tlog", BackendKind: stub.Kind(), Backend: rcpt.Backend, Ref: rcpt.Ref, Proof: rcpt.Proof, BackendKeyID: rcpt.BackendKeyID}
+	if _, err := control.Append(ctl, control.Event{Action: "anchor", Outcome: "success", Invoker: inv, Witness: w, Anchor: payload}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Timeline(t.TempDir(), ctl, Filter{}, stubOptions(stub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := anchorEvents(t, got)
+	if len(ev) != 2 {
+		t.Fatalf("anchor events: %+v", ev)
+	}
+	if a := ev[0].Anchor; ev[0].Seq != 2 || a.Seq != 1 || a.Hash != head.Hash || a.Verdict != "verified" {
+		t.Fatalf("anchor over a sealed head: seq %d %+v", ev[0].Seq, a)
+	}
+	if a := ev[1].Anchor; ev[1].Seq != 4 || a.Seq != 3 || a.Hash != sealHead.Hash || a.Verdict != "verified" {
+		t.Fatalf("anchor over the seal head, in the continuation: seq %d %+v", ev[1].Seq, a)
+	}
+	if got.Sources[len(got.Sources)-1].Integrity != "verified" {
+		t.Fatalf("%+v", got.Sources)
+	}
+}

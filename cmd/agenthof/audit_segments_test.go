@@ -401,7 +401,19 @@ func TestInvestigateAcrossSegments(t *testing.T) {
 	_ = f.Close()
 	out.Reset()
 	cmdInvestigate([]string{"--json", "--log-dir", t.TempDir(), "--control-log", ctl}, &out)
-	if !strings.Contains(out.String(), `"broken"`) {
+	var tampered struct {
+		Sources []struct {
+			Kind      string `json:"kind"`
+			Integrity string `json:"integrity"`
+		} `json:"sources"`
+		Integrity struct {
+			OK bool `json:"ok"`
+		} `json:"integrity"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &tampered); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if len(tampered.Sources) != 1 || tampered.Sources[0].Kind != "control" || tampered.Sources[0].Integrity != "broken" || tampered.Integrity.OK {
 		t.Fatalf("a boundary tamper is broken:\n%s", out.String())
 	}
 	var buf bytes.Buffer

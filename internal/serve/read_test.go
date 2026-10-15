@@ -276,3 +276,51 @@ func TestInvestigateEndpointOverASealedRoot(t *testing.T) {
 		t.Fatalf("after the seal: %+v", d)
 	}
 }
+
+// TestInvestigateEndpointOverAFaultedSealedRoot: a set fault is an answer,
+// not a server error — 200, the control source's verdict "broken" (a foreign
+// genesis in the continuation) or "torn" (a torn continuation tail), and
+// integrity.ok false.
+func TestInvestigateEndpointOverAFaultedSealedRoot(t *testing.T) {
+	for name, tc := range map[string]struct{ plant, verdict string }{
+		"boundary": {`{"v":"control/1","seq":1,"time":"2026-10-15T10:00:00Z","action":"apply","outcome":"success","invoker":{"subject":"old","issuer":"local","method":"static"},"witness":{"os_user":"o","hostname":"h"},"prev":"","log_id":"` + strings.Repeat("cd", 16) + `"}` + "\n", "broken"},
+		"torn":     {`{"torn`, "torn"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestServer(t, &fakeHost{}, fakeAuth{}, 1)
+			ctl := ts.srv.cfg.ControlLog
+			inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
+			if _, err := control.Append(ctl, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := control.SealActive(ctl, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w}); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.OpenFile(ctl, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = f.WriteString(tc.plant)
+			_ = f.Close()
+			resp, body := ts.do(t, http.MethodGet, "/v1/investigate", goodToken, nil)
+			if resp.StatusCode != 200 {
+				t.Fatalf("%d %s", resp.StatusCode, body)
+			}
+			var d struct {
+				Sources []struct {
+					Kind      string `json:"kind"`
+					Integrity string `json:"integrity"`
+				} `json:"sources"`
+				Integrity struct {
+					OK bool `json:"ok"`
+				} `json:"integrity"`
+			}
+			if err := json.Unmarshal(body, &d); err != nil {
+				t.Fatal(err)
+			}
+			if d.Integrity.OK || len(d.Sources) != 1 || d.Sources[0].Kind != "control" || d.Sources[0].Integrity != tc.verdict {
+				t.Fatalf("%+v", d)
+			}
+		})
+	}
+}
