@@ -239,9 +239,142 @@ func readSet(resolved string, handle *os.File, verifyActive func(ledger.Start) (
 	return readSealedSet(resolved, hinfo, siblings, m, verifyActive)
 }
 
-// readSealedSet is the read algorithm with a manifest present.
+// readSealedSet is the read algorithm with a manifest present: each sealed
+// segment in manifest order, the siblings the manifest does not explain, the
+// active (or state C), the seal-terminal check and the identity check.
 func readSealedSet(resolved string, hinfo os.FileInfo, siblings map[int]string, m *Manifest, verifyActive func(ledger.Start) ([]ledger.Record, ledger.Head, error)) (View, error) {
-	return View{FirstSeq: 1, State: StateOpen, LogID: m.LogID}, errors.New("control: sealed segments are not read yet")
+	v := View{FirstSeq: 1, State: StateOpen, LogID: m.LogID}
+	start := ledger.Start{}
+	for i, e := range m.Segments {
+		k := i + 1
+		seg, recs, err := verifySealed(resolved, k, start, e)
+		v.Records = append(v.Records, recs...)
+		if err != nil {
+			v.Head = ledger.Head{Hash: start.Prev, Count: int(start.Base)}
+			if len(recs) > 0 {
+				v.Head = ledger.Head{Hash: hashOf(recs[len(recs)-1].Raw), Count: int(start.Base) + len(recs)}
+			}
+			return v, err
+		}
+		v.Sealed = append(v.Sealed, seg)
+		start = ledger.Start{Prev: seg.HeadHash, Base: uint64(seg.HeadSeq)}
+		delete(siblings, k)
+	}
+	n := len(m.Segments)
+	// Siblings the manifest does not explain, judged against the handle: the
+	// one tolerated is the in-progress link of seal N+1 (states A′ and B).
+	for _, ord := range sortedOrdinals(siblings) {
+		if ord == n+1 && sameFile(siblings[ord], hinfo) {
+			continue
+		}
+		return v, &SetError{Fault: FaultUnexpectedSegment, Path: siblings[ord]}
+	}
+	v.Head = ledger.Head{Hash: start.Prev, Count: int(start.Base)}
+	// State C: the active name still refers to the sealed file. The logical
+	// active is empty; nothing more is read from the handle.
+	if n > 0 && sameFile(SegmentPath(resolved, n), hinfo) {
+		v.State = StateRotatedNotSwapped
+		v.Active = Segment{N: 0, Path: resolved, FirstSeq: int(start.Base) + 1, HeadSeq: int(start.Base), HeadHash: start.Prev}
+		return identityCheck(v, m)
+	}
+	recs, head, verr := verifyActive(start)
+	v.Records = append(v.Records, recs...)
+	v.Active = Segment{N: 0, Path: resolved, FirstSeq: int(start.Base) + 1, HeadSeq: int(start.Base) + head.Count, HeadHash: head.Hash, Bytes: hinfo.Size(), Records: head.Count}
+	if head.Count > 0 {
+		v.Head = ledger.Head{Hash: head.Hash, Count: int(start.Base) + head.Count}
+	}
+	if verr != nil {
+		return v, mapActiveFault(resolved, n, start, recs, verr)
+	}
+	v, err := finishActive(v, n)
+	if err != nil {
+		return v, err
+	}
+	return identityCheck(v, m)
+}
+
+// identityCheck: the manifest's log_id must be the genesis's — a manifest
+// from another root is refused.
+func identityCheck(v View, m *Manifest) (View, error) {
+	logID, err := GenesisLogID(v.Records)
+	if err != nil || logID != m.LogID {
+		return v, &SetError{Fault: FaultManifest, Segment: 0, Path: ManifestPath(v.Active.Path), Err: fmt.Errorf("log_id %s recorded, %s verified", m.LogID, logID)}
+	}
+	return v, nil
+}
+
+// verifySealed reads one sealed segment: open it Unlocked (nothing writes a
+// sealed segment), verify it from start, hash its lines, require its last
+// record to be its seal and nothing to follow it, then cross-check the
+// manifest entry and the seal payload. A disagreement names the field with
+// the recorded and the verified value. The seal-terminal check runs before
+// the manifest cross-checks on purpose: a record appended after the seal
+// also changes head_seq, head_hash, sha256 and bytes, and the fault to name
+// is the appended record, not the figures it disturbed.
+func verifySealed(resolved string, k int, start ledger.Start, e ManifestEntry) (Segment, []ledger.Record, error) {
+	path := SegmentPath(resolved, k)
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Segment{}, nil, &SetError{Fault: FaultMissingSegment, Segment: k, Path: path, want: e.SHA256}
+	}
+	if err != nil {
+		return Segment{}, nil, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return Segment{}, nil, err
+	}
+	recs, head, verr := ledger.VerifyReader(f, start)
+	var torn *ledger.TornError
+	var broken *ledger.ChainBrokenError
+	switch {
+	case errors.As(verr, &torn):
+		return Segment{}, recs, &SetError{Fault: FaultTorn, Segment: k, Path: path, Seq: int(start.Base) + len(recs) + 1, Err: verr, want: e.SHA256}
+	case errors.As(verr, &broken):
+		if broken.Line == 1 && k > 1 {
+			return Segment{}, recs, &SetError{Fault: FaultBoundary, Segment: k, Path: path, Seq: int(start.Base) + 1, Err: verr}
+		}
+		return Segment{}, recs, &SetError{Fault: FaultBroken, Segment: k, Path: path, Seq: int(start.Base) + broken.Line, Err: verr, want: e.SHA256}
+	case verr != nil:
+		return Segment{}, recs, verr
+	}
+	headSeq := int(start.Base) + head.Count
+	content, whole, size := segmentDigests(recs)
+	disagree := func(field string, recorded, verified any) error {
+		return &SetError{Fault: FaultManifest, Segment: k, Path: path, Err: fmt.Errorf("%s %v recorded, %v verified", field, recorded, verified)}
+	}
+	var sealedAt time.Time
+	for i, r := range recs {
+		rec, ok := decodeRecord(r)
+		if !ok || rec.Action != "seal" || rec.Outcome != "success" {
+			continue
+		}
+		if i != len(recs)-1 {
+			return Segment{}, recs, &SetError{Fault: FaultSealNotLast, Segment: k, Path: path, Seq: rec.Seq + 1, want: strconv.Itoa(headSeq)}
+		}
+		want := Seal{Segment: k, FirstSeq: int(start.Base) + 1, HeadSeq: rec.Seq - 1, HeadHash: rec.Prev, ContentSHA256: content}
+		if rec.Seal == nil || *rec.Seal != want {
+			return Segment{}, recs, disagree("seal", rec.Seal, want)
+		}
+		sealedAt = rec.Time
+	}
+	if sealedAt.IsZero() {
+		return Segment{}, recs, disagree("seal", "none", "a successful seal as the last record")
+	}
+	switch {
+	case e.FirstSeq != int(start.Base)+1:
+		return Segment{}, recs, disagree("first_seq", e.FirstSeq, start.Base+1)
+	case e.HeadSeq != headSeq:
+		return Segment{}, recs, disagree("head_seq", e.HeadSeq, headSeq)
+	case e.HeadHash != head.Hash:
+		return Segment{}, recs, disagree("head_hash", e.HeadHash, head.Hash)
+	case e.SHA256 != whole:
+		return Segment{}, recs, disagree("sha256", e.SHA256, whole)
+	case e.Bytes != info.Size() || size != info.Size():
+		return Segment{}, recs, disagree("bytes", e.Bytes, info.Size())
+	}
+	return Segment{N: k, Path: path, FirstSeq: int(start.Base) + 1, HeadSeq: headSeq, HeadHash: head.Hash, SHA256: whole, Bytes: info.Size(), Records: head.Count, SealedAt: sealedAt}, recs, nil
 }
 
 // mapActiveFault translates the ledger's per-file error on the active into
@@ -317,55 +450,114 @@ func Writable(controlLog string) error {
 	return c.Close()
 }
 
-// openActive is the writer's entry: it opens and locks the active BY NAME,
-// verifies the set exactly as Read does and returns the active chain
-// (ledger.Resume over the locked handle) with the View. A missing active
-// beside a manifest or a sibling is FaultActiveMissing and nothing is
-// created; with no history, today's create-on-first-write stands.
+// Test hooks: no-ops in production; a test installs a function that rotates
+// the ledger at the one schedule each rule exists for.
+var (
+	betweenOpenAndLock = func() {}
+	betweenWalkAndOpen = func() {}
+)
+
+// openActive is the writer's entry. It opens and locks the active BY NAME,
+// decides what the locked handle is, verifies the set exactly as Read does
+// and returns the active chain (ledger.Resume over the locked handle) with
+// the View. It never uses the fused ledger.Open/OpenFrom: the Start is known
+// only after the sealed walk, and a locked handle that turns out to be the
+// sealed file under the active's name (state C) must read as ErrSealed, not
+// as a damaged chain. Order: (a) resolve, Lstat — a missing active beside a
+// manifest or a sibling is FaultActiveMissing and nothing is created; with
+// no history, today's create-on-first-write stands; (b) read the manifest M;
+// (c) open by name, LOCK_EX; (d) re-stat; (e) re-read the manifest and
+// require it to equal M — a seal that ran to completion between (b) and (c)
+// left the name on a new, empty active that a stale Start would accept
+// vacuously, and this writer would then duplicate the sealed range;
+// (f) readSet over the locked handle: the sealed walk, the sibling check,
+// state C (reached before the handle is read, so Resume never runs on the
+// sealed inode), ledger.Resume as the active's one read, and the
+// seal-terminal check; a set in state B or C is ErrSealed. (d) and (e) retry
+// from (a) once.
 func openActive(controlLog string) (*ledger.Chain, View, error) {
 	resolved, err := resolveControlLog(controlLog)
 	if err != nil {
 		return nil, View{}, err
 	}
-	create := false
-	if _, lerr := os.Lstat(resolved); lerr != nil {
-		if !errors.Is(lerr, fs.ErrNotExist) {
-			return nil, View{}, lerr
+	for attempt := 0; attempt < 2; attempt++ {
+		create := false
+		if _, lerr := os.Lstat(resolved); lerr != nil {
+			if !errors.Is(lerr, fs.ErrNotExist) {
+				return nil, View{}, lerr
+			}
+			if hasHistory(resolved) {
+				return nil, View{}, activeMissing(resolved)
+			}
+			create = true
 		}
-		if hasHistory(resolved) {
-			return nil, View{}, activeMissing(resolved)
+		m, merr := loadManifest(resolved)
+		if merr != nil {
+			return nil, View{}, merr
 		}
-		create = true
-	}
-	f, err := openForAppend(resolved, create)
-	if err != nil {
-		return nil, View{}, err
-	}
-	if lerr := ledger.LockExclusive(f); lerr != nil {
-		_ = f.Close()
-		return nil, View{}, fmt.Errorf("ledger: open %s: %w", resolved, lerr)
-	}
-	var chain *ledger.Chain
-	v, rerr := readSet(resolved, f, func(s ledger.Start) ([]ledger.Record, ledger.Head, error) {
-		c, recs, err := ledger.Resume(f, ledger.Locked, s)
-		chain = c
-		head := ledger.Head{Hash: s.Prev}
-		if len(recs) > 0 {
-			head = ledger.Head{Hash: hashOf(recs[len(recs)-1].Raw), Count: len(recs)}
+		betweenWalkAndOpen()
+		f, err := openForAppend(resolved, create)
+		if err != nil {
+			return nil, View{}, err
 		}
-		return recs, head, err
-	})
+		betweenOpenAndLock()
+		if lerr := ledger.LockExclusive(f); lerr != nil {
+			_ = f.Close()
+			return nil, View{}, fmt.Errorf("ledger: open %s: %w", resolved, lerr)
+		}
+		fi, serr := f.Stat()
+		if serr != nil || !sameFile(resolved, fi) {
+			ledger.Unlock(f)
+			_ = f.Close()
+			continue
+		}
+		m2, merr := loadManifest(resolved)
+		if merr != nil {
+			ledger.Unlock(f)
+			_ = f.Close()
+			return nil, View{}, merr
+		}
+		if !manifestEqual(m, m2) {
+			ledger.Unlock(f)
+			_ = f.Close()
+			continue
+		}
+		var chain *ledger.Chain
+		v, rerr := readSet(resolved, f, func(s ledger.Start) ([]ledger.Record, ledger.Head, error) {
+			c, recs, err := ledger.Resume(f, ledger.Locked, s)
+			chain = c
+			head := ledger.Head{Hash: s.Prev}
+			if len(recs) > 0 {
+				head = ledger.Head{Hash: hashOf(recs[len(recs)-1].Raw), Count: len(recs)}
+			}
+			return recs, head, err
+		})
+		switch {
+		case rerr != nil:
+			ledger.Unlock(f)
+			_ = f.Close()
+			return nil, v, rerr
+		case v.State != StateOpen:
+			ledger.Unlock(f)
+			_ = f.Close()
+			return nil, v, ErrSealed
+		}
+		return chain, v, nil
+	}
+	return nil, View{}, fmt.Errorf("control: %s was rotated twice while opening it; retry", resolved)
+}
+
+// manifestEqual: same N and same last head (nil == nil).
+func manifestEqual(a, b *Manifest) bool {
 	switch {
-	case rerr != nil:
-		ledger.Unlock(f)
-		_ = f.Close()
-		return nil, v, rerr
-	case v.State != StateOpen:
-		ledger.Unlock(f)
-		_ = f.Close()
-		return nil, v, ErrSealed
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil || len(a.Segments) != len(b.Segments):
+		return false
+	case len(a.Segments) == 0:
+		return true
 	}
-	return chain, v, nil
+	return a.Segments[len(a.Segments)-1].HeadHash == b.Segments[len(b.Segments)-1].HeadHash
 }
 
 // openForAppend is today's create-on-first-write (ledger.Open's flags and
