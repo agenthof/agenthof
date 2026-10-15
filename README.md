@@ -194,11 +194,14 @@ agenthof audit <run-id>      # who asked → what ran → what it touched
 ```
 agenthof investigate --since 24h --agent coder --outcome refused
 agenthof investigate --json | jq          # the stable investigate/1 contract
+agenthof investigate --json | jq -r '.events[].anchor.verdict // empty'   # each successful anchor's offline verdict: verified | mismatch | unverifiable
 ```
 
 One filterable, time-ordered timeline across the control plane and every run —
 who changed what, which `apply` authorized each run's config, and whether the
-record can be trusted. Integrity is always shown, never assumed. See
+record can be trusted. Integrity is always shown, never assumed; an anchored
+head's verdict is shown on its event (informational — `audit verify control`
+is the gate). See
 [`docs/reference/config.md`](docs/reference/config.md) for the flags, exit codes,
 and the `investigate/1` JSON contract.
 

@@ -1377,8 +1377,8 @@ or unreadable control ledger — never tampering; the `cause` names the fix.
 Whether the entry is still in the log today is `audit verify control`'s
 question (without `--offline`), not this view's: `investigate` makes no
 request and never reads `integrity.yaml`. Without a pin every
-transparency-log anchor is `unverifiable`: a reader that took the key from
-the log it is verifying would not be independent.
+transparency-log anchor the chain still reproduces is `unverifiable`: a reader
+that took the key from the log it is verifying would not be independent.
 
 Whenever the view carries at least one verdict, one more line follows the
 integrity line — the gate's own summary phrase:
