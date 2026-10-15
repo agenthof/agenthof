@@ -7,7 +7,9 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -303,5 +305,53 @@ func TestVerifyControlIntegrityVerdictsOutrankAnIncompleteRotation(t *testing.T)
 	crashSeal(ctl)
 	if code, text := verifyControl(t, "--control-log", ctl, "--offline"); code != 3 || !strings.Contains(text, "TAINTED") || !strings.Contains(text, "rotation not completed") {
 		t.Fatalf("3 outranks 8: %d\n%s", code, text)
+	}
+}
+
+// TestAuditRepairControlCompletesAPostSealRotation: the command prints the
+// state-B repair line, verify exits 3 (tainted) with the segment line.
+func TestAuditRepairControlCompletesAPostSealRotation(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := sealSample(t)
+	ctl := applied(t, root)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_manifest")
+	auditSeal(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	// An older binary appends after the seal: emulate with a raw chained record.
+	recs := controlRecords(t, ctl)
+	sum := sha256.Sum256(recs[len(recs)-1].Raw)
+	f, _ := os.OpenFile(ctl, os.O_APPEND|os.O_WRONLY, 0)
+	_, _ = f.WriteString(`{"v":"control/1","seq":` + strconv.Itoa(len(recs)+1) + `,"time":"2026-10-15T10:00:00Z","action":"prune","outcome":"success","invoker":{"subject":"old","issuer":"local","method":"static"},"witness":{"os_user":"o","hostname":"h"},"prev":"` + hex.EncodeToString(sum[:]) + `"}` + "\n")
+	_ = f.Close()
+	var out bytes.Buffer
+	code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	if code != 0 || !regexp.MustCompile(`(?m)^repaired: moved \d+ bytes \(sha256=[0-9a-f]{64}\) to .*control\.jsonl\.torn-\d+; rotation of segment 1 completed; control ledger tainted\n`).MatchString(out.String()) {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if code, vout := verifyControl(t, "--control-log", ctl, "--offline"); code != 3 || !strings.Contains(vout, "segment 1: seq 1–2 sealed") || !strings.Contains(vout, "TAINTED: repaired at seq 3") {
+		t.Fatalf("%d\n%s", code, vout)
+	}
+}
+
+// TestAuditRepairControlRefusesAnIncompleteRotation: state B is not a repair
+// matter — the command points at audit seal, exits 1, and changes nothing.
+func TestAuditRepairControlRefusesAnIncompleteRotation(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root := sealSample(t)
+	ctl := applied(t, root)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_manifest")
+	auditSeal(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	before, _ := os.ReadFile(ctl)
+	var out bytes.Buffer
+	code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	if code != 1 || !strings.Contains(out.String(), "run audit seal") || strings.Contains(out.String(), "repaired:") {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if after, _ := os.ReadFile(ctl); !bytes.Equal(before, after) {
+		t.Fatal("a refusal changes nothing")
+	}
+	if frags, _ := filepath.Glob(ctl + ".torn-*"); len(frags) != 0 {
+		t.Fatalf("no fragment on a refusal: %v", frags)
 	}
 }

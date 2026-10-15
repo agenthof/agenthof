@@ -1523,10 +1523,15 @@ func segmentLines(v control.View) []string {
 // authentication refusal and like roles that cannot be read — is printed
 // and exits nonzero WITHOUT writing any control event, because the ledger
 // here may be exactly the torn file being repaired. Only an authorized
-// invoker reaches control.Repair, which moves the torn fragment aside,
-// truncates the live file, and appends the chained "repair" event that
-// taints the ledger forever (control.IsTainted; reported by a later
-// `audit verify control` as exit 3).
+// invoker reaches control.Repair, which decides over the whole segment set:
+// a torn tail of the active is moved aside, the active truncated, and the
+// chained "repair" event appended; bytes after a successful seal in the
+// active are moved aside and the rotation completed, the "repair" event
+// opening the next segment. Either way the ledger is tainted forever
+// (control.IsTainted; reported by a later `audit verify control` as exit
+// 3). An incomplete rotation (state B or C), a fault in a sealed segment, a
+// chain break and every structural fault are refused with their own remedy
+// and nothing changes — only a damaged tail of the ACTIVE is ever truncated.
 //
 // A missing control log is reported plainly rather than as a generic
 // open error, matching cmdAuditControl/cmdAuditVerifyControl. An
@@ -1627,13 +1632,31 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 		}
 	}
 
-	fragLen, fragSHA, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness())
+	// installed.lock EXCLUSIVE around the repair: the post-seal case rotates
+	// the set, and the lock keeps every pointer writer out of that window.
+	// Lock order store → ledger, as every writer takes them.
+	unlock, lockErr := ledger.LockFile(installedLock(*controlLog))
+	if lockErr != nil {
+		if errors.Is(lockErr, ledger.ErrLockHeld) {
+			_, _ = fmt.Fprintf(out, "audit repair control: %s\n", msgLockBusy)
+			return 1
+		}
+		_, _ = fmt.Fprintln(out, lockErr)
+		return 1
+	}
+	res, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness())
+	unlock()
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
-	_, _ = fmt.Fprintf(out, "repaired: moved %d bytes (sha256=%s) to %s; control ledger tainted\n",
-		fragLen, fragSHA, latestTornFragmentPath(*controlLog))
+	if res.CompletedSegment > 0 {
+		_, _ = fmt.Fprintf(out, "repaired: moved %d bytes (sha256=%s) to %s; rotation of segment %d completed; control ledger tainted\n",
+			res.FragmentLen, res.FragmentSHA, latestTornFragmentPath(*controlLog), res.CompletedSegment)
+	} else {
+		_, _ = fmt.Fprintf(out, "repaired: moved %d bytes (sha256=%s) to %s; control ledger tainted\n",
+			res.FragmentLen, res.FragmentSHA, latestTornFragmentPath(*controlLog))
+	}
 	v, verr := control.Read(*controlLog, ledger.Locked)
 	if verr != nil {
 		_, _ = fmt.Fprintln(out, verr)
@@ -1648,16 +1671,21 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 }
 
 // latestTornFragmentPath finds the most recently created
-// "<controlLog>.torn-<unix-seconds>" sibling file, for the human-readable
+// "<active>.torn-<unix-seconds>" sibling file, for the human-readable
 // message printed after a successful control.Repair. control.Repair
-// itself only returns the fragment's length and sha256 (spec §3.6's
-// interface), not the path it chose, so this glob-and-pick-newest
-// reconstructs it; timestamps are decimal Unix seconds of equal length
-// today, so the lexicographically greatest match is also the newest. A
-// failure here never fails the repair itself — it already succeeded —
-// so this just falls back to a glob pattern if, somehow, nothing matches.
+// itself only returns the fragment's length and sha256, not the path it
+// chose, so this glob-and-pick-newest reconstructs it beside the resolved
+// active — where the fragment is written, like every file of the segment
+// set; timestamps are decimal Unix seconds of equal length today, so the
+// lexicographically greatest match is also the newest. A failure here never
+// fails the repair itself — it already succeeded — so this just falls back
+// to a glob pattern if, somehow, nothing matches.
 func latestTornFragmentPath(controlLog string) string {
-	pattern := controlLog + ".torn-*"
+	resolved, err := filepath.EvalSymlinks(controlLog)
+	if err != nil {
+		resolved = controlLog
+	}
+	pattern := resolved + ".torn-*"
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) == 0 {
 		return pattern
