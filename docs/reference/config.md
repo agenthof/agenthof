@@ -457,7 +457,7 @@ and groups are used outside of `apply`).
 ### `control`
 
 Optional. The control-plane operations this role's `allowed_groups` members
-may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor` — the eight fixed
+may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor`, `seal` — the nine fixed
 operations, named individually. There is no wildcard spelling and no
 operation is granted by omission — the one implication is that `apply`
 includes `pull`; nothing else is implied: a role with no `control` key (or `control:`
@@ -475,7 +475,10 @@ read the installed configuration over the API — `config pull --server`,
 `GET /v1/config` — so an execution point can enforce it; a grant of `apply`
 includes it. `anchor` lets its members run `audit anchor`, which pins the
 control-ledger head into the transparency log the root's `integrity.yaml`
-names (see `audit anchor` below). `vouch` is not a grantable operation (`control-bad-op`): `config
+names (see `audit anchor` below). `seal` lets its members run `audit seal`,
+which closes the control ledger's active segment into a sealed file and opens
+the next, the chain continuing unbroken (see `audit seal` below); completing an
+interrupted seal needs the same grant. `vouch` is not a grantable operation (`control-bad-op`): `config
 vouch` is authorized against no role by design, because the roles' own
 provenance is what it restores.
 
@@ -873,6 +876,7 @@ authorized against no role, permitted for any identity the host resolves (see
 | `agenthof audit verify control [--control-log <path>] [--expect-head <hex>\|<seq>:<hex>] [--anchor-key <path>] [--offline] [--anchor-timeout <dur>]` | `--control-log`, `--expect-head`, `--anchor-key`, `--offline`, `--anchor-timeout` |
 | `agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--config`, `--as`, `--groups`, `--token` |
 | `agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout <dur>]` | `--control-log`, `--as`, `--groups`, `--token`, `--timeout` |
+| `agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>]` | `--control-log`, `--as`, `--groups`, `--token`, `--if-larger-than` |
 | `agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]` | `--control-log`, `--as`, `--groups`, `--token`, `--admin-base` |
 | `agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--older-than`, `--log-dir`, `--artifact-dir`, `--control-log`, `--as`, `--groups`, `--token` |
 | `agenthof investigate [--since <dur\|ts>] [--until <dur\|ts>] [--invoker <id>] [--agent <name>] [--outcome <value>] [--run <run-id>] [--config-hash <sha256:…>] [--json] [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>]` | `--since`, `--until`, `--invoker`, `--agent`, `--outcome`, `--run`, `--config-hash`, `--json`, `--log-dir`, `--control-log`, `--anchor-key` |
@@ -891,6 +895,23 @@ identity, so a symlink or hard link to it is spared too). The sweep under
 the installed-config store, or anything else left in a misconfigured
 `--artifact-dir` is left untouched. Keeping the ledger out from under
 `--log-dir`/`--artifact-dir` is still the tidy layout.
+
+Once `audit seal` has run, the ledger is a set of files beside the active one:
+`control.jsonl.seg-000001`, `control.jsonl.seg-000002`, … (the sealed segments,
+named `<log>.seg-NNNNNN`) and `control.jsonl.segments` (the manifest). They are
+created beside the file a symlinked `--control-log` resolves to, never under
+`--log-dir`, and never pruned: a segment or manifest name never ends in `.jsonl`,
+which is the rule `runs prune`, `investigate` and `serve` use to tell a run log
+from anything else. The chain and the sequence numbers continue across segments,
+and every reader walks the whole set. Sealing is local: a sealed segment is a
+regular file whoever owns the host can rewrite, and the chain detects an
+inconsistent edit and a dropped, duplicated or reordered segment, not a
+consistent rewrite of the whole set. **Standing rule: upgrade every binary that
+shares the control root before the first seal, and never run an older one
+against it afterwards**: every seal leaves an empty active segment that a binary
+without sealing would start a fresh ledger in; the next read by a current binary
+reports it (`does not chain from … a writer older than this root's seals`) and
+names the remedy.
 
 The **installed-configuration store** lives beside it: `<dir>/installed/`
 (default `.agenthof/installed/`), holding one snapshot directory per applied
@@ -1236,6 +1257,19 @@ say — and the flag is local-only: with `--server` (or `AGENTHOF_SERVER`)
 `investigate` exits 2, because the server pins `anchor.pub` beside its own ledger
 and a pin you named would otherwise be silently ignored.
 
+### `--if-larger-than`
+
+`audit seal` only. Seal only if the active segment's file is strictly larger than
+`<size>`: a non-negative integer with an optional single `k`, `m` or `g` suffix
+(1024-based; `50m` is 52 428 800 bytes). Otherwise the command prints
+`audit seal: active segment is N bytes, not larger than <size>; nothing sealed`
+and exits 0 with nothing recorded. `0` seals any non-empty active; an empty active
+is never sealed. The threshold is judged after authorization, so a refusal is
+recorded regardless of it, and a no-op by an authorized cron tick leaves no record.
+It does not apply to completing an interrupted seal. A cron can pair it with
+anchoring, `audit seal --if-larger-than 50m && audit anchor`, which anchors a
+rotation's final head whenever one happens.
+
 ### Exit codes
 
 `agenthof apply` / `agenthof registry enable|disable`:
@@ -1243,7 +1277,7 @@ and a pin you named would otherwise be silently ignored.
 | Exit | Meaning |
 |---|---|
 | `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
-| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`), an installed pointer the control ledger does not record as its last install (`refused`, reason `not_on_record`; the text names the last recorded install, or that there is none, and `config vouch` as the remedy), or an installed snapshot whose bytes do not hash as its pointer (`error`, reason `io_error`; the hatch names `installed/current`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run and every control action is refused — recorded, `configuration not on record` — until `config vouch` puts the flipped snapshot on record, agent still disabled; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run and every control action — a re-apply included — is refused, recorded, `configuration not on record`, until `config vouch`); or (`--if-installed`) the precondition did not hold, printed and **not** recorded (checked after the vouch, so on an unvouched pointer the `not_on_record` refusal comes first); or another process holds the installed-configuration writer lock (`another agenthof process holds the installed-configuration lock; retry`), not recorded; or (`--server`) any answer other than installed, and every transport error |
+| `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`), an installed pointer the control ledger does not record as its last install (`refused`, reason `not_on_record`; the text names the last recorded install, or that there is none, and `config vouch` as the remedy), or an installed snapshot whose bytes do not hash as its pointer (`error`, reason `io_error`; the hatch names `installed/current`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run and every control action is refused — recorded, `configuration not on record` — until `config vouch` puts the flipped snapshot on record, agent still disabled; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run and every control action — a re-apply included — is refused, recorded, `configuration not on record`, until `config vouch`); or (`--if-installed`) the precondition did not hold, printed and **not** recorded (checked after the vouch, so on an unvouched pointer the `not_on_record` refusal comes first); or another process holds the installed-configuration writer lock (`another agenthof process holds the installed-configuration lock; retry`), not recorded; or a control ledger whose seal is not yet rotated (`rotation_incomplete`: nothing recorded; the host's operator runs `agenthof audit seal`; `serve` answers `500`); or (`--server`) any answer other than installed, and every transport error |
 | `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set; `--if-installed` not `sha256:<hex>` or `none`; `--server` without a token or without `--if-installed`; `--bundle` without `--server` |
 
 `agenthof config vouch` (local only; it appends to the control ledger beside which the snapshot is installed):
@@ -1272,22 +1306,23 @@ and a pin you named would otherwise be silently ignored.
 
 | Exit | Meaning |
 |---|---|
-| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code — and, when something is installed, a trailing `installed config:` line saying whether the pointer matches the last recorded install — the last successful `apply`, kill-switch flip, or `config vouch` (informational here; see `verify control`; only the pointer is compared, the snapshot's bytes are not hashed). An event recorded over the API shows its way in beside the method — `dana@example.com (oidc, via api)` |
-| `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain — a torn or broken chain still renders whatever valid prefix was recovered, with the failure named in the trailing integrity line |
+| `0` | Rendered the chain — including a chain that verifies clean but is tainted (a `repair` event was ever appended): the taint shows in the trailing integrity line, but only `audit verify control` turns it into a distinct exit code — and, when something is installed, a trailing `installed config:` line saying whether the pointer matches the last recorded install — the last successful `apply`, kill-switch flip, or `config vouch` (informational here; see `verify control`; only the pointer is compared, the snapshot's bytes are not hashed). On a root that has sealed, one `segment k:` line per sealed segment precedes the events, and the integrity line reads `verified (N events, k sealed segments)`. A seal whose rotation did not finish prints its state line and still exits 0; `audit verify control` exits 8 for it. An event recorded over the API shows its way in beside the method — `dana@example.com (oidc, via api)` |
+| `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain — a torn or broken chain still renders whatever valid prefix was recovered, with the failure named in the trailing integrity line; or a segment-set fault (named in the integrity line; a missing active beside a manifest prints the fault, never `nothing recorded yet`) |
 | `2` | Usage error |
 
 `agenthof audit verify control` computes every verdict, prints every line,
-then exits by precedence **1, 6, 3, 4, 5, 7**:
+then exits by precedence **1, 6, 3, 4, 5, 7, 8**:
 
 | Exit | Meaning |
 |---|---|
-| `1` | No control log at that path yet, another open/IO failure, or a torn/broken chain — checked first and alone; no anchor is examined |
+| `1` | No control log at that path yet, another open/IO failure, a torn/broken chain, or a segment-set fault (a torn or broken sealed segment, a boundary that does not chain, a missing or unexpected segment file, a manifest that disagrees with the files, a seal record that is not its segment's last), each named with its seq and remedy — checked first and alone; no anchor is examined |
 | `6` | **Anchor mismatch** — a definitive content disagreement for at least one anchor the chain records: the chain no longer reproduces the recorded head at the recorded position (a rewritten root); or, under the trusted log key, the stored entry names another hash, its leaf hash is not the recorded entry, the inclusion proof fails, the checkpoint names another tree or its signature is invalid; or the log serves a different body for the recorded entry. Every anchor is still listed |
 | `3` | Tainted — a `repair` event has ever been appended |
 | `4` | `--expect-head` did not hold (either form) |
 | `5` | The installed pointer (`installed/current` beside the log) does not name the last recorded install (the last successful `apply`, kill-switch flip, or `config vouch`) — an install whose event was never appended or whose record was lost (`config vouch` is the remedy) — or the pointer itself is damaged (unreadable or malformed). Only the pointer is read, never the snapshot directory, so a matching pointer whose snapshot bytes were deleted is still exit 0 |
 | `7` | **Anchor unverifiable** — no verdict could be reached for at least one anchor and none mismatched: the log unreachable, slow, redirecting, or answering anything but the entry; a log key the verifier does not hold (the proof's signer is not the pinned key, or the served key is not the one recorded at anchor time); no key at all (`--offline` without a pin); `anchor.pub`/`--anchor-key` missing, malformed or not ECDSA P-256; a proof format or backend kind this build does not read. Never tamper detected: retry, or pin a key, as the line says |
-| `0` | None of the above |
+| `8` | **Rotation not completed** — a seal was recorded but its rotation did not finish (the manifest update or the swap into the fresh active is still owed). Every control writer refuses until `agenthof audit seal` completes it. Not an integrity verdict: the chain is intact, and it is last in precedence (**1, 6, 3, 4, 5, 7, 8**), so every other verdict outranks it |
+| `0` | None of the above. On a root that has sealed, one `segment k:` line per sealed segment and an `active:` line print before the pointer and anchor lines |
 | `2` | Usage, including an `--expect-head` outside its grammar |
 
 The anchor lines print together after every anchor is checked, so against an
@@ -1311,12 +1346,20 @@ bounded at 256, 2048, 64 and 128 bytes (and `proof` at 8192); a larger value
 is refused before the ledger is opened. Nothing an honest log produces comes
 near these.
 
+`agenthof audit seal`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Sealed and recorded: a `seal` `success` event is the last record of the closed segment, the segment is linked under its name, the manifest is updated, and a fresh active is in place. Prints `sealed: segment N seq=A..B sha256=<file> (<name>)` and `control head: seq=B sha256=<head>`. Or completed an interrupted seal, printing `completed rotation of segment N` first. Or, with `--if-larger-than`, the active is not larger than the threshold: printed, nothing recorded, nothing changed |
+| `1` | A recorded `refused` (no role grants `seal`; a token that failed verification; nothing installed; a pointer the ledger does not vouch for) or `error` (the installed pointer cannot be honored — malformed, snapshot gone, or bytes that do not hash as the pointer, with the hatch naming `installed/current` — or the installed-configuration lock cannot be taken for an IO reason); or, not recorded: the ledger is busy, torn or broken (the repair hint for a torn active; a sealed-segment, boundary, missing-segment or manifest fault names its own remedy), the active segment is empty (`nothing to seal`), the filesystem has no hard links (`nothing sealed`, judged before anything is recorded), a seal that was recorded but whose manifest update or swap did not finish (`sealed; rotation NOT completed — re-run: agenthof audit seal`; nothing is lost, and the next run completes it), or a refused completion of an interrupted seal (printed, not recorded) |
+| `2` | Usage: bad flags; `--if-larger-than` outside its grammar; `--token` without `AGENTHOF_OIDC_ISSUER`; an `integrity.yaml` that cannot be read or does not validate |
+
 `agenthof audit repair control`:
 
 | Exit | Meaning |
 |---|---|
-| `0` | A torn tail was repaired: the damaged bytes were moved to a `<log>.torn-<timestamp>` fragment, the live log truncated to its last valid record, and a `repair` event appended — the ledger is now tainted |
-| `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; no role grants `repair` to the invoker, the installed pointer cannot be read or its snapshot's bytes do not hash as the pointer (repair verifies the bytes but, by design, does not ask the ledger it is repairing to vouch for the pointer), or — nothing installed — `--config` cannot be read (all printed, never recorded); or another IO error. None of these write a control event, since the ledger being repaired may itself be the file in question |
+| `0` | A torn tail was repaired: the damaged bytes were moved to a `<log>.torn-<timestamp>` fragment, the live log truncated to its last valid record, and a `repair` event appended — the ledger is now tainted; or records were appended after a successful seal in the active (a writer older than this root's seals): they were moved to the fragment, the rotation completed, and the `repair` event appended as the new active's first record (`rotation of segment K completed`) — tainted all the same |
+| `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; no role grants `repair` to the invoker, the installed pointer cannot be read or its snapshot's bytes do not hash as the pointer (repair verifies the bytes but, by design, does not ask the ledger it is repairing to vouch for the pointer), or — nothing installed — `--config` cannot be read (all printed, never recorded); or another IO error. A fault in a sealed segment is never repaired in place (its own text names the remedy, such as restoring it from a copy); an active that does not chain from the last sealed head names its cause; a sealed, not-yet-rotated active is completed by `agenthof audit seal`, not repaired, and a repair interrupted after its truncate leaves that same state. None of these write a control event, since the ledger being repaired may itself be the file in question |
 | `2` | Usage error |
 
 `agenthof gateway provision`:
@@ -1394,6 +1437,8 @@ anchor lines and no trailer: it states nothing about anchors because it shows
 none. A torn or broken control source prints the trailer too — its anchors
 are counted `unverifiable` under an integrity line that already names the
 damage.
+
+The `integrity` verdict's `broken` covers a set fault too: a boundary that does not chain, a missing or unexpected segment, a manifest disagreement, or a damaged sealed segment. A torn active is `torn`, and `missing` only a root with no control ledger at all.
 
 ### The `investigate/1` JSON contract
 
