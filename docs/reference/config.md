@@ -1438,7 +1438,7 @@ none. A torn or broken control source prints the trailer too — its anchors
 are counted `unverifiable` under an integrity line that already names the
 damage.
 
-The `integrity` verdict's `broken` covers a set fault too: a boundary that does not chain, a missing or unexpected segment, a manifest disagreement, or a damaged sealed segment. A torn active is `torn`, and `missing` only a root with no control ledger at all.
+The `integrity` verdict's `broken` covers a set fault too: a boundary that does not chain, a missing or unexpected segment, a manifest disagreement, or a damaged sealed segment. A torn active is `torn`. A root with no control ledger at all lists no control source.
 
 ### The `investigate/1` JSON contract
 
