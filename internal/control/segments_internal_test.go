@@ -328,6 +328,45 @@ func TestSetFaultsAcrossSegments(t *testing.T) {
 	})
 }
 
+// TestOrdinalZeroSiblingIsUnexpected: no manifest ever lists segment 0, so a
+// `.seg-000000` beside a manifest is an unexpected segment — beside a
+// populated manifest, and beside an empty one even when it is a hard link to
+// the active (which must never read as state C and lock every writer out
+// with ErrSealed).
+func TestOrdinalZeroSiblingIsUnexpected(t *testing.T) {
+	p := twoSegments(t)
+	if err := os.WriteFile(SegmentPath(p, 0), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Read(p, ledger.Locked)
+	var se *SetError
+	if !errors.As(err, &se) || se.Fault != FaultUnexpectedSegment || !strings.Contains(err.Error(), "control.jsonl.seg-000000") {
+		t.Fatalf("segment 0 beside a populated manifest: %v", err)
+	}
+
+	q := filepath.Join(t.TempDir(), "control.jsonl")
+	appendN(t, q, 1)
+	v, err := Read(q, ledger.Unlocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logID, _ := GenesisLogID(v.Records)
+	m, _ := json.Marshal(Manifest{V: ManifestVersion, LogID: logID})
+	if err := os.WriteFile(ManifestPath(q), m, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(q, SegmentPath(q, 0)); err != nil {
+		t.Fatal(err)
+	}
+	v, err = Read(q, ledger.Locked)
+	if v.State == StateRotatedNotSwapped || !errors.As(err, &se) || se.Fault != FaultUnexpectedSegment {
+		t.Fatalf("segment 0 linked to the active beside an empty manifest: state %d err %v", v.State, err)
+	}
+	if werr := Writable(q); errors.Is(werr, ErrSealed) || !errors.As(werr, &se) || se.Fault != FaultUnexpectedSegment {
+		t.Fatalf("the writer must not be locked out as sealed: %v", werr)
+	}
+}
+
 // TestStateMachineReads: A′, B and C each read with complete, correct records
 // and the right State; openActive appends normally in A′ and returns
 // ErrSealed — never a damaged verdict — in B and C.
@@ -426,7 +465,9 @@ func TestOpenActiveRestatRetries(t *testing.T) {
 // the writer's sealed walk and its lock; the manifest re-check under the lock
 // restarts the writer, so the record it appends carries prev == head_{N+1}
 // and seq == head_{N+1}.Seq + 1 — never head_N's. Without the re-check the
-// next Read shows FaultBoundary{0}.
+// writer, holding a stale walk under its lock, refuses on the completed
+// seal's link as an unexpected sibling (the sibling check is the fail-closed
+// second line); the re-check turns that refusal into the correct retry.
 func TestOpenActiveManifestRecheckClosesTheForkWindow(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "control.jsonl")
 	appendN(t, p, 5)

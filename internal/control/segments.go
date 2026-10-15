@@ -39,7 +39,9 @@ var segmentNameRE = regexp.MustCompile(`^\.seg-([0-9]{6})$`)
 // writer is allowed to create — resolving to the link's own path would find
 // no history beside the link and re-found a fresh genesis beside the sealed
 // segments. The target is also what the writer's create-on-first-write makes
-// and what every later resolution of the same name returns.
+// and what every later resolution of the same name returns. Only ONE level of
+// a dangling link is followed: a --control-log that is a link to another link
+// to a missing target resolves to that middle link, not to the final target.
 func resolveControlLog(controlLog string) (string, error) {
 	r, err := filepath.EvalSymlinks(controlLog)
 	if err == nil {
@@ -353,18 +355,20 @@ func readActive(resolved string, handle *os.File, w sealedWalk, verifyActive fun
 	// Siblings the manifest does not explain, judged against the handle: the
 	// one tolerated is the in-progress link of seal N+1 (states A′ and B).
 	for _, ord := range sortedOrdinals(siblings) {
-		if ord <= n {
-			continue
+		if ord >= 1 && ord <= n {
+			continue // listed by the manifest and verified above
 		}
 		if ord == n+1 && sameFile(siblings[ord], hinfo) {
 			continue
 		}
+		// Ordinal 0 (no manifest ever lists it) and anything past N+1.
 		return v, &SetError{Fault: FaultUnexpectedSegment, Path: siblings[ord]}
 	}
 	v.Head = ledger.Head{Hash: start.Prev, Count: int(start.Base)}
 	// State C: the active name still refers to the sealed file. The logical
-	// active is empty; nothing more is read from the handle.
-	if sameFile(SegmentPath(resolved, n), hinfo) {
+	// active is empty; nothing more is read from the handle. n > 0 keeps an
+	// empty manifest from ever matching a `.seg-000000` here.
+	if n > 0 && sameFile(SegmentPath(resolved, n), hinfo) {
 		v.State = StateRotatedNotSwapped
 		v.Active = Segment{N: 0, Path: resolved, FirstSeq: int(start.Base) + 1, HeadSeq: int(start.Base), HeadHash: start.Prev}
 		return identityCheck(v, w.m)
