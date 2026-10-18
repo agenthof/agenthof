@@ -271,7 +271,12 @@ explicitly. It is never written under `--log-dir`, and `runs prune` skips
 it and any `*.torn-<timestamp>` repair fragment (below) by name, and the exact file `--control-log` names by identity, whatever it is
 called. `audit seal` may close the control log's active segment into a sealed file and
 open the next, the chain continuing across segments; every segment is kept in full,
-indefinitely, as the compliance record, not run ephemera — nothing is pruned. Its invoker
+indefinitely, as the compliance record, not run ephemera — nothing is pruned. A
+sealed segment is a file like any other: whoever can write the control root can
+still rewrite it, and the chain detects a dropped, duplicated, reordered or
+inconsistently edited segment, not a consistent rewrite of the whole set — the
+same bound as the single file, closed the same way, by a head kept off the
+machine or an anchor. Its invoker
 subjects are personal data like any other identity the ledger records, so
 the self-hosting operator is the data controller for it, same as for the
 run ledger.
@@ -315,8 +320,15 @@ ledger permanently** — repair restores availability, it does not erase
 what happened — and `agenthof audit verify control` reports that taint
 from then on, on every future invocation, cleared by nothing. A chain
 break (a well-formed record that disagrees with its neighbor, rather than
-an interrupted write) is not something repair can fix at all; only a torn
-tail is recoverable this way.
+an interrupted write) is not something repair can fix at all. Repair touches
+only the **active** segment: when the bytes to move aside follow a seal record
+(a seal whose rotation was interrupted and then written after — a torn write,
+or records a binary older than sealing appended), repair also completes that
+rotation, and the repair record opens the next segment. A seal that was simply
+interrupted, with nothing written after it, is not damage and not repair's to
+fix: every writer refuses with the remedy, `agenthof audit seal`, which
+completes it, while reads and runs continue. A damaged sealed segment is never
+repaired in place — it is restored from a copy whose hash the manifest records.
 
 ## Config is law
 

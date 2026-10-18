@@ -106,6 +106,18 @@ Pre-release, and the governed core is real and runnable today:
   as unverifiable, never as tampering (see
   [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md) and
   [`docs/reference/config.md`](docs/reference/config.md));
+- **a control ledger that seals and rotates** — `audit seal` closes the active
+  log into a sealed segment and opens a fresh one, so a long-running control
+  ledger is an ordered set of sealed segments plus a live active, read, verified
+  and appended as one hash chain with one sequence; the seal is itself a
+  recorded, authorized control action, and an interrupted rotation is completed
+  on the next run, never left broken. The limit is stated plainly: a sealed
+  segment is a regular file whoever owns the host can still rewrite — the chain
+  detects a dropped, duplicated, reordered or inconsistently edited segment, not
+  a consistent rewrite of the whole set. Pinning sealed segments into a
+  non-erasable storage sink (`sink: worm`/`external`) remains reserved; this is
+  the foundation it builds on (see
+  [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md));
 - incident investigation — `agenthof investigate` merges the control log and
   every run log into one filterable, time-ordered timeline (human or `--json`),
   and `audit <run-id>` names the exact `apply` that put a run's config on record.
