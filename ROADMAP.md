@@ -212,6 +212,25 @@ The governed core is real and runnable today:
   opaque head hashes and their timing. A non-erasable storage sink for the
   whole ledger (`sink: worm`/`external`) and `anchor: signed` remain reserved.
 
+- **Sealing and rotating the control ledger** — `agenthof audit seal` closes the
+  active log into a sealed segment and opens a fresh one, so a long-running
+  control ledger becomes an ordered set of sealed segments plus a live active
+  segment — read, verified, and appended as one continuous hash chain. The seal
+  is itself a recorded, authorized control action, and the rotation is
+  crash-safe: an interrupted seal is *completed* by re-running `audit seal`,
+  never left in a broken state. `audit verify control` verifies every segment as
+  one chain and reports a rotation caught mid-flight distinctly from tampering;
+  `audit repair control` recovers a torn tail of the active segment and refuses
+  to touch a sealed segment — a cleanly interrupted rotation it declines, naming
+  `audit seal` as the way to finish it. An incomplete rotation blocks new
+  writes; reads of the ledger continue. A ledger that is never sealed behaves
+  exactly as before. The limit is stated plainly: a sealed segment is a regular
+  file whoever owns the host can still rewrite — the chain detects a dropped,
+  duplicated, reordered, or inconsistently edited segment, not a consistent
+  rewrite of the whole set. Pinning sealed segments into write-once storage
+  (`sink: worm`/`external`) remains reserved; this is the foundation it builds
+  on.
+
 ## Next
 
 - **Streamed model usage and Agenthof-side budgets** — record token counts

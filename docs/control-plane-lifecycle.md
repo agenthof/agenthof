@@ -15,10 +15,11 @@ a later version, it says so — only shipped behavior is a guarantee.
 
 ## The commands
 
-Seven commands write to the control plane — one of them, `apply`, can
+Eight commands write to the control plane — one of them, `apply`, can
 also arrive over the network; one, `config vouch`, is a recovery act rather
-than a change; and one, `audit anchor`, changes no configuration at all but
-pins the ledger's own head outside the machine:
+than a change; and two change no configuration at all: `audit anchor` pins the
+ledger's own head outside the machine, and `audit seal` closes the ledger's
+active segment and opens the next:
 
 ```
 agenthof apply --config ./config --as dana@example.com --groups platform-eng                   # adopt a configuration
@@ -29,6 +30,7 @@ agenthof gateway provision --as dana@example.com --groups platform-eng          
 agenthof runs prune --older-than 180d --as dana@example.com --groups platform-eng               # remove aged run ledgers and artifact bodies
 agenthof config vouch --control-log .agenthof/control.jsonl --as dana@example.com              # record the install event the ledger lacks for the snapshot already installed (recovery)
 agenthof audit anchor --control-log .agenthof/control.jsonl --as dana@example.com --groups platform-eng  # pin the ledger's head into a transparency log (anchor: tlog) — see "The life of an anchor"
+agenthof audit seal --control-log .agenthof/control.jsonl --as dana@example.com --groups platform-eng    # close the active segment into a sealed file and open the next — see "The life of a sealed segment"
 agenthof apply --server https://agenthof.example --token $TOKEN --if-installed sha256:…  # the same apply, over the API (serve)
 agenthof config pull --server https://agenthof.example --token $TOKEN --out ./pulled           # read the installed configuration back, for an execution point (a read: not recorded)
 ```
@@ -48,7 +50,7 @@ unrecorded install" below.
 ## The journey at a glance
 
 ```
-  agenthof apply / registry enable|disable / audit repair control / gateway provision / runs prune / audit anchor
+  agenthof apply / registry enable|disable / audit repair control / gateway provision / runs prune / audit anchor / audit seal
       │
       ▼
   1. Who is changing it?   authenticate  ──►  Invoker {subject, issuer, method}
@@ -100,7 +102,7 @@ non-zero.
 Knowing who asked is not the same as letting them. Every control action is
 **authorized, default-deny**, from two facts: the invoker's groups and the
 roles in the configuration directory. A role may carry a `control:` grant —
-any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor`, named one by one, no wildcard —
+any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor`, `seal`, named one by one, no wildcard —
 and the action is allowed only if some role both names one of the invoker's
 groups in `allowed_groups` **and** lists that operation. Membership and grant,
 never the grant alone. One grant includes another: a grant of `apply`
@@ -114,24 +116,27 @@ workflows at all — an operator who changes governance but runs nothing.
 # config/roles/platform-admin.yaml
 name: platform-admin
 allowed_groups: [platform-eng]
-control: [apply, enable, disable, repair, provision, prune, anchor]
+control: [apply, enable, disable, repair, provision, prune, anchor, seal]
 ```
 
-Three of the operations guard commands that change no configuration but are
+Four of the operations guard commands that change no configuration but are
 control-plane actions all the same. `anchor` guards `audit anchor`, which pins
-the ledger's head into a transparency log — see "The life of an anchor" below. `gateway provision` mints a provider key
+the ledger's head into a transparency log — see "The life of an anchor" below.
+`seal` guards `audit seal`, which closes the ledger's active segment into a
+sealed file and opens the next — see "The life of a sealed segment" below; the
+same grant is needed to complete a seal that was interrupted. `gateway provision` mints a provider key
 at the model gateway for every **installed** role that owns workflows — what
 the last `apply` installed, never a directory — and records `provision`
 with the installed configuration's hash; that record is not an install
 (`audit verify control` and a run's config-join ignore it). `runs prune`
 removes aged run ledgers and artifact bodies and records `prune` with a
 one-line `detail` of what it removed and no hash: it installs nothing and
-reads no configuration. All three refuse, recorded, when nothing is installed —
-there are no roles to authorize against, and neither prune nor anchor has a
+reads no configuration. All four refuse, recorded, when nothing is installed —
+there are no roles to authorize against, and none of prune, anchor or seal has a
 directory to fall back to (the kill switch and repair do, while nothing is
 installed, because each has a directory in hand) — so after removing
-`installed/current` a retention job or an anchoring cron is refused until the
-re-bootstrap apply lands. A provision
+`installed/current` a retention job, an anchoring cron or a sealing cron is
+refused until the re-bootstrap apply lands. A provision
 that fails on one role stops there: keys minted for earlier roles persist,
 one `error` record names the role that failed, and a re-run finds the
 earlier keys valid. A provision or prune whose success event could not be
@@ -198,7 +203,7 @@ nothing. Second, the **pointer must be the install the control ledger records
 last** — the last successful `apply`, kill-switch flip, or `config vouch` on
 record — or the action is refused, recorded, `configuration not on record`;
 this is the same vouch the execution read performs, and `apply`, the kill
-switch, `gateway provision`, `runs prune` and `audit anchor` all require it. `audit repair
+switch, `gateway provision`, `runs prune`, `audit anchor` and `audit seal` all require it. `audit repair
 control` is the one exception: it verifies the bytes but does not consult the
 ledger, because the ledger it would consult is the one it exists to repair.
 Third, the roles are **parsed leniently** — roles only, never the full
@@ -386,16 +391,26 @@ control ledger, which is:
   point and every point after it.
 - **Contiguous** — the unbroken `seq` from 1 is what distinguishes a control log
   from a run log (which carries no `seq`); a gap is itself evidence.
+- **One chain, however many files** — a ledger that has been sealed (`audit
+  seal`) is an ordered set of sealed segments plus the live active segment,
+  and `seq`, `prev` and the genesis `log_id` carry straight across the file
+  boundaries: the append always lands on the chain's logical position, and the
+  readers walk the whole set as one chain. A never-sealed ledger is the one
+  file described above, byte for byte. See "The life of a sealed segment".
 
 The record is a **control/1** event: `{ action, outcome, invoker, asserted_as,
 witness, config_hash, seq, prev, … }`. The `outcome` is one of `success`,
 `rejected`, `refused`, or `error`, and **all four are recorded** — the ledger is
 a log of *attempts*, not only of successes.
 
-**Honest limits.** There are three narrow cases the ledger names rather than
+**Honest limits.** There are four narrow cases the ledger names rather than
 hides. If the ledger is already **torn or broken** when a command runs, the
 command records nothing new, exits non-zero, and tells you to run `audit repair
-control` first — a damaged chain is not appended to. And a `registry`
+control` first — a damaged chain is not appended to. A ledger whose **seal has
+not finished rotating** is refused the same way, by every writer, with a
+different remedy: nothing is recorded and the command names `audit seal`, which
+completes the rotation (reads and runs are not held up; see "The life of a
+sealed segment"). And a `registry`
 flip that lands but whose recording append then fails prints `state changed;
 event NOT recorded` — the one case where state changed with no event to show for
 it. An `apply` has the same shape: once its snapshot is installed and the
@@ -432,7 +447,7 @@ as tampering. A posture naming
 a still-reserved sink or anchor (`worm`, `external`, `signed`) is one the build
 cannot honour, so every control write — `apply`, a `registry` flip, `config
 vouch`, `gateway provision`, `runs prune`, `audit repair control`, `audit
-anchor` — refuses before it opens the ledger, and `serve` refuses to start; a running server
+anchor`, `audit seal` — refuses before it opens the ledger, and `serve` refuses to start; a running server
 keeps the posture it read, so a change takes effect on restart. The `anchor`
 record was reserved by the schema before it was ever written; a root without
 `anchor: tlog` configured still never writes one.
@@ -682,8 +697,9 @@ operator's* key, is reserved.
 agenthof audit control                          # render the chain + an integrity line
 agenthof config pull [--control-log <path>] [--out <dir>] [--json]   # the installed configuration, as it would be served
 agenthof audit verify control [--expect-head H | K:H] [--anchor-key <path>] [--offline]   # verify, check the head, check every recorded anchor
-agenthof audit repair control [--config <dir>]  # repair a torn tail (see below)
+agenthof audit repair control [--config <dir>]  # repair a torn tail of the active segment (see below)
 agenthof config vouch [--control-log <path>]    # put an unrecorded install on record (see "Recovering an unrecorded install")
+agenthof audit seal [--if-larger-than <size>]   # close the active segment and open the next (see "The life of a sealed segment")
 ```
 
 Integrity is always stated, never assumed. Every read ends with a verdict:
@@ -697,6 +713,14 @@ Integrity is always stated, never assumed. Every read ends with a verdict:
   point. Repair is legitimate and recorded, but it **permanently marks** the
   ledger so a reader knows a tail was once rebuilt. `audit verify control`
   reports this as its own exit status, distinct from clean.
+
+On a ledger that has been sealed, the verdict is over the whole set: one
+`segment k:` line per sealed segment precedes the events, the integrity line
+counts the sealed segments, and a fault in any segment — or between two — is
+named with its global `seq` and its own remedy. A seal whose rotation did not
+finish is reported as its own state, not as damage: `audit control` prints the
+state line and still exits 0, `audit verify control` exits 8 for it, last in
+precedence behind every integrity verdict. See "The life of a sealed segment".
 
 This is **tamper-evident, not tamper-proof**: Agenthof cannot stop someone with
 disk access from editing the file, but it makes any such edit *show* — the chain
@@ -761,7 +785,7 @@ optional `credential` is a broker reference — environment-variable *names* for
 a direct bearer or a `client_credentials` grant, never a value; the public-good
 log needs none. The file is checked for shape only: the first contact with the
 log is the command. Every other writer — `apply`, the kill switch, `config
-vouch`, `gateway provision`, `runs prune`, `audit repair control`, `serve` —
+vouch`, `gateway provision`, `runs prune`, `audit repair control`, `audit seal`, `serve` —
 reads a `tlog` posture and proceeds exactly as at the floor, unanchored;
 **nothing anchors but `audit anchor`**. The reference for every field is in
 [`reference/config.md`](reference/config.md).
@@ -982,6 +1006,270 @@ rfc3161`), the storage sinks (`sink: worm`, `sink: external`) and `anchor:
 signed`. Reserved, and simply not there yet: a periodic or `serve`-driven
 cadence. Only shipped behavior is a guarantee.
 
+## The life of a sealed segment
+
+Everything above treats the control ledger as one file. A ledger that is
+appended to for years is still one *chain*, but it need not stay one *file*:
+`agenthof audit seal` closes the active file into a **sealed segment** and
+opens a fresh, empty active beside it. After a few seals the ledger is an
+ordered set of sealed segments plus the live active — read, verified and
+appended as **one logical chain with one sequence**, so nothing a reader
+learned above changes: `seq` keeps counting, every `prev` still names the line
+before it (across the file boundary too), and the genesis `log_id` stays the
+ledger's identity for its whole life. A segment is a unit you can copy, hash,
+ship off the box and compare — the chain that was already there, cut at
+recorded points. This section follows one segment from the seal that closes it
+to the reads that walk it later. Everything in it ships today unless marked
+reserved; a ledger that is never sealed is the single file the rest of this
+page describes, byte for byte.
+
+```
+  .agenthof/control.jsonl                              one file, seq 1..B — "the active"
+      │
+      ▼
+  agenthof audit seal [--if-larger-than 50m]           (a cron, with --token; or an operator at the terminal)
+      │
+      ▼
+  1. Who? / May they?    authenticate ──► the installed snapshot's bytes, the ledger's vouch, then
+      │                   default-deny on the role grant `seal`  ──► no ──► refused (recorded)
+      ▼
+  2. Worth sealing?      --if-larger-than: the active is not larger ──► printed, exit 0, nothing recorded
+      │                   an empty active ──► nothing to seal, exit 1, nothing recorded
+      ▼
+  3. Link               control.jsonl.seg-000001  ──►  a second name for the SAME file (a hard link)
+      ▼
+  4. Record             append seal / success { segment: 1, first_seq: 1, head_seq: B, head_hash: H_B, content_sha256 }
+      │                   as seq B+1 — the segment's last line; the chain's head is now this line
+      ▼
+  5. Manifest           control.jsonl.segments  ◄── written whole: temp, fsync, rename  (segment 1: seq 1–B+1, sha256 of the file)
+      ▼
+  6. Swap               control.jsonl  ──►  a fresh, empty file under the active's name
+      │                   the old bytes live on under .seg-000001 alone
+      ▼
+  7. Ship the line      sealed: segment 1 seq=1..B+1 sha256=<file> (control.jsonl.seg-000001)
+                        control head: seq=B+1 sha256=<the seal line>        ◄── save both off the box
+      │
+      ▼
+  8. Carry on           the next apply is seq B+2, prev = the seal line's hash, in the new active
+                        audit control / verify control / investigate / serve read .seg-000001 + control.jsonl as one chain
+```
+
+### Who, and may they?
+
+`audit seal` is a control action and is treated like every other one on this
+page. The invoker is resolved as §1 describes; the posture is read first (a
+file that cannot be read or does not validate exits 2, unrecorded); the set
+must be writable (busy exits 1 unrecorded; a torn or broken active prints the
+repair hint); a token that fails verification is recorded as `refused`; and the
+authorization read of §2 runs — the installed snapshot's bytes verified against
+the pointer, the ledger required to vouch for that pointer, the invoker's
+groups checked, default-deny, against a role that grants `seal`. Nothing
+installed, an unvouched pointer and a caller no role grants are each a
+**recorded refusal**, written to the active that stays open. The seal holds
+the configuration lock *exclusively* for its whole run, so no install is ever
+caught between its pointer move and its record by a rotation.
+
+`--if-larger-than <size>` (bytes; `k`, `m`, `g`) is for a cron: judged
+**after** authorization, so every refusal is still recorded and an authorized
+no-op leaves no record at all — the command prints that the active is not
+larger and exits 0. An empty active is never sealed (a segment holding only
+its own seal would record nothing), and the filesystem must make hard links;
+one that cannot is told so and nothing is recorded.
+
+### The seal, in four steps
+
+The four steps run in a fixed order under the active's exclusive lock, and the
+order is what makes an interruption safe:
+
+1. **Link.** The active is hard-linked under its segment name,
+   `<log>.seg-NNNNNN` (six digits; `N` is one more than the segments already
+   sealed). The file now has two names and no byte has moved. Beside a
+   symlinked `--control-log`, the segments and the manifest are created beside
+   the file the link resolves to.
+2. **Record.** A `seal` `success` record is appended as the segment's **last
+   line**, under the three identities of §1. Its payload names exactly what it
+   closes: `segment`, `first_seq` and `head_seq` (the segment's first and last
+   record *before* the seal), `head_hash` (the record before it — its own
+   `prev`) and `content_sha256` (every byte of the segment before this line).
+   The append is held to a permit: the payload must describe precisely the
+   active this writer holds, so a seal can be written by nothing but a seal
+   of this very segment. This is the first commit: **the segment is closed.**
+3. **Manifest.** `<log>.segments` is rewritten whole — a temp file, fsynced,
+   renamed over the old one, the directory fsynced — now listing the new
+   segment: its file name, `first_seq`, `head_seq` (the seal line included),
+   `head_hash` (the seal line's hash — the next segment's starting `prev`),
+   the whole file's `sha256`, its byte size and the seal's time. This is the
+   second commit: **the set is rotated.**
+4. **Swap.** A fresh, empty file is put under the active's name (temp, fsync,
+   rename, directory fsync). The sealed bytes now live under the segment name
+   alone.
+
+The command then prints `sealed: segment N seq=A..B sha256=<file> (<name>)`
+and the head, which is the seal line itself. Both are verifier inputs: the
+`sha256` is the whole sealed file as the manifest records it, and `B:<head>`
+is exactly what `audit verify control --expect-head <seq>:<hex>` takes, so a
+cron that ships the two lines off the box every rotation leaves a trail of
+cut points the box cannot rewrite. `audit control` renders the record as
+`segment N sealed (seq A–B)` — the range of the records it closes, one short
+of the `sealed:` line's range, which includes the seal line itself.
+
+**The manifest is advisory.** It is an index, not an authority: every value in
+it is recomputed from the files on every read, and a disagreement refuses the
+read naming the field (`head_seq 40 recorded, 41 verified`). A manifest from
+another ledger is refused outright — its `log_id` must be the genesis's. An
+operator who loses it can rewrite it from `audit verify control`'s per-segment
+lines; the chain is the record.
+
+### Reading across the boundary
+
+Every reader — `audit control`, `audit verify control`, `investigate`, the
+vouch that `run`, `serve` and every control command perform, the pull, and the
+server's `/audit` and `/v1/investigate` — reads the set the same way: the
+manifest, then each sealed segment in order (its chain verified from the
+previous segment's head, its last record required to be its own seal and
+nothing to follow it, every manifest figure recomputed), then the active,
+verified from the last sealed head. The result is one list of records, one
+head, and one verdict. A reader holds the active's shared lock and a seal
+needs the exclusive one, so a reader always sees one consistent set and never
+a rotation half-done.
+
+Appending is the mirror image: a writer walks the sealed segments without
+the lock (nothing writes a sealed file), then locks the active by name,
+confirms the manifest did not change under it, and appends at the chain's
+logical position — the next `seq`, `prev` the last line wherever it is. An
+anchor's coverage is judged against that same logical count, so anchors
+recorded before a seal keep verifying after it and a new anchor may cover the
+seal line itself.
+
+The verdicts are the ones §6 lists, over the whole set. A torn or broken
+**active** is `torn` or `broken` with its global `seq`, exactly as before. A
+fault anywhere else is named for what it is and exits 1 from `audit verify
+control` (`investigate` folds it into `broken`): a sealed segment torn or
+broken in the middle (*a sealed segment is never repaired in place; restore it
+from a copy*, with the expected `sha256`); a segment whose first record does
+not chain from the previous head (*altered, replaced or reordered*); a segment
+the manifest lists that is gone; a `.seg-*` file the manifest does not list;
+a manifest that disagrees with its files; a seal that is not its segment's
+last record; a root with sealed history whose active file is gone (never
+"nothing recorded yet"). Each line names the segment, the global `seq` and
+the remedy.
+
+**One hazard is operational and named by its cause.** A binary older than
+sealing, pointed at a root that has sealed, opens the empty active after a
+rotation and — knowing nothing of the segments beside it — mints a fresh
+genesis there. The next read by a current binary reports it distinctly: *its
+first record is a fresh genesis … a writer older than this root's seals wrote
+it* — with the remedy: upgrade every binary that shares the root, move that
+active aside (its records are evidence, not chain) and create an empty one in
+its place; the chain continues from the last sealed head. **The standing rule
+is to upgrade every binary that shares the control root before the first
+seal, and never run an older one against it afterwards.**
+
+### An interrupted rotation
+
+A crash can fall between any two of the four steps, and the seal is built so
+that each landing is a state the next run finishes, not a fault to diagnose:
+
+| the crash fell after | what is on disk | what happens next |
+|---|---|---|
+| the **link**, before the record | an open active with a second name beside it | nothing is owed: appends continue; the next `audit seal` finds the link already pointing at the same file and continues from there |
+| the **record**, before the manifest | the active's last line is a successful seal; the manifest does not list it yet | the segment is closed; the set is **not yet rotated** |
+| the **manifest**, before the swap | the manifest lists the segment; the active's name still refers to the sealed file | the set is rotated; the fresh active is **not yet in place** |
+
+In the last two states the ledger is *sealed and not yet rotated*. Reads are
+unaffected — the chain is whole and verifies, `audit control` prints
+`control ledger: segment N sealed, rotation not completed; run: agenthof audit
+seal` and exits 0, `investigate` reads `verified`, and `run` and `serve` keep
+executing (the vouch is a read). **Writes refuse**: every control writer —
+`apply`, the kill switch, `config vouch`, `gateway provision`, `runs prune`,
+`audit anchor`, `audit repair control` — records nothing and names `audit seal`
+as the remedy; over the API, `POST /v1/config/apply` answers `500`
+`{status:"rotation_incomplete"}` with a fixed body, nothing recorded, and the
+server's log names the command. `audit verify control` exits **8** for it —
+*rotation not completed* — the last code in its precedence (1, 6, 3, 4, 5, 7,
+8), so a tamper or an unverifiable anchor on the same root is what you see
+first; the chain itself is intact. Running `agenthof audit seal` **completes**
+the rotation: it takes the same authorization (the `seal` grant; a refused
+completion is printed, not recorded, because the closed segment takes no record
+and the next does not yet exist), skips `--if-larger-than`, redoes whichever of
+link, manifest and swap is missing — each step is harmless to repeat — and
+prints `completed rotation of segment N` before the usual `sealed:` line. A
+seal that fails at the manifest or the swap says so on the spot (`sealed;
+rotation NOT completed — re-run: agenthof audit seal`); nothing is lost.
+
+### Repairing the active, and only the active
+
+`audit repair control` reads the whole set and decides from the verdict. It
+recovers two shapes, both in the **active** segment, and in both the damaged
+bytes are moved aside to a `<log>.torn-<timestamp>` fragment — the only
+remaining copy, kept indefinitely, never pruned — before anything is cut:
+
+- **A torn tail with no seal before it** — the case §6 describes: the tail is
+  moved aside, the active truncated to its last valid record, and a chained
+  `repair` record appended on the chain's position. The ledger is tainted from
+  then on.
+- **Bytes after a seal line** — a seal that recorded but whose rotation did not
+  finish, and then something landed after it: a torn write, or whole records
+  (a writer older than this root's seals appended to a closed segment; the
+  verdict reads *seal record … is not its last record*). Everything after the
+  seal line is moved to the fragment, the active is truncated at the end of the
+  seal line, the rotation is **completed** — the same link, manifest and swap —
+  and the `repair` record is appended as the **new active's first record**, its
+  `prev` the seal line's hash. The command prints `rotation of segment K
+  completed`; the ledger is tainted all the same.
+
+Everything else is refused with its own remedy and nothing changes. A seal that
+is simply not yet rotated, with nothing after it, is `audit seal`'s to
+complete — *not a repair matter*. A chain break mid-active is not a tail to cut
+off. A fault in a **sealed** segment is never repaired in place: a sealed
+segment is the unit a copy exists of and the boundary every later segment
+chains from, so the remedy is to restore it from a copy whose `sha256` matches
+the manifest. A missing, unexpected or disagreeing segment or manifest names its
+own fix. And a ledger whose genesis predates `log_id` — written before ledgers
+carried an identity — **cannot be sealed at all**: the manifest requires the
+identity, so `audit seal` refuses before anything is linked or recorded, and the
+root remains a single, writable file; no remedy is invented, because none exists
+short of editing the ledger.
+
+### Honest bounds
+
+What a sealed segment is, and is not (Article III):
+
+- **A sealed segment is a regular file.** Whoever owns the host can still
+  rewrite it, as they could the single file before. Sealing moves no byte and
+  adds no protection; what it adds is a *unit* — a closed range of the chain
+  with a recorded cut point, a recorded hash of its bytes, and a fixed name —
+  that can be copied, compared and later pinned.
+- **The chain detects a dropped, duplicated, reordered or inconsistently
+  edited segment, not a consistent rewrite of the whole set.** A segment
+  removed, swapped in order or edited without recomputing everything after it
+  breaks a boundary or a manifest figure and is named. A rewrite of every
+  segment, the manifest and the active together, consistently, is the same
+  rewrite the single file always allowed — caught by a head held off the box
+  (`--expect-head B:<head>` from the `sealed:` output) or by an anchor (`audit
+  seal --if-larger-than 50m && audit anchor` anchors each rotation's final
+  head), never by the files alone.
+- **The manifest proves nothing.** It is recomputed on every read; it speeds
+  nothing up and it cannot vouch for a file. The seal records and the hash
+  links are the evidence.
+- **Nothing is pruned.** Every sealed segment is kept in full, indefinitely,
+  as the compliance record. A retention rule over sealed segments is reserved
+  (the manifest reserves the keys for it and refuses them today).
+
+### Shipped today vs reserved
+
+Shipped: `audit seal` with `--if-larger-than`, the `seal` control operation
+and record, the `<log>.seg-NNNNNN` segments and the advisory `<log>.segments`
+manifest, reading and appending across the set as one chain in every reader
+and writer (the CLI and `serve`), completion of an interrupted rotation by the
+next `audit seal`, `audit verify control`'s per-segment lines and exit 8,
+`audit repair control`'s completion of a rotation that had bytes after its
+seal, and the distinct cause for an older binary's fresh genesis. Reserved:
+pinning sealed segments into a non-erasable storage sink (`sink: worm`/
+`external` — refused by name today; a sealed segment is what such a sink would
+receive), pruning sealed segments under a retention rule, and sealing a ledger
+whose genesis carries no `log_id`. Only shipped behavior is a guarantee.
+
 ## The config_hash bridge to runs
 
 The `config_hash` on an `apply` record is the seam that ties the control plane
@@ -1002,7 +1290,7 @@ adopted. Because both carry the same key:
 
 | Shipped today | Reserved for later |
 |---|---|
-| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune`, `config vouch`, `audit anchor` | policy-as-config approval workflows |
+| `apply`, `registry enable/disable`, `audit repair control`, `gateway provision`, `runs prune`, `config vouch`, `audit anchor`, `audit seal` | policy-as-config approval workflows |
 | operator signing of the installed snapshot: `config keygen` mints the Ed25519 pair on the host, every install signs (opt-in), and `serve` returns the signature on the pull and verifies it as it serves — 200 only when the ledger vouches **and** a matching signature verifies, else a retryable *not yet signed*; `config sign` (re)signs an install; the public key is pinned at the edge | a recorded key-lifecycle event for rotation and revocation |
 | `run` and `serve` verify the installed configuration against a pinned key (`verify.pub` / `run --verify-key`) before executing — unsigned/wrong-key/tampered/stale/foreign refused and recorded, a held lock a retryable busy, a persisted `verify.floor` bounding rollback; opt-in and fail-closed; Article VI names it | carrying the operator's signature with a pulled configuration so a consuming edge verifies the operator's key (today a point verifies only installs made on its own root); `--verify-floor` to relocate the floor outside a backup set; a `--max-age` bound on `installed_at` |
 | `apply` over the API (`POST /v1/config/apply`) with a required compare-and-swap on the installed hash, authorization at the API against the installed roles, one writer lock across apply and the kill switch, and `origin` on the record; pulling the installed configuration over the API (`GET /v1/config`, `GET /v1/config/hash`, `config pull`), authorized by `pull` (or `apply`, which includes it), content-addressed, unrecorded | `registry enable\|disable` and `audit repair control` over the API; `audit control --server` |
@@ -1010,6 +1298,7 @@ adopted. Because both carry the same key:
 | `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read, on the authorization read, and on the kill switch's re-snapshot read; the execution read executes only an install the control ledger records as its last (an `apply`, a kill-switch flip, or a `config vouch`) — a pointer it does not vouch for is a recorded refusal, a damaged ledger refuses runs until repaired, a held configuration lock a retryable busy | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
 | `gateway provision` and `runs prune` authorized against the installed roles (`provision`, `prune`) and recorded; prune spares the control ledger by name and by identity | `provision`/`prune` over the API; a structured prune record; `detail` in `investigate/1` |
 | hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts; `anchor: tlog` external anchoring of the head (`audit anchor` pins it into a transparency log, `audit verify control` checks every recorded anchor — exit 6 only for a genuine content mismatch (a head the chain no longer reproduces, or a proof that fails under a verified key), exit 7 when unverifiable; a still-reserved sink or anchor is refused) | a non-erasable storage sink for the whole ledger (`sink: worm`/`external`) and `anchor: signed` |
+| sealing and rotating the control ledger: `audit seal` closes the active segment into a sealed file (`<log>.seg-NNNNNN`) and opens the next, recorded as an authorized `seal` action and listed in an advisory `<log>.segments` manifest; the segments and the active read, verify and append as one chain with one `seq`; an interrupted rotation is completed by the next `audit seal`, never left broken (`audit verify control` exit 8 while it is owed); `audit repair control` recovers a torn tail of the active and, when bytes landed after a seal, moves them aside and completes that rotation — a sealed segment is never repaired in place; `--if-larger-than` for a cron; a never-sealed ledger is unchanged | pinning sealed segments into the non-erasable sink (`sink: worm`/`external`) — this is the foundation it builds on; pruning sealed segments under a retention rule (the manifest reserves the keys); sealing a ledger whose genesis predates `log_id` (refused today, single file) |
 | three identities per action (invoker / asserted_as / witness) | agent-to-IdP federation for the invoker's authority |
 | `--expect-head` off-machine head check | continuous/remote attestation of the head |
 | `config_hash` join to runs (`audit <run-id>`, `investigate`) | SIEM export / multi-org investigation at scale |
