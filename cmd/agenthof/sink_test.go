@@ -736,3 +736,120 @@ func TestInvestigateAndServeStayPostureBlind(t *testing.T) {
 		t.Fatalf("serve exited %d\n%s", code, serveOut.String())
 	}
 }
+
+// TestVerifyControlLocalMismatchByDigest: an oldest version of exactly the
+// local segment's length with one byte flipped is LOCAL MISMATCH by digest —
+// the one path to that verdict is the bytes in hand, never a listing figure.
+func TestVerifyControlLocalMismatchByDigest(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	far := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	ctl, f := wormSealedRoot(t)
+	key := segmentKey(t, ctl, 1)
+	flipped := segmentBytes(t, ctl, 1)
+	flipped[len(flipped)/2] ^= 0x01
+	f.RemoveVersions(key)
+	id := f.Plant(key, flipped, "COMPLIANCE", far)
+	code, out := verifyControl(t, "--control-log", ctl)
+	if code != exitSinkMismatch || !strings.Contains(out, "      LOCAL MISMATCH — the oldest version "+id+" at the key does not hold the local segment's bytes") || !strings.Contains(out, "1 mismatch, 0 under-locked, 0 unverifiable); sink holds 1 objects for this ledger, 0 accounted for") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+}
+
+// TestVerifySinkStaleViewIsNotTamper: a seal that lands while a verification
+// is in its network phase puts an object past the view the verifier read;
+// judged against the view re-read under the ledger's lock it is in flight —
+// no "not accounted for", never definitive, undecided so the operator
+// re-runs.
+func TestVerifySinkStaleViewIsNotTamper(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root, ctl, _ := wormRoot(t)
+	if code, out := auditSeal(t, ctl); code != 0 {
+		t.Fatalf("seal 1: %d\n%s", code, out)
+	}
+	var buf bytes.Buffer
+	if code := cmdRegistry([]string{"enable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
+		t.Fatalf("enable: %d\n%s", code, buf.String())
+	}
+	stale := sealedView(t, ctl)                    // one sealed segment; the active holds the enable
+	if code, out := auditSeal(t, ctl); code != 0 { // segment 2 lands in the sink after the view was read
+		t.Fatalf("seal 2: %d\n%s", code, out)
+	}
+	var out bytes.Buffer
+	s := verifySink(ctl, "", stale, false, time.Minute, &out)
+	if s.definitive() || !s.undecided() || s.inFlight != 1 || strings.Contains(out.String(), "not accounted for") || !strings.Contains(out.String(), "  sink: key "+segmentKey(t, ctl, 2)+" is segment 2, sealed during this verification; re-run\n") || !strings.Contains(out.String(), "sink holds 1 objects for this ledger, 1 accounted for, 1 sealed during this verification — re-run") {
+		t.Fatalf("%+v\n%s", s, out.String())
+	}
+	// Through the command the fresh view accounts for both: exit 0.
+	if code, text := verifyControl(t, "--control-log", ctl); code != 0 || !strings.Contains(text, "sink holds 2 objects for this ledger, 2 accounted for") {
+		t.Fatalf("re-run: exit %d\n%s", code, text)
+	}
+}
+
+// readerOverride is a SinkReader over the fake with one or two answers
+// replaced — the shapes a store could answer that the fake does not.
+type readerOverride struct {
+	control.SinkReader
+	listVersions func(control.KeyVersions) control.KeyVersions
+	retention    func() control.SinkRetention
+}
+
+func (r readerOverride) ListVersions(ctx context.Context, key string) (control.KeyVersions, error) {
+	kv, err := r.SinkReader.ListVersions(ctx, key)
+	if err == nil && r.listVersions != nil {
+		kv = r.listVersions(kv)
+	}
+	return kv, err
+}
+
+func (r readerOverride) GetRetention(ctx context.Context, key, id string) (control.SinkRetention, error) {
+	if r.retention != nil {
+		return r.retention(), nil
+	}
+	return r.SinkReader.GetRetention(ctx, key, id)
+}
+
+// TestVerifyCopyIncompleteAnswersAreUnverifiable: a listing whose Size is
+// not the object's length, a listing with no Size at all, a retention
+// document with a date but no mode, and one naming a mode this verifier
+// does not know are each unverifiable — never MISSING, MISMATCH or
+// UNDER-LOCKED.
+func TestVerifyCopyIncompleteAnswersAreUnverifiable(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _ := wormSealedRoot(t)
+	in, err := loadIntegrity(ctl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be, err := sinkFor(in, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seg := sealedView(t, ctl).Sealed[0]
+	resize := func(delta int64) func(control.KeyVersions) control.KeyVersions {
+		return func(kv control.KeyVersions) control.KeyVersions {
+			kv.Versions[0].Size += delta
+			return kv
+		}
+	}
+	for name, tc := range map[string]struct {
+		r    readerOverride
+		want string
+	}{
+		"size larger":   {readerOverride{SinkReader: be, listVersions: resize(1)}, "unverifiable — the listing and the object disagree on the size of version v-1"},
+		"size smaller":  {readerOverride{SinkReader: be, listVersions: resize(-1)}, "unverifiable — the listing and the object disagree on the size of version v-1"},
+		"size absent":   {readerOverride{SinkReader: be, listVersions: resize(-seg.Bytes)}, "unverifiable — the listing and the object disagree on the size of version v-1 (0 listed, "},
+		"date, no mode": {readerOverride{SinkReader: be, retention: func() control.SinkRetention { return control.SinkRetention{RetainUntil: seg.Sink.RetainUntil} }}, "unverifiable — the retention document for version v-1 carries a date but no mode"},
+		"unknown mode": {readerOverride{SinkReader: be, retention: func() control.SinkRetention {
+			return control.SinkRetention{Mode: "LEGAL_HOLD", RetainUntil: seg.Sink.RetainUntil}
+		}}, "unverifiable — the retention document for version v-1 names a mode this verifier does not know: LEGAL_HOLD"},
+	} {
+		c := verifyCopy(context.Background(), tc.r, seg, time.Now())
+		if c.state != copyUnverifiable || !strings.HasPrefix(c.verdict, tc.want) {
+			t.Fatalf("%s: %+v", name, c)
+		}
+	}
+	// The fake's own answers still verify: the override is the only change.
+	if c := verifyCopy(context.Background(), be, seg, time.Now()); c.state != copyVerified {
+		t.Fatalf("baseline: %+v", c)
+	}
+}
