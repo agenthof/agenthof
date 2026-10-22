@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -92,6 +93,12 @@ func TestProtectedLine(t *testing.T) {
 	res.Existed = true
 	if got := protectedLine(res); !strings.HasSuffix(got, " until 2033-10-20T09:00:00Z (already confirmed)") {
 		t.Fatal(got)
+	}
+	// On a completion the block is the ledger's and the id the sink's: a
+	// control character in either never reaches the terminal.
+	res.Sink.Kind, res.Sink.Key, res.VersionID = "s3-object-lock\x1b[2J", "agenthof/abc/seg-000001\r", "v-9\x07"
+	if got := protectedLine(res); strings.ContainsAny(got, "\x1b\r\x07") || !strings.HasPrefix(got, "protected: s3-object-lock[2J https://s3.example/worm/agenthof key=agenthof/abc/seg-000001 version=v-9 compliance") {
+		t.Fatalf("not cleaned: %q", got)
 	}
 }
 
@@ -388,6 +395,58 @@ func tidy(t *testing.T, ctl string) {
 		t.Fatalf("%v %+v", err, last)
 	}
 	repointTo(t, ctl, last.ConfigHash)
+}
+
+// TestSealAfterTidiedTruncationNamesTheRebuild (§11.4 met by the preflight):
+// after the tidied truncation the next honest seal computes segment 2, whose
+// key the sink still holds — the original, compliance-locked segment 2. The
+// preflight refuses with nothing linked or recorded, no PUT, and the remedy
+// that exists: verify, then the rebuild from the locked originals — never
+// "remove the foreign object" (compliance forbids it) or a fresh prefix
+// (which would hide the evidence).
+func TestSealAfterTidiedTruncationNamesTheRebuild(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root, ctl, f := twiceSealedWormRoot(t)
+	id := sealedView(t, ctl).LogID
+	tidy(t, ctl)
+	// One record in the active, so there is something to seal.
+	var buf bytes.Buffer
+	if code := cmdRegistry([]string{"enable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
+		t.Fatalf("enable: %d\n%s", code, buf.String())
+	}
+	before, err := os.ReadFile(ctl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	puts := 0
+	for _, r := range f.Requests() {
+		if r.Op == "PutObject" {
+			puts++
+		}
+	}
+	code, out := auditSeal(t, ctl)
+	want := "audit seal: key agenthof/" + id + "/seg-000002 is occupied by a version, and a fresh seal's key must be empty: either this ledger sealed this segment before and the local set no longer lists it (a local truncation — the sink still holds the original: run audit verify control, then audit restore control --rebuild --log-id <id>, the id on audit control's header, to put the sealed set back), or a foreign object sits at the key; nothing was sealed, and a compliance-locked version cannot be removed\n"
+	if code != 1 || out != want {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if _, err := os.Lstat(control.SegmentPath(ctl, 2)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nothing linked: %v", err)
+	}
+	if after, _ := os.ReadFile(ctl); !bytes.Equal(before, after) {
+		t.Fatal("nothing recorded")
+	}
+	after := 0
+	for _, r := range f.Requests() {
+		if r.Op == "PutObject" {
+			after++
+		}
+	}
+	if after != puts {
+		t.Fatalf("a PUT was sent: %d before, %d after", puts, after)
+	}
+	if v := sealedView(t, ctl); len(v.Sealed) != 1 || v.State != control.StateOpen {
+		t.Fatalf("the tidied set is as it was: %+v", v)
+	}
 }
 
 // TestVerifyControlBucketFirst (the direction that sees a consistent local

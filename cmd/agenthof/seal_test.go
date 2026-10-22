@@ -526,8 +526,9 @@ const sealStateBLine = "audit seal: sealed; protected copy NOT confirmed — rot
 // TestSealPutOnlyCredentialLandsInStateB (§8.4): a credential that can PUT
 // but not read the lock back lands the seal in state B naming the IAM
 // remedy; writers refuse, verify exits 8; a re-run with the same policy
-// fails the same way without a second PUT; once the policy is fixed the
-// re-run confirms the copy already there and completes.
+// fails the same way without a second PUT — its line says the copy was
+// already at the key, since that run wrote nothing; once the policy is
+// fixed the re-run confirms the copy already there and completes.
 func TestSealPutOnlyCredentialLandsInStateB(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	root, ctl, f := wormRoot(t)
@@ -549,7 +550,7 @@ func TestSealPutOnlyCredentialLandsInStateB(t *testing.T) {
 		t.Fatalf("verify: %d\n%s", code, out)
 	}
 	code, out = auditSeal(t, ctl)
-	if code != 1 || out != want {
+	if rerun := strings.Replace(want, "protected copy written but", "protected copy already at the key but", 1); code != 1 || out != rerun {
 		t.Fatalf("re-run with the policy unchanged: %d\n%s", code, out)
 	}
 	if vs := f.Versions(key); len(vs) != 1 {
@@ -586,7 +587,7 @@ func TestRotateRefusesOccupiedKeyLeavesStateB(t *testing.T) {
 	f.Plant(key, []byte("foreign\n"), "COMPLIANCE", far)
 	before, _ := os.ReadFile(ctl)
 	code, out := auditSeal(t, ctl)
-	if code != 1 || !strings.Contains(out, "audit seal: key "+key+" is occupied by a version that is not this segment") || strings.Contains(out, "re-run") || strings.Contains(out, "control head:") {
+	if code != 1 || !strings.Contains(out, "audit seal: key "+key+" is occupied by a version, and a fresh seal's key must be empty") || strings.Contains(out, "re-run") || strings.Contains(out, "control head:") {
 		t.Fatalf("%d\n%s", code, out)
 	}
 	noSegmentSibling(t, ctl)
@@ -604,7 +605,10 @@ func TestRotateRefusesOccupiedKeyLeavesStateB(t *testing.T) {
 	}
 	f.Plant(key, []byte("foreign\n"), "COMPLIANCE", far)
 	code, out = auditSeal(t, ctl)
-	if code != 1 || !strings.Contains(out, "audit seal: key "+key+" is occupied by a version that is not this segment") || !strings.HasSuffix(out, sealStateBLine) {
+	// State B: the refusal names the fork and the bound on this key — never
+	// a fresh prefix (the record's URL is pinned) or a removal compliance
+	// mode forbids.
+	if code != 1 || !strings.Contains(out, "audit seal: key "+key+" is occupied by a version that is not this segment, and the seal never writes on top: another writer landed an object at this ledger's key first — a fork;") || !strings.Contains(out, "a compliance-locked version blocks the key until its retention ends") || strings.Contains(out, "fresh prefix") || !strings.HasSuffix(out, sealStateBLine) {
 		t.Fatalf("re-run: %d\n%s", code, out)
 	}
 	if v, err := control.Read(ctl, ledger.Locked); err != nil || v.State != control.StateSealedNotRotated {

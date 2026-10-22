@@ -373,6 +373,75 @@ func TestRotatePostureChanged(t *testing.T) {
 	if v, err := Read(q, ledger.Locked); err != nil || v.State != StateOpen || v.Sealed[0].Sink != nil {
 		t.Fatalf("%v %+v", err, v)
 	}
+
+	// The record's kind and URL come from the ledger, which a hand can
+	// write: a control character in them never reaches the refusal's text.
+	r := filepath.Join(t.TempDir(), "control.jsonl")
+	appendN(t, r, 3)
+	escaped := f.Locator(logIDOf(t, r), 1, time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC))
+	escaped.Kind = "s3-object-lock\x1b[2J"
+	sealByHand(t, r, "B", &escaped)
+	_, err = CompleteSeal(r, f)
+	if err == nil || strings.Contains(err.Error(), "\x1b") || !strings.Contains(err.Error(), "at s3-object-lock[2J https://sink.example/bucket/p;") {
+		t.Fatalf("the refusal is cleaned for the terminal: %q", err)
+	}
+}
+
+// TestRotateRefusesARecordNamingAnotherKey (§8.5, the key): the chain fixes
+// a seal's five chain fields and carries its sink block as recorded, so a
+// correctly chained seal line written by hand can name any key — another
+// ledger's seg-000001 in a shared bucket. A block completes only through
+// the key the sink derives for THIS ledger's segment: a record naming
+// another is refused with no Put and state B standing, and the repair
+// refuses it before its truncate with nothing changed.
+func TestRotateRefusesARecordNamingAnotherKey(t *testing.T) {
+	const other = "ffffffffffffffffffffffffffffffff"
+	at := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
+	t.Run("completion", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "control.jsonl")
+		appendN(t, p, 3)
+		f := &fakeSink{}
+		id := logIDOf(t, p)
+		block := f.Locator(id, 1, at)
+		block.Key = "p/" + other + "/seg-000001"
+		sealByHand(t, p, "B", &block)
+		_, err := CompleteSeal(p, f)
+		var se *SealError
+		want := "segment 1 was sealed for a protected copy at key p/" + other + "/seg-000001; the sink derives p/" + id + "/seg-000001 for this ledger's segment 1 — the record does not name this ledger's own copy; run audit verify control"
+		if !errors.As(err, &se) || se.Step != SealStepSink || err.Error() != want {
+			t.Fatalf("%v", err)
+		}
+		if len(f.calls) != 0 {
+			t.Fatalf("the sink was called: %v", f.calls)
+		}
+		if v, err := Read(p, ledger.Locked); err != nil || v.State != StateSealedNotRotated {
+			t.Fatalf("state B stands: %v %d", err, v.State)
+		}
+	})
+	t.Run("repair", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "control.jsonl")
+		appendN(t, p, 3)
+		f := &fakeSink{}
+		id := logIDOf(t, p)
+		block := f.Locator(id, 1, at)
+		block.Key = "p/" + other + "/seg-000001"
+		line := sealByHand(t, p, "B", &block)
+		appendRaw(t, p, hashOf(line), 5, 6)
+		before, _ := os.ReadFile(p)
+		dir := snapshotDir(t, filepath.Dir(p))
+		_, err := Repair(p, repairOp, "", repairWitness, f)
+		want := "control: ledger " + p + ": segment was sealed for a protected copy at key p/" + other + "/seg-000001; the sink derives p/" + id + "/seg-000001 for this ledger's segment 1 — the record does not name this ledger's own copy; run audit verify control"
+		if err == nil || err.Error() != want {
+			t.Fatalf("%v", err)
+		}
+		if len(f.calls) != 0 {
+			t.Fatalf("the sink was called: %v", f.calls)
+		}
+		stillTorn(t, p, before)
+		if snapshotDir(t, filepath.Dir(p)) != dir {
+			t.Fatal("a refusal changes nothing on disk")
+		}
+	})
 }
 
 // tornWormRoot is the one post-seal shape a repair completes, on a worm

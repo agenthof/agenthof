@@ -77,10 +77,16 @@ func TestLogicPrepare(t *testing.T) {
 	if err := s.Prepare(ctx, loc); err != nil {
 		t.Errorf("marker only: %v", err)
 	}
+	// Occupied: a fresh seal has no bytes to compare, so the refusal names
+	// both causes and the remedy that exists for the local truncation —
+	// verify, then the rebuild — never a removal compliance mode forbids.
 	m.plant(loc.Key, []byte("foreign\n"), "COMPLIANCE", fixedUntil)
 	err = s.Prepare(ctx, loc)
-	if err == nil || err.Error() != "key "+loc.Key+" is occupied by a version that is not this segment; the sink cannot take this seal — choose a fresh prefix or remove the foreign object" {
+	if err == nil || err.Error() != "key "+loc.Key+" is occupied by a version, and a fresh seal's key must be empty: either this ledger sealed this segment before and the local set no longer lists it (a local truncation — the sink still holds the original: run audit verify control, then audit restore control --rebuild --log-id <id>, the id on audit control's header, to put the sealed set back), or a foreign object sits at the key; nothing was sealed, and a compliance-locked version cannot be removed" {
 		t.Errorf("occupied: %v", err)
+	}
+	if strings.Contains(err.Error(), "remove the foreign object") || strings.Contains(err.Error(), "fresh prefix") {
+		t.Errorf("the refusal must not suggest a remedy that does not exist: %v", err)
 	}
 
 	// The store's refusals pass through unchanged.
@@ -175,7 +181,11 @@ func TestLogicPutLocksToTheLaterDate(t *testing.T) {
 
 func TestLogicPutRefusesOccupiedKey(t *testing.T) {
 	ctx := context.Background()
-	occupied := "key %s is occupied by a version that is not this segment; the sink cannot take this seal — choose a fresh prefix or remove the foreign object"
+	// The record exists, so the key is this ledger's: the refusal names the
+	// fork and the bound (an unlocked version is removable; a locked one
+	// blocks the key until its retention ends) — never a fresh prefix the
+	// record's URL does not allow.
+	occupied := "key %s is occupied by a version that is not this segment, and the seal never writes on top: another writer landed an object at this ledger's key first — a fork; what the sink holds there is not this segment — so the rotation cannot complete through this key while that version stands: an unlocked version a credential with delete may remove, then re-run; a compliance-locked version blocks the key until its retention ends; run audit verify control to see what the sink holds"
 	t.Run("foreign version", func(t *testing.T) {
 		m := newMemStore()
 		s := newLogic(m)
@@ -277,7 +287,8 @@ func TestLogicPutUnconfirmed(t *testing.T) {
 		m.plant(loc.Key, segData, "COMPLIANCE", fixedUntil)
 		m.fail = map[string]error{"get": &StatusError{Op: "GetObject", Status: 403, Host: "127.0.0.1:1", Code: "AccessDenied"}}
 		_, err := s.Put(ctx, loc, segData, segHash)
-		want := "protected copy written but NOT confirmed: the credential cannot read the object back; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 AccessDenied from 127.0.0.1:1 (GetObject))"
+		// This run wrote nothing: the copy was already at the key.
+		want := "protected copy already at the key but NOT confirmed: the credential cannot read the object back; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 AccessDenied from 127.0.0.1:1 (GetObject))"
 		if err == nil || err.Error() != want {
 			t.Errorf("err = %v", err)
 		}

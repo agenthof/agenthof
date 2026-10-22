@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/origin"
 )
 
 // ErrNothingToSeal is the seal's verdict on an active that holds no record: a
@@ -315,9 +316,13 @@ func completeSealWith(controlLog string, sink SinkWriter, pre *confirmedCopy) (S
 //
 // The record is the authority for what a segment was sealed FOR: a block
 // completes only through a sink of the same kind and URL (nil or another
-// refuses, state B stands — flipping integrity.yaml is not an escape); no
-// block completes without an upload whatever the posture now says, since
-// the chained seal line cannot be retrofitted.
+// refuses, state B stands — flipping integrity.yaml is not an escape), and
+// only at the key that sink derives for this ledger's segment — the chain
+// fixes the seal's five chain fields, never its block, so a chained seal
+// line written by hand could otherwise aim the Put at any key in the bucket
+// (another ledger's, in a shared one); no block completes without an
+// upload whatever the posture now says, since the chained seal line cannot
+// be retrofitted.
 func rotate(resolved string, v View, sink SinkWriter, pre *confirmedCopy) (SealResult, error) {
 	var n int
 	var seg Segment
@@ -346,8 +351,16 @@ func rotate(resolved string, v View, sink SinkWriter, pre *confirmedCopy) (SealR
 			return SealResult{}, &SealError{Step: SealStepManifest, Err: err}
 		}
 		if block := last.Seal.Sink; block != nil {
+			// Kind, URL and Key are the record's, which a hand can write:
+			// origin.Clean before any of them reaches a terminal.
 			if sink == nil || sink.Kind() != block.Kind || sink.URL() != block.URL {
-				return SealResult{}, &SealError{Step: SealStepSink, Err: fmt.Errorf("segment %d was sealed for a protected copy at %s %s; integrity.yaml no longer names it — restore that posture to complete the rotation", n, block.Kind, block.URL)}
+				return SealResult{}, &SealError{Step: SealStepSink, Err: fmt.Errorf("segment %d was sealed for a protected copy at %s %s; integrity.yaml no longer names it — restore that posture to complete the rotation", n, origin.Clean(block.Kind), origin.Clean(block.URL))}
+			}
+			// Locator's key depends on the log_id and the ordinal alone (its
+			// time is retain_until's), so the record's key is compared, not
+			// the block.
+			if want := sink.Locator(logID, n, last.Time).Key; block.Key != want {
+				return SealResult{}, &SealError{Step: SealStepSink, Err: fmt.Errorf("segment %d was sealed for a protected copy at key %s; the sink derives %s for this ledger's segment %d — the record does not name this ledger's own copy; run audit verify control", n, origin.Clean(block.Key), want, n)}
 			}
 			if pre != nil && pre.block.Kind == block.Kind && pre.block.URL == block.URL && pre.whole == whole {
 				rcpt = pre.receipt

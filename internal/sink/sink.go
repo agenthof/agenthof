@@ -199,18 +199,47 @@ func (s *S3) keyVersions(ctx context.Context, key string) (control.KeyVersions, 
 	return kv, nil
 }
 
-// occupiedErr is the refusal for a key holding a version that is not the
-// segment: the seal never writes on top.
+// occupiedErr is Put's refusal for a key holding a version that is not the
+// segment: the seal never writes on top. The record exists (a rotation
+// completing, or a repair confirming its copy), so the key is this
+// ledger's and another writer landed an object there first — a fork: what
+// the sink holds at the key is not this ledger's segment, and the copy
+// could never be the oldest version there, the one verify judges.
+//
+// Honest limit: the rotation cannot complete through this key while that
+// version stands, and state B refuses every control writer meanwhile. An
+// unlocked foreign version (a plain PUT into the bucket) a credential with
+// delete can remove, after which a re-run completes; a compliance-locked
+// one nobody can remove — the key is blocked until its retention ends.
+// The refusal names what happened and that bound; it does not suggest a
+// removal that compliance mode forbids or a fresh prefix the record's URL
+// does not allow. Causing it takes a write credential for the bucket (a
+// holder of the seal's own, or a restored snapshot of this host sealing the
+// same ordinal beside the original); the detection is the point — the
+// chain's segment is not what the sink holds — and the cost is availability,
+// never integrity.
 func occupiedErr(key string) error {
-	return fmt.Errorf("key %s is occupied by a version that is not this segment; the sink cannot take this seal — choose a fresh prefix or remove the foreign object", key)
+	return fmt.Errorf("key %s is occupied by a version that is not this segment, and the seal never writes on top: another writer landed an object at this ledger's key first — a fork; what the sink holds there is not this segment — so the rotation cannot complete through this key while that version stands: an unlocked version a credential with delete may remove, then re-run; a compliance-locked version blocks the key until its retention ends; run audit verify control to see what the sink holds", key)
+}
+
+// occupiedFreshErr is Prepare's refusal for a fresh seal whose key already
+// holds a version. No record exists yet and there are no bytes to compare,
+// so the sink cannot tell the two causes apart and names both: the sink
+// still holds a segment this ledger sealed and the local set no longer
+// lists (a tidied truncation — the remedy that exists is verify, then the
+// rebuild from the locked originals), or a foreign object sits at the key
+// (occupiedErr's fork, before any record). A compliance-locked version
+// cannot be removed either way.
+func occupiedFreshErr(key string) error {
+	return fmt.Errorf("key %s is occupied by a version, and a fresh seal's key must be empty: either this ledger sealed this segment before and the local set no longer lists it (a local truncation — the sink still holds the original: run audit verify control, then audit restore control --rebuild --log-id <id>, the id on audit control's header, to put the sealed set back), or a foreign object sits at the key; nothing was sealed, and a compliance-locked version cannot be removed", key)
 }
 
 // Prepare is the preflight before anything is linked or recorded: the
 // credential resolves, the bucket answers with Object Lock enabled, and
 // the seal's key can be listed and holds no version. A fresh seal's key
 // has nothing of its own yet (a re-run completes through Put, which can
-// compare bytes), so any version there is foreign; a delete marker alone
-// is not.
+// compare bytes), so any version there refuses — occupiedFreshErr names
+// the two causes; a delete marker alone does not.
 func (s *S3) Prepare(ctx context.Context, loc control.SealSink) error {
 	cctx, cancel := s.bounded(ctx)
 	enabled, err := s.store.lockEnabled(cctx)
@@ -226,7 +255,7 @@ func (s *S3) Prepare(ctx context.Context, loc control.SealSink) error {
 		return err
 	}
 	if len(kv.Versions) > 0 {
-		return occupiedErr(loc.Key)
+		return occupiedFreshErr(loc.Key)
 	}
 	return nil
 }
@@ -269,7 +298,7 @@ func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256h
 			return control.PutReceipt{}, occupiedErr(loc.Key)
 		}
 		if err != nil {
-			return control.PutReceipt{}, unconfirmed(err)
+			return control.PutReceipt{}, unconfirmed(err, true)
 		}
 		if !bytes.Equal(body, data) {
 			return control.PutReceipt{}, occupiedErr(loc.Key)
@@ -279,7 +308,7 @@ func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256h
 		oldest := kv.Versions[0]
 		l, err := s.retentionOf(ctx, loc.Key, oldest.ID)
 		if err != nil {
-			return control.PutReceipt{}, unconfirmed(err)
+			return control.PutReceipt{}, unconfirmed(err, true)
 		}
 		if err := underLocked(oldest.ID, l, loc); err != nil {
 			return control.PutReceipt{}, err
@@ -309,7 +338,7 @@ func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256h
 	}
 	l, err := s.retentionOf(ctx, loc.Key, id)
 	if err != nil {
-		return control.PutReceipt{}, unconfirmed(err)
+		return control.PutReceipt{}, unconfirmed(err, false)
 	}
 	if err := underLocked(id, l, loc); err != nil {
 		return control.PutReceipt{}, err
@@ -328,21 +357,27 @@ func (s *S3) lockUntil(loc control.SealSink) time.Time {
 }
 
 // unconfirmed is the text for a read-back that failed on the seal's own
-// version — on the run that wrote it or on a re-run that found it: the copy
-// is there, unconfirmed. A 403 names the IAM remedy, since a policy missing
-// one of the read permissions fails here every time until it is fixed: a
-// PUT-only policy on the lock read-back, a policy without GetObject on the
-// re-run's byte compare.
-func unconfirmed(err error) error {
+// version: the copy is there, unconfirmed. existed says which run put it
+// there — false on the run that wrote it ("written"), true on a re-run that
+// found the key already holding versions and wrote nothing ("already at the
+// key"); fail-closed either way. A 403 names the IAM remedy, since a policy
+// missing one of the read permissions fails here every time until it is
+// fixed: a PUT-only policy on the lock read-back, a policy without
+// GetObject on the re-run's byte compare.
+func unconfirmed(err error, existed bool) error {
+	state := "written"
+	if existed {
+		state = "already at the key"
+	}
 	var se *StatusError
 	if errors.As(err, &se) && se.Status == http.StatusForbidden {
 		what := "the object's retention"
 		if se.Op == "GetObject" {
 			what = "the object back"
 		}
-		return fmt.Errorf("protected copy written but NOT confirmed: the credential cannot read %s; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (%w)", what, err)
+		return fmt.Errorf("protected copy %s but NOT confirmed: the credential cannot read %s; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (%w)", state, what, err)
 	}
-	return fmt.Errorf("protected copy written but NOT confirmed: %w", err)
+	return fmt.Errorf("protected copy %s but NOT confirmed: %w", state, err)
 }
 
 // underLocked is the verdict on a read-back: the version must be locked in

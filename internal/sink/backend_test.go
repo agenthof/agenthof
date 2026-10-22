@@ -169,7 +169,7 @@ func TestPrepare(t *testing.T) {
 	}
 	f.Deny = nil
 	f.Plant(loc.Key, []byte("foreign\n"), "COMPLIANCE", fixedUntil)
-	if err := s.Prepare(ctx, loc); err == nil || !strings.HasPrefix(err.Error(), "key "+loc.Key+" is occupied by a version that is not this segment") {
+	if err := s.Prepare(ctx, loc); err == nil || !strings.HasPrefix(err.Error(), "key "+loc.Key+" is occupied by a version, and a fresh seal's key must be empty") {
 		t.Errorf("occupied: %v", err)
 	}
 }
@@ -270,7 +270,7 @@ func TestPutRefusesOccupiedKey(t *testing.T) {
 	loc := s.Locator(logID, 1, fixedNow)
 	f.Plant(loc.Key, []byte("foreign\n"), "COMPLIANCE", fixedUntil)
 	_, err := s.Put(ctx, loc, segData, segHash)
-	if err == nil || err.Error() != "key "+loc.Key+" is occupied by a version that is not this segment; the sink cannot take this seal — choose a fresh prefix or remove the foreign object" {
+	if err == nil || err.Error() != "key "+loc.Key+" is occupied by a version that is not this segment, and the seal never writes on top: another writer landed an object at this ledger's key first — a fork; what the sink holds there is not this segment — so the rotation cannot complete through this key while that version stands: an unlocked version a credential with delete may remove, then re-run; a compliance-locked version blocks the key until its retention ends; run audit verify control to see what the sink holds" {
 		t.Errorf("err = %v", err)
 	}
 	// The own copy present AND a newer foreign version on top: still refused.
@@ -321,9 +321,10 @@ func TestPutUnconfirmed(t *testing.T) {
 			t.Errorf("the PUT did not land: %+v", vs)
 		}
 		// A re-run finds the seal's own version and fails the read-back the
-		// same way — the remedy is named again, no second PUT.
+		// same way — the remedy is named again, no second PUT, and the line
+		// says the copy was already at the key, not written by this run.
 		_, err = s.Put(ctx, loc, segData, segHash)
-		if err == nil || err.Error() != want {
+		if rerun := strings.Replace(want, "protected copy written but", "protected copy already at the key but", 1); err == nil || err.Error() != rerun {
 			t.Errorf("re-run err = %v", err)
 		}
 		if vs := f.Versions(loc.Key); len(vs) != 1 {
@@ -342,7 +343,7 @@ func TestPutUnconfirmed(t *testing.T) {
 		}
 		f.Deny = map[string]bool{"GetObject": true}
 		_, err := s.Put(ctx, loc, segData, segHash)
-		want := "protected copy written but NOT confirmed: the credential cannot read the object back; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 AccessDenied from " + hostOf(f) + " (GetObject))"
+		want := "protected copy already at the key but NOT confirmed: the credential cannot read the object back; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 AccessDenied from " + hostOf(f) + " (GetObject))"
 		if err == nil || err.Error() != want {
 			t.Errorf("err = %v", err)
 		}

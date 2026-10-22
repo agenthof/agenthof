@@ -94,9 +94,12 @@ func sinkKeys(c config.BackendCredential) func(context.Context) (broker.KeyPair,
 // protectedLine is the seal's line for the protected copy: the record's
 // block and the sink's receipt — the version it confirmed and the lock as
 // the sink reports it. A completion that found the copy already confirmed
-// says so.
+// says so. On a completion the block is the ledger's, which a hand can
+// write, and the version id is the sink's answer: origin.Clean strips
+// control characters before any of them reaches a terminal (display only;
+// the Put went to the record's key as recorded).
 func protectedLine(res control.SealResult) string {
-	line := fmt.Sprintf("protected: %s %s key=%s version=%s %s until %s", res.Sink.Kind, res.Sink.URL, res.Sink.Key, res.VersionID, res.Sink.Mode, res.RetainUntil.UTC().Format(time.RFC3339))
+	line := fmt.Sprintf("protected: %s %s key=%s version=%s %s until %s", origin.Clean(res.Sink.Kind), origin.Clean(res.Sink.URL), origin.Clean(res.Sink.Key), origin.Clean(res.VersionID), res.Sink.Mode, res.RetainUntil.UTC().Format(time.RFC3339))
 	if res.Existed {
 		line += " (already confirmed)"
 	}

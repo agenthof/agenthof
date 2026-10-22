@@ -380,8 +380,21 @@ func Repair(path string, op identity.Invoker, assertedAs string, witness Witness
 	// receipt and makes no sink call of its own.
 	var pre *confirmedCopy
 	if block := last.Seal.Sink; block != nil {
+		// Kind, URL and Key are the record's, which a hand can write:
+		// origin.Clean before any of them reaches a terminal. The key must
+		// be the one the sink derives for this ledger's segment (rotate's
+		// rule): a chained seal line can name any key, and the Put below
+		// goes to the record's.
 		if sink == nil || sink.Kind() != block.Kind || sink.URL() != block.URL {
-			return RepairResult{}, fmt.Errorf("control: ledger %s: segment was sealed for a protected copy at %s %s; integrity.yaml no longer names it — restore that posture to repair", path, block.Kind, block.URL)
+			return RepairResult{}, fmt.Errorf("control: ledger %s: segment was sealed for a protected copy at %s %s; integrity.yaml no longer names it — restore that posture to repair", path, origin.Clean(block.Kind), origin.Clean(block.URL))
+		}
+		logID, err := manifestLogID(v)
+		if err != nil {
+			return RepairResult{}, err
+		}
+		n := len(v.Sealed) + 1
+		if want := sink.Locator(logID, n, last.Time).Key; block.Key != want {
+			return RepairResult{}, fmt.Errorf("control: ledger %s: segment was sealed for a protected copy at key %s; the sink derives %s for this ledger's segment %d — the record does not name this ledger's own copy; run audit verify control", path, origin.Clean(block.Key), want, n)
 		}
 		whole, _ := segmentDigests(sealed)
 		rcpt, perr := sink.Put(context.Background(), *block, segmentBytes(sealed), whole)
