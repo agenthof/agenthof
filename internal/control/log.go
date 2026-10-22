@@ -161,7 +161,8 @@ func checkAnchorCoverage(a *Anchor, count int) error {
 
 // Append admits an anchor record only through checkAnchorShape and
 // checkAnchorCoverage, a seal record only through checkSealShape and
-// checkSealPlacement (seal.go), and rejects any non-"success" Event with a
+// checkSealPlacement (seal.go), a restore record only through
+// checkRestoreShape (restore.go), and rejects any non-"success" Event with a
 // nil Reason: every control-plane denial must explain itself, and this is the
 // one place that rule is enforced, rather than scattered across call sites.
 // It then opens the active segment through the seam (openActive: a torn or
@@ -173,6 +174,9 @@ func Append(path string, e Event) (ledger.Head, error) {
 		return ledger.Head{}, err
 	}
 	if err := checkSealShape(e); err != nil {
+		return ledger.Head{}, err
+	}
+	if err := checkRestoreShape(e); err != nil {
 		return ledger.Head{}, err
 	}
 	if e.Outcome != "success" && e.Reason == nil {

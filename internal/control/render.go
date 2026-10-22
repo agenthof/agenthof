@@ -116,6 +116,15 @@ func label(rec record) string {
 			return fmt.Sprintf("head anchored: seq %d %s (%s)", rec.Anchor.Seq, rec.Anchor.Hash, rec.Anchor.Kind)
 		}
 		return "anchor " + rec.Outcome
+	case "restore":
+		// A restore puts a sealed segment's own bytes back from its protected
+		// copy; it is not a repair and taints nothing. The detail (which
+		// segment, from which version, what was moved aside) is appended by
+		// Render as for prune.
+		if rec.Outcome == "success" {
+			return "restored a sealed segment from its protected copy"
+		}
+		return "restore " + rec.Outcome
 	default:
 		return rec.Action
 	}

@@ -220,15 +220,17 @@ func replaceFile(dest, pattern string, data []byte) error {
 	return nil
 }
 
-// sweepTemps removes manifest and swap temps an earlier crash left beside the
-// ledger: <base>.segments-* and .<base>.next-*, matched by name prefix on a
+// sweepTemps removes manifest, swap and restore temps an earlier crash left
+// beside the ledger: <base>.segments-*, .<base>.next-* and .<base>.restore-*,
+// matched by name prefix on a
 // directory listing, never a glob (a path with [ or * in it is pattern syntax
 // to filepath.Glob and would sweep nothing). Best effort: a temp that cannot
 // be removed is harmless — siblingNames never reads it as a segment and the
 // next write makes its own. Call it only while holding the active's exclusive
 // lock: every writer of these temps holds that lock, so a temp seen under it
 // is stale by construction; a sweep outside it could remove a concurrent
-// seal's live temp and fail that seal's rename.
+// seal's live temp and fail that seal's rename. A <base>.replaced-* file is
+// never a temp: it is the evidence a restore kept.
 func sweepTemps(resolved string) {
 	dir, base := filepath.Dir(resolved), filepath.Base(resolved)
 	entries, err := os.ReadDir(dir)
@@ -237,7 +239,7 @@ func sweepTemps(resolved string) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, base+".segments-") || strings.HasPrefix(name, "."+base+".next-") {
+		if strings.HasPrefix(name, base+".segments-") || strings.HasPrefix(name, "."+base+".next-") || strings.HasPrefix(name, "."+base+".restore-") {
 			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}

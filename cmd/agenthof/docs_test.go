@@ -132,6 +132,44 @@ func TestConfigReferenceDocumentsWormSink(t *testing.T) {
 	}
 }
 
+// TestConfigReferenceDocumentsRestore fails when docs/reference/config.md
+// stops documenting audit restore control: the row with its flags, the
+// grant it runs under, that it taints nothing, the evidence file's name, and
+// the banned words still absent.
+func TestConfigReferenceDocumentsRestore(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference", "config.md"))
+	if err != nil {
+		t.Fatalf("config reference missing: %v", err)
+	}
+	doc := string(data)
+	row := ""
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.HasPrefix(line, "| `agenthof audit restore control ") {
+			row = line
+		}
+	}
+	for _, want := range []string{"[--segment N]", "[--rebuild --log-id <id>]", "[--integrity <path>]", "[--sink-timeout <dur>]", "`--segment`", "`--rebuild`", "`--log-id`"} {
+		if row == "" || !strings.Contains(row, want) {
+			t.Fatalf("the audit restore control row must list %s: %q", want, row)
+		}
+	}
+	for _, want := range []string{
+		"`repair` grant",
+		"taints nothing",
+		"`.replaced-`",
+		"`agenthof audit restore control`:",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("docs/reference/config.md must say %q", want)
+		}
+	}
+	for _, banned := range []string{"tamper-proof", "immutable", "write-once", "self-contained"} {
+		if strings.Contains(doc, banned) {
+			t.Fatalf("docs/reference/config.md must not say %q", banned)
+		}
+	}
+}
+
 // TestConfigReferenceDocumentsVerifySink fails when docs/reference/config.md
 // stops documenting audit verify control's sink pass: the two flags in the
 // verify row, the exit 9 and 10 rows, the new precedence (and not the old

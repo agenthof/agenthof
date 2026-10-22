@@ -54,6 +54,7 @@ Usage:
   agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>]  (closes the control ledger's active segment into a sealed file and opens the next; the chain and seq continue unbroken; an authorized control action, recorded whether it succeeded or failed)
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
+  agenthof audit restore control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--segment N]... [--integrity <path>] [--sink-timeout 2m] [--rebuild --log-id <id>]  (puts a sealed segment of the control ledger back from the protected copy in the sink, selected by the chain; under the repair grant; recorded, never a taint)
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]  (mints a per-role model key at the reserved model gateway for the installed roles; recorded in the control ledger; no run consumes it)
   agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>] [--server <url>] [--token <jwt>]
@@ -1237,6 +1238,14 @@ func cmdAudit(args []string, out io.Writer) int {
 	// rather than a separate cmdAuditRepair layer.
 	if args[0] == "repair" {
 		return cmdAuditRepairControl(args[1:], out)
+	}
+	// "restore" is disambiguated the same way: a run id is always "r-<hex>"
+	// (engine.NewRunID), which "restore" can never match. Only "restore
+	// control" exists (a sealed segment of the control ledger, from its
+	// protected copy), so the "control" sub-dispatch lives inside
+	// cmdAuditRestoreControl as repair's does.
+	if args[0] == "restore" {
+		return cmdAuditRestoreControl(args[1:], out)
 	}
 	// "anchor" is disambiguated the same way: a run id is always "r-<hex>"
 	// (engine.NewRunID), which "anchor" can never match.
