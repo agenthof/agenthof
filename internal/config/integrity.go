@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,19 +19,20 @@ import (
 // is what pins its head (third-party attestation, layerable on any sink). It
 // is read from integrity.yaml beside the control ledger; absent means the
 // floor. The floor — sink "local", anchor "none", nothing else set — and
-// anchor "tlog" with a transparency-log backend are implemented: the floor is
-// exactly the hash-chained local file the constitution describes. Every other
-// value is RESERVED: parsed, named, and refused by Validate, never read as
-// the floor (a posture nothing honours would be a false guarantee). Backend coordinates are broker references — env-var
-// NAMES, never values (Article II).
+// anchor "tlog" with a transparency-log backend are implemented, as is sink
+// "worm" with an s3-object-lock backend: the floor is exactly the hash-chained
+// local file the constitution describes. Every other value is RESERVED:
+// parsed, named, and refused by Validate, never read as the floor (a posture
+// nothing honours would be a false guarantee). Backend coordinates are broker
+// references — env-var NAMES, never values (Article II).
 type Integrity struct {
 	Sink   string `yaml:"sink"`   // "" | "local" (the floor) | "worm" | "external" (reserved)
 	Anchor string `yaml:"anchor"` // "" | "none" (the floor) | "tlog" | "signed" (reserved)
 	// Duplicate is reserved: further sinks written in parallel with Sink
 	// (a separately stored duplicate copy). Must be empty.
 	Duplicate []IntegrityBackend `yaml:"duplicate"`
-	// SinkBackend is reserved: the coordinates of a worm or external sink.
-	// Must be unset while Sink is local. AnchorBackend holds the coordinates
+	// SinkBackend holds the coordinates of a worm sink (kind s3-object-lock);
+	// external is reserved. Must be unset while Sink is local. AnchorBackend holds the coordinates
 	// of a transparency log (anchor: tlog); the other anchor kinds (timestamp
 	// authority, signing key) are reserved. Must be unset while Anchor is none.
 	SinkBackend   IntegrityBackend `yaml:"sink_backend"`
@@ -35,13 +40,21 @@ type Integrity struct {
 }
 
 // IntegrityBackend names an external integrity service and how to reach it.
-// Kind "transparency-log" is implemented for anchor: tlog; every other kind is reserved. URL is the service's public
+// Kind "transparency-log" is implemented for anchor: tlog and "s3-object-lock"
+// for sink: worm; every other kind is reserved. URL is the service's public
 // endpoint or key URI (a KMS key ARN/URI fits; never a secret, and never a
 // parallel key field later); Credential is the broker reference it
 // authenticates with.
 type IntegrityBackend struct {
-	Kind       string            `yaml:"kind"` // reserved vocabulary, e.g. "s3-object-lock", "rfc3161", "transparency-log", "kms"
-	URL        string            `yaml:"url"`  // the service's endpoint OR key URI
+	Kind string `yaml:"kind"` // "s3-object-lock", "transparency-log" (implemented); reserved vocabulary, e.g. "rfc3161", "kms"
+	URL  string `yaml:"url"`  // the service's endpoint OR key URI
+	// Region, Mode and Retention are the coordinates of a write-once store
+	// (s3-object-lock): the signing region (derived when empty), the lock
+	// mode (compliance only) and how long a sealed segment is locked.
+	// They are refused on an anchor backend.
+	Region     string            `yaml:"region"`
+	Mode       string            `yaml:"mode"`
+	Retention  string            `yaml:"retention"`
 	Credential BackendCredential `yaml:"credential"`
 }
 
@@ -73,21 +86,25 @@ type BackendCredential struct {
 // only — sink, then anchor, then duplicate, then the two backends. A value is
 // matched exactly (case-sensitive, no trimming): config is law, not a guess.
 // Since every reserved sink and anchor is refused first, the backend rules
-// can only fire at the floor — except anchor_backend under anchor: tlog,
-// which is that anchor's own coordinates and is validated as part of the
-// tlog case above. Coordinates naming a backend nothing consumes would be a
-// false signal to a reader of the file.
+// can only fire at the floor — except sink_backend under sink: worm and
+// anchor_backend under anchor: tlog, which are those postures' own
+// coordinates and are validated as part of their cases. Coordinates naming a
+// backend nothing consumes would be a false signal to a reader of the file.
 func (i Integrity) Validate() error {
 	switch i.Sink {
 	case "", "local":
-	case "worm", "external":
-		return fmt.Errorf("sink %q is reserved and not yet supported in this build (only local is implemented)", i.Sink)
+	case "worm":
+		if err := validateSinkBackend(i.SinkBackend); err != nil {
+			return err
+		}
+	case "external":
+		return fmt.Errorf("sink %q is reserved and not yet supported in this build (only local and worm are implemented)", i.Sink)
 	case "duplicate":
 		// A sink VALUE in the design's vocabulary, so the operator is early,
 		// not wrong — but the shape spells it as the list.
 		return errors.New(`sink "duplicate" is reserved and not yet supported in this build; when it is, it is written as the duplicate: list, not as the sink value`)
 	default:
-		return fmt.Errorf("sink %q is not an integrity sink (want local; worm, external and duplicate are reserved)", i.Sink)
+		return fmt.Errorf("sink %q is not an integrity sink (want local or worm; external and duplicate are reserved)", i.Sink)
 	}
 	switch i.Anchor {
 	case "", "none":
@@ -103,8 +120,8 @@ func (i Integrity) Validate() error {
 	if n := len(i.Duplicate); n > 0 {
 		return fmt.Errorf("duplicate names %d sink(s); duplicate sinks are reserved and not yet supported in this build", n)
 	}
-	if i.SinkBackend.IsSet() {
-		return errors.New("sink_backend is set but sink is local; backend coordinates are reserved for worm and external")
+	if i.Sink != "worm" && i.SinkBackend.IsSet() {
+		return errors.New("sink_backend is set but sink is local; backend coordinates belong to worm (and to external, which is reserved)")
 	}
 	if i.Anchor != "tlog" && i.AnchorBackend.IsSet() {
 		return errors.New("anchor_backend is set but anchor is none; backend coordinates are reserved for tlog and signed")
@@ -114,7 +131,8 @@ func (i Integrity) Validate() error {
 
 // validateAnchorBackend checks anchor: tlog's own coordinates — the ones the
 // anchoring command consumes — reporting the first fault in a fixed order
-// (kind, url, then the credential fields). The credential check is shape-only
+// (kind, url, the write-once coordinates it refuses, then the credential
+// fields). The credential check is shape-only
 // on purpose: it does not check that client_credentials has its endpoint and
 // env names — the broker fails at use with its own named error, and audit
 // anchor records that as an anchor error. Validation is syntactic: no
@@ -137,6 +155,11 @@ func validateAnchorBackend(b IntegrityBackend) error {
 	if !isBackendURL(b.URL) {
 		return fmt.Errorf("anchor_backend.url %q is not an absolute http(s) URL without credentials", b.URL)
 	}
+	for _, coord := range []struct{ name, value string }{{"region", b.Region}, {"mode", b.Mode}, {"retention", b.Retention}} {
+		if coord.value != "" {
+			return fmt.Errorf("anchor_backend.%s is not a coordinate of an anchor backend", coord.name)
+		}
+	}
 	c := b.Credential
 	switch c.GrantType {
 	case "", "client_credentials":
@@ -147,6 +170,113 @@ func validateAnchorBackend(b IntegrityBackend) error {
 	case "", "static_env":
 	default:
 		return fmt.Errorf("anchor_backend.credential: credential_source %q is not supported for an anchor backend (want static_env)", c.CredentialSource)
+	}
+	return nil
+}
+
+// The retention bounds of a write-once sink. A year is a fixed 365 days: a
+// leap-year-exact year is nobody's compliance requirement, and a fixed day
+// count keeps a retain-until date recomputable. The minimum is the day S3
+// itself imposes; any policy floor above it is the operator's.
+const (
+	RetentionDay  = 24 * time.Hour
+	RetentionYear = 365 * RetentionDay
+	RetentionMin  = RetentionDay
+	RetentionMax  = 100 * RetentionYear
+)
+
+var (
+	retentionForm = regexp.MustCompile(`^([1-9][0-9]*)(d|y)$`)
+	regionName    = regexp.MustCompile(`^[a-z0-9-]+$`)
+)
+
+// ParseRetention reads <n>d or <n>y — the one place that grammar is read —
+// into a duration within [RetentionMin, RetentionMax]. The errors name the
+// sink_backend.retention key: that is the only place a retention is written.
+func ParseRetention(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, errors.New("sink_backend.retention is required for s3-object-lock: <n>d or <n>y (e.g. 7y)")
+	}
+	m := retentionForm.FindStringSubmatch(s)
+	if m == nil {
+		return 0, fmt.Errorf("sink_backend.retention %q is not a retention (want <n>d or <n>y)", s)
+	}
+	unit := RetentionDay
+	if m[2] == "y" {
+		unit = RetentionYear
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	// Compare in units before multiplying, so a huge n cannot wrap a Duration.
+	if err != nil || n > int64(RetentionMax/unit) {
+		return 0, fmt.Errorf("sink_backend.retention %q exceeds 100y", s)
+	}
+	d := time.Duration(n) * unit
+	if d < RetentionMin { // unreachable by the grammar (1d is the smallest form); kept so the bound is stated
+		return 0, fmt.Errorf("sink_backend.retention %q is below the minimum of 1d", s)
+	}
+	return d, nil
+}
+
+// validateSinkBackend checks sink: worm's own coordinates — the ones the seal
+// consumes — reporting the first fault in a fixed order (set, kind, url,
+// mode, retention, region, then the credential). Only compliance mode is
+// accepted: a governance-mode lock can be lifted by a privileged user. Like
+// the anchor's, the check is syntactic: no network, no DNS, and that the named
+// env vars are set is the broker's verdict at use.
+func validateSinkBackend(b IntegrityBackend) error {
+	if !b.IsSet() {
+		return errors.New("sink is worm but sink_backend is not set; name the write-once store (kind s3-object-lock, url, mode compliance, retention)")
+	}
+	switch b.Kind {
+	case "s3-object-lock":
+	case "azure-immutable-blob", "gcs-bucket-lock":
+		return fmt.Errorf("sink_backend kind %q is reserved and not yet supported in this build (only s3-object-lock is implemented)", b.Kind)
+	default:
+		return fmt.Errorf("sink_backend kind %q is not a write-once sink kind (want s3-object-lock; azure-immutable-blob and gcs-bucket-lock are reserved)", b.Kind)
+	}
+	if b.URL == "" {
+		return errors.New("sink_backend.url is required for sink: worm (endpoint + /bucket[/prefix], e.g. https://s3.<region>.amazonaws.com/<bucket>)")
+	}
+	if !isBackendURL(b.URL) {
+		return fmt.Errorf("sink_backend.url %q is not an absolute http(s) URL without credentials", b.URL)
+	}
+	if u, err := url.Parse(b.URL); err != nil || strings.Trim(u.Path, "/") == "" {
+		return fmt.Errorf("sink_backend.url %q names no bucket (want endpoint + /bucket[/prefix])", b.URL)
+	}
+	switch b.Mode {
+	case "compliance":
+	case "":
+		return errors.New("sink_backend.mode is required for s3-object-lock and must be compliance (governance mode can be lifted by a privileged user and is refused)")
+	case "governance":
+		return errors.New(`sink_backend.mode "governance" is refused: a governance-mode lock can be bypassed by a privileged user; use compliance`)
+	default:
+		return fmt.Errorf("sink_backend.mode %q is not an object-lock mode (want compliance)", b.Mode)
+	}
+	if _, err := ParseRetention(b.Retention); err != nil {
+		return err
+	}
+	if b.Region != "" && !regionName.MatchString(b.Region) {
+		return fmt.Errorf("sink_backend.region %q is not a region name", b.Region)
+	}
+	c := b.Credential
+	switch c.CredentialSource {
+	case "", "static_env":
+	default:
+		return fmt.Errorf("sink_backend.credential: credential_source %q is not supported for a write-once sink (want static_env)", c.CredentialSource)
+	}
+	if c.GrantType != "" {
+		return fmt.Errorf("sink_backend.credential: grant_type %q is not supported for a write-once sink (a signing key pair is used directly; leave grant_type unset)", c.GrantType)
+	}
+	if c.ClientAuth != "sigv4" {
+		return errors.New("sink_backend.credential: client_auth must be sigv4 for s3-object-lock")
+	}
+	if c.ClientIDEnv == "" || c.ClientSecretEnv == "" {
+		return errors.New("sink_backend.credential: client_id_env and client_secret_env are required (the access key id and secret access key env NAMES)")
+	}
+	for _, unused := range []struct{ name, value string }{{"issuer", c.Issuer}, {"token_endpoint", c.TokenEndpoint}, {"scope", c.Scope}, {"audience", c.Audience}} {
+		if unused.value != "" {
+			return fmt.Errorf("sink_backend.credential: %s is not used by sigv4", unused.name)
+		}
 	}
 	return nil
 }
@@ -164,7 +294,7 @@ func isBackendURL(s string) bool {
 // sibling key (cadence, runs) is added here: the text is not a wire contract.
 const (
 	integrityKeys  = "sink, anchor, duplicate, sink_backend, anchor_backend"
-	backendKeys    = "kind, url, credential"
+	backendKeys    = "kind, url, region, mode, retention, credential"
 	credentialKeys = "credential_source, token_env, grant_type, client_auth, issuer, token_endpoint, client_id_env, client_secret_env, scope, audience"
 )
 
@@ -244,7 +374,7 @@ func checkBackendNode(n *yaml.Node, where string) error {
 			return fmt.Errorf("line %d: key must be a plain scalar in %s (allowed keys: %s)", key.Line, where, backendKeys)
 		}
 		switch key.Value {
-		case "kind", "url":
+		case "kind", "url", "region", "mode", "retention":
 		case "credential":
 			if isNull(val) {
 				continue

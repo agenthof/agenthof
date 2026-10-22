@@ -27,8 +27,9 @@ func integrityPath(controlLog string) string {
 // decided by Lstat on the entry itself, so a present-but-unreadable file —
 // a dangling symlink, a bad mode — is a fault, not a missing file. Every
 // control writer calls it before it touches the ledger and exits 2 on an
-// error; the posture it returns, after validation, is either the floor or
-// anchor: tlog with its coordinates, which anchor-aware callers consume.
+// error; the posture it returns, after validation, is the floor, anchor: tlog
+// with its coordinates (which anchor-aware callers consume), sink: worm with
+// its coordinates, or both knobs layered.
 func loadIntegrity(controlLog string) (config.Integrity, error) {
 	path := integrityPath(controlLog)
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {

@@ -993,17 +993,18 @@ beside it too: `<dir>/integrity.yaml`, operator-written — Agenthof never write
 it. It has two knobs — `sink` (where the ledger's bytes live) and `anchor`
 (what pins its head) — and, absent, means the floor: `sink: local`, `anchor:
 none`, which is exactly the hash-chained local file the control ledger is
-today. Two postures are honored: the floor, and `anchor: tlog` with an
-`anchor_backend` naming a transparency log. Every other value is reserved
-and refused by name:
+today. Three postures are honored: the floor; `anchor: tlog` with an
+`anchor_backend` naming a transparency log; and `sink: worm` with a
+`sink_backend` naming an S3-compatible bucket with Object Lock, which the two
+knobs let you layer. Every other value is reserved and refused by name:
 
 | key | accepted | reserved — refused |
 |---|---|---|
-| `sink` | absent, `""`, `local` | `worm`, `external` (and `duplicate`, which when it ships is written as the `duplicate:` list, not as the sink) |
+| `sink` | absent, `""`, `local`, `worm` | `external` (and `duplicate`, which when it ships is written as the `duplicate:` list, not as the sink) |
 | `anchor` | absent, `""`, `none`, `tlog` | `signed` |
 | `duplicate` | absent, `null`, `[]` | any entry — a list of further sinks written in parallel with `sink` |
-| `sink_backend` | absent, `null`, `{}` | any set field |
-| `anchor_backend` | with `anchor: tlog`: `kind` absent or `transparency-log`, `url` **required** — an absolute `http(s)` URL with no credentials, query or fragment (the Sigstore public-good log is `https://rekor.sigstore.dev`; it is never defaulted, so nothing is published to a service you did not name) — and an optional `credential` (direct bearer via `token_env`, or `grant_type: client_credentials`) | `kind: rfc3161`; any other kind; `grant_type: token_exchange`; a `credential_source` other than `static_env`; any set field while `anchor` is `none` |
+| `sink_backend` | with `sink: worm`: `kind: s3-object-lock`, `url` **required** — an absolute `http(s)` URL with no credentials, query or fragment whose path names the bucket and an optional prefix (`https://s3.<region>.amazonaws.com/<bucket>[/<prefix>]`; `http://` is accepted so a private store or MinIO works) — `mode: compliance` **required**, `retention` **required** (`<n>d` or `<n>y`, from `1d` to `100y`; a year is a fixed 365 days), an optional `region` (lower-case letters, digits and `-`; derived from an `amazonaws.com` host when absent), and a `credential` with `credential_source: static_env` (or absent), `client_auth: sigv4`, and `client_id_env` and `client_secret_env` naming the access key id and secret access key (plus an optional `token_env` for a session token) | any `kind` other than `s3-object-lock` (the other cloud-store kinds are reserved); `mode: governance` (a privileged user can lift a governance-mode lock) or any mode other than `compliance`; a `retention` outside the grammar or the bounds; `grant_type`; `issuer`, `token_endpoint`, `scope` or `audience`; a `credential_source` other than `static_env`; any set field unless `sink` is `worm` |
+| `anchor_backend` | with `anchor: tlog`: `kind` absent or `transparency-log`, `url` **required** — an absolute `http(s)` URL with no credentials, query or fragment (the Sigstore public-good log is `https://rekor.sigstore.dev`; it is never defaulted, so nothing is published to a service you did not name) — and an optional `credential` (direct bearer via `token_env`, or `grant_type: client_credentials`) | `kind: rfc3161`; any other kind; `grant_type: token_exchange`; a `credential_source` other than `static_env`; `region`, `mode` or `retention` (those belong to a `sink_backend`); any set field while `anchor` is `none` |
 
 A backend's `credential` is the same broker-reference vocabulary a tool
 resource's credential uses — `credential_source`, `token_env`, `grant_type`,

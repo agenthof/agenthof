@@ -39,8 +39,8 @@ func TestConfigReferenceDocumentsInvestigateAnchors(t *testing.T) {
 			t.Fatalf("docs/reference/config.md must say %q", want)
 		}
 	}
-	// "worm" in lower case is a reserved integrity.yaml sink value the
-	// reference already names; the banned claims are the three below.
+	// "worm" in lower case is an integrity.yaml sink value the reference
+	// already names; the banned claims are the three below.
 	for _, banned := range []string{"tamper-proof", "immutable", "write-once"} {
 		if strings.Contains(doc, banned) {
 			t.Fatalf("docs/reference/config.md must not say %q", banned)
@@ -98,5 +98,36 @@ func TestConfigReferenceDocumentsSeal(t *testing.T) {
 	}
 	if strings.Contains(string(concepts), "Nothing rotates or seals the control log today") {
 		t.Fatal("docs/concepts.md must no longer say nothing seals the control log")
+	}
+}
+
+// TestConfigReferenceDocumentsWormSink fails when docs/reference/config.md
+// stops documenting the sink: worm integrity posture — the accepted sink
+// row, the backend shape, the retention bounds — or says one of the banned
+// words about it.
+func TestConfigReferenceDocumentsWormSink(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference", "config.md"))
+	if err != nil {
+		t.Fatalf("config reference missing: %v", err)
+	}
+	doc := string(data)
+	for _, want := range []string{
+		"| `sink` | absent, `\"\"`, `local`, `worm` |",
+		"| `sink_backend` | with `sink: worm`: `kind: s3-object-lock`, `url` **required**",
+		"`mode: compliance`",
+		"`retention`",
+		"`client_auth: sigv4`",
+		"`1d`",
+		"`100y`",
+		"365 days",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("docs/reference/config.md must say %q", want)
+		}
+	}
+	for _, banned := range []string{"tamper-proof", "immutable", "write-once"} {
+		if strings.Contains(doc, banned) {
+			t.Fatalf("docs/reference/config.md must not say %q", banned)
+		}
 	}
 }
