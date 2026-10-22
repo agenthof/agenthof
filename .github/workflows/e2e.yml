@@ -28,7 +28,7 @@ jobs:
       - run: ./scripts/e2e-dex.sh
   worm:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

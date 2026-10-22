@@ -56,10 +56,10 @@ run() {
 }
 # expect <step> <pattern>: $OUT must contain a line matching the pattern.
 expect() {
-  printf '%s\n' "$OUT" | grep -Eq -- "$2" || fail "$1: output lacks /$2/"
+  grep -Eq -- "$2" <<<"$OUT" || fail "$1: output lacks /$2/"
 }
 
-if curl -fsS -o /dev/null "$ENDPOINT/minio/health/live" 2>/dev/null; then
+if curl -fsS -o /dev/null "$ENDPOINT/minio/health/ready" 2>/dev/null; then
   fail "something already listens on $ENDPOINT; set WORM_PORT to a free port"
 fi
 
@@ -79,7 +79,9 @@ export MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin MINIO_BROWSER=o
 MINIO_PID=$!
 echo "waiting for minio..."
 for i in $(seq 1 30); do
-  curl -fsS -o /dev/null "$ENDPOINT/minio/health/live" 2>/dev/null && break
+  # ready, not live: live answers before IAM is initialised, and the user
+  # and policy setup below needs IAM.
+  curl -fsS -o /dev/null "$ENDPOINT/minio/health/ready" 2>/dev/null && break
   [ "$i" = 30 ] && { cat "$WORK/minio.log"; fail "minio never became ready"; }
   sleep 1
 done
@@ -149,6 +151,7 @@ run "verify after seal" 0 "$AH" audit verify control --control-log "$CTL"
 expect "verify after seal" "^      verified — oldest version $VID1 compliance until "
 expect "verify after seal" "^protected copies: 1 \(1 verified, 0 missing, 0 mismatch, 0 under-locked, 0 unverifiable\); sink holds 1 objects for this ledger, 1 accounted for"
 
+sha256sum "$CTL.seg-000001" >"$WORK/seg1.sha256"
 rm "$CTL.seg-000001"
 run "verify with segment 1 missing locally" 1 "$AH" audit verify control --control-log "$CTL"
 expect "verify with segment 1 missing locally" "^control ledger segment 1 missing: the manifest lists control.jsonl.seg-000001 and it does not exist"
@@ -156,6 +159,7 @@ expect "verify with segment 1 missing locally" "^control ledger segment 1 missin
 run "restore segment 1" 0 "$AH" audit restore control --control-log "$CTL" --config "$CFG" "${AS[@]}"
 expect "restore segment 1" "^restored: segment 1 from s3-object-lock $SINK_URL version=$VID1 sha256=[0-9a-f]{64} \(nothing was there\)"
 expect "restore segment 1" "^control head: seq=4 "
+run "restored segment 1 byte-identical" 0 sha256sum -c "$WORK/seg1.sha256"
 
 run "verify after restore" 0 "$AH" audit verify control --control-log "$CTL"
 expect "verify after restore" "^protected copies: 1 \(1 verified, 0 missing, 0 mismatch, 0 under-locked, 0 unverifiable\)"
@@ -166,7 +170,7 @@ code=0
 RM_OUT=$("${MC[@]}" rm --version-id "$VID1" "local/$BUCKET/$KEY1" 2>&1) || code=$?
 printf '%s\n' "$RM_OUT"
 [ "$code" != 0 ] || fail "admin delete of the locked version: mc rm exited 0; compliance did not hold"
-printf '%s\n' "$RM_OUT" | grep -Eqi 'WORM|retention|compliance|denied' || fail "admin delete of the locked version: refusal names no lock"
+grep -qi 'WORM protected' <<<"$RM_OUT" || fail "admin delete of the locked version: refusal does not name the lock"
 run "stat the locked version after the refused delete" 0 "${MC[@]}" stat --version-id "$VID1" "local/$BUCKET/$KEY1"
 run "verify after the refused delete" 0 "$AH" audit verify control --control-log "$CTL"
 expect "verify after the refused delete" "^protected copies: 1 \(1 verified, "
