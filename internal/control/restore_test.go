@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,12 +18,15 @@ import (
 	"github.com/agenthof/agenthof/internal/ledger"
 )
 
-// fakeVersion is one object version as the fakeReader holds it.
+// fakeVersion is one object version as the fakeReader holds it; marker is a
+// delete marker, which lists as the key's DeleteMarker and never as a
+// version.
 type fakeVersion struct {
-	id    string
-	data  []byte
-	mode  string // "COMPLIANCE", "GOVERNANCE" or "" (no lock)
-	until time.Time
+	id     string
+	data   []byte
+	mode   string // "COMPLIANCE", "GOVERNANCE" or "" (no lock)
+	until  time.Time
+	marker bool
 }
 
 // fakeReader is an in-memory SinkReader: key → versions oldest first, ids
@@ -47,6 +51,16 @@ func (r *fakeReader) add(key string, data []byte, mode string, until time.Time) 
 	return id
 }
 
+// addMarker puts a delete marker on key (the newest entry), as a plain
+// DeleteObject does.
+func (r *fakeReader) addMarker(key string) {
+	r.next++
+	r.objects[key] = append(r.objects[key], fakeVersion{id: fmt.Sprintf("v-%d", r.next), marker: true})
+}
+
+// RemoveVersions removes every version and marker at key: a bucket gap.
+func (r *fakeReader) RemoveVersions(key string) { delete(r.objects, key) }
+
 func (r *fakeReader) Prefix(logID string) string { return "p/" + logID + "/" }
 
 func (r *fakeReader) ListVersions(_ context.Context, key string) (KeyVersions, error) {
@@ -57,11 +71,17 @@ func (r *fakeReader) ListVersions(_ context.Context, key string) (KeyVersions, e
 	kv := KeyVersions{Key: key}
 	vs := r.objects[key]
 	for i, v := range vs {
+		if v.marker {
+			kv.DeleteMarker = true
+			continue
+		}
 		kv.Versions = append(kv.Versions, SinkVersion{ID: v.id, IsLatest: i == len(vs)-1, Size: int64(len(v.data))})
 	}
 	return kv, nil
 }
 
+// ListPrefix lists in map order on purpose: a reader must not depend on the
+// listing's order.
 func (r *fakeReader) ListPrefix(ctx context.Context, prefix string) ([]KeyVersions, error) {
 	if err := r.errs["ListPrefix"]; err != nil {
 		return nil, err
@@ -78,7 +98,7 @@ func (r *fakeReader) ListPrefix(ctx context.Context, prefix string) ([]KeyVersio
 
 func (r *fakeReader) find(key, id string) (fakeVersion, bool) {
 	for _, v := range r.objects[key] {
-		if v.id == id {
+		if v.id == id && !v.marker {
 			return v, true
 		}
 	}
@@ -121,17 +141,24 @@ func (r *fakeReader) Get(_ context.Context, key, id string, max int64) ([]byte, 
 // empty.
 func restoreFixture(t *testing.T) (string, *fakeReader) {
 	t.Helper()
+	return wormFixture(t, 2)
+}
+
+// wormFixture is restoreFixture with n seals: segment k = seq 4k−3..4k,
+// copy v-k.
+func wormFixture(t *testing.T, n int) (string, *fakeReader) {
+	t.Helper()
 	p := filepath.Join(t.TempDir(), "control.jsonl")
 	r := newFakeReader()
 	s := &fakeSink{}
 	s.onPut = func() { r.add(s.putLoc.Key, s.putData, "COMPLIANCE", s.putLoc.RetainUntil) }
-	for i := 0; i < 2; i++ {
+	for i := 0; i < n; i++ {
 		appendN(t, p, 3)
 		if _, err := SealActive(p, sealEvent(), s); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if v, err := Read(p, ledger.Locked); err != nil || len(v.Sealed) != 2 || v.Head.Count != 8 {
+	if v, err := Read(p, ledger.Locked); err != nil || len(v.Sealed) != n || v.Head.Count != 4*n {
 		t.Fatalf("fixture: %v %+v", err, v.Head)
 	}
 	return p, r
@@ -813,4 +840,552 @@ func TestRestoreLabel(t *testing.T) {
 	if got := label(record{Action: "restore", Outcome: "refused"}); got != "restore refused" {
 		t.Fatalf("%q", got)
 	}
+}
+
+// sha256File is a file's whole-file digest, for the byte-identical oracle.
+func sha256File(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hashOf(data)
+}
+
+// rebuildIt runs Rebuild with the fixture's event.
+func rebuildIt(t *testing.T, p, id string, r *fakeReader) (RebuildResult, error) {
+	t.Helper()
+	return Rebuild(p, id, r, restoreEvent())
+}
+
+// rewriteSealLine returns data with its last line (the seal) decoded, edited
+// by f and re-encoded: the chain fields are untouched, so the copy still
+// recomputes; only what f changes differs.
+func rewriteSealLine(t *testing.T, data []byte, f func(seal map[string]any)) []byte {
+	t.Helper()
+	lines := bytes.Split(bytes.TrimSuffix(data, []byte("\n")), []byte("\n"))
+	var seal map[string]any
+	if err := json.Unmarshal(lines[len(lines)-1], &seal); err != nil {
+		t.Fatal(err)
+	}
+	f(seal)
+	altered, err := json.Marshal(seal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines[len(lines)-1] = altered
+	return append(bytes.Join(lines, []byte("\n")), '\n')
+}
+
+// TestRebuildFromNothing: every sealed file, the manifest and the active
+// removed → the set is reconstructed byte-identical from the reader's
+// copies, an empty active created, and one restore record says so.
+func TestRebuildFromNothing(t *testing.T) {
+	p, r := restoreFixture(t)
+	id := logIDOf(t, p)
+	files := []string{SegmentPath(p, 1), SegmentPath(p, 2), ManifestPath(p)}
+	want := map[string]string{}
+	for _, f := range files {
+		want[f] = sha256File(t, f)
+	}
+	for _, f := range append(files, p) {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := rebuildIt(t, p, id, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Segments != 2 || res.Written != 2 || res.Replaced != 0 || len(res.ReplacedNames) != 0 || res.ManifestReplaced != "" || !res.ActiveCreated || len(res.UnderLocked) != 0 {
+		t.Fatalf("%+v", res)
+	}
+	for f, h := range want {
+		if got := sha256File(t, f); got != h {
+			t.Fatalf("%s: rebuilt %s, was %s", filepath.Base(f), got, h)
+		}
+	}
+	rec, v := lastRecord(t, p)
+	if rec.Action != "restore" || rec.Outcome != "success" || rec.Seq != 9 || rec.Detail != "rebuild from s3-object-lock: 2 segments verified against the sink, 2 written, 0 replaced, manifest rewritten, active created" || rec.Invoker.Subject != "ops@example.com" {
+		t.Fatalf("%+v", rec)
+	}
+	if v.Head != res.Head || v.Head.Count != 9 {
+		t.Fatalf("head %+v vs %+v", v.Head, res.Head)
+	}
+	if tainted, _ := IsTainted(v.Records); tainted {
+		t.Fatal("a rebuild taints nothing")
+	}
+	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the created active is 0600: %v", err)
+	}
+	if _, err := Rebuild(p, id, r, Event{Action: "restore", Outcome: "success", Detail: "x"}); err == nil || !strings.Contains(err.Error(), "Restore takes a success restore event without a detail") {
+		t.Fatalf("event shape: %v", err)
+	}
+}
+
+// TestRebuildRefusesGapNamesOrdinal (Review Focus 4): a key with no version
+// is a hole in the chain and refuses whole, naming the held ranges and the
+// missing ordinal, with nothing written and no record; a delete marker on
+// top of a version is not a gap; a marker alone is; an empty prefix refuses
+// naming the ledger.
+func TestRebuildRefusesGapNamesOrdinal(t *testing.T) {
+	p, r := wormFixture(t, 3)
+	id := logIDOf(t, p)
+	r.RemoveVersions(segKey(t, p, r, 2))
+	snap := snapshotDir(t, filepath.Dir(p))
+	_, err := rebuildIt(t, p, id, r)
+	want := "control: cannot rebuild: the sink holds segments 1–1 and 3–3; segment 2 is missing from the bucket — a chain with a hole cannot be reconstructed"
+	if err == nil || err.Error() != want {
+		t.Fatalf("%v", err)
+	}
+	if snapshotDir(t, filepath.Dir(p)) != snap {
+		t.Fatal("nothing written")
+	}
+	if v, err := Read(p, ledger.Locked); err != nil || v.Head.Count != 12 {
+		t.Fatalf("nothing recorded: %v %+v", err, v.Head)
+	}
+	// Three ranges: the rendering is "a–b, c–d and e–f".
+	p, r = wormFixture(t, 5)
+	id = logIDOf(t, p)
+	r.RemoveVersions(segKey(t, p, r, 2))
+	r.RemoveVersions(segKey(t, p, r, 4))
+	if _, err := rebuildIt(t, p, id, r); err == nil || err.Error() != "control: cannot rebuild: the sink holds segments 1–1, 3–3 and 5–5; segment 2 is missing from the bucket — a chain with a hole cannot be reconstructed" {
+		t.Fatalf("%v", err)
+	}
+
+	t.Run("a marker is not a gap", func(t *testing.T) {
+		p, r := wormFixture(t, 3)
+		id := logIDOf(t, p)
+		r.addMarker(segKey(t, p, r, 2))
+		_ = os.Remove(SegmentPath(p, 2))
+		res, err := rebuildIt(t, p, id, r)
+		if err != nil || res.Segments != 3 || res.Written != 1 {
+			t.Fatalf("%v %+v", err, res)
+		}
+		if _, err := Read(p, ledger.Locked); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("a marker alone holds nothing", func(t *testing.T) {
+		p, r := wormFixture(t, 3)
+		id := logIDOf(t, p)
+		key := segKey(t, p, r, 2)
+		r.RemoveVersions(key)
+		r.addMarker(key)
+		if _, err := rebuildIt(t, p, id, r); err == nil || err.Error() != "control: cannot rebuild: the sink holds segments 1–1 and 3–3; segment 2 is missing from the bucket — a chain with a hole cannot be reconstructed" {
+			t.Fatalf("%v", err)
+		}
+		// Trailing, it is simply not held: N is 2, and the local segment 3
+		// stays as a trailing entry the sink does not judge.
+		p, r = wormFixture(t, 3)
+		id = logIDOf(t, p)
+		key = segKey(t, p, r, 3)
+		r.RemoveVersions(key)
+		r.addMarker(key)
+		if res, err := rebuildIt(t, p, id, r); err != nil || res.Segments != 2 || res.Written != 0 || res.ManifestReplaced != "" {
+			t.Fatalf("%v %+v", err, res)
+		}
+	})
+	t.Run("nothing under the prefix", func(t *testing.T) {
+		p, _ := restoreFixture(t)
+		id := logIDOf(t, p)
+		r := newFakeReader()
+		if _, err := rebuildIt(t, p, id, r); err == nil || err.Error() != "control: cannot rebuild: the sink holds no segment of ledger "+id+" under p/"+id+"/" {
+			t.Fatalf("%v", err)
+		}
+	})
+	t.Run("a listing error is that error", func(t *testing.T) {
+		p, r := restoreFixture(t)
+		id := logIDOf(t, p)
+		r.errs["ListPrefix"] = errors.New("status 503 from host")
+		snap := snapshotDir(t, filepath.Dir(p))
+		if _, err := rebuildIt(t, p, id, r); err == nil || !strings.Contains(err.Error(), "status 503 from host") || strings.Contains(err.Error(), "missing") {
+			t.Fatalf("%v", err)
+		}
+		if snapshotDir(t, filepath.Dir(p)) != snap {
+			t.Fatal("nothing written")
+		}
+	})
+}
+
+// TestRebuildRefusesABreakNamesOrdinal: the oldest version at a key is the
+// copy, judged by verifyFetchedSegment — a foreign oldest refuses whole with
+// the ordinal and cause and nothing written; a forgery written OVER the
+// original is ignored (the oldest wins); a copy whose seal block names
+// another key is a foreign object; a lock that cannot be read refuses.
+func TestRebuildRefusesABreakNamesOrdinal(t *testing.T) {
+	far := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	p, r := restoreFixture(t)
+	id := logIDOf(t, p)
+	key := segKey(t, p, r, 2)
+	real := r.objects[key][0].data
+	r.objects[key][0].data = []byte("other\n")
+	snap := snapshotDir(t, filepath.Dir(p))
+	_, err := rebuildIt(t, p, id, r)
+	if err == nil || err.Error() != "control: cannot rebuild: segment 2: the oldest version at the key is not a sealed segment of this ledger — the sink's copy was replaced before the seal could write it, or the key was pre-occupied" {
+		t.Fatalf("%v", err)
+	}
+	if snapshotDir(t, filepath.Dir(p)) != snap {
+		t.Fatal("nothing written")
+	}
+
+	// A forged newer version over the original: the oldest wins.
+	r.objects[key][0].data = real
+	r.add(key, []byte("forged\n"), "COMPLIANCE", far)
+	_ = os.Remove(SegmentPath(p, 2))
+	res, err := rebuildIt(t, p, id, r)
+	if err != nil || res.Written != 1 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if back, _ := os.ReadFile(SegmentPath(p, 2)); !bytes.Equal(back, real) {
+		t.Fatal("segment 2 is the oldest version's bytes")
+	}
+
+	t.Run("block names another key", func(t *testing.T) {
+		p, r := restoreFixture(t)
+		id := logIDOf(t, p)
+		key := segKey(t, p, r, 2)
+		r.objects[key][0].data = rewriteSealLine(t, r.objects[key][0].data, func(seal map[string]any) {
+			seal["seal"].(map[string]any)["sink"].(map[string]any)["key"] = "p/x/seg-000009"
+		})
+		snap := snapshotDir(t, filepath.Dir(p))
+		if _, err := rebuildIt(t, p, id, r); err == nil || err.Error() != "control: cannot rebuild: segment 2: the seal's sink block names p/x/seg-000009, not "+key {
+			t.Fatalf("%v", err)
+		}
+		if snapshotDir(t, filepath.Dir(p)) != snap {
+			t.Fatal("nothing written")
+		}
+	})
+	t.Run("lock unreadable refuses", func(t *testing.T) {
+		p, r := restoreFixture(t)
+		id := logIDOf(t, p)
+		r.errs["GetRetention"] = errors.New("status 403 from host")
+		_ = os.Remove(SegmentPath(p, 1))
+		snap := snapshotDir(t, filepath.Dir(p))
+		if _, err := rebuildIt(t, p, id, r); err == nil || !strings.Contains(err.Error(), "segment 1: the lock on version v-1 could not be read; nothing was written") || !strings.Contains(err.Error(), "status 403 from host") {
+			t.Fatalf("%v", err)
+		}
+		if snapshotDir(t, filepath.Dir(p)) != snap {
+			t.Fatal("nothing written")
+		}
+	})
+}
+
+// TestRebuildTidiedTruncation: segment 2 dropped, the manifest shortened,
+// the active emptied — a clean local chain. The rebuild puts segment 2 back,
+// moves the shortened manifest aside and records (an empty active chains
+// vacuously). With the active holding a record that chains from segment 1's
+// head the rebuilt set does not read clean: FaultBoundary{0}, the result
+// returned, nothing recorded; the remedy's re-run writes nothing and records.
+func TestRebuildTidiedTruncation(t *testing.T) {
+	tidy := func(t *testing.T) (string, *fakeReader, string) {
+		t.Helper()
+		p, r := restoreFixture(t)
+		id := logIDOf(t, p)
+		m, err := loadManifest(p)
+		if err != nil || m == nil {
+			t.Fatal(err)
+		}
+		m.Segments = m.Segments[:1]
+		if err := writeManifest(p, *m); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(SegmentPath(p, 2)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if v, err := Read(p, ledger.Locked); err != nil || len(v.Sealed) != 1 || v.Head.Count != 4 {
+			t.Fatalf("the tidied set reads clean: %v %+v", err, v.Head)
+		}
+		return p, r, id
+	}
+	p, r, id := tidy(t)
+	res, err := rebuildIt(t, p, id, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedDir, _ := filepath.EvalSymlinks(filepath.Dir(p))
+	if res.Segments != 2 || res.Written != 1 || res.Replaced != 0 || res.ActiveCreated || !regexp.MustCompile(`control\.jsonl\.replaced-segments-\d+$`).MatchString(res.ManifestReplaced) || filepath.Dir(res.ManifestReplaced) != resolvedDir || len(res.ReplacedNames) != 1 || res.ReplacedNames[0] != res.ManifestReplaced {
+		t.Fatalf("%+v", res)
+	}
+	if _, err := Read(p, ledger.Locked); err != nil {
+		t.Fatal(err)
+	}
+	rec, v := lastRecord(t, p)
+	if rec.Action != "restore" || rec.Seq != 9 || rec.Detail != "rebuild from s3-object-lock: 2 segments verified against the sink, 1 written, 0 replaced, manifest rewritten, active kept" || v.Head != res.Head {
+		t.Fatalf("%+v", rec)
+	}
+
+	// The harder case: the active holds a record chained from segment 1's
+	// head — the tidied set's own appends.
+	p, r, id = tidy(t)
+	appendN(t, p, 1)
+	if v, err := Read(p, ledger.Locked); err != nil || v.Head.Count != 5 {
+		t.Fatalf("%v %+v", err, v.Head)
+	}
+	before, _ := os.ReadFile(p)
+	_, err = rebuildIt(t, p, id, r)
+	var re *RebuildError
+	var se *SetError
+	if !errors.As(err, &re) || !errors.As(re.Fault, &se) || se.Fault != FaultBoundary || se.Segment != 0 || !errors.As(err, &se) {
+		t.Fatalf("%v", err)
+	}
+	if re.Result.Written != 1 || re.Result.Segments != 2 || re.Result.ManifestReplaced == "" {
+		t.Fatalf("%+v", re.Result)
+	}
+	if re.Error() != "rebuilt 2 sealed segments; NOT recorded — "+se.Error() {
+		t.Fatalf("%q", re.Error())
+	}
+	if after, _ := os.ReadFile(p); !bytes.Equal(before, after) {
+		t.Fatal("nothing recorded: the active is untouched")
+	}
+	_ = assertSetFault(t, p, FaultBoundary, 0)
+	if err := os.Rename(p, p+".aside"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err = rebuildIt(t, p, id, r)
+	if err != nil || res.Written != 0 || res.Replaced != 0 || res.ManifestReplaced != "" || len(res.ReplacedNames) != 0 || res.ActiveCreated {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if rec, _ := lastRecord(t, p); rec.Detail != "rebuild from s3-object-lock: 2 segments verified against the sink, 0 written, 0 replaced, manifest kept, active kept" || rec.Seq != 9 {
+		t.Fatalf("%+v", rec)
+	}
+}
+
+// TestRebuildLogIDMismatch: --log-id of another ledger with the genesis
+// present refuses naming both, nothing touched, nothing read from the sink;
+// the manifest alone (segments and active gone) names the identity too.
+func TestRebuildLogIDMismatch(t *testing.T) {
+	p, r := restoreFixture(t)
+	id := logIDOf(t, p)
+	other := strings.Repeat("a", 32)
+	snap := snapshotDir(t, filepath.Dir(p))
+	_, err := rebuildIt(t, p, other, r)
+	if err == nil || err.Error() != "control: --log-id "+other+" but this root is ledger "+id+"; a rebuild reconstructs one ledger" {
+		t.Fatalf("%v", err)
+	}
+	if snapshotDir(t, filepath.Dir(p)) != snap || len(r.calls) != 0 {
+		t.Fatal("nothing touched, nothing read")
+	}
+	_ = os.Remove(p)
+	_ = os.Remove(SegmentPath(p, 1))
+	_ = os.Remove(SegmentPath(p, 2))
+	if _, err := rebuildIt(t, p, other, r); err == nil || !strings.Contains(err.Error(), "but this root is ledger "+id) {
+		t.Fatalf("the manifest alone: %v", err)
+	}
+	// A root with no local identity accepts the flag's.
+	_ = os.Remove(ManifestPath(p))
+	if _, err := rebuildIt(t, p, id, r); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRebuildRefusesIncompleteRotation: state B or C refuses with "run audit
+// seal" before any write — from the read's verdict on a clean set, and from
+// the active itself when an earlier segment is at fault.
+func TestRebuildRefusesIncompleteRotation(t *testing.T) {
+	for _, state := range []string{"B", "C"} {
+		t.Run("state "+state, func(t *testing.T) {
+			p, r := restoreFixture(t)
+			id := logIDOf(t, p)
+			appendN(t, p, 1)
+			sealByHand(t, p, state)
+			snap := snapshotDir(t, filepath.Dir(p))
+			if _, err := rebuildIt(t, p, id, r); err == nil || err.Error() != errNotRestoreMatter(p).Error() {
+				t.Fatalf("%v", err)
+			}
+			_ = os.Remove(SegmentPath(p, 1))
+			if _, err := rebuildIt(t, p, id, r); err == nil || err.Error() != errNotRestoreMatter(p).Error() {
+				t.Fatalf("earlier segment at fault: %v", err)
+			}
+			_ = os.WriteFile(SegmentPath(p, 1), []byte("x"), 0o600) // only so the snapshot's sizes compare
+			if snapshotDir(t, filepath.Dir(p)) != snapshotDirWith(snap, "control.jsonl.seg-000001", 1) || len(r.calls) != 0 {
+				t.Fatal("refused before any write and before any sink call")
+			}
+		})
+	}
+}
+
+// snapshotDirWith returns snap with one entry's size replaced — for a
+// comparison after a test rewrote that one file itself.
+func snapshotDirWith(snap, name string, size int) string {
+	re := regexp.MustCompile(regexp.QuoteMeta(name) + `:\d+;`)
+	return re.ReplaceAllString(snap, fmt.Sprintf("%s:%d;", name, size))
+}
+
+// TestRebuildCrashHooks: a stop after the segment writes leaves segment
+// files no manifest lists (the diagnosis), and the re-run leaves them in
+// place (same inodes), writes the manifest and records; a stop after the
+// manifest leaves the active missing, and the re-run creates it and records.
+func TestRebuildCrashHooks(t *testing.T) {
+	p, r := restoreFixture(t)
+	id := logIDOf(t, p)
+	for _, f := range []string{SegmentPath(p, 1), SegmentPath(p, 2), ManifestPath(p)} {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "rebuild_after_segment_before_manifest")
+	if _, err := rebuildIt(t, p, id, r); !errors.Is(err, errStoppedByTestHook) {
+		t.Fatalf("%v", err)
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if se := assertSetFault(t, p, FaultUnexpectedSegment, 0); !se.noManifest {
+		t.Fatalf("%v", se)
+	}
+	fi1, _ := os.Stat(SegmentPath(p, 1))
+	fi2, _ := os.Stat(SegmentPath(p, 2))
+	res, err := rebuildIt(t, p, id, r)
+	if err != nil || res.Written != 0 || res.Replaced != 0 || res.ManifestReplaced != "" || res.ActiveCreated {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if !sameFile(SegmentPath(p, 1), fi1) || !sameFile(SegmentPath(p, 2), fi2) {
+		t.Fatal("the written files are left in place")
+	}
+	if rec, _ := lastRecord(t, p); rec.Detail != "rebuild from s3-object-lock: 2 segments verified against the sink, 0 written, 0 replaced, manifest rewritten, active kept" {
+		t.Fatalf("%+v", rec)
+	}
+
+	p, r = restoreFixture(t)
+	id = logIDOf(t, p)
+	for _, f := range []string{SegmentPath(p, 1), SegmentPath(p, 2), ManifestPath(p), p} {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "rebuild_after_manifest_before_active")
+	if _, err := rebuildIt(t, p, id, r); !errors.Is(err, errStoppedByTestHook) {
+		t.Fatalf("%v", err)
+	}
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	_ = assertSetFault(t, p, FaultActiveMissing, 0)
+	res, err = rebuildIt(t, p, id, r)
+	if err != nil || res.Written != 0 || res.ManifestReplaced != "" || !res.ActiveCreated {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if rec, _ := lastRecord(t, p); rec.Detail != "rebuild from s3-object-lock: 2 segments verified against the sink, 0 written, 0 replaced, manifest kept, active created" {
+		t.Fatalf("%+v", rec)
+	}
+}
+
+// TestRebuildUnderLockedIsPrintedNotRefused: a copy whose lock is not
+// COMPLIANCE to at least the block's date is still the chain's bytes — the
+// ordinal is reported, the rebuild runs and is recorded.
+func TestRebuildUnderLockedIsPrintedNotRefused(t *testing.T) {
+	p, r := restoreFixture(t)
+	id := logIDOf(t, p)
+	r.objects[segKey(t, p, r, 1)][0].mode = "GOVERNANCE"
+	r.objects[segKey(t, p, r, 2)][0].mode = "GOVERNANCE"
+	_ = os.Remove(SegmentPath(p, 1))
+	res, err := rebuildIt(t, p, id, r)
+	if err != nil || !slices.Equal(res.UnderLocked, []int{1, 2}) || res.Written != 1 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if rec, _ := lastRecord(t, p); rec.Action != "restore" {
+		t.Fatalf("%+v", rec)
+	}
+	// No lock at all, and a COMPLIANCE lock short of the block's date.
+	p, r = restoreFixture(t)
+	id = logIDOf(t, p)
+	r.objects[segKey(t, p, r, 1)][0].mode = ""
+	r.objects[segKey(t, p, r, 2)][0].until = r.objects[segKey(t, p, r, 2)][0].until.Add(-time.Second)
+	if res, err := rebuildIt(t, p, id, r); err != nil || !slices.Equal(res.UnderLocked, []int{1, 2}) {
+		t.Fatalf("%v %+v", err, res)
+	}
+	// A longer lock is fine.
+	p, r = restoreFixture(t)
+	id = logIDOf(t, p)
+	r.objects[segKey(t, p, r, 1)][0].until = r.objects[segKey(t, p, r, 1)][0].until.Add(time.Hour)
+	if res, err := rebuildIt(t, p, id, r); err != nil || len(res.UnderLocked) != 0 {
+		t.Fatalf("%v %+v", err, res)
+	}
+}
+
+// TestRebuildKeepsForeignKeyRefusal: a key under the ledger's prefix that
+// is not seg-NNNNNN refuses by name — nothing under the prefix is guessed
+// at — with nothing written.
+func TestRebuildKeepsForeignKeyRefusal(t *testing.T) {
+	p, r := restoreFixture(t)
+	id := logIDOf(t, p)
+	r.add("p/"+id+"/notes.txt", []byte("x"), "", time.Time{})
+	snap := snapshotDir(t, filepath.Dir(p))
+	if _, err := rebuildIt(t, p, id, r); err == nil || err.Error() != "control: key p/"+id+"/notes.txt under this ledger's prefix is not a sealed segment" {
+		t.Fatalf("%v", err)
+	}
+	if snapshotDir(t, filepath.Dir(p)) != snap {
+		t.Fatal("nothing written")
+	}
+	r.RemoveVersions("p/" + id + "/notes.txt")
+	r.add("p/"+id+"/seg-000000", []byte("x"), "", time.Time{})
+	if _, err := rebuildIt(t, p, id, r); err == nil || err.Error() != "control: key p/"+id+"/seg-000000 under this ledger's prefix is not a sealed segment" {
+		t.Fatalf("ordinal 0: %v", err)
+	}
+}
+
+// TestRebuildReplacesDifferingFiles: a local segment that differs from the
+// copy is moved aside as evidence and rewritten; a local manifest listing a
+// third segment that verifies from segment 2's head keeps that entry, one
+// that does not drops it and the read names the file.
+func TestRebuildReplacesDifferingFiles(t *testing.T) {
+	p, r := restoreFixture(t)
+	id := logIDOf(t, p)
+	seg1 := SegmentPath(p, 1)
+	real, _ := os.ReadFile(seg1)
+	damaged := real[:len(real)-10]
+	if err := os.WriteFile(seg1, damaged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rebuildIt(t, p, id, r)
+	if err != nil || res.Written != 1 || res.Replaced != 1 || len(res.ReplacedNames) != 1 || !strings.Contains(res.ReplacedNames[0], "control.jsonl.replaced-000001-") || res.ManifestReplaced != "" {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if kept, _ := os.ReadFile(res.ReplacedNames[0]); !bytes.Equal(kept, damaged) {
+		t.Fatal("the evidence holds the damaged bytes")
+	}
+	if back, _ := os.ReadFile(seg1); !bytes.Equal(back, real) {
+		t.Fatal("segment 1 is the copy's bytes")
+	}
+	if rec, _ := lastRecord(t, p); rec.Detail != "rebuild from s3-object-lock: 2 segments verified against the sink, 1 written, 1 replaced, manifest kept, active kept" {
+		t.Fatalf("%+v", rec)
+	}
+
+	t.Run("trailing local segment kept when it verifies", func(t *testing.T) {
+		p, r := wormFixture(t, 3)
+		id := logIDOf(t, p)
+		// The sink lost segment 3 entirely (a floor seal would look the same).
+		r.RemoveVersions(segKey(t, p, r, 3))
+		before := sha256File(t, ManifestPath(p))
+		res, err := rebuildIt(t, p, id, r)
+		if err != nil || res.Segments != 2 || res.Written != 0 || res.ManifestReplaced != "" {
+			t.Fatalf("%v %+v", err, res)
+		}
+		if sha256File(t, ManifestPath(p)) != before {
+			t.Fatal("the manifest keeps the trailing entry and is unchanged")
+		}
+		if v, err := Read(p, ledger.Locked); err != nil || len(v.Sealed) != 3 {
+			t.Fatalf("%v", err)
+		}
+	})
+	t.Run("trailing local segment dropped when it does not verify", func(t *testing.T) {
+		p, r := wormFixture(t, 3)
+		id := logIDOf(t, p)
+		r.RemoveVersions(segKey(t, p, r, 3))
+		seg3 := SegmentPath(p, 3)
+		data, _ := os.ReadFile(seg3)
+		_ = os.WriteFile(seg3, data[:len(data)-10], 0o600)
+		_, err := rebuildIt(t, p, id, r)
+		var re *RebuildError
+		var se *SetError
+		if !errors.As(err, &re) || !errors.As(re.Fault, &se) || se.Fault != FaultUnexpectedSegment || filepath.Base(se.Path) != "control.jsonl.seg-000003" {
+			t.Fatalf("%v", err)
+		}
+		if re.Result.ManifestReplaced == "" {
+			t.Fatalf("the three-entry manifest was moved aside: %+v", re.Result)
+		}
+	})
 }

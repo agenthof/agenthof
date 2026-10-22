@@ -11,7 +11,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -129,7 +131,7 @@ func Restore(controlLog string, only []int, r SinkReader, e Event) (RestoreResul
 		// An incomplete rotation refuses BEFORE any write (§11.2 step 4).
 		// Read cannot say so here — its sealed walk stopped at k before the
 		// active's state was decided — so the active is peeked at directly.
-		incomplete, err := incompleteRotation(resolved, m)
+		incomplete, err := incompleteRotation(resolved, len(m.Segments))
 		if err != nil {
 			return res, err
 		}
@@ -177,17 +179,22 @@ func errNotRestoreMatter(controlLog string) error {
 // incompleteRotation reports whether the active is a sealed segment whose
 // rotation did not complete, decided from the active alone and before any
 // write: state C — the active name refers to the inode of the last segment
-// the manifest lists (a restore of that segment would move the active's own
-// inode aside and the re-read would misdiagnose a replaced active); state B
-// — the active's last complete line is a successful seal (the manifest does
-// not list it yet). A torn or missing last line is no seal: the active's own
-// faults are the next read's to name.
-func incompleteRotation(resolved string, m *Manifest) (bool, error) {
+// the manifest lists (listed; a restore of that segment would move the
+// active's own inode aside and the re-read would misdiagnose a replaced
+// active); state B — the active's last complete line is a successful seal
+// (the manifest does not list it yet). A torn or missing last line is no
+// seal: the active's own faults are the next read's to name. An absent
+// active is no rotation at all (the rebuild tolerates one; a restore
+// refused it from the read's verdict already).
+func incompleteRotation(resolved string, listed int) (bool, error) {
 	fi, err := os.Stat(resolved)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	if sameFile(SegmentPath(resolved, len(m.Segments)), fi) {
+	if listed > 0 && sameFile(SegmentPath(resolved, listed), fi) {
 		return true, nil
 	}
 	line, err := lastLine(resolved, fi.Size())
@@ -566,4 +573,356 @@ func checkRestoreShape(e Event) error {
 		return errors.New("control: a restore must say what it restored")
 	}
 	return nil
+}
+
+// RebuildResult is what a rebuild did. Segments is N, the sealed segments
+// the sink holds and the chain verified; Written counts the segment files
+// written (absent or differing), Replaced those among them that differed
+// and were moved aside first; ReplacedNames is every "<base>.replaced-*"
+// file written, the manifest's included; ManifestReplaced is the manifest's
+// own, "" when the old manifest matched or was absent; ActiveCreated says an
+// empty active was created; UnderLocked lists the ordinals whose version is
+// not under a COMPLIANCE lock to at least the block's date — printed, never
+// refused: the bytes are still the chain's. Head is the chain's head after
+// the record.
+type RebuildResult struct {
+	Segments, Written, Replaced int
+	ReplacedNames               []string
+	ManifestReplaced            string
+	ActiveCreated               bool
+	Head                        ledger.Head
+	UnderLocked                 []int
+
+	manifestWritten bool // the manifest was written (absent or differing): "manifest rewritten"
+}
+
+// RebuildError is a rebuild that ran to its writes but was not recorded:
+// the post-rebuild read is not clean, or the record could not be appended.
+// The bytes written are left in place — they are the chain's.
+type RebuildError struct {
+	Result RebuildResult
+	Fault  error
+}
+
+func (e *RebuildError) Error() string {
+	return fmt.Sprintf("rebuilt %d sealed segments; NOT recorded — %v", e.Result.Segments, e.Fault)
+}
+
+func (e *RebuildError) Unwrap() error { return e.Fault }
+
+// sinkSegmentKeyRE is the one spelling of a segment's key under the
+// ledger's prefix (segmentNameRE's twin for the sink).
+var sinkSegmentKeyRE = regexp.MustCompile(`^seg-([0-9]{6})$`)
+
+// fetchedSegment is one sealed segment as fetched from the sink and judged
+// by verifyFetchedSegment.
+type fetchedSegment struct {
+	data []byte
+	seg  Segment
+}
+
+// Rebuild reconstructs the entire sealed set — every segment file and the
+// manifest — of ledger logID from the sink alone, for a root whose local
+// set is gone, damaged beyond the manifest, or tidied short. It is the
+// restore's whole-set twin: untainted for the same reason (every byte
+// written is one the chain and the seal records commit to, read back from
+// the sink's oldest version at each key) and recorded as one "restore".
+//
+// Order: the local set is read and its verdict kept, not acted on — a clean
+// set, any fault, nothing recorded yet and a missing active are all inputs;
+// the one refusal is an incomplete rotation (state B or C, from the verdict
+// or from the active itself when the walk never reached it): a rebuild
+// never completes a rotation. A readable local identity (the manifest's or
+// the genesis's) must be logID's: a rebuild reconstructs one ledger. The
+// active is then held exclusively when it exists (holdActive; ENOENT is
+// tolerated) and stale temps swept. Then the whole chain is fetched and
+// verified before anything is written: every key under the prefix must be
+// a sealed segment's; the ordinals must be exactly 1..N — a hole refuses
+// naming it; for each ordinal the oldest non-marker version is the seal's
+// copy, judged by verifyFetchedSegment from the prior head, and any failure
+// refuses the WHOLE rebuild with the ordinal and cause — nothing local
+// changes. A version whose lock is not COMPLIANCE to at least the block's
+// date is reported (UnderLocked), never refused; a lock that cannot be read
+// refuses (nothing written). Only then are the writes made, ascending: a
+// local file byte-identical to the copy is left in place, a differing one
+// moved aside as evidence (moveAsideReplaced) then rewritten, an absent one
+// written; the manifest is recomputed from the fetched bytes (trailing local
+// entries beyond N kept only while their files verify from N's head) and
+// compared to the old one — moved aside and rewritten when it differs; an
+// absent active is created empty (a present one is left as-is: its bytes
+// are not the sink's business). Segments before the manifest, the manifest
+// before the active: a crash mid-way leaves a state the next read names as
+// a diagnosis, never a partial set as if complete, and the re-run finds the
+// written files identical and completes.
+//
+// The lock is released before the set is re-read and before the record is
+// appended, for the reason Restore states (flock contends across
+// descriptors within one process). A set that does not read clean after the
+// writes — above all a present active that no longer chains from segment
+// N's head (the tidied truncation replaced it; FaultBoundary{0}) — is a
+// *RebuildError carrying the result and the fault: nothing is recorded, the
+// bytes stay. Otherwise one restore record is appended, even when nothing
+// was written: a rebuild that verified the local set against the sink is a
+// visible act, and it is what lets the remedy's re-run record what the first
+// run did. The window between the last rename and the record is Repair's
+// residual, stated the same way.
+func Rebuild(controlLog, logID string, r SinkReader, e Event) (RebuildResult, error) {
+	var res RebuildResult
+	if e.Action != "restore" || e.Outcome != "success" || e.Detail != "" {
+		return res, errors.New("control: Restore takes a success restore event without a detail")
+	}
+	resolved, err := resolveControlLog(controlLog)
+	if err != nil {
+		return res, err
+	}
+	v, verr := Read(controlLog, ledger.Locked)
+	var se *SetError
+	switch {
+	case verr == nil:
+		if v.State != StateOpen {
+			return res, errNotRestoreMatter(controlLog)
+		}
+	case errors.As(verr, &se), errors.Is(verr, fs.ErrNotExist):
+		// A fault, or nothing recorded: inputs. The rotation state the walk
+		// never decided is read from the active itself.
+		listed := 0
+		if m, merr := loadManifest(resolved); merr == nil && m != nil {
+			listed = len(m.Segments)
+		}
+		incomplete, err := incompleteRotation(resolved, listed)
+		if err != nil {
+			return res, err
+		}
+		if incomplete {
+			return res, errNotRestoreMatter(controlLog)
+		}
+	default:
+		return res, verr // a lock or IO error: as found
+	}
+	if have := rootLogID(resolved, v); have != "<id>" && have != logID {
+		return res, fmt.Errorf("control: --log-id %s but this root is ledger %s; a rebuild reconstructs one ledger", logID, have)
+	}
+
+	active, err := holdActive(resolved)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return res, err
+	}
+	release := func() {
+		if active != nil {
+			ledger.Unlock(active)
+			_ = active.Close()
+			active = nil
+		}
+	}
+	defer release()
+	created := active == nil
+	sweepTemps(resolved)
+
+	fetched, under, err := fetchChain(logID, r)
+	if err != nil {
+		return res, err
+	}
+	res, err = rebuildWrite(resolved, logID, fetched, created)
+	res.Segments, res.UnderLocked = len(fetched), under
+	if err != nil {
+		return res, err
+	}
+	release()
+
+	v, verr = Read(controlLog, ledger.Locked)
+	if verr != nil {
+		return res, &RebuildError{Result: res, Fault: verr}
+	}
+	if v.State != StateOpen {
+		return res, &RebuildError{Result: res, Fault: errNotRestoreMatter(controlLog)}
+	}
+	manifest, activeWas := "kept", "kept"
+	if res.ManifestReplaced != "" || res.manifestWritten {
+		manifest = "rewritten"
+	}
+	if res.ActiveCreated {
+		activeWas = "created"
+	}
+	rec := e
+	rec.Detail = fmt.Sprintf("rebuild from %s: %d segments verified against the sink, %d written, %d replaced, manifest %s, active %s", fetched[len(fetched)-1].seg.Sink.Kind, res.Segments, res.Written, res.Replaced, manifest, activeWas)
+	head, err := Append(resolved, rec)
+	if err != nil {
+		return res, &RebuildError{Result: res, Fault: fmt.Errorf("the restore record could not be appended: %w", err)}
+	}
+	res.Head = head
+	return res, nil
+}
+
+// fetchChain is every sink call of a rebuild: the listing under the
+// ledger's prefix, judged as exactly the ordinals 1..N, then each ordinal's
+// oldest non-marker version fetched and verified as the next link of the
+// chain, its lock read. Nothing local is touched; the first fault returns.
+func fetchChain(logID string, r SinkReader) ([]fetchedSegment, []int, error) {
+	ctx := context.Background()
+	prefix := r.Prefix(logID)
+	listed, err := r.ListPrefix(ctx, prefix)
+	if err != nil {
+		return nil, nil, fmt.Errorf("control: listing %s: %w", prefix, err)
+	}
+	byOrdinal := map[int]KeyVersions{}
+	for _, kv := range listed {
+		sub := sinkSegmentKeyRE.FindStringSubmatch(strings.TrimPrefix(kv.Key, prefix))
+		n := 0
+		if sub != nil {
+			n, _ = strconv.Atoi(sub[1])
+		}
+		if n == 0 {
+			return nil, nil, fmt.Errorf("control: key %s under this ledger's prefix is not a sealed segment", kv.Key)
+		}
+		if len(kv.Versions) == 0 {
+			continue // a delete marker alone: the key holds nothing
+		}
+		byOrdinal[n] = kv
+	}
+	held := make([]int, 0, len(byOrdinal))
+	for n := range byOrdinal {
+		held = append(held, n)
+	}
+	slices.Sort(held)
+	if len(held) == 0 {
+		return nil, nil, fmt.Errorf("control: cannot rebuild: the sink holds no segment of ledger %s under %s", logID, prefix)
+	}
+	n := held[len(held)-1]
+	for k := 1; k <= n; k++ {
+		if _, ok := byOrdinal[k]; !ok {
+			return nil, nil, fmt.Errorf("control: cannot rebuild: the sink holds segments %s; segment %d is missing from the bucket — a chain with a hole cannot be reconstructed", ordinalRanges(held), k)
+		}
+	}
+	var fetched []fetchedSegment
+	var under []int
+	start := ledger.Start{}
+	for k := 1; k <= n; k++ {
+		kv := byOrdinal[k]
+		id := kv.Versions[0].ID // the oldest: the seal's copy by construction
+		data, err := r.Get(ctx, kv.Key, id, maxRestoreBody)
+		if err != nil {
+			return nil, nil, fmt.Errorf("control: segment %d: %w", k, err)
+		}
+		seg, _, verr := verifyFetchedSegment(data, k, start, logID, kv.Key)
+		if verr != nil {
+			return nil, nil, fmt.Errorf("control: cannot rebuild: %w", verr)
+		}
+		lock, err := r.GetRetention(ctx, kv.Key, id)
+		if err != nil {
+			return nil, nil, fmt.Errorf("control: segment %d: the lock on version %s could not be read; nothing was written — if the credential is denied, grant s3:GetObjectRetention (with s3:GetObject and s3:ListBucketVersions) and re-run: %w", k, id, err)
+		}
+		if lock.Mode != "COMPLIANCE" || lock.RetainUntil.Before(seg.Sink.RetainUntil) {
+			under = append(under, k)
+		}
+		fetched = append(fetched, fetchedSegment{data: data, seg: seg})
+		start = ledger.Start{Prev: seg.HeadHash, Base: uint64(seg.HeadSeq)}
+	}
+	return fetched, under, nil
+}
+
+// ordinalRanges renders sorted ordinals as their runs: "1–3", "1–1 and
+// 3–3", "1–3, 5–7 and 9–9".
+func ordinalRanges(held []int) string {
+	var parts []string
+	for i := 0; i < len(held); {
+		j := i
+		for j+1 < len(held) && held[j+1] == held[j]+1 {
+			j++
+		}
+		parts = append(parts, fmt.Sprintf("%d–%d", held[i], held[j]))
+		i = j + 1
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+}
+
+// rebuildWrite is the rebuild's writes, under the active's lock when one
+// exists: segments ascending, the manifest, then the active when createActive.
+func rebuildWrite(resolved, logID string, fetched []fetchedSegment, createActive bool) (RebuildResult, error) {
+	var res RebuildResult
+	if createActive {
+		if err := os.MkdirAll(filepath.Dir(resolved), 0o700); err != nil {
+			return res, err
+		}
+	}
+	for i, f := range fetched {
+		k := i + 1
+		path := SegmentPath(resolved, k)
+		have, err := os.ReadFile(path)
+		switch {
+		case err == nil && bytes.Equal(have, f.data):
+			continue
+		case err == nil:
+			name, err := moveAsideReplaced(path, fmt.Sprintf("%06d", k))
+			if err != nil {
+				return res, err
+			}
+			res.Replaced++
+			res.ReplacedNames = append(res.ReplacedNames, name)
+		case !errors.Is(err, fs.ErrNotExist):
+			return res, err
+		}
+		if err := writeRestored(resolved, path, f.data); err != nil {
+			return res, fmt.Errorf("control: segment %d: the rebuilt bytes could not be written: %w", k, err)
+		}
+		res.Written++
+	}
+	if crashAt("rebuild_after_segment_before_manifest") {
+		return res, errStoppedByTestHook
+	}
+
+	m := Manifest{V: ManifestVersion, LogID: logID}
+	for _, f := range fetched {
+		m.Segments = append(m.Segments, manifestEntry(resolved, f.seg))
+	}
+	// Local segments beyond N are not the sink's to judge: their entries
+	// stay while the files verify from N's head; from the first that does
+	// not, the read names them.
+	last := fetched[len(fetched)-1].seg
+	if old, err := loadManifest(resolved); err == nil && old != nil {
+		start := ledger.Start{Prev: last.HeadHash, Base: uint64(last.HeadSeq)}
+		for j := len(fetched) + 1; j <= len(old.Segments); j++ {
+			seg, _, err := verifySealed(resolved, j, start, old.Segments[j-1])
+			if err != nil {
+				break
+			}
+			m.Segments = append(m.Segments, manifestEntry(resolved, seg))
+			start = ledger.Start{Prev: seg.HeadHash, Base: uint64(seg.HeadSeq)}
+		}
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return res, err
+	}
+	have, err := os.ReadFile(ManifestPath(resolved))
+	switch {
+	case err == nil && bytes.Equal(have, data):
+	case err == nil:
+		name, err := moveAsideReplaced(ManifestPath(resolved), "segments")
+		if err != nil {
+			return res, err
+		}
+		res.ManifestReplaced = name
+		res.ReplacedNames = append(res.ReplacedNames, name)
+		fallthrough
+	case errors.Is(err, fs.ErrNotExist):
+		if err := writeManifest(resolved, m); err != nil {
+			return res, fmt.Errorf("control: the rebuilt manifest could not be written: %w", err)
+		}
+		res.manifestWritten = true
+	default:
+		return res, err
+	}
+	if crashAt("rebuild_after_manifest_before_active") {
+		return res, errStoppedByTestHook
+	}
+	if createActive {
+		if err := swapActive(resolved); err != nil {
+			return res, fmt.Errorf("control: the empty active could not be created: %w", err)
+		}
+		res.ActiveCreated = true
+	}
+	return res, nil
 }

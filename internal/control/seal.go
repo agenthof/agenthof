@@ -366,7 +366,7 @@ func rotate(resolved string, v View, sink SinkWriter, pre *confirmedCopy) (SealR
 		}
 		m := Manifest{V: ManifestVersion, LogID: logID}
 		for _, s := range append(v.Sealed, seg) {
-			m.Segments = append(m.Segments, ManifestEntry{N: s.N, File: filepath.Base(s.Path), FirstSeq: s.FirstSeq, HeadSeq: s.HeadSeq, HeadHash: s.HeadHash, SHA256: s.SHA256, Bytes: s.Bytes, SealedAt: s.SealedAt})
+			m.Segments = append(m.Segments, manifestEntry(resolved, s))
 		}
 		if err := writeManifest(resolved, m); err != nil {
 			return SealResult{}, &SealError{Step: SealStepManifest, Err: err}

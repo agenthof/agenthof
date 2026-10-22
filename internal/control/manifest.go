@@ -101,6 +101,13 @@ func ParseManifest(data []byte, resolved string) (Manifest, error) {
 	return m, nil
 }
 
+// manifestEntry is the manifest's line for a verified sealed segment — what
+// a seal writes at rotation and what a rebuild recomputes from the fetched
+// bytes. File is derived from the ordinal, never from the Segment's Path.
+func manifestEntry(resolved string, s Segment) ManifestEntry {
+	return ManifestEntry{N: s.N, File: filepath.Base(SegmentPath(resolved, s.N)), FirstSeq: s.FirstSeq, HeadSeq: s.HeadSeq, HeadHash: s.HeadHash, SHA256: s.SHA256, Bytes: s.Bytes, SealedAt: s.SealedAt}
+}
+
 // loadManifest reads the manifest beside resolved: (nil, nil) when absent;
 // a *SetError{FaultManifest, Segment 0} when present and unusable.
 func loadManifest(resolved string) (*Manifest, error) {

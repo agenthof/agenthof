@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,7 +14,9 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/control"
+	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/sink/sinktest"
 )
 
 // restoreControl runs audit restore control as dana (platform-eng, which
@@ -132,9 +136,6 @@ func TestAuditRestoreControlSegmentFlagAndEvidence(t *testing.T) {
 		if code, out := restoreControl(t, ctl, "--segment", bad); code != 2 || !strings.Contains(out, "--segment") {
 			t.Fatalf("%q: %d\n%s", bad, code, out)
 		}
-	}
-	if code, out := restoreControl(t, ctl, "--rebuild", "--log-id", "x"); code != 2 || !strings.Contains(out, "audit restore control: --rebuild is not available in this build") {
-		t.Fatalf("rebuild stub: %d\n%s", code, out)
 	}
 }
 
@@ -310,5 +311,236 @@ func TestAuditRestoreControlBusy(t *testing.T) {
 	}
 	if _, err := os.Stat(control.SegmentPath(ctl, 1)); err == nil {
 		t.Fatal("busy restores nothing")
+	}
+}
+
+// thriceSealedWormRoot seals a worm root three times — segment 1 (seq 1–3),
+// segment 2 (seq 4–5), segment 3 (seq 6–7), each with a protected copy; the
+// active is empty.
+func thriceSealedWormRoot(t *testing.T) (string, string, *sinktest.Fake) {
+	t.Helper()
+	root, ctl, f := twiceSealedWormRoot(t)
+	var buf bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 {
+		t.Fatalf("disable: %d\n%s", code, buf.String())
+	}
+	if code, out := auditSeal(t, ctl); code != 0 {
+		t.Fatalf("seal 3: %d\n%s", code, out)
+	}
+	return root, ctl, f
+}
+
+// ledgerID is the genesis's log_id, read while the local set still has one.
+func ledgerID(t *testing.T, ctl string) string {
+	t.Helper()
+	id, err := control.GenesisLogID(sealedView(t, ctl).Records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// sha256Of is a file's whole-file digest.
+func sha256Of(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// TestAuditRestoreRebuildWholeSet: three sealed segments and the manifest
+// deleted → --rebuild puts every file back byte-identical from the fake,
+// records it, verify exits 0, audit control renders the record.
+func TestAuditRestoreRebuildWholeSet(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	_, ctl, f := thriceSealedWormRoot(t)
+	id := ledgerID(t, ctl)
+	files := []string{control.SegmentPath(ctl, 1), control.SegmentPath(ctl, 2), control.SegmentPath(ctl, 3), control.ManifestPath(ctl)}
+	want := map[string]string{}
+	for _, p := range files {
+		want[p] = sha256Of(t, p)
+	}
+	for _, p := range files {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out := restoreControl(t, ctl, "--rebuild", "--log-id", id)
+	if code != 0 || !regexp.MustCompile(`^rebuilt: segments 1–3 from s3-object-lock `+regexp.QuoteMeta(f.URL())+`/agenthof \(3 written, 0 replaced\)\ncontrol head: seq=8 sha256=[0-9a-f]{64}\n$`).MatchString(out) {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	for p, h := range want {
+		if got := sha256Of(t, p); got != h {
+			t.Fatalf("%s: rebuilt %s, was %s", filepath.Base(p), got, h)
+		}
+	}
+	if code, out := verifyControl(t, "--control-log", ctl); code != 0 || strings.Contains(out, "TAINTED") {
+		t.Fatalf("verify after: %d\n%s", code, out)
+	}
+	var buf bytes.Buffer
+	if code := cmdAudit([]string{"control", "--control-log", ctl}, &buf); code != 0 || !strings.Contains(buf.String(), "restored a sealed segment from its protected copy (rebuild from s3-object-lock: 3 segments verified against the sink, 3 written, 0 replaced, manifest rewritten, active kept) — dana@example.com (asserted)") {
+		t.Fatalf("audit control: %d\n%s", code, buf.String())
+	}
+	if e := lastRecordOf(t, ctl); e.Action != "restore" || e.Outcome != "success" || e.Seq != 8 {
+		t.Fatalf("%+v", e)
+	}
+	if len(replacedFiles(t, ctl)) != 0 {
+		t.Fatal("nothing was there to move aside")
+	}
+	// A re-run verifies the set against the sink, writes nothing, records.
+	if code, out := restoreControl(t, ctl, "--rebuild", "--log-id", id); code != 0 || !strings.HasPrefix(out, "rebuilt: segments 1–3 from s3-object-lock "+f.URL()+"/agenthof (0 written, 0 replaced)\ncontrol head: seq=9 ") {
+		t.Fatalf("re-run: %d\n%s", code, out)
+	}
+}
+
+// TestAuditRestoreRebuildTidiedTruncation: segments 2–3 dropped, the
+// manifest shortened, a record appended to the active — a clean local chain
+// verify's sink pass catches (9). The rebuild puts the segments back and
+// refuses to record: the active no longer chains (the remedy line, exit 1).
+// The remedy's re-run writes nothing and records.
+func TestAuditRestoreRebuildTidiedTruncation(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	_, ctl, f := thriceSealedWormRoot(t)
+	id := ledgerID(t, ctl)
+	for _, n := range []int{2, 3} {
+		if err := os.Remove(control.SegmentPath(ctl, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := readManifest(t, ctl)
+	m.Segments = m.Segments[:1]
+	writeManifest(t, ctl, m)
+	if err := os.WriteFile(ctl, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inv := identity.Invoker{Subject: "dana@example.com", Issuer: "static", Method: "static"}
+	if _, err := control.Append(ctl, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness()}); err != nil {
+		t.Fatalf("the tidied set takes an append: %v", err)
+	}
+	active, _ := os.ReadFile(ctl)
+	if code, out := verifyControl(t, "--control-log", ctl); code != 9 {
+		t.Fatalf("verify before: %d\n%s", code, out)
+	}
+	code, out := restoreControl(t, ctl, "--rebuild", "--log-id", id)
+	want := "audit restore control: rebuilt 3 sealed segments; NOT recorded — the active does not chain from segment 3's head: move " + ctl + " aside (its records are evidence, not chain), create an empty " + ctl + ", then re-run audit restore control --rebuild --log-id " + id + " to record the rebuild\n"
+	if code != 1 || !strings.HasSuffix(out, want) || !regexp.MustCompile(`(?m)^rebuilt: segments 1–3 from s3-object-lock .* \(2 written, 0 replaced\) kept at control\.jsonl\.replaced-segments-\d+\n`).MatchString(out) {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if after, _ := os.ReadFile(ctl); !bytes.Equal(active, after) {
+		t.Fatal("nothing recorded: the active is untouched")
+	}
+	for _, n := range []int{2, 3} {
+		if _, err := os.Stat(control.SegmentPath(ctl, n)); err != nil {
+			t.Fatalf("segment %d is back: %v", n, err)
+		}
+	}
+	if code, out := verifyControl(t, "--control-log", ctl); code != 1 || !strings.Contains(out, "active segment does not chain from segment 3's head") {
+		t.Fatalf("verify between: %d\n%s", code, out)
+	}
+	if err := os.Rename(ctl, ctl+".aside"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ctl, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out = restoreControl(t, ctl, "--rebuild", "--log-id", id)
+	if code != 0 || !strings.HasPrefix(out, "rebuilt: segments 1–3 from s3-object-lock "+f.URL()+"/agenthof (0 written, 0 replaced)\ncontrol head: seq=8 ") {
+		t.Fatalf("re-run: %d\n%s", code, out)
+	}
+	if code, out := verifyControl(t, "--control-log", ctl); code != 0 {
+		t.Fatalf("verify after: %d\n%s", code, out)
+	}
+	if e := lastRecordOf(t, ctl); e.Action != "restore" || !strings.HasSuffix(e.Detail, "0 written, 0 replaced, manifest kept, active kept") {
+		t.Fatalf("%+v", e)
+	}
+}
+
+// TestAuditRestoreRebuildGap: a key with no version in the bucket refuses
+// the whole rebuild naming the ordinal, nothing written.
+func TestAuditRestoreRebuildGap(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	_, ctl, f := thriceSealedWormRoot(t)
+	id := ledgerID(t, ctl)
+	f.RemoveVersions(segmentKey(t, ctl, 2))
+	for _, n := range []int{1, 2, 3} {
+		if err := os.Remove(control.SegmentPath(ctl, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := os.ReadFile(ctl)
+	code, out := restoreControl(t, ctl, "--rebuild", "--log-id", id)
+	if code != 1 || out != "audit restore control: control: cannot rebuild: the sink holds segments 1–1 and 3–3; segment 2 is missing from the bucket — a chain with a hole cannot be reconstructed\n" {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	for _, n := range []int{1, 2, 3} {
+		if _, err := os.Stat(control.SegmentPath(ctl, n)); err == nil {
+			t.Fatalf("segment %d written", n)
+		}
+	}
+	if after, _ := os.ReadFile(ctl); !bytes.Equal(before, after) {
+		t.Fatal("nothing recorded")
+	}
+	// A delete marker on a key is not a gap: the locked versions stand.
+	_, ctl, f = thriceSealedWormRoot(t)
+	id = ledgerID(t, ctl)
+	f.AddDeleteMarker(segmentKey(t, ctl, 2))
+	_ = os.Remove(control.SegmentPath(ctl, 2))
+	if code, out := restoreControl(t, ctl, "--rebuild", "--log-id", id); code != 0 || !strings.Contains(out, "(1 written, 0 replaced)") {
+		t.Fatalf("marker: %d\n%s", code, out)
+	}
+}
+
+// TestAuditRestoreRebuildUsage: --rebuild without --log-id and with
+// --segment are usage (exit 2, before the invoker); state B refuses with
+// "run audit seal", exit 1.
+func TestAuditRestoreRebuildUsage(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _ := wormSealedRoot(t)
+	id := ledgerID(t, ctl)
+	var out bytes.Buffer
+	if code := cmdAudit([]string{"restore", "control", "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance", "--rebuild"}, &out); code != 2 || out.String() != "audit restore control: --rebuild requires --log-id <id> (the ledger's identity — from the sealed:/control head: lines shipped off the box, audit control's header, or the bucket listing)\n" {
+		t.Fatalf("no --log-id: %d\n%s", code, out.String())
+	}
+	if code, text := restoreControl(t, ctl, "--rebuild", "--log-id", id, "--segment", "1"); code != 2 || text != "audit restore control: --segment cannot be combined with --rebuild\n" {
+		t.Fatalf("--segment: %d\n%s", code, text)
+	}
+	before, _ := os.ReadFile(ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_sink")
+	var buf bytes.Buffer
+	cmdRegistry([]string{"enable", "coder", "--config", sealSample(t), "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf)
+	auditSeal(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if code, text := verifyControl(t, "--control-log", ctl, "--offline"); code != exitRotationIncomplete {
+		t.Fatalf("state B: %d\n%s", code, text)
+	}
+	stateB, _ := os.ReadFile(ctl)
+	if bytes.Equal(before, stateB) {
+		t.Fatal("the fixture appended and sealed")
+	}
+	if code, text := restoreControl(t, ctl, "--rebuild", "--log-id", id); code != 1 || !strings.Contains(text, "run audit seal to complete it — not a restore matter") {
+		t.Fatalf("state B: %d\n%s", code, text)
+	}
+	if after, _ := os.ReadFile(ctl); !bytes.Equal(stateB, after) {
+		t.Fatal("nothing recorded")
+	}
+}
+
+// TestAuditRestoreRebuildLogIDMismatch: --log-id of another ledger with
+// the genesis present → refused naming both, nothing touched.
+func TestAuditRestoreRebuildLogIDMismatch(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl, _ := wormSealedRoot(t)
+	id := ledgerID(t, ctl)
+	other := strings.Repeat("b", 32)
+	before, _ := os.ReadFile(ctl)
+	code, out := restoreControl(t, ctl, "--rebuild", "--log-id", other)
+	if code != 1 || out != "audit restore control: control: --log-id "+other+" but this root is ledger "+id+"; a rebuild reconstructs one ledger\n" {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if after, _ := os.ReadFile(ctl); !bytes.Equal(before, after) || len(replacedFiles(t, ctl)) != 0 {
+		t.Fatal("nothing touched")
 	}
 }

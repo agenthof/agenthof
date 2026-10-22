@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/authz"
@@ -15,20 +16,22 @@ import (
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/origin"
+	"github.com/agenthof/agenthof/internal/sink"
 )
 
 // cmdAuditRestoreControl implements `audit restore control [--control-log
 // <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
 // [--segment N]... [--integrity <path>] [--sink-timeout <dur>] [--rebuild
 // --log-id <id>]`: put a sealed segment of the control ledger back from the
-// protected copy the sink holds, selected by the chain. It is not a repair —
-// nothing is truncated, the bytes written hash to what the manifest and the
-// next segment already commit to — so it taints nothing; it is recorded,
-// because a recovery is a visible, attributable act.
+// protected copy the sink holds, selected by the chain — or, with --rebuild,
+// reconstruct the whole sealed set and its manifest from the sink alone. It
+// is not a repair — nothing is truncated, the bytes written hash to what the
+// manifest and the next segment already commit to — so it taints nothing;
+// it is recorded, because a recovery is a visible, attributable act.
 //
 // Order, pinned (audit repair control's, with the sink):
 //
-//  1. the flags (exit 2); --rebuild is not available in this build (exit 2);
+//  1. the flags (exit 2): --rebuild requires --log-id and refuses --segment;
 //  2. the invoker (--token without AGENTHOF_OIDC_ISSUER → exit 2); a refused
 //     token is printed and NOT recorded — the root may be exactly the
 //     damaged one;
@@ -44,12 +47,18 @@ import (
 //  5. installed.lock EXCLUSIVE around the whole restore (busy → exit 1), as
 //     the repair holds it, so no pointer writer and no seal runs alongside;
 //  6. control.Restore: the verdict, the selection (every sink call), the
-//     write under the active's lock, the re-read, the record;
+//     write under the active's lock, the re-read, the record — or
+//     control.Rebuild: the verdict kept, the whole chain fetched and
+//     verified before any write, the writes, the re-read, the record;
 //  7. print per segment `restored: segment N from <kind> <url> version=<id>
 //     sha256=<…> (<replaced name> | nothing was there)` with its information
 //     lines beneath (not the oldest; unlocked; the manifest entry
 //     disagrees), then the head line. A fault after a write prints the
-//     segments written, then the fault, `NOT recorded`, exit 1.
+//     segments written, then the fault, `NOT recorded`, exit 1. A rebuild
+//     prints each UNDER-LOCKED ordinal, then `rebuilt: segments 1–N from
+//     <kind> <url> (W written, R replaced)` with the evidence names kept,
+//     then the head line; rebuilt but not recorded prints the fault with
+//     its remedy, exit 1.
 func cmdAuditRestoreControl(args []string, out io.Writer) int {
 	if len(args) < 1 || args[0] != "control" {
 		_, _ = fmt.Fprintln(out, "audit restore needs a subcommand: control")
@@ -73,14 +82,20 @@ func cmdAuditRestoreControl(args []string, out io.Writer) int {
 	integrity := fs.String("integrity", "", "read the sink posture from this copy of integrity.yaml instead of the one beside the ledger")
 	sinkTimeout := fs.Duration("sink-timeout", 2*time.Minute, "bound on each call to the sink")
 	rebuild := fs.Bool("rebuild", false, "reconstruct the whole sealed set and its manifest from the sink (with --log-id)")
-	fs.String("log-id", "", "with --rebuild: the ledger's identity, from the sealed:/control head: lines shipped off the box or the bucket listing")
+	logID := fs.String("log-id", "", "with --rebuild: the ledger's identity, from the sealed:/control head: lines shipped off the box or the bucket listing")
 	fs.SetOutput(out)
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
 	if *rebuild {
-		_, _ = fmt.Fprintln(out, "audit restore control: --rebuild is not available in this build")
-		return 2
+		if *logID == "" {
+			_, _ = fmt.Fprintln(out, "audit restore control: --rebuild requires --log-id <id> (the ledger's identity — from the sealed:/control head: lines shipped off the box, audit control's header, or the bucket listing)")
+			return 2
+		}
+		if len(segments) > 0 {
+			_, _ = fmt.Fprintln(out, "audit restore control: --segment cannot be combined with --rebuild")
+			return 2
+		}
 	}
 
 	inv, assertedAs, refused, usageErr, verifyErr := resolveInvoker(*as, *groups, *token)
@@ -152,7 +167,13 @@ func cmdAuditRestoreControl(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, lockErr)
 		return 1
 	}
-	res, err := control.Restore(*controlLog, segments, be, control.Event{Action: "restore", Outcome: "success", Invoker: inv, AssertedAs: assertedAs, Witness: control.CaptureWitness()})
+	event := control.Event{Action: "restore", Outcome: "success", Invoker: inv, AssertedAs: assertedAs, Witness: control.CaptureWitness()}
+	if *rebuild {
+		res, err := control.Rebuild(*controlLog, *logID, be, event)
+		unlock()
+		return printRebuilt(res, err, *controlLog, *logID, be, out)
+	}
+	res, err := control.Restore(*controlLog, segments, be, event)
 	unlock()
 	for _, s := range res.Restored {
 		printRestored(s, out)
@@ -174,6 +195,48 @@ func cmdAuditRestoreControl(args []string, out io.Writer) int {
 	}
 	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", res.Head.Count, res.Head.Hash)
 	return 0
+}
+
+// printRebuilt prints a rebuild's outcome and returns the exit code. A
+// rebuild that ran to its writes — recorded, or not (a *control.RebuildError)
+// — prints each UNDER-LOCKED ordinal, then the `rebuilt:` line with the
+// evidence names kept (printed, never recorded); the head line closes a
+// recorded one. Rebuilt but not recorded names the fault: an active that no
+// longer chains from the rebuilt head gets its remedy. Anything else is the
+// refusal's own text, nothing written.
+func printRebuilt(res control.RebuildResult, err error, controlLog, logID string, be sink.Backend, out io.Writer) int {
+	var re *control.RebuildError
+	if err == nil || errors.As(err, &re) {
+		for _, k := range res.UnderLocked {
+			_, _ = fmt.Fprintf(out, "segment %d: UNDER-LOCKED in the sink — the bytes are the chain's, but the lock is not what the posture claims\n", k)
+		}
+		line := fmt.Sprintf("rebuilt: segments 1–%d from %s %s (%d written, %d replaced)", res.Segments, origin.Clean(be.Kind()), origin.Clean(be.URL()), res.Written, res.Replaced)
+		if len(res.ReplacedNames) > 0 {
+			names := make([]string, len(res.ReplacedNames))
+			for i, n := range res.ReplacedNames {
+				names[i] = filepath.Base(n)
+			}
+			line += " kept at " + strings.Join(names, ", ")
+		}
+		_, _ = fmt.Fprintln(out, line)
+	}
+	switch {
+	case err == nil:
+		_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", res.Head.Count, res.Head.Hash)
+		return 0
+	case re != nil:
+		var se *control.SetError
+		if errors.As(re.Fault, &se) && se.Fault == control.FaultBoundary && se.Segment == 0 {
+			_, _ = fmt.Fprintf(out, "audit restore control: rebuilt %d sealed segments; NOT recorded — the active does not chain from segment %d's head: move %s aside (its records are evidence, not chain), create an empty %s, then re-run audit restore control --rebuild --log-id %s to record the rebuild\n", res.Segments, res.Segments, controlLog, controlLog, logID)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "audit restore control: %v\n", err)
+	case errors.Is(err, ledger.ErrLockHeld):
+		_, _ = fmt.Fprintf(out, "audit restore control: %s\n", msgLockBusy)
+	default:
+		_, _ = fmt.Fprintf(out, "audit restore control: %v\n", err)
+	}
+	return 1
 }
 
 // printRestored prints one restored segment's line and the information
