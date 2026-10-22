@@ -54,7 +54,7 @@ func TestRepairTornTailMovesFragmentAndTaints(t *testing.T) {
 
 	repairOp := identity.Static("ops@example.com")
 	witness := control.CaptureWitness()
-	res, err := control.Repair(p, repairOp, "ops@example.com", witness)
+	res, err := control.Repair(p, repairOp, "ops@example.com", witness, nil)
 	if err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestRepairTerminatedUnparseableFinalLineTaints(t *testing.T) {
 		t.Fatalf("fixture verr = %T, want *ledger.TornError", verr)
 	}
 
-	res, err := control.Repair(p, identity.Static("ops@example.com"), "ops@example.com", control.CaptureWitness())
+	res, err := control.Repair(p, identity.Static("ops@example.com"), "ops@example.com", control.CaptureWitness(), nil)
 	if err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestRepairDoesNotOverwriteExistingFragmentFile(t *testing.T) {
 		t.Fatalf("seed decoy fragment file: %v", err)
 	}
 
-	if _, err := control.Repair(p, op, "", control.CaptureWitness()); err != nil {
+	if _, err := control.Repair(p, op, "", control.CaptureWitness(), nil); err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
 
@@ -317,7 +317,7 @@ func TestRepairCleanLogErrors(t *testing.T) {
 		t.Fatalf("read before: %v", err)
 	}
 
-	if _, err := control.Repair(p, op, "", control.CaptureWitness()); err == nil {
+	if _, err := control.Repair(p, op, "", control.CaptureWitness(), nil); err == nil {
 		t.Fatal("Repair on a clean log must return an error")
 	} else if !strings.Contains(err.Error(), "not torn") {
 		t.Fatalf("error = %v, want it to mention the log is not torn", err)
@@ -370,7 +370,7 @@ func TestRepairChainBrokenNotAutoRepairable(t *testing.T) {
 		t.Fatalf("read before: %v", err)
 	}
 
-	_, err = control.Repair(p, op, "", control.CaptureWitness())
+	_, err = control.Repair(p, op, "", control.CaptureWitness(), nil)
 	if err == nil {
 		t.Fatal("Repair on a chain-broken log must return an error")
 	}

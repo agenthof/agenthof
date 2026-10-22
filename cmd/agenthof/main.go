@@ -1644,7 +1644,7 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, lockErr)
 		return 1
 	}
-	res, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness())
+	res, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness(), nil)
 	unlock()
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)

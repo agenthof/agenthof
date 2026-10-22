@@ -269,7 +269,9 @@ type RepairResult struct {
 //     seals appended (FaultSealNotLast), a torn write, or both: every byte
 //     after the seal line is moved to a fragment, the active truncated at the
 //     end of the seal line (state B exactly), the rotation completed
-//     (CompleteSeal: link, manifest, swap — the same commit points), and the
+//     (CompleteSeal: link, the protected copy when the seal record names
+//     one, manifest, swap — the same commit points; sink is the root's
+//     posture now, nil on the floor), and the
 //     "repair" record appended as the new active's first record, prev the
 //     seal line's hash, seq the seal's + 1. A seal whose payload does not
 //     recompute is a planted seal: refused with that fault before anything
@@ -311,7 +313,7 @@ type RepairResult struct {
 // rotation and the append leaves a clean rotated root with a fragment and no
 // taint. Making the steps atomic would need a write-new-set-then-rename,
 // beyond V1's scope.
-func Repair(path string, op identity.Invoker, assertedAs string, witness Witness) (RepairResult, error) {
+func Repair(path string, op identity.Invoker, assertedAs string, witness Witness, sink SinkWriter) (RepairResult, error) {
 	resolved, err := resolveControlLog(path)
 	if err != nil {
 		return RepairResult{}, err
@@ -361,7 +363,7 @@ func Repair(path string, op identity.Invoker, assertedAs string, witness Witness
 	if crashAt("repair_after_truncate_before_rotate") {
 		return RepairResult{}, errStoppedByTestHook
 	}
-	seal, err := CompleteSeal(resolved)
+	seal, err := CompleteSeal(resolved, sink)
 	if err != nil {
 		return RepairResult{}, fmt.Errorf("control: moved %d bytes after the seal line aside and truncated the active at the seal, but completing the rotation failed: %w; run audit seal to complete it — the fragment file is the evidence of the repair", res.FragmentLen, err)
 	}

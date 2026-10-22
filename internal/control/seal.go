@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -92,8 +93,9 @@ type SealResult struct {
 	SHA256    string // the whole sealed file
 	Path      string // the segment's path
 	Completed bool   // an interrupted rotation was completed rather than a new seal made
-	// The protected copy, on a root whose posture is sink: worm — the seal
-	// record's sink block and the sink's receipt for it. Zero on a floor seal.
+	// The protected copy this run had confirmed — the seal record's sink
+	// block and the sink's receipt for it. Zero on a floor seal and on a
+	// state C completion, which makes no sink call.
 	Sink        *SealSink
 	VersionID   string
 	RetainUntil time.Time
@@ -179,17 +181,21 @@ func checkSealPlacement(c *ledger.Chain, view View, e Event) error {
 // under the active's exclusive lock: openActive (busy, damaged and ErrSealed
 // refuse here); sweep the temps an earlier crash left (before any step, so
 // even an empty active's refusal leaves none behind); an empty active is
-// ErrNothingToSeal; link the active under its segment name FIRST (a
-// filesystem that cannot link fails with nothing recorded; EEXIST to the same
-// inode is a re-run after a crash and continues; EEXIST to another file is
-// FaultUnexpectedSegment); compute content_sha256 from the records read
-// under the lock and append the seal record — commit 1, the segment is
-// closed; write the manifest — commit 2, the set is rotated; swap a fresh,
-// empty active under the name. The chain's lock is on the old inode
-// throughout, and every name below derives from the View's resolved active
-// path — the one the lock was taken on. e is a success seal event without a
-// payload; the payload is computed here.
-func SealActive(controlLog string, e Event) (SealResult, error) {
+// ErrNothingToSeal; on a sink: worm root, the sink's preflight (the
+// credential resolves, the bucket answers with Object Lock enabled, the
+// seal's own key is empty) — a refusal records nothing; link the active
+// under its segment name (a filesystem that cannot link fails with nothing
+// recorded; EEXIST to the same inode is a re-run after a crash and
+// continues; EEXIST to another file is FaultUnexpectedSegment); compute
+// content_sha256 from the records read under the lock and append the seal
+// record, its sink block naming where the protected copy goes — commit 1,
+// the segment is closed; then rotate: the protected copy, confirmed; the
+// manifest — commit 2, the set is rotated; swap a fresh, empty active under
+// the name. The chain's lock is on the old inode throughout, and every name
+// below derives from the View's resolved active path — the one the lock was
+// taken on. e is a success seal event without a payload; the payload is
+// computed here. A nil sink is the floor: no preflight, no block, no copy.
+func SealActive(controlLog string, e Event, sink SinkWriter) (SealResult, error) {
 	if e.Action != "seal" || e.Outcome != "success" || e.Seal != nil {
 		return SealResult{}, errors.New("control: SealActive takes a success seal event without a payload")
 	}
@@ -206,17 +212,29 @@ func SealActive(controlLog string, e Event) (SealResult, error) {
 	// The identity the manifest will record, judged before the link: a root
 	// without one is refused with nothing linked and nothing recorded (the
 	// permit in appendOn would refuse too, but only after the link).
-	if _, err := manifestLogID(v); err != nil {
+	logID, err := manifestLogID(v)
+	if err != nil {
 		return SealResult{}, err
 	}
 	n := len(v.Sealed) + 1
+	// The preflight is a fresh seal's only: the key must be empty, which is
+	// true before this seal's record exists and never after it (a re-run
+	// completes through rotate, whose Put recognizes the seal's own copy).
+	var loc *SealSink
+	if sink != nil {
+		l := sink.Locator(logID, n, time.Now().UTC())
+		if err := sink.Prepare(context.Background(), l); err != nil {
+			return SealResult{}, &SealError{Step: SealStepPreflight, Err: err}
+		}
+		loc = &l
+	}
 	if err := linkSegment(resolved, n); err != nil {
 		return SealResult{}, &SealError{Step: SealStepLink, Err: err}
 	}
 	if crashAt("after_link_before_seal") {
 		return SealResult{}, &SealError{Step: SealStepRecord, Err: errStoppedByTestHook}
 	}
-	e.Seal = &Seal{Segment: n, FirstSeq: int(c.Base()) + 1, HeadSeq: int(c.Base()) + c.Count(), HeadHash: c.Prev(), ContentSHA256: sealContentDigest(activeRecords(v))}
+	e.Seal = &Seal{Segment: n, FirstSeq: int(c.Base()) + 1, HeadSeq: int(c.Base()) + c.Count(), HeadHash: c.Prev(), ContentSHA256: sealContentDigest(activeRecords(v)), Sink: loc}
 	if err := checkSealShape(e); err != nil {
 		return SealResult{}, &SealError{Step: SealStepRecord, Err: err}
 	}
@@ -230,16 +248,18 @@ func SealActive(controlLog string, e Event) (SealResult, error) {
 	if crashAt("after_seal_before_manifest") {
 		return SealResult{}, &SealError{Step: SealStepManifest, Err: errStoppedByTestHook}
 	}
-	return rotate(resolved, v)
+	return rotate(resolved, v, sink)
 }
 
-// CompleteSeal finishes a rotation found in state B (manifest, swap) or C
-// (swap). It locks the active by name exactly as a writer does and holds
-// LOCK_EX for the duration — a sealed-not-rotated active takes no appends,
-// but the lock still serializes two completions — reading the set as Read
-// does (VerifyReader: nothing is appended, so no chain is resumed). An open
-// active has nothing to complete.
-func CompleteSeal(controlLog string) (SealResult, error) {
+// CompleteSeal finishes a rotation found in state B (the protected copy
+// when the record names one, manifest, swap) or C (swap). It locks the
+// active by name exactly as a writer does and holds LOCK_EX for the
+// duration — a sealed-not-rotated active takes no appends, but the lock
+// still serializes two completions — reading the set as Read does
+// (VerifyReader: nothing is appended, so no chain is resumed). An open
+// active has nothing to complete. sink is the root's posture now; what the
+// record was sealed for is rotate's to compare.
+func CompleteSeal(controlLog string, sink SinkWriter) (SealResult, error) {
 	f, v, err := lockActive(controlLog, false, func(f *os.File, s ledger.Start) ([]ledger.Record, ledger.Head, error) {
 		return ledger.VerifyReader(f, s)
 	})
@@ -255,19 +275,32 @@ func CompleteSeal(controlLog string) (SealResult, error) {
 	}
 	resolved := v.Active.Path
 	sweepTemps(resolved)
-	res, err := rotate(resolved, v)
+	res, err := rotate(resolved, v, sink)
 	res.Completed = true
 	return res, err
 }
 
-// rotate is commit 2 and the swap over a View whose active ends in a
-// successful seal (state B — the seal just written, or found) or whose
-// manifest already lists it (state C): link if the link is missing, write
-// the manifest with the new entry, swap. Each step is idempotent against a
-// crash that already took it.
-func rotate(resolved string, v View) (SealResult, error) {
+// rotate is the protected copy, commit 2 and the swap over a View whose
+// active ends in a successful seal (state B — the seal just written, or
+// found) or whose manifest already lists it (state C): link if the link is
+// missing; when the seal record carries a sink block, Put the sealed bytes
+// to the sink it names and have the copy confirmed; write the manifest with
+// the new entry; swap. Each step is idempotent against a crash that already
+// took it — Put's oldest-version rule makes the copy so. The manifest is
+// written only after a confirmed Put, so a segment the manifest lists has a
+// confirmed protected copy, or carries no block. State C makes no sink
+// call: the manifest's listing is the confirmation.
+//
+// The record is the authority for what a segment was sealed FOR: a block
+// completes only through a sink of the same kind and URL (nil or another
+// refuses, state B stands — flipping integrity.yaml is not an escape); no
+// block completes without an upload whatever the posture now says, since
+// the chained seal line cannot be retrofitted.
+func rotate(resolved string, v View, sink SinkWriter) (SealResult, error) {
 	var n int
 	var seg Segment
+	var sunk *SealSink // the block a Put confirmed on this run; nil in state C and on the floor
+	var rcpt PutReceipt
 	switch v.State {
 	case StateRotatedNotSwapped:
 		n = len(v.Sealed)
@@ -280,10 +313,25 @@ func rotate(resolved string, v View) (SealResult, error) {
 		}
 		last, _ := decodeRecord(active[len(active)-1])
 		whole, size := segmentDigests(active)
-		seg = Segment{N: n, Path: SegmentPath(resolved, n), FirstSeq: v.Active.FirstSeq, HeadSeq: v.Head.Count, HeadHash: v.Head.Hash, SHA256: whole, Bytes: size, Records: len(active), SealedAt: last.Time}
+		seg = Segment{N: n, Path: SegmentPath(resolved, n), FirstSeq: v.Active.FirstSeq, HeadSeq: v.Head.Count, HeadHash: v.Head.Hash, SHA256: whole, Bytes: size, Records: len(active), SealedAt: last.Time, Sink: last.Seal.Sink}
 		logID, err := manifestLogID(v)
 		if err != nil {
 			return SealResult{}, &SealError{Step: SealStepManifest, Err: err}
+		}
+		if block := last.Seal.Sink; block != nil {
+			if sink == nil || sink.Kind() != block.Kind || sink.URL() != block.URL {
+				return SealResult{}, &SealError{Step: SealStepSink, Err: fmt.Errorf("segment %d was sealed for a protected copy at %s %s; integrity.yaml no longer names it — restore that posture to complete the rotation", n, block.Kind, block.URL)}
+			}
+			if crashAt("after_seal_before_sink") {
+				return SealResult{}, &SealError{Step: SealStepSink, Err: errStoppedByTestHook}
+			}
+			if rcpt, err = sink.Put(context.Background(), *block, segmentBytes(active), whole); err != nil {
+				return SealResult{}, &SealError{Step: SealStepSink, Err: err}
+			}
+			sunk = block
+			if crashAt("after_sink_before_manifest") {
+				return SealResult{}, &SealError{Step: SealStepManifest, Err: errStoppedByTestHook}
+			}
 		}
 		m := Manifest{V: ManifestVersion, LogID: logID}
 		for _, s := range append(v.Sealed, seg) {
@@ -299,7 +347,8 @@ func rotate(resolved string, v View) (SealResult, error) {
 	if err := swapActive(resolved); err != nil {
 		return SealResult{}, &SealError{Step: SealStepSwap, Err: err}
 	}
-	return SealResult{Segment: n, FirstSeq: seg.FirstSeq, HeadSeq: seg.HeadSeq, HeadHash: seg.HeadHash, SHA256: seg.SHA256, Path: seg.Path}, nil
+	return SealResult{Segment: n, FirstSeq: seg.FirstSeq, HeadSeq: seg.HeadSeq, HeadHash: seg.HeadHash, SHA256: seg.SHA256, Path: seg.Path,
+		Sink: sunk, VersionID: rcpt.VersionID, RetainUntil: rcpt.RetainUntil, Existed: rcpt.Existed}, nil
 }
 
 // linkSegment hard-links the resolved active under segment n's name and

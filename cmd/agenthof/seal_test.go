@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/sink/sinktest"
 )
 
 // keyOrder returns a record's top-level keys in wire order.
@@ -380,5 +382,293 @@ func TestAuditSealRefusesGenesisWithoutLogID(t *testing.T) {
 	}
 	if err := control.Writable(ctl); err != nil {
 		t.Fatalf("the root stays writable: %v", err)
+	}
+}
+
+// wormPostureFor writes a sink: worm posture beside ctl naming the fake's
+// bucket plus prefix, and places the fake's key pair in the two env NAMES
+// the posture names.
+func wormPostureFor(t *testing.T, ctl string, f *sinktest.Fake, prefix, retention string) {
+	t.Helper()
+	writeIntegrity(t, ctl, "sink: worm\nsink_backend:\n  kind: s3-object-lock\n  url: "+f.URL()+prefix+"\n  mode: compliance\n  retention: "+retention+"\n  credential:\n    credential_source: static_env\n    client_auth: sigv4\n    client_id_env: AGENTHOF_TEST_WORM_ID\n    client_secret_env: AGENTHOF_TEST_WORM_SECRET\n")
+	t.Setenv("AGENTHOF_TEST_WORM_ID", f.KeyID)
+	t.Setenv("AGENTHOF_TEST_WORM_SECRET", f.Secret)
+}
+
+// wormRoot is sealedRoot's root before its seal, under a worm posture: apply,
+// one disable, the posture.
+func wormRoot(t *testing.T) (string, string, *sinktest.Fake) {
+	t.Helper()
+	root := sealSample(t)
+	ctl := applied(t, root)
+	var out bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("disable: %d\n%s", code, out.String())
+	}
+	f := sinktest.NewFake(t)
+	wormPostureFor(t, ctl, f, "/agenthof", "1d")
+	return root, ctl, f
+}
+
+// wormSealedRoot is sealedRoot under a worm posture: segment 1 = seq 1–3
+// with a sink block, its copy in the fake.
+func wormSealedRoot(t *testing.T) (string, *sinktest.Fake) {
+	t.Helper()
+	_, ctl, f := wormRoot(t)
+	if code, out := auditSeal(t, ctl); code != 0 {
+		t.Fatalf("seal: %d\n%s", code, out)
+	}
+	return ctl, f
+}
+
+// segmentKey is the fake's key for segment n of ctl's ledger under the
+// "agenthof" prefix.
+func segmentKey(t *testing.T, ctl string, n int) string {
+	t.Helper()
+	v, err := control.Read(ctl, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := control.GenesisLogID(v.Records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("agenthof/%s/seg-%06d", id, n)
+}
+
+func noSegmentSibling(t *testing.T, ctl string) {
+	t.Helper()
+	entries, _ := os.ReadDir(filepath.Dir(ctl))
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".seg") {
+			t.Fatalf("nothing linked, no manifest: %s", e.Name())
+		}
+	}
+}
+
+func fakeHost(f *sinktest.Fake) string {
+	return strings.TrimPrefix(f.URL(), "http://")[:strings.Index(strings.TrimPrefix(f.URL(), "http://"), "/")]
+}
+
+// TestAuditSealWormPrintsProtected: the protected: line, immediately before
+// sealed:, names the record's block and the sink's receipt; the fake holds
+// exactly one version at the key whose bytes are the sealed file; the
+// block's retain_until is the lock the fake holds.
+func TestAuditSealWormPrintsProtected(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	_, ctl, f := wormRoot(t)
+	code, out := auditSeal(t, ctl)
+	if code != 0 || !regexp.MustCompile(`(?m)^protected: s3-object-lock http://127\.0\.0\.1:\d+/worm/agenthof key=agenthof/[0-9a-f]{32}/seg-000001 version=v-1 compliance until 20\d\d-\d\d-\d\dT\d\d:\d\d:\d\dZ\nsealed: segment 1 seq=1\.\.3 `).MatchString(out) || strings.Contains(out, "already confirmed") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	key := segmentKey(t, ctl, 1)
+	vs := f.Versions(key)
+	seg, _ := os.ReadFile(control.SegmentPath(ctl, 1))
+	if len(vs) != 1 || !bytes.Equal(vs[0].Data, seg) || vs[0].Mode != "COMPLIANCE" {
+		t.Fatalf("versions at %s: %+v", key, vs)
+	}
+	v, err := control.Read(ctl, ledger.Locked)
+	if err != nil || v.Sealed[0].Sink == nil || !v.Sealed[0].Sink.RetainUntil.Equal(vs[0].Until) || v.Sealed[0].Sink.Key != key {
+		t.Fatalf("%v %+v vs %+v", err, v.Sealed[0].Sink, vs[0])
+	}
+}
+
+// TestAuditSealFloorPrintsNoProtectedLine: without a posture there is no
+// protected: line.
+func TestAuditSealFloorPrintsNoProtectedLine(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, sealSample(t))
+	code, out := auditSeal(t, ctl)
+	if code != 0 || strings.Contains(out, "protected:") {
+		t.Fatalf("%d\n%s", code, out)
+	}
+}
+
+// TestSealPreflightRefusalRecordsNothing: a bucket without Object Lock, and
+// a credential that cannot list, are refused before anything is linked or
+// recorded — the cause only, no re-run line, no head line.
+func TestSealPreflightRefusalRecordsNothing(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	for name, want := range map[string]string{
+		"lock disabled": "audit seal: bucket worm does not have Object Lock enabled; enable it on the bucket (versioning is required) before sink: worm\n",
+		"list denied":   "audit seal: status 403 AccessDenied from HOST (ListObjectVersions)\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, ctl, f := wormRoot(t)
+			if name == "lock disabled" {
+				f.LockDisabled = true
+			} else {
+				f.Deny = map[string]bool{"ListObjectVersions": true}
+			}
+			before, _ := os.ReadFile(ctl)
+			code, out := auditSeal(t, ctl)
+			if code != 1 || out != strings.ReplaceAll(want, "HOST", fakeHost(f)) {
+				t.Fatalf("%d\n%s", code, out)
+			}
+			noSegmentSibling(t, ctl)
+			if after, _ := os.ReadFile(ctl); !bytes.Equal(before, after) {
+				t.Fatal("nothing recorded")
+			}
+			if err := control.Writable(ctl); err != nil {
+				t.Fatalf("the root stays writable: %v", err)
+			}
+		})
+	}
+}
+
+const sealStateBLine = "audit seal: sealed; protected copy NOT confirmed — rotation NOT completed; re-run: agenthof audit seal\n"
+
+// TestSealPutOnlyCredentialLandsInStateB (§8.4): a credential that can PUT
+// but not read the lock back lands the seal in state B naming the IAM
+// remedy; writers refuse, verify exits 8; a re-run with the same policy
+// fails the same way without a second PUT; once the policy is fixed the
+// re-run confirms the copy already there and completes.
+func TestSealPutOnlyCredentialLandsInStateB(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root, ctl, f := wormRoot(t)
+	f.Deny = map[string]bool{"GetObjectRetention": true}
+	want := "audit seal: protected copy written but NOT confirmed: the credential cannot read the object's retention; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 AccessDenied from " + fakeHost(f) + " (GetObjectRetention))\n" + sealStateBLine
+	code, out := auditSeal(t, ctl)
+	if code != 1 || out != want {
+		t.Fatalf("%d\n%s", code, out)
+	}
+	key := segmentKey(t, ctl, 1)
+	if vs := f.Versions(key); len(vs) != 1 {
+		t.Fatalf("one version: %+v", vs)
+	}
+	var buf bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 1 || !strings.Contains(buf.String(), "the active segment is sealed and not yet rotated; run: agenthof audit seal") {
+		t.Fatalf("writers refuse: %d\n%s", code, buf.String())
+	}
+	if code, out := verifyControl(t, "--control-log", ctl); code != 8 {
+		t.Fatalf("verify: %d\n%s", code, out)
+	}
+	code, out = auditSeal(t, ctl)
+	if code != 1 || out != want {
+		t.Fatalf("re-run with the policy unchanged: %d\n%s", code, out)
+	}
+	if vs := f.Versions(key); len(vs) != 1 {
+		t.Fatalf("still one version: %+v", vs)
+	}
+	delete(f.Deny, "GetObjectRetention")
+	code, out = auditSeal(t, ctl)
+	if code != 0 || !strings.HasPrefix(out, "completed rotation of segment 1\nprotected: s3-object-lock ") || !regexp.MustCompile(`(?m)^protected: .* version=v-1 compliance until 20[0-9T:-]+Z \(already confirmed\)\nsealed: `).MatchString(out) {
+		t.Fatalf("re-run after the fix: %d\n%s", code, out)
+	}
+	if vs := f.Versions(key); len(vs) != 1 {
+		t.Fatalf("still one version: %+v", vs)
+	}
+	puts := 0
+	for _, req := range f.Requests() {
+		if req.Op == "PutObject" {
+			puts++
+		}
+	}
+	if puts != 1 {
+		t.Fatalf("%d PutObject requests, want 1", puts)
+	}
+}
+
+// TestRotateRefusesOccupiedKeyLeavesStateB (§7.2 through the seal): a
+// foreign object at the seal's key is refused by the preflight with nothing
+// linked or recorded; planted after the record, it is refused by the
+// completion with no PUT and state B stands.
+func TestRotateRefusesOccupiedKeyLeavesStateB(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	far := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, ctl, f := wormRoot(t)
+	key := segmentKey(t, ctl, 1)
+	f.Plant(key, []byte("foreign\n"), "COMPLIANCE", far)
+	before, _ := os.ReadFile(ctl)
+	code, out := auditSeal(t, ctl)
+	if code != 1 || !strings.Contains(out, "audit seal: key "+key+" is occupied by a version that is not this segment") || strings.Contains(out, "re-run") || strings.Contains(out, "control head:") {
+		t.Fatalf("%d\n%s", code, out)
+	}
+	noSegmentSibling(t, ctl)
+	if after, _ := os.ReadFile(ctl); !bytes.Equal(before, after) {
+		t.Fatal("nothing recorded")
+	}
+
+	_, ctl, f = wormRoot(t)
+	key = segmentKey(t, ctl, 1)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_sink")
+	code, out = auditSeal(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if code != 1 || !strings.HasSuffix(out, sealStateBLine) {
+		t.Fatalf("hook: %d\n%s", code, out)
+	}
+	f.Plant(key, []byte("foreign\n"), "COMPLIANCE", far)
+	code, out = auditSeal(t, ctl)
+	if code != 1 || !strings.Contains(out, "audit seal: key "+key+" is occupied by a version that is not this segment") || !strings.HasSuffix(out, sealStateBLine) {
+		t.Fatalf("re-run: %d\n%s", code, out)
+	}
+	if v, err := control.Read(ctl, ledger.Locked); err != nil || v.State != control.StateSealedNotRotated {
+		t.Fatalf("state B stands: %v %+v", err, v.State)
+	}
+	for _, req := range f.Requests() {
+		if req.Op == "PutObject" {
+			t.Fatal("never written on top of a foreign object")
+		}
+	}
+}
+
+// TestSealSinkTimeoutAndPostureBuild: --sink-timeout bounds each sink call
+// (the preflight times out, nothing recorded); a malformed value is usage.
+func TestSealSinkTimeoutAndPostureBuild(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	_, ctl, f := wormRoot(t)
+	f.Slow = 50 * time.Millisecond
+	before, _ := os.ReadFile(ctl)
+	code, out := auditSeal(t, ctl, "--sink-timeout", "1ms")
+	if code != 1 || !strings.Contains(out, fakeHost(f)) || !strings.Contains(out, "deadline") || strings.Contains(out, "re-run") {
+		t.Fatalf("%d\n%s", code, out)
+	}
+	noSegmentSibling(t, ctl)
+	if after, _ := os.ReadFile(ctl); !bytes.Equal(before, after) {
+		t.Fatal("nothing recorded")
+	}
+	if code, out := auditSeal(t, ctl, "--sink-timeout", "0x"); code != 2 || !strings.Contains(out, "sink-timeout") {
+		t.Fatalf("%d\n%s", code, out)
+	}
+}
+
+// TestSealPostureFlippedToLocalRefusesCompletion (§8.5 through the command):
+// a state-B worm root whose integrity.yaml now says local is refused with
+// the record's own coordinates; restoring the posture completes it.
+func TestSealPostureFlippedToLocalRefusesCompletion(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	_, ctl, f := wormRoot(t)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_sink")
+	code, out := auditSeal(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if code != 1 {
+		t.Fatalf("hook: %d\n%s", code, out)
+	}
+	writeIntegrity(t, ctl, "sink: local\n")
+	code, out = auditSeal(t, ctl)
+	if code != 1 || out != "audit seal: segment 1 was sealed for a protected copy at s3-object-lock "+f.URL()+"/agenthof; integrity.yaml no longer names it — restore that posture to complete the rotation\n"+sealStateBLine {
+		t.Fatalf("flipped: %d\n%s", code, out)
+	}
+	wormPostureFor(t, ctl, f, "/agenthof", "1d")
+	code, out = auditSeal(t, ctl)
+	if code != 0 || !strings.HasPrefix(out, "completed rotation of segment 1\nprotected: ") {
+		t.Fatalf("restored: %d\n%s", code, out)
+	}
+}
+
+// TestAuditSealWormThroughTheWriters: after a worm seal the writers append
+// as today — the sink never touches the active.
+func TestAuditSealWormThroughTheWriters(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root, ctl, _ := wormRoot(t)
+	if code, out := auditSeal(t, ctl); code != 0 {
+		t.Fatalf("seal: %d\n%s", code, out)
+	}
+	var buf bytes.Buffer
+	if code := cmdRegistry([]string{"disable", "coder", "--config", root, "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &buf); code != 0 || !strings.Contains(buf.String(), "control head: seq=4 ") {
+		t.Fatalf("disable after a worm seal: %d\n%s", code, buf.String())
+	}
+	if _, f := wormSealedRoot(t); len(f.Requests()) == 0 {
+		t.Fatal("the fixture reached the fake")
 	}
 }

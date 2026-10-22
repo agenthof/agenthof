@@ -111,6 +111,16 @@ func sealChainFieldsAgree(got *Seal, want Seal) bool {
 		got.ContentSHA256 == want.ContentSHA256
 }
 
+// sealChainText renders the five chain fields of a seal for a fault text —
+// never the sink block, whose pointer would print as an address. "none" for
+// a missing payload.
+func sealChainText(s *Seal) string {
+	if s == nil {
+		return "none"
+	}
+	return fmt.Sprintf("segment=%d first_seq=%d head_seq=%d head_hash=%s content_sha256=%s", s.Segment, s.FirstSeq, s.HeadSeq, s.HeadHash, s.ContentSHA256)
+}
+
 // checkSealSink is the shape permit for a seal's sink block, in fixed order,
 // first fault only: nil is the floor; kind non-empty; url an absolute http(s)
 // URL with a bucket path, under the cap; key relative, no .. segment, under

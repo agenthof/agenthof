@@ -292,6 +292,15 @@ func TestPutUnconfirmed(t *testing.T) {
 		if vs := f.Versions(loc.Key); len(vs) != 1 || vs[0].ID != "v-1" {
 			t.Errorf("the PUT did not land: %+v", vs)
 		}
+		// A re-run finds the seal's own version and fails the read-back the
+		// same way — the remedy is named again, no second PUT.
+		_, err = s.Put(ctx, loc, segData, segHash)
+		if err == nil || err.Error() != want {
+			t.Errorf("re-run err = %v", err)
+		}
+		if vs := f.Versions(loc.Key); len(vs) != 1 {
+			t.Errorf("the re-run wrote: %+v", vs)
+		}
 	})
 	t.Run("governance and short date", func(t *testing.T) {
 		f := sinktest.NewFake(t)

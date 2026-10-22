@@ -467,7 +467,7 @@ func verifySealed(resolved string, k int, start ledger.Start, e ManifestEntry) (
 		}
 		want := Seal{Segment: k, FirstSeq: int(start.Base) + 1, HeadSeq: rec.Seq - 1, HeadHash: rec.Prev, ContentSHA256: sealContentDigest(recs[:i])}
 		if !sealChainFieldsAgree(rec.Seal, want) {
-			return Segment{}, recs, disagree("seal", rec.Seal, want)
+			return Segment{}, recs, disagree("seal", sealChainText(rec.Seal), sealChainText(&want))
 		}
 		// The sink block is carried, not recomputed; the one thing the chain
 		// can say about it is that its retain_until is after the seal's time.
@@ -558,7 +558,7 @@ func finishActive(v View, sealedCount int) (View, error) {
 		}
 		want := Seal{Segment: sealedCount + 1, FirstSeq: v.Active.FirstSeq, HeadSeq: rec.Seq - 1, HeadHash: rec.Prev, ContentSHA256: sealContentDigest(active[:i])}
 		if !sealChainFieldsAgree(rec.Seal, want) {
-			return v, &SetError{Fault: FaultManifest, Segment: sealedCount + 1, Path: v.Active.Path, Seq: rec.Seq, Err: fmt.Errorf("seal payload %+v recorded, %+v verified", rec.Seal, want)}
+			return v, &SetError{Fault: FaultManifest, Segment: sealedCount + 1, Path: v.Active.Path, Seq: rec.Seq, Err: fmt.Errorf("seal payload %s recorded, %s verified", sealChainText(rec.Seal), sealChainText(&want))}
 		}
 		if rec.Seal.Sink != nil && !rec.Seal.Sink.RetainUntil.After(rec.Time) {
 			return v, &SetError{Fault: FaultManifest, Segment: sealedCount + 1, Path: v.Active.Path, Seq: rec.Seq, Err: sinkRetainErr(rec.Seal.Sink, rec.Time)}

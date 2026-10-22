@@ -300,7 +300,7 @@ func TestTimelineAnchorVerdictsAcrossASeal(t *testing.T) {
 	stub := anchortest.NewStub([]byte("s"))
 	ctl, head, _ := anchoredLedger(t, stub) // seq 1 apply, seq 2 anchor (covers seq 1)
 	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
-	res, err := control.SealActive(ctl, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w})
+	res, err := control.SealActive(ctl, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

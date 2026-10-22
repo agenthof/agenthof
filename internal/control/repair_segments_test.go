@@ -16,7 +16,7 @@ import (
 
 func repairIt(t *testing.T, p string) (RepairResult, error) {
 	t.Helper()
-	return Repair(p, identity.Static("ops@example.com"), "", Witness{OSUser: "ops", Hostname: "host"})
+	return Repair(p, identity.Static("ops@example.com"), "", Witness{OSUser: "ops", Hostname: "host"}, nil)
 }
 
 // appendRaw appends chained records through the bare ledger — no control
@@ -120,7 +120,7 @@ func TestRepairTornSealRecordReopensTheSegment(t *testing.T) {
 	if err != nil || v.State != StateOpen || len(v.Sealed) != 0 || v.Head.Count != 4 {
 		t.Fatalf("%v %+v", err, v)
 	}
-	if _, err := SealActive(p, sealEvent()); err != nil {
+	if _, err := SealActive(p, sealEvent(), nil); err != nil {
 		t.Fatal(err)
 	}
 	v, _ = Read(p, ledger.Locked)
@@ -291,7 +291,7 @@ func TestRepairPostSealCrashHooks(t *testing.T) {
 			if _, err := repairIt(t, p); err == nil || !strings.Contains(err.Error(), "run audit seal") {
 				t.Fatalf("a re-run of repair in state B refuses: %v", err)
 			}
-			if _, err := CompleteSeal(p); err != nil {
+			if _, err := CompleteSeal(p, nil); err != nil {
 				t.Fatal(err)
 			}
 		}

@@ -21,10 +21,12 @@ import (
 const ManifestVersion = "segments/1"
 
 // Manifest is <controlLog>.segments: the ordered, non-empty list of sealed segments with
-// their Starts, heads and content hashes. It is an advisory index and the
-// list a future worm sink ships; every value in it is recomputed from the
-// files on every read and any disagreement refuses the read. It is never
-// edited in place: written whole by temp+fsync+rename.
+// their Starts, heads and content hashes. It is an advisory index; every
+// value in it is recomputed from the files on every read and any
+// disagreement refuses the read. On a sink: worm root it is written only
+// after the segment's protected copy is confirmed, so a listed segment has
+// one (or its seal record carries no sink block). It is never edited in
+// place: written whole by temp+fsync+rename.
 type Manifest struct {
 	V        string          `json:"v"`
 	LogID    string          `json:"log_id"`

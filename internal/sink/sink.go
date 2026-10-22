@@ -265,7 +265,7 @@ func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256h
 		oldest := kv.Versions[0]
 		l, err := s.retentionOf(ctx, loc.Key, oldest.ID)
 		if err != nil {
-			return control.PutReceipt{}, err
+			return control.PutReceipt{}, unconfirmed(err)
 		}
 		if err := underLocked(oldest.ID, l, loc); err != nil {
 			return control.PutReceipt{}, err
@@ -295,16 +295,24 @@ func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256h
 	}
 	l, err := s.retentionOf(ctx, loc.Key, id)
 	if err != nil {
-		var se *StatusError
-		if errors.As(err, &se) && se.Status == http.StatusForbidden {
-			return control.PutReceipt{}, fmt.Errorf("protected copy written but NOT confirmed: the credential cannot read the object's retention; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (%w)", err)
-		}
-		return control.PutReceipt{}, fmt.Errorf("protected copy written but NOT confirmed: %w", err)
+		return control.PutReceipt{}, unconfirmed(err)
 	}
 	if err := underLocked(id, l, loc); err != nil {
 		return control.PutReceipt{}, err
 	}
 	return control.PutReceipt{VersionID: id, RetainUntil: l.RetainUntil}, nil
+}
+
+// unconfirmed is the text for a lock read-back that failed on the seal's
+// own version — on the run that wrote it or on a re-run that found it: the
+// copy is there, unconfirmed. A 403 names the IAM remedy, since a PUT-only
+// policy fails here every time until it is fixed.
+func unconfirmed(err error) error {
+	var se *StatusError
+	if errors.As(err, &se) && se.Status == http.StatusForbidden {
+		return fmt.Errorf("protected copy written but NOT confirmed: the credential cannot read the object's retention; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (%w)", err)
+	}
+	return fmt.Errorf("protected copy written but NOT confirmed: %w", err)
 }
 
 // underLocked is the verdict on a read-back: the version must be locked in
