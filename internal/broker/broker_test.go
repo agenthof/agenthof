@@ -116,3 +116,21 @@ func TestCredentialRefLogValueRedacts(t *testing.T) {
 		t.Fatalf("expected both log lines to render the ref as REDACTED:\n%s", out)
 	}
 }
+
+// TestStaticEnvRefusesASigV4Ref: a sigv4 ref names a signing key pair, not a
+// bearer, so it must never resolve through the bearer path — directly or via
+// Dispatch (Grant "" routes to StaticEnv).
+func TestStaticEnvRefusesASigV4Ref(t *testing.T) {
+	t.Setenv("W_SESSION", "tok")
+	ref := CredentialRef{ClientAuth: "sigv4", TokenEnv: "W_SESSION"}
+	const want = "broker: a sigv4 key pair is not a bearer; resolve it with ResolveKeyPair"
+
+	_, err := StaticEnv{}.Resolve(context.Background(), ref)
+	if err == nil || err.Error() != want {
+		t.Fatalf("StaticEnv.Resolve error = %v, want %q", err, want)
+	}
+	_, err = Dispatch{StaticEnv: StaticEnv{}}.Resolve(context.Background(), ref)
+	if err == nil || err.Error() != want {
+		t.Fatalf("Dispatch.Resolve error = %v, want %q", err, want)
+	}
+}

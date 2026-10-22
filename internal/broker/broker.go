@@ -20,16 +20,16 @@ type CredentialRef struct {
 	ResourceID string // cache-key component; never a secret
 	Source     string // credential source: "static_env" (the only source today)
 	Grant      string // "" = env value IS the bearer; "client_credentials" = mint; "token_exchange" = exchange the invoker's token
-	ClientAuth string // client_credentials / token_exchange: "client_secret_basic" (only method today)
+	ClientAuth string // client_credentials / token_exchange: "client_secret_basic"; "sigv4" = a signing key pair (KeyPairBroker, never a bearer)
 	Issuer     string // client_credentials: AS identity; (resource, issuer) cache-key component. token_exchange does not use Issuer.
 	TokenURL   string // client_credentials / token_exchange: token endpoint
 	Scope      string // client_credentials / token_exchange: optional, space-delimited
 	Audience   string // token_exchange: the audience the exchanged token is for (RFC 8693 audience)
 
 	// Environment-variable NAMES (never values); only names may appear in errors.
-	TokenEnv        string // direct-bearer secret (Grant == "")
-	ClientIDEnv     string // client_credentials / token_exchange
-	ClientSecretEnv string // client_credentials / token_exchange
+	TokenEnv        string // direct-bearer secret (Grant == ""); under sigv4, the AWS session token
+	ClientIDEnv     string // client_credentials / token_exchange; under sigv4, the access key id
+	ClientSecretEnv string // client_credentials / token_exchange; under sigv4, the secret access key
 
 	// SubjectToken is the invoker's verified inbound token — the RFC 8693
 	// subject token. It is a VALUE, not a name: the gateway sets it only on
@@ -59,8 +59,12 @@ var _ Broker = StaticEnv{}
 
 // Resolve returns the value of ref.TokenEnv for a direct-bearer static_env ref.
 // It handles only Grant == "" (the env value is the final bearer); a non-empty
-// grant is another broker's job. Errors name the variable, never a value.
+// grant is another broker's job, and a sigv4 ref is a key pair, resolved by
+// KeyPairBroker, never a bearer. Errors name the variable, never a value.
 func (StaticEnv) Resolve(_ context.Context, ref CredentialRef) (string, error) {
+	if ref.ClientAuth == "sigv4" {
+		return "", fmt.Errorf("broker: a sigv4 key pair is not a bearer; resolve it with ResolveKeyPair")
+	}
 	if ref.Grant != "" {
 		return "", fmt.Errorf("broker: static_env handles the direct-bearer grant only, not %q", ref.Grant)
 	}
