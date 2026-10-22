@@ -108,8 +108,10 @@ func parseBackendURL(s string) (string, error) {
 
 // awsRegionHostRE reads the region out of an S3 regional endpoint:
 // s3.<region>.amazonaws.com, s3-<region>.amazonaws.com, and the .com.cn
-// partition.
-var awsRegionHostRE = regexp.MustCompile(`^s3[.-]([a-z0-9-]+)\.amazonaws\.com(\.cn)?$`)
+// partition. The capture is a region's shape (us-east-1, eu-central-1,
+// us-gov-west-1, us-iso-east-1, cn-north-1), so the legacy and special
+// endpoints (s3-external-1, s3-accelerate, …) do not read as regions.
+var awsRegionHostRE = regexp.MustCompile(`^s3[.-]([a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\d+)\.amazonaws\.com(\.cn)?$`)
 
 // regionFor is the signing region: the configured one when set; else read
 // from an AWS regional endpoint; the legacy global endpoint is us-east-1;
@@ -228,9 +230,10 @@ func (s *S3) Prepare(ctx context.Context, loc control.SealSink) error {
 // the lock back. The order: list the exact key; every non-marker version
 // there must hash to data (any that does not refuses the seal — no PUT);
 // if one does, the OLDEST is the seal's own: its lock is read back and the
-// receipt says Existed. An empty key is written with the lock headers, and
-// the version the store minted has its lock read back; a write with no
-// version id, a refused read-back, or a lesser lock is unconfirmed.
+// receipt says Existed. An empty key is written with the lock headers; the
+// version the store minted must then list as the key's OLDEST and has its
+// lock read back. A write with no version id, one that is not the oldest,
+// a refused read-back, or a lesser lock is unconfirmed.
 func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256hex string) (control.PutReceipt, error) {
 	if loc.Mode != "compliance" {
 		return control.PutReceipt{}, fmt.Errorf("sink: mode %q is not compliance; this sink writes compliance locks only", loc.Mode)
@@ -278,6 +281,17 @@ func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256h
 	}
 	if id == "" {
 		return control.PutReceipt{}, errors.New("sink answered without a version id; versioning is not enabled, so no lock was applied — nothing confirmed")
+	}
+	// The write is the seal's own only if it is the OLDEST at the key —
+	// the version verify judges. Another writer can land a version between
+	// the empty listing and the PUT; then this one sits on top of a foreign
+	// object and is not confirmed (a re-run meets the occupied refusal).
+	after, err := s.keyVersions(ctx, loc.Key)
+	if err != nil {
+		return control.PutReceipt{}, fmt.Errorf("protected copy written but NOT confirmed: %w", err)
+	}
+	if len(after.Versions) == 0 || after.Versions[0].ID != id {
+		return control.PutReceipt{}, fmt.Errorf("protected copy written but NOT confirmed: version %s is not the oldest at the key — the key was written concurrently", id)
 	}
 	l, err := s.retentionOf(ctx, loc.Key, id)
 	if err != nil {

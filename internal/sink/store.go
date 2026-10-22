@@ -67,8 +67,13 @@ type StatusError struct {
 	Code   string
 }
 
+// Error is "status 403 AccessDenied from <host> (<op>)", the code omitted
+// when the body carried none.
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("status %d from %s (%s)", e.Status, e.Host, e.Op)
+	if e.Code == "" {
+		return fmt.Sprintf("status %d from %s (%s)", e.Status, e.Host, e.Op)
+	}
+	return fmt.Sprintf("status %d %s from %s (%s)", e.Status, e.Code, e.Host, e.Op)
 }
 
 // ErrClockSkew is the cause when the store answered RequestTimeTooSkewed:

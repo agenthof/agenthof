@@ -156,16 +156,26 @@ func TestSigV4PathEncodedOnce(t *testing.T) {
 }
 
 // TestSigV4CanonicalQuery: a bare subresource ("?versions") canonicalizes as
-// "versions=", pairs sort by encoded key, and values are encoded once per
-// RFC 3986 (a "+" in a prefix is "%2B", never a space).
+// "versions=", values are encoded once per RFC 3986 (a "+" in a prefix is
+// "%2B", never a space), and pairs sort by encoded NAME, then encoded value
+// — never by the joined "name=value" string: "x-y=1&x=2" is "x=2&x-y=1"
+// ("x" sorts before "x-y"), although as joined strings "-" (0x2D) sorts
+// before "=" (0x3D) and would put x-y first.
 func TestSigV4CanonicalQuery(t *testing.T) {
-	req, err := http.NewRequest(http.MethodGet, "https://h.example/worm?versions&prefix=p%2Bq%2Fseg-&key-marker=k", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	creq := canonicalRequest(req, []string{"host"}, emptyHash)
-	if got, want := strings.Split(creq, "\n")[2], "key-marker=k&prefix=p%2Bq%2Fseg-&versions="; got != want {
-		t.Errorf("canonical query = %q, want %q", got, want)
+	for raw, want := range map[string]string{
+		"versions&prefix=p%2Bq%2Fseg-&key-marker=k": "key-marker=k&prefix=p%2Bq%2Fseg-&versions=",
+		"x-y=1&x=2":    "x=2&x-y=1",
+		"a=2&a=1&a=10": "a=1&a=10&a=2",
+		"b=&a=1":       "a=1&b=",
+	} {
+		req, err := http.NewRequest(http.MethodGet, "https://h.example/worm?"+raw, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		creq := canonicalRequest(req, []string{"host"}, emptyHash)
+		if got := strings.Split(creq, "\n")[2]; got != want {
+			t.Errorf("canonical query of %q = %q, want %q", raw, got, want)
+		}
 	}
 }
 

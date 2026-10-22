@@ -111,8 +111,9 @@ func TestLogicPutWritesAndConfirms(t *testing.T) {
 	if string(v.data) != string(segData) || v.lock.Mode != "COMPLIANCE" || !v.lock.RetainUntil.Equal(fixedUntil) {
 		t.Errorf("stored: %+v", v)
 	}
-	// list → put → retention read-back: confirmed means read.
-	if want := []string{"list " + loc.Key, "put " + loc.Key, "retention " + loc.Key}; strings.Join(m.ops, ",") != strings.Join(want, ",") {
+	// list → put → list (the write is the oldest) → retention read-back:
+	// confirmed means read.
+	if want := []string{"list " + loc.Key, "put " + loc.Key, "list " + loc.Key, "retention " + loc.Key}; strings.Join(m.ops, ",") != strings.Join(want, ",") {
 		t.Errorf("ops %v, want %v", m.ops, want)
 	}
 
@@ -221,7 +222,7 @@ func TestLogicPutUnconfirmed(t *testing.T) {
 		s := newLogic(m)
 		loc := locatorFor(s)
 		_, err := s.Put(ctx, loc, segData, segHash)
-		want := "protected copy written but NOT confirmed: the credential cannot read the object's retention; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 from 127.0.0.1:1 (GetObjectRetention))"
+		want := "protected copy written but NOT confirmed: the credential cannot read the object's retention; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 AccessDenied from 127.0.0.1:1 (GetObjectRetention))"
 		if err == nil || err.Error() != want {
 			t.Errorf("err = %v", err)
 		}
@@ -289,6 +290,29 @@ func TestLogicPutUnconfirmed(t *testing.T) {
 			t.Errorf("ops %v", m.ops)
 		}
 	})
+	t.Run("written but not the oldest", func(t *testing.T) {
+		// The adversary lands a version between the empty listing and the
+		// PUT: the write is versioned and locked, but it is NOT the oldest
+		// at the key, so verify would judge the other one. Unconfirmed —
+		// never a receipt.
+		m := newMemStore()
+		s := newLogic(&racingStore{memStore: m})
+		loc := locatorFor(s)
+		rcpt, err := s.Put(ctx, loc, segData, segHash)
+		if err == nil || err.Error() != "protected copy written but NOT confirmed: version v-2 is not the oldest at the key — the key was written concurrently" {
+			t.Errorf("err = %v", err)
+		}
+		if rcpt != (control.PutReceipt{}) {
+			t.Errorf("a receipt came back: %+v", rcpt)
+		}
+		if m.count("put") != 1 || m.count("list") != 2 {
+			t.Errorf("ops %v", m.ops)
+		}
+		// The re-run then hits the occupied-key refusal: state B stands.
+		if _, err := s.Put(ctx, loc, segData, segHash); err == nil || !strings.HasPrefix(err.Error(), "key "+loc.Key+" is occupied") {
+			t.Errorf("re-run: %v", err)
+		}
+	})
 	t.Run("digest mismatch is a caller fault", func(t *testing.T) {
 		m := newMemStore()
 		s := newLogic(m)
@@ -307,6 +331,15 @@ func TestLogicPutUnconfirmed(t *testing.T) {
 			t.Errorf("err = %v, ops %v", err, m.ops)
 		}
 	})
+}
+
+// racingStore lands a foreign version at the key just before every write,
+// so the version it mints is never the oldest.
+type racingStore struct{ *memStore }
+
+func (r *racingStore) putLocked(ctx context.Context, key string, body []byte, mode string, until time.Time) (string, error) {
+	r.plant(key, []byte("landed first, same size\n")[:len(body)], "COMPLIANCE", until)
+	return r.memStore.putLocked(ctx, key, body, mode, until)
 }
 
 // downgradingStore applies GOVERNANCE whatever mode is asked.

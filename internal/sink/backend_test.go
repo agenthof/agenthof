@@ -96,6 +96,9 @@ func TestRegionDerivation(t *testing.T) {
 		{"https://s3.eu-central-1.amazonaws.com/b", "", "eu-central-1"},
 		{"https://s3-ap-southeast-2.amazonaws.com/b", "", "ap-southeast-2"},
 		{"https://s3.cn-north-1.amazonaws.com.cn/b", "", "cn-north-1"},
+		{"https://s3.us-gov-west-1.amazonaws.com/b", "", "us-gov-west-1"},
+		{"https://s3.us-iso-east-1.amazonaws.com/b", "", "us-iso-east-1"},
+		{"https://s3.us-isob-east-1.amazonaws.com/b", "", "us-isob-east-1"},
 		{"https://s3.amazonaws.com/b", "", "us-east-1"},
 		{"https://s3.eu-central-1.amazonaws.com/b", "x-y", "x-y"},
 		{"https://minio.internal:9000/b", "", "us-east-1"},
@@ -114,7 +117,13 @@ func TestRegionDerivation(t *testing.T) {
 	}
 	// An AWS host the rule cannot read is refused, never signed for a
 	// guessed region.
-	for _, u := range []string{"https://s3-fips.us-east-1.amazonaws.com/b", "https://s3.dualstack.eu-west-1.amazonaws.com/b", "https://bucket.s3.eu-west-1.amazonaws.com/b"} {
+	for _, u := range []string{
+		"https://s3-fips.us-east-1.amazonaws.com/b",
+		"https://s3.dualstack.eu-west-1.amazonaws.com/b",
+		"https://bucket.s3.eu-west-1.amazonaws.com/b",
+		"https://s3-external-1.amazonaws.com/b", // the legacy us-east-1 alias is not a region
+		"https://s3-accelerate.amazonaws.com/b", // nor is the accelerate endpoint
+	} {
 		_, err := sink.NewS3(u, sink.S3Options{Keys: f.Keys, Retention: time.Hour})
 		if err == nil || !strings.Contains(err.Error(), "cannot derive the signing region") {
 			t.Errorf("NewS3(%q) = %v", u, err)
@@ -185,7 +194,7 @@ func TestPutConfirms(t *testing.T) {
 			put = &r
 		}
 	}
-	if strings.Join(ops, ",") != "ListObjectVersions,PutObject,GetObjectRetention" {
+	if strings.Join(ops, ",") != "ListObjectVersions,PutObject,ListObjectVersions,GetObjectRetention" {
 		t.Errorf("ops: %v", ops)
 	}
 	if put == nil {
@@ -272,7 +281,7 @@ func TestPutUnconfirmed(t *testing.T) {
 		s := newS3(t, f, "/agenthof")
 		loc := s.Locator(logID, 1, fixedNow)
 		_, err := s.Put(ctx, loc, segData, segHash)
-		want := "protected copy written but NOT confirmed: the credential cannot read the object's retention; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 from " + hostOf(f) + " (GetObjectRetention))"
+		want := "protected copy written but NOT confirmed: the credential cannot read the object's retention; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 AccessDenied from " + hostOf(f) + " (GetObjectRetention))"
 		if err == nil || err.Error() != want {
 			t.Errorf("err = %v", err)
 		}
@@ -317,6 +326,32 @@ func TestListVersionsSeesThroughDeleteMarker(t *testing.T) {
 	}
 	all, err := s.ListPrefix(ctx, s.Prefix(logID))
 	if err != nil || len(all) != 1 || !all[0].DeleteMarker || all[0].Versions[0].ID != "v-1" {
+		t.Errorf("ListPrefix = %+v %v", all, err)
+	}
+}
+
+// TestListVersionsRoundTripsEscapedKey: a key with a space and a "+" goes
+// out encoded once on the prefix, comes back through the listing's <Key>
+// XML escape/unescape, and is filtered to the exact key — the sibling with
+// the same prefix is not it.
+func TestListVersionsRoundTripsEscapedKey(t *testing.T) {
+	f := sinktest.NewFake(t)
+	s := newS3(t, f, "/my prefix")
+	key := "my prefix/a+b/seg-000001"
+	f.Plant(key, []byte("one"), "COMPLIANCE", fixedUntil)
+	f.Plant(key+"x", []byte("sibling"), "COMPLIANCE", fixedUntil)
+	kv, err := s.ListVersions(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kv.Key != key || len(kv.Versions) != 1 || kv.Versions[0].ID != "v-1" || kv.Versions[0].Size != 3 {
+		t.Errorf("ListVersions = %+v", kv)
+	}
+	if uri := f.Requests()[0].RequestURI; !strings.Contains(uri, "prefix=my%20prefix%2Fa%2Bb%2Fseg-000001") {
+		t.Errorf("listing prefix on the wire: %s", uri)
+	}
+	all, err := s.ListPrefix(ctx, "my prefix/a+b/")
+	if err != nil || len(all) != 2 || all[0].Key != key || all[1].Key != key+"x" {
 		t.Errorf("ListPrefix = %+v %v", all, err)
 	}
 }

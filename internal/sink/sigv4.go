@@ -156,22 +156,32 @@ func uriEncode(s string) string {
 
 // canonicalQuery parses the raw query as sent, percent-decodes each name
 // and value (a "+" is a plus, never a space), re-encodes them once, and
-// sorts by encoded name then encoded value. A bare name ("versions") is
-// "versions=".
+// sorts by encoded NAME, then by encoded value for a repeated name — never
+// by the joined "name=value" string, whose "=" would sort a longer name
+// first. A bare name ("versions") is "versions=".
 func canonicalQuery(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	var pairs []string
+	var pairs [][2]string
 	for _, p := range strings.Split(raw, "&") {
 		if p == "" {
 			continue
 		}
 		name, value, _ := strings.Cut(p, "=")
-		pairs = append(pairs, uriEncode(pathUnescape(name))+"="+uriEncode(pathUnescape(value)))
+		pairs = append(pairs, [2]string{uriEncode(pathUnescape(name)), uriEncode(pathUnescape(value))})
 	}
-	sort.Strings(pairs)
-	return strings.Join(pairs, "&")
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i][0] != pairs[j][0] {
+			return pairs[i][0] < pairs[j][0]
+		}
+		return pairs[i][1] < pairs[j][1]
+	})
+	parts := make([]string, len(pairs))
+	for i, p := range pairs {
+		parts[i] = p[0] + "=" + p[1]
+	}
+	return strings.Join(parts, "&")
 }
 
 // pathUnescape percent-decodes s, leaving it unchanged when it is not a

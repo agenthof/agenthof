@@ -173,8 +173,14 @@ func TestFakeRefusals(t *testing.T) {
 		if st, _, body := lockPut(t, f, "k", []byte("x"), func(h map[string]string) { h["Content-MD5"] = "AAAAAAAAAAAAAAAAAAAAAA==" }); st != 400 || code(t, body) != "BadDigest" {
 			t.Errorf("bad Content-MD5: %d %s", st, body)
 		}
-		if st, _, body := lockPut(t, f, "k", []byte("x"), func(h map[string]string) { h["X-Amz-Checksum-Sha256"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }); st != 400 || code(t, body) != "InvalidRequest" {
-			t.Errorf("bad checksum: %d %s", st, body)
+		if st, _, body := lockPut(t, f, "k", []byte("x"), func(h map[string]string) { h["X-Amz-Checksum-Sha256"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }); st != 400 || code(t, body) != "BadDigest" {
+			t.Errorf("mismatched checksum: %d %s", st, body)
+		}
+		if st, _, body := lockPut(t, f, "k", []byte("x"), func(h map[string]string) { h["X-Amz-Checksum-Sha256"] = "not-base64!" }); st != 400 || code(t, body) != "InvalidRequest" {
+			t.Errorf("malformed checksum: %d %s", st, body)
+		}
+		if st, _, body := lockPut(t, f, "k", []byte("x"), func(h map[string]string) { h["X-Amz-Checksum-Sha256"] = "AAAA" }); st != 400 || code(t, body) != "InvalidRequest" {
+			t.Errorf("wrong-length checksum: %d %s", st, body)
 		}
 		if st, _, body := lockPut(t, f, "k", []byte("x"), func(h map[string]string) { delete(h, "Content-MD5") }); st != 400 || code(t, body) != "InvalidRequest" {
 			t.Errorf("lock PUT without Content-MD5: %d %s", st, body)

@@ -398,9 +398,15 @@ func (f *Fake) put(w http.ResponseWriter, r *http.Request, key string, body []by
 		return
 	}
 	if ck := r.Header.Get("x-amz-checksum-sha256"); ck != "" {
+		// A malformed value is InvalidRequest; a well-formed one that is
+		// not the body's digest is BadDigest, as S3 answers.
+		if raw, err := base64.StdEncoding.DecodeString(ck); err != nil || len(raw) != sha256.Size {
+			f.fail(w, http.StatusBadRequest, "InvalidRequest")
+			return
+		}
 		sum := sha256.Sum256(body)
 		if ck != base64.StdEncoding.EncodeToString(sum[:]) {
-			f.fail(w, http.StatusBadRequest, "InvalidRequest")
+			f.fail(w, http.StatusBadRequest, "BadDigest")
 			return
 		}
 	}
@@ -574,7 +580,9 @@ func canonical(method, path, rawQuery, host string, h http.Header, names []strin
 	for i, s := range segs {
 		segs[i] = encode(s)
 	}
-	var pairs []string
+	// Pairs sort by encoded name, then value (SigV4's rule) — not by the
+	// joined "name=value" string.
+	var pairs [][2]string
 	for _, p := range strings.Split(rawQuery, "&") {
 		if p == "" {
 			continue
@@ -582,11 +590,20 @@ func canonical(method, path, rawQuery, host string, h http.Header, names []strin
 		k, v, _ := strings.Cut(p, "=")
 		ku, _ := url.PathUnescape(k)
 		vu, _ := url.PathUnescape(v)
-		pairs = append(pairs, encode(ku)+"="+encode(vu))
+		pairs = append(pairs, [2]string{encode(ku), encode(vu)})
 	}
-	sort.Strings(pairs)
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i][0] != pairs[j][0] {
+			return pairs[i][0] < pairs[j][0]
+		}
+		return pairs[i][1] < pairs[j][1]
+	})
+	query := make([]string, len(pairs))
+	for i, p := range pairs {
+		query[i] = p[0] + "=" + p[1]
+	}
 	var b strings.Builder
-	b.WriteString(method + "\n" + strings.Join(segs, "/") + "\n" + strings.Join(pairs, "&") + "\n")
+	b.WriteString(method + "\n" + strings.Join(segs, "/") + "\n" + strings.Join(query, "&") + "\n")
 	for _, n := range names {
 		v := strings.Join(h.Values(n), ",")
 		if n == "host" {
