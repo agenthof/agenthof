@@ -131,3 +131,43 @@ func TestConfigReferenceDocumentsWormSink(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigReferenceDocumentsVerifySink fails when docs/reference/config.md
+// stops documenting audit verify control's sink pass: the two flags in the
+// verify row, the exit 9 and 10 rows, the new precedence (and not the old
+// one), the not-independent line, and the banned words still absent.
+func TestConfigReferenceDocumentsVerifySink(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference", "config.md"))
+	if err != nil {
+		t.Fatalf("config reference missing: %v", err)
+	}
+	doc := string(data)
+	row := ""
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.HasPrefix(line, "| `agenthof audit verify control ") {
+			row = line
+		}
+	}
+	if row == "" || !strings.Contains(row, "[--integrity <path>]") || !strings.Contains(row, "[--sink-timeout <dur>]") || !strings.Contains(row, "`--integrity`") || !strings.Contains(row, "`--sink-timeout`") {
+		t.Fatalf("the verify row must list --integrity and --sink-timeout: %q", row)
+	}
+	for _, want := range []string{
+		"| `9` | **Protected copy mismatch**",
+		"| `10` | **Protected copy unverifiable**",
+		"1, 6, 9, 3, 4, 5, 7, 10, 8",
+		"(sink address taken from the root being verified — not independent; pass --integrity)",
+		"protected copies: not checked (--offline)",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("docs/reference/config.md must say %q", want)
+		}
+	}
+	if strings.Contains(doc, "1, 6, 3, 4, 5, 7, 8") {
+		t.Fatal("docs/reference/config.md still states the old precedence 1, 6, 3, 4, 5, 7, 8")
+	}
+	for _, banned := range []string{"tamper-proof", "immutable", "write-once"} {
+		if strings.Contains(doc, banned) {
+			t.Fatalf("docs/reference/config.md must not say %q", banned)
+		}
+	}
+}

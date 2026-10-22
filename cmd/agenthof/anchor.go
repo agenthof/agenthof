@@ -30,20 +30,30 @@ import (
 )
 
 // audit verify control's exit codes beside exitInstalledMismatch (installed.go),
-// in the fixed precedence 1, 6, 3, 4, 5, 7, 8. 6 and 7 are the anchor
+// in the fixed precedence 1, 6, 9, 3, 4, 5, 7, 10, 8. 6 and 7 are the anchor
 // verdicts: 6 is a definitive content disagreement — the chain does not
 // reproduce a recorded head, or the stored proof under the trusted key says
 // otherwise; 7 is the absence of a verdict — a log that could not be reached,
-// a key the verifier does not hold. 7 never reads as tamper detected, and
-// every definitive verdict outranks it. 8 is no verdict on the chain at all:
-// a seal's rotation did not complete, so the chain is intact and an operator
-// step (agenthof audit seal) is owed; it is last, so a verdict on the chain
-// is never hidden behind it, and a cron that watches the exit code does not
+// a key the verifier does not hold. 9 and 10 are the sink verdicts on the
+// same doctrine: 9 is definitive — a protected copy is missing, the oldest
+// version at its key does not hold the local segment, a copy is locked less
+// than the seal recorded, or the sink holds an object for this ledger that
+// no local segment accounts for; 10 is the absence of a verdict — a sink
+// that could not be reached or refused, no credential, a posture that could
+// not be read. 7 and 10 never read as tamper detected, and every definitive
+// verdict outranks them; 6 precedes 9 because the anchor is the verdict on
+// the chain and the sink the verdict on a copy of a segment, and 7 precedes
+// 10 for the same reason. 8 is no verdict on the chain at all: a seal's
+// rotation did not complete, so the chain is intact and an operator step
+// (agenthof audit seal) is owed; it is last, so a verdict on the chain is
+// never hidden behind it, and a cron that watches the exit code does not
 // see green while every writer is blocked.
 const (
 	exitAnchorMismatch     = 6
 	exitAnchorUnverifiable = 7
 	exitRotationIncomplete = 8
+	exitSinkMismatch       = 9
+	exitSinkUnverifiable   = 10
 )
 
 // anchorPubPath is the transparency log's pinned checkpoint key, BESIDE the
