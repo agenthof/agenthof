@@ -581,6 +581,10 @@ func newLogID() (string, error) {
 // genesisLogIDRE is what newLogID produces: 16 bytes, lowercase hex.
 var genesisLogIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
+// IsLogID reports whether s has a ledger identity's shape (genesisLogIDRE):
+// what a flag naming a ledger must be before it names a sink prefix.
+func IsLogID(s string) bool { return genesisLogIDRE.MatchString(s) }
+
 // GenesisLogID reads the control ledger's identity: the log_id Append set
 // on the genesis record and nothing since — audit repair control truncates
 // a torn tail and never rewrites genesis, so it is stable for the ledger's

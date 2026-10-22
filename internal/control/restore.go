@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/origin"
 )
 
 // ErrNothingToRestore is the restore's verdict on a set that reads clean: a
@@ -101,8 +102,8 @@ type RestoreResult struct {
 // returns that fault beside the Restored so far: the bytes are left in
 // place — they are the chain's — and nothing is recorded.
 func Restore(controlLog string, only []int, r SinkReader, e Event) (RestoreResult, error) {
-	if e.Action != "restore" || e.Outcome != "success" || e.Detail != "" {
-		return RestoreResult{}, errors.New("control: Restore takes a success restore event without a detail")
+	if err := checkRestoreEvent(e); err != nil {
+		return RestoreResult{}, err
 	}
 	resolved, err := resolveControlLog(controlLog)
 	if err != nil {
@@ -365,7 +366,7 @@ func restoreSegment(resolved string, v View, m *Manifest, k int, verr error, r S
 		// Fail closed: the bytes are the chain's, but a lock that cannot be
 		// read is not reported as one; nothing is written. A denied read is
 		// the credential's, as audit verify control's is.
-		return RestoredSegment{}, fmt.Errorf("control: segment %d: the lock on version %s could not be read; nothing was written — if the credential is denied, grant s3:GetObjectRetention (with s3:GetObject and s3:ListBucketVersions) and re-run: %w", k, id, err)
+		return RestoredSegment{}, fmt.Errorf("control: segment %d: the lock on version %s could not be read; nothing was written — if the credential is denied, grant s3:GetObjectRetention (with s3:GetObject and s3:ListBucketVersions) and re-run: %w", k, origin.Clean(id), err)
 	}
 	out := RestoredSegment{N: k, Sink: *seg.Sink, VersionID: id, SHA256: seg.SHA256,
 		NotOldest: selected > 0, Unlocked: lock.Mode != "COMPLIANCE", ManifestDisagrees: entry.SHA256 != seg.SHA256}
@@ -473,7 +474,7 @@ func verifyFetchedSegment(data []byte, k int, start ledger.Start, logID, key str
 	case block == nil:
 		return Segment{}, nil, fmt.Errorf("segment %d: the seal names no sink block; no protected copy of it was ever written", k)
 	case block.Key != key:
-		return Segment{}, nil, fmt.Errorf("segment %d: the seal's sink block names %s, not %s", k, block.Key, key)
+		return Segment{}, nil, fmt.Errorf("segment %d: the seal's sink block names %s, not %s", k, origin.Clean(block.Key), key)
 	case !block.RetainUntil.After(last.Time):
 		return Segment{}, nil, fmt.Errorf("segment %d: %v", k, sinkRetainErr(block, last.Time))
 	}
@@ -555,6 +556,34 @@ func writeRestored(resolved, dest string, data []byte) error {
 	return replaceFile(dest, "."+filepath.Base(resolved)+".restore-*", data)
 }
 
+// sameBytes reports whether the entry under path is a regular file (never
+// followed through a symlink: a link to a FIFO or to something huge is not
+// a sealed segment) holding exactly data, read only when its size matches.
+// An absent entry is fs.ErrNotExist.
+func sameBytes(path string, data []byte) (bool, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() != int64(len(data)) {
+		return false, nil
+	}
+	have, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(have, data), nil
+}
+
+// checkRestoreEvent is what Restore and Rebuild require of the event they
+// are handed: a success restore whose detail they will compose.
+func checkRestoreEvent(e Event) error {
+	if e.Action != "restore" || e.Outcome != "success" || e.Detail != "" {
+		return errors.New("control: a restore or rebuild takes a success restore event without a detail")
+	}
+	return nil
+}
+
 // checkRestoreShape is Append's structural permit for a restore record
 // (checkSealShape's twin): only a success is recorded — a restore that did
 // not restore changes nothing and has nothing to say on the chain; it
@@ -584,7 +613,8 @@ func checkRestoreShape(e Event) error {
 // empty active was created; UnderLocked lists the ordinals whose version is
 // not under a COMPLIANCE lock to at least the block's date — printed, never
 // refused: the bytes are still the chain's. Head is the chain's head after
-// the record.
+// the record. Every string in it that came from the sink is the sink's own
+// (a name, a version id); the command cleans what it prints.
 type RebuildResult struct {
 	Segments, Written, Replaced int
 	ReplacedNames               []string
@@ -592,6 +622,12 @@ type RebuildResult struct {
 	ActiveCreated               bool
 	Head                        ledger.Head
 	UnderLocked                 []int
+	// MarkerOnly: keys above N holding only a delete marker — every version
+	// at the key was removed; LocalOnly: the manifest's entries beyond N
+	// kept because their files verify from N's head; Dropped: those beyond
+	// the first that does not (the read names the files). Each is reported,
+	// none refuses.
+	MarkerOnly, LocalOnly, Dropped []int
 
 	manifestWritten bool // the manifest was written (absent or differing): "manifest rewritten"
 }
@@ -633,22 +669,25 @@ type fetchedSegment struct {
 // the one refusal is an incomplete rotation (state B or C, from the verdict
 // or from the active itself when the walk never reached it): a rebuild
 // never completes a rotation. A readable local identity (the manifest's or
-// the genesis's) must be logID's: a rebuild reconstructs one ledger. The
-// active is then held exclusively when it exists (holdActive; ENOENT is
-// tolerated) and stale temps swept. Then the whole chain is fetched and
-// verified before anything is written: every key under the prefix must be
+// the genesis's) must be logID's: a rebuild reconstructs one ledger. Then
+// the whole chain is fetched and verified — every sink call, with no lock
+// held, as Restore's — before anything is written: every key under the prefix must be
 // a sealed segment's; the ordinals must be exactly 1..N — a hole refuses
 // naming it; for each ordinal the oldest non-marker version is the seal's
 // copy, judged by verifyFetchedSegment from the prior head, and any failure
 // refuses the WHOLE rebuild with the ordinal and cause — nothing local
 // changes. A version whose lock is not COMPLIANCE to at least the block's
 // date is reported (UnderLocked), never refused; a lock that cannot be read
-// refuses (nothing written). Only then are the writes made, ascending: a
+// refuses (nothing written); a key above N holding only a delete marker is
+// reported (MarkerOnly). Only then is the active held exclusively when it
+// exists (holdActive; ENOENT is tolerated), stale temps swept, and the
+// writes made, ascending: a
 // local file byte-identical to the copy is left in place, a differing one
 // moved aside as evidence (moveAsideReplaced) then rewritten, an absent one
 // written; the manifest is recomputed from the fetched bytes (trailing local
 // entries beyond N kept only while their files verify from N's head) and
-// compared to the old one — moved aside and rewritten when it differs; an
+// compared to the old one — moved aside and rewritten when it differs;
+// the trailing entries kept and dropped are reported (LocalOnly, Dropped); an
 // absent active is created empty (a present one is left as-is: its bytes
 // are not the sink's business). Segments before the manifest, the manifest
 // before the active: a crash mid-way leaves a state the next read names as
@@ -668,8 +707,8 @@ type fetchedSegment struct {
 // residual, stated the same way.
 func Rebuild(controlLog, logID string, r SinkReader, e Event) (RebuildResult, error) {
 	var res RebuildResult
-	if e.Action != "restore" || e.Outcome != "success" || e.Detail != "" {
-		return res, errors.New("control: Restore takes a success restore event without a detail")
+	if err := checkRestoreEvent(e); err != nil {
+		return res, err
 	}
 	resolved, err := resolveControlLog(controlLog)
 	if err != nil {
@@ -703,6 +742,14 @@ func Rebuild(controlLog, logID string, r SinkReader, e Event) (RebuildResult, er
 		return res, fmt.Errorf("control: --log-id %s but this root is ledger %s; a rebuild reconstructs one ledger", logID, have)
 	}
 
+	// Every sink call runs before the active is locked, as Restore's do: the
+	// lock would buy nothing during the fetch (a present active is judged
+	// only at the re-read, and holdActive re-stats for a rotation when it is
+	// taken) and would cost every lock-free reader the fetch's duration.
+	chain, err := fetchChain(logID, r)
+	if err != nil {
+		return res, err
+	}
 	active, err := holdActive(resolved)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return res, err
@@ -715,15 +762,11 @@ func Rebuild(controlLog, logID string, r SinkReader, e Event) (RebuildResult, er
 		}
 	}
 	defer release()
-	created := active == nil
+	// With no active there is no lock to hold; the sweep's precondition is
+	// then the command's installed.lock, which excludes every temp writer.
 	sweepTemps(resolved)
-
-	fetched, under, err := fetchChain(logID, r)
-	if err != nil {
-		return res, err
-	}
-	res, err = rebuildWrite(resolved, logID, fetched, created)
-	res.Segments, res.UnderLocked = len(fetched), under
+	res, err = rebuildWrite(resolved, logID, chain.segments, active == nil)
+	res.Segments, res.UnderLocked, res.MarkerOnly = len(chain.segments), chain.underLocked, chain.markerOnly
 	if err != nil {
 		return res, err
 	}
@@ -744,7 +787,7 @@ func Rebuild(controlLog, logID string, r SinkReader, e Event) (RebuildResult, er
 		activeWas = "created"
 	}
 	rec := e
-	rec.Detail = fmt.Sprintf("rebuild from %s: %d segments verified against the sink, %d written, %d replaced, manifest %s, active %s", fetched[len(fetched)-1].seg.Sink.Kind, res.Segments, res.Written, res.Replaced, manifest, activeWas)
+	rec.Detail = fmt.Sprintf("rebuild from %s: %d segments verified against the sink, %d written, %d replaced, manifest %s, active %s", chain.segments[len(chain.segments)-1].seg.Sink.Kind, res.Segments, res.Written, res.Replaced, manifest, activeWas)
 	head, err := Append(resolved, rec)
 	if err != nil {
 		return res, &RebuildError{Result: res, Fault: fmt.Errorf("the restore record could not be appended: %w", err)}
@@ -753,18 +796,29 @@ func Rebuild(controlLog, logID string, r SinkReader, e Event) (RebuildResult, er
 	return res, nil
 }
 
+// fetchedChain is what fetchChain brings back: the segments 1..N in order,
+// the ordinals under-locked, and the keys above N holding only a marker.
+type fetchedChain struct {
+	segments    []fetchedSegment
+	underLocked []int
+	markerOnly  []int
+}
+
 // fetchChain is every sink call of a rebuild: the listing under the
 // ledger's prefix, judged as exactly the ordinals 1..N, then each ordinal's
 // oldest non-marker version fetched and verified as the next link of the
 // chain, its lock read. Nothing local is touched; the first fault returns.
-func fetchChain(logID string, r SinkReader) ([]fetchedSegment, []int, error) {
+// A string of the sink's choosing that lands in an error — a listed key, a
+// version id — is cleaned first: a refusal is printed to a terminal.
+func fetchChain(logID string, r SinkReader) (fetchedChain, error) {
 	ctx := context.Background()
 	prefix := r.Prefix(logID)
 	listed, err := r.ListPrefix(ctx, prefix)
 	if err != nil {
-		return nil, nil, fmt.Errorf("control: listing %s: %w", prefix, err)
+		return fetchedChain{}, fmt.Errorf("control: listing %s: %w", prefix, err)
 	}
 	byOrdinal := map[int]KeyVersions{}
+	var markerOnly []int
 	for _, kv := range listed {
 		sub := sinkSegmentKeyRE.FindStringSubmatch(strings.TrimPrefix(kv.Key, prefix))
 		n := 0
@@ -772,10 +826,11 @@ func fetchChain(logID string, r SinkReader) ([]fetchedSegment, []int, error) {
 			n, _ = strconv.Atoi(sub[1])
 		}
 		if n == 0 {
-			return nil, nil, fmt.Errorf("control: key %s under this ledger's prefix is not a sealed segment", kv.Key)
+			return fetchedChain{}, fmt.Errorf("control: key %s under this ledger's prefix is not a sealed segment", origin.Clean(kv.Key))
 		}
 		if len(kv.Versions) == 0 {
-			continue // a delete marker alone: the key holds nothing
+			markerOnly = append(markerOnly, n) // a delete marker alone: the key holds nothing
+			continue
 		}
 		byOrdinal[n] = kv
 	}
@@ -784,40 +839,41 @@ func fetchChain(logID string, r SinkReader) ([]fetchedSegment, []int, error) {
 		held = append(held, n)
 	}
 	slices.Sort(held)
+	slices.Sort(markerOnly)
 	if len(held) == 0 {
-		return nil, nil, fmt.Errorf("control: cannot rebuild: the sink holds no segment of ledger %s under %s", logID, prefix)
+		return fetchedChain{}, fmt.Errorf("control: cannot rebuild: the sink holds no segment of ledger %s under %s", logID, prefix)
 	}
 	n := held[len(held)-1]
 	for k := 1; k <= n; k++ {
 		if _, ok := byOrdinal[k]; !ok {
-			return nil, nil, fmt.Errorf("control: cannot rebuild: the sink holds segments %s; segment %d is missing from the bucket — a chain with a hole cannot be reconstructed", ordinalRanges(held), k)
+			return fetchedChain{}, fmt.Errorf("control: cannot rebuild: the sink holds segments %s; segment %d is missing from the bucket — a chain with a hole cannot be reconstructed", ordinalRanges(held), k)
 		}
 	}
-	var fetched []fetchedSegment
-	var under []int
+	// Past the hole check every marker-only key is above N.
+	out := fetchedChain{markerOnly: markerOnly}
 	start := ledger.Start{}
 	for k := 1; k <= n; k++ {
 		kv := byOrdinal[k]
 		id := kv.Versions[0].ID // the oldest: the seal's copy by construction
 		data, err := r.Get(ctx, kv.Key, id, maxRestoreBody)
 		if err != nil {
-			return nil, nil, fmt.Errorf("control: segment %d: %w", k, err)
+			return fetchedChain{}, fmt.Errorf("control: segment %d: %w", k, err)
 		}
 		seg, _, verr := verifyFetchedSegment(data, k, start, logID, kv.Key)
 		if verr != nil {
-			return nil, nil, fmt.Errorf("control: cannot rebuild: %w", verr)
+			return fetchedChain{}, fmt.Errorf("control: cannot rebuild: %w", verr)
 		}
 		lock, err := r.GetRetention(ctx, kv.Key, id)
 		if err != nil {
-			return nil, nil, fmt.Errorf("control: segment %d: the lock on version %s could not be read; nothing was written — if the credential is denied, grant s3:GetObjectRetention (with s3:GetObject and s3:ListBucketVersions) and re-run: %w", k, id, err)
+			return fetchedChain{}, fmt.Errorf("control: segment %d: the lock on version %s could not be read; nothing was written — if the credential is denied, grant s3:GetObjectRetention (with s3:GetObject and s3:ListBucketVersions) and re-run: %w", k, origin.Clean(id), err)
 		}
 		if lock.Mode != "COMPLIANCE" || lock.RetainUntil.Before(seg.Sink.RetainUntil) {
-			under = append(under, k)
+			out.underLocked = append(out.underLocked, k)
 		}
-		fetched = append(fetched, fetchedSegment{data: data, seg: seg})
+		out.segments = append(out.segments, fetchedSegment{data: data, seg: seg})
 		start = ledger.Start{Prev: seg.HeadHash, Base: uint64(seg.HeadSeq)}
 	}
-	return fetched, under, nil
+	return out, nil
 }
 
 // ordinalRanges renders sorted ordinals as their runs: "1–3", "1–1 and
@@ -850,9 +906,9 @@ func rebuildWrite(resolved, logID string, fetched []fetchedSegment, createActive
 	for i, f := range fetched {
 		k := i + 1
 		path := SegmentPath(resolved, k)
-		have, err := os.ReadFile(path)
+		same, err := sameBytes(path, f.data)
 		switch {
-		case err == nil && bytes.Equal(have, f.data):
+		case err == nil && same:
 			continue
 		case err == nil:
 			name, err := moveAsideReplaced(path, fmt.Sprintf("%06d", k))
@@ -886,8 +942,12 @@ func rebuildWrite(resolved, logID string, fetched []fetchedSegment, createActive
 		for j := len(fetched) + 1; j <= len(old.Segments); j++ {
 			seg, _, err := verifySealed(resolved, j, start, old.Segments[j-1])
 			if err != nil {
+				for ; j <= len(old.Segments); j++ {
+					res.Dropped = append(res.Dropped, j)
+				}
 				break
 			}
+			res.LocalOnly = append(res.LocalOnly, j)
 			m.Segments = append(m.Segments, manifestEntry(resolved, seg))
 			start = ledger.Start{Prev: seg.HeadHash, Base: uint64(seg.HeadSeq)}
 		}

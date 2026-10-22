@@ -161,7 +161,9 @@ func TestConfigReferenceDocumentsRestore(t *testing.T) {
 		"`audit restore control --rebuild --log-id <id>` is the",
 		"a chain with a hole cannot be reconstructed",
 		"`control.jsonl.replaced-segments-<timestamp>`",
-		"`--rebuild` without `--log-id`, or combined with `--segment`",
+		"`--rebuild` without `--log-id`, with one that is not 32 lowercase hex characters, or combined with `--segment`",
+		"a delete marker",
+		"kept as a trailing entry",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Fatalf("docs/reference/config.md must say %q", want)

@@ -68,6 +68,12 @@ func (r *fakeReader) ListVersions(_ context.Context, key string) (KeyVersions, e
 	if err := r.errs["ListVersions"]; err != nil {
 		return KeyVersions{}, err
 	}
+	return r.versionsOf(key), nil
+}
+
+// versionsOf is a key's listing: non-marker versions oldest first, a marker
+// as DeleteMarker.
+func (r *fakeReader) versionsOf(key string) KeyVersions {
 	kv := KeyVersions{Key: key}
 	vs := r.objects[key]
 	for i, v := range vs {
@@ -77,20 +83,20 @@ func (r *fakeReader) ListVersions(_ context.Context, key string) (KeyVersions, e
 		}
 		kv.Versions = append(kv.Versions, SinkVersion{ID: v.id, IsLatest: i == len(vs)-1, Size: int64(len(v.data))})
 	}
-	return kv, nil
+	return kv
 }
 
 // ListPrefix lists in map order on purpose: a reader must not depend on the
-// listing's order.
-func (r *fakeReader) ListPrefix(ctx context.Context, prefix string) ([]KeyVersions, error) {
+// listing's order. One call, whatever the listing's size.
+func (r *fakeReader) ListPrefix(_ context.Context, prefix string) ([]KeyVersions, error) {
+	r.calls = append(r.calls, "ListPrefix")
 	if err := r.errs["ListPrefix"]; err != nil {
 		return nil, err
 	}
 	var out []KeyVersions
 	for key := range r.objects {
 		if strings.HasPrefix(key, prefix) {
-			kv, _ := r.ListVersions(ctx, key)
-			out = append(out, kv)
+			out = append(out, r.versionsOf(key))
 		}
 	}
 	return out, nil
@@ -557,7 +563,7 @@ func TestRestoreRefusals(t *testing.T) {
 	t.Run("event shape", func(t *testing.T) {
 		p, r := restoreFixture(t)
 		for _, e := range []Event{{Action: "repair", Outcome: "success"}, {Action: "restore", Outcome: "refused"}, {Action: "restore", Outcome: "success", Detail: "x"}} {
-			if _, err := Restore(p, nil, r, e); err == nil || !strings.Contains(err.Error(), "Restore takes a success restore event without a detail") {
+			if _, err := Restore(p, nil, r, e); err == nil || !strings.Contains(err.Error(), "a restore or rebuild takes a success restore event without a detail") {
 				t.Fatalf("%+v: %v", e, err)
 			}
 		}
@@ -918,9 +924,39 @@ func TestRebuildFromNothing(t *testing.T) {
 	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("the created active is 0600: %v", err)
 	}
-	if _, err := Rebuild(p, id, r, Event{Action: "restore", Outcome: "success", Detail: "x"}); err == nil || !strings.Contains(err.Error(), "Restore takes a success restore event without a detail") {
+	if calls := strings.Join(r.calls, ","); calls != "ListPrefix,Get,GetRetention,Get,GetRetention" {
+		t.Fatalf("calls %s", calls)
+	}
+	if _, err := Rebuild(p, id, r, Event{Action: "restore", Outcome: "success", Detail: "x"}); err == nil || !strings.Contains(err.Error(), "a restore or rebuild takes a success restore event without a detail") {
 		t.Fatalf("event shape: %v", err)
 	}
+
+	t.Run("the root directory gone", func(t *testing.T) {
+		p, r := restoreFixture(t)
+		id := logIDOf(t, p)
+		want := map[string]string{}
+		for _, f := range []string{SegmentPath(p, 1), SegmentPath(p, 2), ManifestPath(p)} {
+			want[f] = sha256File(t, f)
+		}
+		if err := os.RemoveAll(filepath.Dir(p)); err != nil {
+			t.Fatal(err)
+		}
+		res, err := rebuildIt(t, p, id, r)
+		if err != nil || res.Written != 2 || !res.ActiveCreated {
+			t.Fatalf("%v %+v", err, res)
+		}
+		for f, h := range want {
+			if got := sha256File(t, f); got != h {
+				t.Fatalf("%s: rebuilt %s, was %s", filepath.Base(f), got, h)
+			}
+		}
+		if fi, err := os.Stat(filepath.Dir(p)); err != nil || fi.Mode().Perm() != 0o700 {
+			t.Fatalf("the directory is created 0700: %v", err)
+		}
+		if v, err := Read(p, ledger.Locked); err != nil || v.Head.Count != 9 {
+			t.Fatalf("%v %+v", err, v.Head)
+		}
+	})
 }
 
 // TestRebuildRefusesGapNamesOrdinal (Review Focus 4): a key with no version
@@ -982,7 +1018,7 @@ func TestRebuildRefusesGapNamesOrdinal(t *testing.T) {
 		key = segKey(t, p, r, 3)
 		r.RemoveVersions(key)
 		r.addMarker(key)
-		if res, err := rebuildIt(t, p, id, r); err != nil || res.Segments != 2 || res.Written != 0 || res.ManifestReplaced != "" {
+		if res, err := rebuildIt(t, p, id, r); err != nil || res.Segments != 2 || res.Written != 0 || res.ManifestReplaced != "" || !slices.Equal(res.MarkerOnly, []int{3}) || !slices.Equal(res.LocalOnly, []int{3}) || res.Dropped != nil {
 			t.Fatalf("%v %+v", err, res)
 		}
 	})
@@ -1321,6 +1357,13 @@ func TestRebuildKeepsForeignKeyRefusal(t *testing.T) {
 		t.Fatal("nothing written")
 	}
 	r.RemoveVersions("p/" + id + "/notes.txt")
+	// A key of the sink's choosing is cleaned before it can reach a
+	// terminal: control characters never appear in the refusal.
+	r.add("p/"+id+"/\x1b[2Knotes\x07.txt", []byte("x"), "", time.Time{})
+	if _, err := rebuildIt(t, p, id, r); err == nil || err.Error() != "control: key p/"+id+"/[2Knotes.txt under this ledger's prefix is not a sealed segment" {
+		t.Fatalf("cleaned: %v", err)
+	}
+	r.RemoveVersions("p/" + id + "/\x1b[2Knotes\x07.txt")
 	r.add("p/"+id+"/seg-000000", []byte("x"), "", time.Time{})
 	if _, err := rebuildIt(t, p, id, r); err == nil || err.Error() != "control: key p/"+id+"/seg-000000 under this ledger's prefix is not a sealed segment" {
 		t.Fatalf("ordinal 0: %v", err)
@@ -1361,7 +1404,7 @@ func TestRebuildReplacesDifferingFiles(t *testing.T) {
 		r.RemoveVersions(segKey(t, p, r, 3))
 		before := sha256File(t, ManifestPath(p))
 		res, err := rebuildIt(t, p, id, r)
-		if err != nil || res.Segments != 2 || res.Written != 0 || res.ManifestReplaced != "" {
+		if err != nil || res.Segments != 2 || res.Written != 0 || res.ManifestReplaced != "" || !slices.Equal(res.LocalOnly, []int{3}) || res.Dropped != nil || res.MarkerOnly != nil {
 			t.Fatalf("%v %+v", err, res)
 		}
 		if sha256File(t, ManifestPath(p)) != before {
@@ -1384,8 +1427,34 @@ func TestRebuildReplacesDifferingFiles(t *testing.T) {
 		if !errors.As(err, &re) || !errors.As(re.Fault, &se) || se.Fault != FaultUnexpectedSegment || filepath.Base(se.Path) != "control.jsonl.seg-000003" {
 			t.Fatalf("%v", err)
 		}
-		if re.Result.ManifestReplaced == "" {
+		if re.Result.ManifestReplaced == "" || !slices.Equal(re.Result.Dropped, []int{3}) || re.Result.LocalOnly != nil {
 			t.Fatalf("the three-entry manifest was moved aside: %+v", re.Result)
+		}
+	})
+	t.Run("a symlink under a segment name is moved aside, never followed", func(t *testing.T) {
+		p, r := restoreFixture(t)
+		id := logIDOf(t, p)
+		seg1 := SegmentPath(p, 1)
+		real, _ := os.ReadFile(seg1)
+		elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+		if err := os.WriteFile(elsewhere, real, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(seg1); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(elsewhere, seg1); err != nil {
+			t.Fatal(err)
+		}
+		res, err := rebuildIt(t, p, id, r)
+		if err != nil || res.Written != 1 || res.Replaced != 1 {
+			t.Fatalf("%v %+v", err, res)
+		}
+		if fi, err := os.Lstat(seg1); err != nil || !fi.Mode().IsRegular() {
+			t.Fatalf("segment 1 is a regular file again: %v", err)
+		}
+		if fi, err := os.Lstat(res.ReplacedNames[0]); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link is the evidence: %v", err)
 		}
 	})
 }

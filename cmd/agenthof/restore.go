@@ -31,7 +31,8 @@ import (
 //
 // Order, pinned (audit repair control's, with the sink):
 //
-//  1. the flags (exit 2): --rebuild requires --log-id and refuses --segment;
+//  1. the flags (exit 2): --rebuild requires a well-formed --log-id and
+//     refuses --segment;
 //  2. the invoker (--token without AGENTHOF_OIDC_ISSUER → exit 2); a refused
 //     token is printed and NOT recorded — the root may be exactly the
 //     damaged one;
@@ -55,7 +56,8 @@ import (
 //     lines beneath (not the oldest; unlocked; the manifest entry
 //     disagrees), then the head line. A fault after a write prints the
 //     segments written, then the fault, `NOT recorded`, exit 1. A rebuild
-//     prints each UNDER-LOCKED ordinal, then `rebuilt: segments 1–N from
+//     prints each UNDER-LOCKED ordinal, each key above N holding only a
+//     delete marker, each local segment beyond N kept or dropped, then `rebuilt: segments 1–N from
 //     <kind> <url> (W written, R replaced)` with the evidence names kept,
 //     then the head line; rebuilt but not recorded prints the fault with
 //     its remedy, exit 1.
@@ -94,6 +96,10 @@ func cmdAuditRestoreControl(args []string, out io.Writer) int {
 		}
 		if len(segments) > 0 {
 			_, _ = fmt.Fprintln(out, "audit restore control: --segment cannot be combined with --rebuild")
+			return 2
+		}
+		if !control.IsLogID(*logID) {
+			_, _ = fmt.Fprintln(out, "audit restore control: --log-id must be the ledger's identity, 32 lowercase hex characters (as the sealed:/control head: lines, audit control's header and the bucket listing spell it)")
 			return 2
 		}
 	}
@@ -199,7 +205,8 @@ func cmdAuditRestoreControl(args []string, out io.Writer) int {
 
 // printRebuilt prints a rebuild's outcome and returns the exit code. A
 // rebuild that ran to its writes — recorded, or not (a *control.RebuildError)
-// — prints each UNDER-LOCKED ordinal, then the `rebuilt:` line with the
+// — prints each UNDER-LOCKED ordinal, each marker-only key above N and each
+// local-only segment beyond N (kept or dropped), then the `rebuilt:` line with the
 // evidence names kept (printed, never recorded); the head line closes a
 // recorded one. Rebuilt but not recorded names the fault: an active that no
 // longer chains from the rebuilt head gets its remedy. Anything else is the
@@ -209,6 +216,15 @@ func printRebuilt(res control.RebuildResult, err error, controlLog, logID string
 	if err == nil || errors.As(err, &re) {
 		for _, k := range res.UnderLocked {
 			_, _ = fmt.Fprintf(out, "segment %d: UNDER-LOCKED in the sink — the bytes are the chain's, but the lock is not what the posture claims\n", k)
+		}
+		for _, k := range res.MarkerOnly {
+			_, _ = fmt.Fprintf(out, "segment %d: the sink holds only a delete marker at its key — every version was removed; not rebuilt\n", k)
+		}
+		for _, k := range res.LocalOnly {
+			_, _ = fmt.Fprintf(out, "segment %d: not in the sink — local only, kept as a trailing entry\n", k)
+		}
+		for _, k := range res.Dropped {
+			_, _ = fmt.Fprintf(out, "segment %d: not in the sink — local only, and it does not verify from the rebuilt head; dropped from the manifest, the file left in place\n", k)
 		}
 		line := fmt.Sprintf("rebuilt: segments 1–%d from %s %s (%d written, %d replaced)", res.Segments, origin.Clean(be.Kind()), origin.Clean(be.URL()), res.Written, res.Replaced)
 		if len(res.ReplacedNames) > 0 {

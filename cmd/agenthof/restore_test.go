@@ -488,8 +488,20 @@ func TestAuditRestoreRebuildGap(t *testing.T) {
 	id = ledgerID(t, ctl)
 	f.AddDeleteMarker(segmentKey(t, ctl, 2))
 	_ = os.Remove(control.SegmentPath(ctl, 2))
-	if code, out := restoreControl(t, ctl, "--rebuild", "--log-id", id); code != 0 || !strings.Contains(out, "(1 written, 0 replaced)") {
+	if code, out := restoreControl(t, ctl, "--rebuild", "--log-id", id); code != 0 || !strings.Contains(out, "(1 written, 0 replaced)") || strings.Contains(out, "delete marker") {
 		t.Fatalf("marker: %d\n%s", code, out)
+	}
+	// A top key holding only a marker is reported, and the local segment
+	// beyond the rebuilt set is kept as a trailing entry — said so.
+	_, ctl, f = thriceSealedWormRoot(t)
+	id = ledgerID(t, ctl)
+	f.RemoveVersions(segmentKey(t, ctl, 3))
+	f.AddDeleteMarker(segmentKey(t, ctl, 3))
+	if code, out := restoreControl(t, ctl, "--rebuild", "--log-id", id); code != 0 || !strings.HasPrefix(out, "segment 3: the sink holds only a delete marker at its key — every version was removed; not rebuilt\nsegment 3: not in the sink — local only, kept as a trailing entry\nrebuilt: segments 1–2 from s3-object-lock "+f.URL()+"/agenthof (0 written, 0 replaced)\ncontrol head: seq=8 ") {
+		t.Fatalf("marker-only top key: %d\n%s", code, out)
+	}
+	if code, out := verifyControl(t, "--control-log", ctl, "--offline"); code != 0 {
+		t.Fatalf("verify after: %d\n%s", code, out)
 	}
 }
 
@@ -506,6 +518,11 @@ func TestAuditRestoreRebuildUsage(t *testing.T) {
 	}
 	if code, text := restoreControl(t, ctl, "--rebuild", "--log-id", id, "--segment", "1"); code != 2 || text != "audit restore control: --segment cannot be combined with --rebuild\n" {
 		t.Fatalf("--segment: %d\n%s", code, text)
+	}
+	for _, bad := range []string{"<id>", "x", strings.ToUpper(id), id + "0"} {
+		if code, text := restoreControl(t, ctl, "--rebuild", "--log-id", bad); code != 2 || text != "audit restore control: --log-id must be the ledger's identity, 32 lowercase hex characters (as the sealed:/control head: lines, audit control's header and the bucket listing spell it)\n" {
+			t.Fatalf("--log-id %q: %d\n%s", bad, code, text)
+		}
 	}
 	before, _ := os.ReadFile(ctl)
 	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_sink")
