@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/origin"
 )
 
 // IsTainted reports whether any of records carries action "repair", and,
@@ -87,12 +88,19 @@ func label(rec record) string {
 		return "vouch " + rec.Outcome
 	case "seal":
 		// A successful seal is the last record of the segment it closes; the
-		// label names the unit so a reader can find the segment by ordinal.
+		// label names the unit so a reader can find the segment by ordinal,
+		// and, on a worm seal, where the protected copy went and until when
+		// (the key stays in the record for raw readers). Rendering is not
+		// verifying: whether the copy is there is verify's verdict.
 		if rec.Outcome == "success" {
 			if rec.Seal == nil {
 				return "seal record without payload"
 			}
-			return fmt.Sprintf("segment %d sealed (seq %d–%d)", rec.Seal.Segment, rec.Seal.FirstSeq, rec.Seal.HeadSeq)
+			lbl := fmt.Sprintf("segment %d sealed (seq %d–%d)", rec.Seal.Segment, rec.Seal.FirstSeq, rec.Seal.HeadSeq)
+			if s := rec.Seal.Sink; s != nil {
+				lbl += fmt.Sprintf(" → protected copy %s %s until %s", origin.Clean(s.Kind), origin.Clean(s.URL), s.RetainUntil.UTC().Format(time.RFC3339))
+			}
+			return lbl
 		}
 		return "seal " + rec.Outcome
 	case "anchor":

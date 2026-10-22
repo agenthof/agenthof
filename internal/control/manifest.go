@@ -133,6 +133,17 @@ func segmentDigests(records []ledger.Record) (whole string, size int64) {
 	return hex.EncodeToString(h.Sum(nil)), size
 }
 
+// segmentBytes is the exact file bytes segmentDigests hashes — each record's
+// Raw plus '\n' — assembled: what a sink stores for a sealed segment, and
+// what hashes to the manifest's sha256. Nil for no records.
+func segmentBytes(records []ledger.Record) []byte {
+	var out []byte
+	for _, r := range records {
+		out = append(append(out, r.Raw...), '\n')
+	}
+	return out
+}
+
 // sealContentDigest is the seal payload's content_sha256: sha256 of every
 // byte of the segment BEFORE the seal line, newlines included — which is
 // segmentDigests' whole digest over the records the seal closes, the seal

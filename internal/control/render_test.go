@@ -384,6 +384,24 @@ func TestControlRenderSealLabelAndSegments(t *testing.T) {
 	}
 }
 
+// TestLabelWormSeal: a seal record with a sink block labels where the
+// protected copy went and until when; without a block the shipped label is
+// unchanged.
+func TestLabelWormSeal(t *testing.T) {
+	const head = `{"v":"control/1","seq":6,"time":"2026-10-15T09:00:00Z","action":"seal","outcome":"success","invoker":{"subject":"dana","issuer":"local","method":"static"},"witness":{"os_user":"dana","hostname":"host"},"seal":{"segment":1,"first_seq":1,"head_seq":5,"head_hash":"h","content_sha256":"c"`
+	worm := head + `,"sink":{"kind":"s3-object-lock","url":"https://s3.eu-central-1.amazonaws.com/acme/agenthof","key":"agenthof/x/seg-000001","mode":"compliance","retain_until":"2033-10-20T09:12:00Z"}},"prev":"p"}`
+	floor := head + `},"prev":"p"}`
+	for raw, want := range map[string]string{
+		worm:  "  seq 6  2026-10-15 09:00:00  segment 1 sealed (seq 1–5) → protected copy s3-object-lock https://s3.eu-central-1.amazonaws.com/acme/agenthof until 2033-10-20T09:12:00Z — dana (static)\n",
+		floor: "  seq 6  2026-10-15 09:00:00  segment 1 sealed (seq 1–5) — dana (static)\n",
+	} {
+		out := control.Render([]ledger.Record{{Raw: []byte(raw)}}, ledger.Head{Count: 1}, nil)
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 // TestRenderViewRotationState: a seal that was not rotated says so between
 // the segment lines and the events, naming the segment by its ordinal — the
 // active is that segment in state B, the manifest already lists it in state C.

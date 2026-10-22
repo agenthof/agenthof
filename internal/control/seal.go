@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/ledger"
 )
@@ -59,14 +60,16 @@ var linkFile = os.Link
 func crashAt(point string) bool { return os.Getenv("AGENTHOF_TEST_CRASH_AT") == point }
 
 // SealStep names the step of a seal that failed, so the command prints the
-// fixed line beside it: a link failure recorded nothing; a record failure
-// left the segment open; a manifest or swap failure left state B or C,
-// which a re-run completes.
+// fixed line beside it: a preflight or link failure recorded nothing; a
+// record failure left the segment open; a sink, manifest or swap failure
+// left state B or C, which a re-run completes. Never serialized.
 type SealStep int
 
 const (
-	SealStepLink SealStep = iota + 1
+	SealStepPreflight SealStep = iota + 1
+	SealStepLink
 	SealStepRecord
+	SealStepSink
 	SealStepManifest
 	SealStepSwap
 )
@@ -89,6 +92,12 @@ type SealResult struct {
 	SHA256    string // the whole sealed file
 	Path      string // the segment's path
 	Completed bool   // an interrupted rotation was completed rather than a new seal made
+	// The protected copy, on a root whose posture is sink: worm — the seal
+	// record's sink block and the sink's receipt for it. Zero on a floor seal.
+	Sink        *SealSink
+	VersionID   string
+	RetainUntil time.Time
+	Existed     bool
 }
 
 // checkSealShape is Append's structural permit for a seal record, decidable
@@ -97,8 +106,9 @@ type SealResult struct {
 // structural rule every writer must meet). A seal payload only on action
 // seal; a successful seal carries one; a refused or error seal carries none;
 // a seal carries no config_hash, no anchor, no detail; hashes are 64
-// lowercase hex; segment ≥ 1, first_seq ≥ 1, head_seq ≥ first_seq. Whether
-// the payload describes the active is checkSealPlacement's question.
+// lowercase hex; segment ≥ 1, first_seq ≥ 1, head_seq ≥ first_seq; a sink
+// block, when present, meets checkSealSink. Whether the payload describes
+// the active is checkSealPlacement's question.
 func checkSealShape(e Event) error {
 	if e.Seal != nil && e.Action != "seal" {
 		return fmt.Errorf("control: seal payload on a %q record", e.Action)
@@ -125,7 +135,7 @@ func checkSealShape(e Event) error {
 	case s.Segment < 1 || s.FirstSeq < 1 || s.HeadSeq < s.FirstSeq:
 		return fmt.Errorf("control: seal payload segment %d first_seq %d head_seq %d is malformed", s.Segment, s.FirstSeq, s.HeadSeq)
 	}
-	return nil
+	return checkSealSink(s.Sink)
 }
 
 // checkSealPlacement needs the open chain: the root must have the identity a

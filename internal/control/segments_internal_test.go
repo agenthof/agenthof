@@ -32,9 +32,14 @@ func appendN(t *testing.T, p string, n int) {
 // writer and the swap primitive (writeManifest, swapActive), so the reader
 // tests read the on-disk shape the seal command produces. stopAt leaves the root in a
 // crash state: "A'" after the link, "B" after the seal record, "C" after the
-// manifest; "" completes. It returns the seal line.
-func sealByHand(t *testing.T, p, stopAt string) []byte {
+// manifest; "" completes. An optional sink block rides on the seal line (a
+// worm seal); none is the floor. It returns the seal line.
+func sealByHand(t *testing.T, p, stopAt string, sink ...*SealSink) []byte {
 	t.Helper()
+	var block *SealSink
+	if len(sink) > 0 {
+		block = sink[0]
+	}
 	resolved, err := filepath.EvalSymlinks(p)
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +65,7 @@ func sealByHand(t *testing.T, p, stopAt string) []byte {
 	content := sealContentDigest(active)
 	rec := record{V: "control/1", Seq: v.Head.Count + 1, Time: time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC), Action: "seal", Outcome: "success",
 		Invoker: identity.Static("dana@example.com"), Witness: Witness{OSUser: "dana", Hostname: "host"},
-		Seal: &Seal{Segment: n, FirstSeq: v.Active.FirstSeq, HeadSeq: v.Head.Count, HeadHash: v.Head.Hash, ContentSHA256: content}, Prev: v.Head.Hash}
+		Seal: &Seal{Segment: n, FirstSeq: v.Active.FirstSeq, HeadSeq: v.Head.Count, HeadHash: v.Head.Hash, ContentSHA256: content, Sink: block}, Prev: v.Head.Hash}
 	line, _ := json.Marshal(rec)
 	c, err := ledger.OpenFrom(resolved, ledger.Locked, start)
 	if err != nil {
