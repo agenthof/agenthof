@@ -159,12 +159,14 @@ func cmdAuditRestoreControl(args []string, out io.Writer) int {
 	}
 	if err != nil {
 		switch {
+		case len(res.Restored) > 0:
+			// Judged first: a busy re-read or append after a write must still
+			// say the write happened and carry its cause.
+			_, _ = fmt.Fprintf(out, "audit restore control: the segments above were written but NOT recorded — %v\n", err)
 		case os.IsNotExist(err):
 			_, _ = fmt.Fprintf(out, "no control ledger at %s — nothing recorded yet\n", *controlLog)
 		case errors.Is(err, ledger.ErrLockHeld):
 			_, _ = fmt.Fprintf(out, "audit restore control: %s\n", msgLockBusy)
-		case len(res.Restored) > 0:
-			_, _ = fmt.Fprintf(out, "audit restore control: the segments above were written but NOT recorded — %v\n", err)
 		default:
 			_, _ = fmt.Fprintf(out, "audit restore control: %v\n", err)
 		}

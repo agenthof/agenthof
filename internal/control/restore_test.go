@@ -616,12 +616,104 @@ func TestRestoreContinuityWithNextSegment(t *testing.T) {
 	_ = os.Remove(SegmentPath(p, 1))
 	snap := snapshotDir(t, filepath.Dir(p))
 	_, err = Restore(p, nil, r, restoreEvent())
-	if want := "control: segment 1: 1 version(s) at " + key + " chain from the genesis, but segment 2's first record continues none of them; the local segment 2 is not this ledger's — run: audit restore control --rebuild --log-id " + id; err == nil || err.Error() != want {
+	if want := "control: segment 1: 1 version(s) at " + key + " chain from the genesis, but segment 2's first record continues none of them — either the chaining copy at the key is not the seal's own (audit verify control's sink pass judges the oldest version) or the local segment 2 was replaced; run: audit restore control --rebuild --log-id " + id; err == nil || err.Error() != want {
 		t.Fatalf("%v", err)
 	}
 	if snapshotDir(t, filepath.Dir(p)) != snap {
 		t.Fatal("nothing written")
 	}
+
+	// The last listed segment: what follows it is the active, whose first
+	// record's prev is the constraint. A forged oldest copy of segment 2
+	// that recomputes is skipped for the real one the active continues
+	// from; with only the forgery at the key the refusal names the active.
+	p, r = restoreFixture(t)
+	appendN(t, p, 1) // the active now holds a record chained from segment 2's seal
+	key = segKey(t, p, r, 2)
+	real2 := r.objects[key][0].data
+	r.objects[key] = []fakeVersion{{id: "v-1", data: forge(real2), mode: "COMPLIANCE", until: far}, {id: "v-2", data: real2, mode: "COMPLIANCE", until: far}}
+	_ = os.Remove(SegmentPath(p, 2))
+	res, err = Restore(p, nil, r, restoreEvent())
+	if err != nil || len(res.Restored) != 1 || res.Restored[0].N != 2 || res.Restored[0].VersionID != "v-2" || !res.Restored[0].NotOldest {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if v, err := Read(p, ledger.Locked); err != nil || v.Head.Count != 10 {
+		t.Fatalf("%v %+v", err, v.Head)
+	}
+	p, r = restoreFixture(t)
+	appendN(t, p, 1)
+	key, id = segKey(t, p, r, 2), logIDOf(t, p)
+	r.objects[key] = []fakeVersion{{id: "v-1", data: forge(r.objects[key][0].data), mode: "COMPLIANCE", until: far}}
+	_ = os.Remove(SegmentPath(p, 2))
+	snap = snapshotDir(t, filepath.Dir(p))
+	_, err = Restore(p, nil, r, restoreEvent())
+	if err == nil || !strings.Contains(err.Error(), "but the active segment's first record continues none of them — either the chaining copy at the key is not the seal's own") || !strings.HasSuffix(err.Error(), "or the local active segment was replaced; run: audit restore control --rebuild --log-id "+id) {
+		t.Fatalf("%v", err)
+	}
+	if snapshotDir(t, filepath.Dir(p)) != snap {
+		t.Fatal("nothing written")
+	}
+	// An EMPTY active constrains nothing: the forgery alone is accepted for
+	// the last segment (§5.3's oldest-first rule is the defence there).
+	p, r = restoreFixture(t)
+	key = segKey(t, p, r, 2)
+	r.objects[key] = []fakeVersion{{id: "v-1", data: forge(r.objects[key][0].data), mode: "COMPLIANCE", until: far}}
+	_ = os.Remove(SegmentPath(p, 2))
+	if res, err := Restore(p, nil, r, restoreEvent()); err == nil || len(res.Restored) != 1 || !strings.Contains(err.Error(), "manifest disagrees with segment 2") {
+		t.Fatalf("an empty active cannot judge the last segment; the manifest's figure then does: %v %+v", err, res)
+	}
+}
+
+// TestRestoreRefusesIncompleteRotationBeforeWriting (§11.2 step 4): a root
+// in state B or C whose EARLIER segment is at fault — Read's verdict stops
+// at that segment and never decides the rotation state — is refused from
+// the active itself before any write, with no sink call; and in state C
+// the last listed segment IS the active's inode, so a torn one is refused
+// rather than moved aside from under the active's name.
+func TestRestoreRefusesIncompleteRotationBeforeWriting(t *testing.T) {
+	for _, state := range []string{"B", "C"} {
+		t.Run("state "+state+" earlier segment missing", func(t *testing.T) {
+			p, r := restoreFixture(t)
+			appendN(t, p, 1)
+			sealByHand(t, p, state)
+			_ = os.Remove(SegmentPath(p, 1))
+			_ = assertSetFault(t, p, FaultMissingSegment, 1)
+			snap := snapshotDir(t, filepath.Dir(p))
+			_, err := Restore(p, nil, r, restoreEvent())
+			if err == nil || err.Error() != errNotRestoreMatter(p).Error() {
+				t.Fatalf("%v", err)
+			}
+			if snapshotDir(t, filepath.Dir(p)) != snap || len(r.calls) != 0 {
+				t.Fatal("refused before any write and before any sink call")
+			}
+			_ = assertSetFault(t, p, FaultMissingSegment, 1)
+		})
+	}
+	t.Run("state C last segment torn is the active", func(t *testing.T) {
+		p, r := restoreFixture(t)
+		appendN(t, p, 1)
+		sealByHand(t, p, "C") // the manifest lists 3; the active name is segment 3's inode
+		seg3 := SegmentPath(p, 3)
+		data, _ := os.ReadFile(seg3)
+		_ = os.WriteFile(seg3, data[:len(data)-10], 0o600)
+		_ = assertSetFault(t, p, FaultTorn, 3)
+		snap := snapshotDir(t, filepath.Dir(p))
+		_, err := Restore(p, nil, r, restoreEvent())
+		if err == nil || err.Error() != errNotRestoreMatter(p).Error() {
+			t.Fatalf("%v", err)
+		}
+		if snapshotDir(t, filepath.Dir(p)) != snap || len(r.calls) != 0 {
+			t.Fatal("the active's own inode is never moved aside")
+		}
+	})
+	t.Run("open active with a fault is still restored", func(t *testing.T) {
+		p, r := restoreFixture(t)
+		appendN(t, p, 2) // an open active with records: no refusal
+		_ = os.Remove(SegmentPath(p, 1))
+		if res, err := Restore(p, nil, r, restoreEvent()); err != nil || len(res.Restored) != 1 {
+			t.Fatalf("%v %+v", err, res)
+		}
+	})
 }
 
 // TestVerifyFetchedSegmentTexts pins the rule each refusal names (reused by

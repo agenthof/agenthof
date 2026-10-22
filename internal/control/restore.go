@@ -69,10 +69,16 @@ type RestoreResult struct {
 // active beside history (both: the rebuild, with the ledger's identity when
 // one reads).
 //
+// An incomplete rotation (state B or C) refuses before any write, decided
+// from the active itself (incompleteRotation): with an earlier segment at
+// fault Read's verdict cannot say so, and a restore that wrote first would
+// leave its record owed forever, or move the active's own inode aside.
+//
 // Selection is by the chain, never by the manifest (verifyFetchedSegment):
 // the versions at the segment's key, oldest first, until one is sealed
-// segment k continuing the verified prefix — and, when segment k+1's first
-// line reads, the one its prev names. The manifest's sha256 is a
+// segment k continuing the verified prefix — and the one whose seal line
+// what follows chains from: segment k+1's first record, or the active's
+// for the last listed segment. The manifest's sha256 is a
 // cross-check only (ManifestDisagrees); the version's position and lock are
 // reported (NotOldest, Unlocked). A sink error is that error with nothing
 // written — "the protected copy is missing" is said only of an exhausted
@@ -106,7 +112,7 @@ func Restore(controlLog string, only []int, r SinkReader, e Event) (RestoreResul
 		v, verr := Read(controlLog, ledger.Locked)
 		if verr == nil {
 			if v.State != StateOpen {
-				return res, fmt.Errorf("control: ledger %s: the active segment is sealed and not yet rotated; run audit seal to complete it — not a restore matter", controlLog)
+				return res, errNotRestoreMatter(controlLog)
 			}
 			if last == 0 {
 				return res, ErrNothingToRestore
@@ -119,6 +125,16 @@ func Restore(controlLog string, only []int, r SinkReader, e Event) (RestoreResul
 		}
 		if k <= last {
 			return res, verr // the write did not clear the verdict: the fault stands
+		}
+		// An incomplete rotation refuses BEFORE any write (§11.2 step 4).
+		// Read cannot say so here — its sealed walk stopped at k before the
+		// active's state was decided — so the active is peeked at directly.
+		incomplete, err := incompleteRotation(resolved, m)
+		if err != nil {
+			return res, err
+		}
+		if incomplete {
+			return res, errNotRestoreMatter(controlLog)
 		}
 		if only != nil && !slices.Contains(only, k) {
 			for _, n := range slices.Sorted(slices.Values(only)) {
@@ -149,6 +165,63 @@ func Restore(controlLog string, only []int, r SinkReader, e Event) (RestoreResul
 		res.Head = head
 	}
 	return res, nil
+}
+
+// errNotRestoreMatter is the refusal on a sealed, not-yet-rotated active:
+// completing a rotation is audit seal's, and a restore writes nothing on
+// such a root.
+func errNotRestoreMatter(controlLog string) error {
+	return fmt.Errorf("control: ledger %s: the active segment is sealed and not yet rotated; run audit seal to complete it — not a restore matter", controlLog)
+}
+
+// incompleteRotation reports whether the active is a sealed segment whose
+// rotation did not complete, decided from the active alone and before any
+// write: state C — the active name refers to the inode of the last segment
+// the manifest lists (a restore of that segment would move the active's own
+// inode aside and the re-read would misdiagnose a replaced active); state B
+// — the active's last complete line is a successful seal (the manifest does
+// not list it yet). A torn or missing last line is no seal: the active's own
+// faults are the next read's to name.
+func incompleteRotation(resolved string, m *Manifest) (bool, error) {
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		return false, err
+	}
+	if sameFile(SegmentPath(resolved, len(m.Segments)), fi) {
+		return true, nil
+	}
+	line, err := lastLine(resolved, fi.Size())
+	if err != nil || line == nil {
+		return false, err
+	}
+	rec, ok := decodeRecord(ledger.Record{Raw: line})
+	return ok && rec.Action == "seal" && rec.Outcome == "success", nil
+}
+
+// lastLine is the last newline-terminated line of the file at path, read
+// from a bounded tail (maxRecordLine); nil when the file is empty, its last
+// line is unterminated, or the line runs past the bound (not a control
+// record).
+func lastLine(path string, size int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	off := max(int64(0), size-maxRecordLine)
+	buf := make([]byte, size-off)
+	if _, err := f.ReadAt(buf, off); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	if !bytes.HasSuffix(buf, []byte("\n")) {
+		return nil, nil
+	}
+	buf = buf[:len(buf)-1]
+	i := bytes.LastIndexByte(buf, '\n')
+	if i < 0 && off > 0 {
+		return nil, nil
+	}
+	return buf[i+1:], nil
 }
 
 // restorable decides whether verr is a fault a restore answers: a fault in
@@ -221,8 +294,10 @@ func restoreSegment(resolved string, v View, m *Manifest, k int, verr error, r S
 		start = ledger.Start{Prev: prev.HeadHash, Base: uint64(prev.HeadSeq)}
 	}
 	entry := m.Segments[k-1]
-	// The manifest's bytes bound the read only when the entry is trusted; a
-	// disagreeing entry (FaultManifest{k}) bounds nothing but the cap.
+	// The read bound is the larger of a trusted manifest figure (bytes, when
+	// the fault is not the entry's own) and the listing's size, under the
+	// cap — so in effect the listing's size, which is the sink's own figure;
+	// the manifest's only ever widens it, never narrows a copy out of reach.
 	bound := int64(maxRestoreBody)
 	var se *SetError
 	if errors.As(verr, &se) && se.Fault != FaultManifest {
@@ -234,7 +309,15 @@ func restoreSegment(resolved string, v View, m *Manifest, k int, verr error, r S
 	if err != nil {
 		return RestoredSegment{}, fmt.Errorf("control: segment %d: %w", k, err)
 	}
-	nextPrev := firstPrev(SegmentPath(resolved, k+1))
+	// The continuity constraint: what follows segment k must chain from the
+	// selected seal line — segment k+1's first record, or the active's for
+	// the last listed segment (an empty active constrains nothing).
+	next, nextPath := fmt.Sprintf("segment %d", k+1), SegmentPath(resolved, k+1)
+	if k == len(m.Segments) {
+		next, nextPath = "the active segment", resolved
+	}
+	local := strings.TrimPrefix(next, "the ") // "the local segment 3" / "the local active segment"
+	nextPrev := firstPrev(nextPath)
 	var data []byte
 	var seg Segment
 	selected, chained := -1, 0
@@ -260,16 +343,22 @@ func restoreSegment(resolved string, v View, m *Manifest, k int, verr error, r S
 			from = fmt.Sprintf("segment %d's head %s", k-1, start.Prev)
 		}
 		if chained > 0 {
-			// The copy is there and chains; what does not continue it is the
-			// local segment after it — not this restore's fault to answer.
-			return RestoredSegment{}, fmt.Errorf("control: segment %d: %d version(s) at %s chain from %s, but segment %d's first record continues none of them; the local segment %d is not this ledger's — run: audit restore control --rebuild --log-id %s", k, chained, key, from, k+1, k+1, v.LogID)
+			// A copy chains, and what should follow it does not continue it.
+			// Which side is wrong cannot be known here: the chaining copy may
+			// not be the seal's own, or the local file after it may have been
+			// replaced. The rebuild's own continuity check decides from the
+			// sink's whole chain.
+			return RestoredSegment{}, fmt.Errorf("control: segment %d: %d version(s) at %s chain from %s, but %s's first record continues none of them — either the chaining copy at the key is not the seal's own (audit verify control's sink pass judges the oldest version) or the local %s was replaced; run: audit restore control --rebuild --log-id %s", k, chained, key, from, next, local, v.LogID)
 		}
 		return RestoredSegment{}, fmt.Errorf("control: segment %d: no version at %s chains from %s; the protected copy is missing", k, key, from)
 	}
 	id := kv.Versions[selected].ID
 	lock, err := r.GetRetention(ctx, key, id)
 	if err != nil {
-		return RestoredSegment{}, fmt.Errorf("control: segment %d: %w", k, err)
+		// Fail closed: the bytes are the chain's, but a lock that cannot be
+		// read is not reported as one; nothing is written. A denied read is
+		// the credential's, as audit verify control's is.
+		return RestoredSegment{}, fmt.Errorf("control: segment %d: the lock on version %s could not be read; nothing was written — if the credential is denied, grant s3:GetObjectRetention (with s3:GetObject and s3:ListBucketVersions) and re-run: %w", k, id, err)
 	}
 	out := RestoredSegment{N: k, Sink: *seg.Sink, VersionID: id, SHA256: seg.SHA256,
 		NotOldest: selected > 0, Unlocked: lock.Mode != "COMPLIANCE", ManifestDisagrees: entry.SHA256 != seg.SHA256}
@@ -299,10 +388,10 @@ func restoreSegment(resolved string, v View, m *Manifest, k int, verr error, r S
 	return out, nil
 }
 
-// maxFirstLine bounds the read of a segment's first line for the
-// continuity check: a control record is at most a few KB (an anchor's proof
-// is capped at 8 KB).
-const maxFirstLine = 64 << 10
+// maxRecordLine bounds the read of one record line — a segment's first for
+// the continuity check, the active's last for the rotation peek: a control
+// record is at most a few KB (an anchor's proof is capped at 8 KB).
+const maxRecordLine = 64 << 10
 
 // firstPrev is the prev of the first record of the file at path, or "" when
 // the file is absent, unreadable or its first line does not decode: then
@@ -313,7 +402,7 @@ func firstPrev(path string) string {
 		return ""
 	}
 	defer func() { _ = f.Close() }()
-	line, err := bufio.NewReader(io.LimitReader(f, maxFirstLine)).ReadBytes('\n')
+	line, err := bufio.NewReader(io.LimitReader(f, maxRecordLine)).ReadBytes('\n')
 	if err != nil {
 		return ""
 	}
