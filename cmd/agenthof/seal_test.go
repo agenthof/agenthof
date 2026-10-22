@@ -674,3 +674,64 @@ func TestAuditSealWormThroughTheWriters(t *testing.T) {
 		t.Fatal("the fixture reached the fake")
 	}
 }
+
+// backdateSealLine rewrites the seal line that ends a state-B active so the
+// record was sealed at sealedAt with its copy due until retainUntil — the
+// shape of a rotation left incomplete until its retention lapsed. Nothing
+// chains from the active's last line yet, so only that line changes, and it
+// is rewritten in place: the segment name is a hard link to the same inode.
+func backdateSealLine(t *testing.T, ctl string, sealedAt, retainUntil time.Time) {
+	t.Helper()
+	raw, err := os.ReadFile(ctl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSuffix(raw, []byte("\n")), []byte("\n"))
+	var rec map[string]any
+	if err := json.Unmarshal(lines[len(lines)-1], &rec); err != nil {
+		t.Fatal(err)
+	}
+	rec["time"] = sealedAt.UTC().Format(time.RFC3339)
+	rec["seal"].(map[string]any)["sink"].(map[string]any)["retain_until"] = retainUntil.UTC().Format(time.RFC3339)
+	line, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines[len(lines)-1] = line
+	if err := os.WriteFile(ctl, append(bytes.Join(lines, []byte("\n")), '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSealCompletesAfterTheRetentionLapsed (§8.4: never a permanent wedge):
+// a worm root left in state B until its recorded retain_until has passed
+// still completes — the sink locks the copy from now, at least the
+// configured retention, and verify holds the lock to the recorded date.
+func TestSealCompletesAfterTheRetentionLapsed(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	_, ctl, f := wormRoot(t)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_sink")
+	code, out := auditSeal(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if code != 1 || !strings.HasSuffix(out, sealStateBLine) {
+		t.Fatalf("hook: %d\n%s", code, out)
+	}
+	now := time.Now()
+	backdateSealLine(t, ctl, now.Add(-72*time.Hour), now.Add(-48*time.Hour))
+	if v, err := control.Read(ctl, ledger.Locked); err != nil || v.State != control.StateSealedNotRotated {
+		t.Fatalf("the backdated root reads as state B: %v %+v", err, v.State)
+	}
+	code, out = auditSeal(t, ctl)
+	if code != 0 || !strings.HasPrefix(out, "completed rotation of segment 1\nprotected: s3-object-lock ") {
+		t.Fatalf("completion after the retention lapsed: %d\n%s", code, out)
+	}
+	key := segmentKey(t, ctl, 1)
+	vs := f.Versions(key)
+	if len(vs) != 1 || vs[0].Mode != "COMPLIANCE" || vs[0].Until.Before(now.Add(24*time.Hour-time.Minute)) {
+		t.Fatalf("the copy is locked from now for the configured retention: %+v", vs)
+	}
+	code, vout := verifyControl(t, "--control-log", ctl)
+	if code != 0 || !strings.Contains(vout, "verified — oldest version v-1 compliance until") || !strings.Contains(vout, "protected copies: 1 (1 verified, 0 missing, 0 mismatch, 0 under-locked, 0 unverifiable)") {
+		t.Fatalf("verify: %d\n%s", code, vout)
+	}
+}

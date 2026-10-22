@@ -307,12 +307,15 @@ type RepairResult struct {
 //
 // Residual risks: a crash between the truncate and the repair append leaves
 // a clean, shorter chain with no taint, the fragment its only evidence; in
-// the post-seal case a crash between the truncate and the rotation leaves
-// state B (audit seal completes it; the repair record is then owed, and a
-// re-run of repair refuses with "run audit seal") and a crash between the
-// rotation and the append leaves a clean rotated root with a fragment and no
-// taint. Making the steps atomic would need a write-new-set-then-rename,
-// beyond V1's scope.
+// the post-seal case a crash between the truncate and the rotation — or, on
+// a sink: worm root, a sink that cannot confirm the protected copy (an
+// outage, a denied read-back) — leaves state B (audit seal completes it;
+// the repair record is then owed and nothing writes it: a re-run of repair
+// refuses with "run audit seal" before the completion and with "not torn"
+// after it) and a crash between the rotation and the append leaves a clean
+// rotated root with a fragment and no taint. Making the steps atomic would
+// need a write-new-set-then-rename, beyond V1's scope; recognizing an owed
+// repair record from the fragment beside the active is reserved.
 func Repair(path string, op identity.Invoker, assertedAs string, witness Witness, sink SinkWriter) (RepairResult, error) {
 	resolved, err := resolveControlLog(path)
 	if err != nil {

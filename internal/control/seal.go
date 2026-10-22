@@ -311,7 +311,12 @@ func rotate(resolved string, v View, sink SinkWriter) (SealResult, error) {
 		if err := linkSegment(resolved, n); err != nil {
 			return SealResult{}, &SealError{Step: SealStepLink, Err: err}
 		}
-		last, _ := decodeRecord(active[len(active)-1])
+		// The View's state says the last record is a successful seal that
+		// decoded; the guard makes a disagreement impossible to dereference.
+		last, ok := decodeRecord(active[len(active)-1])
+		if !ok || last.Seal == nil {
+			return SealResult{}, &SealError{Step: SealStepManifest, Err: errors.New("control: the active's last record does not decode as a seal; run audit verify control")}
+		}
 		whole, size := segmentDigests(active)
 		seg = Segment{N: n, Path: SegmentPath(resolved, n), FirstSeq: v.Active.FirstSeq, HeadSeq: v.Head.Count, HeadHash: v.Head.Hash, SHA256: whole, Bytes: size, Records: len(active), SealedAt: last.Time, Sink: last.Seal.Sink}
 		logID, err := manifestLogID(v)

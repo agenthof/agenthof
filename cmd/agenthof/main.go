@@ -1556,6 +1556,14 @@ func segmentLines(v control.View) []string {
 // chain break and every structural fault are refused with their own remedy
 // and nothing changes — only a damaged tail of the ACTIVE is ever truncated.
 //
+// The root's integrity posture is consumed, not just checked: on a sink:
+// worm root the sink is built from sink_backend exactly as audit seal
+// builds it (the seal's default 2m bound on each call; repair takes no
+// flag) and handed to control.Repair, so a post-seal repair puts the
+// protected copy before it rotates — the one path that would otherwise
+// rotate a worm root past an unprotected segment. A posture this build
+// cannot honour exits 2 before the ledger is looked at.
+//
 // A missing control log is reported plainly rather than as a generic
 // open error, matching cmdAuditControl/cmdAuditVerifyControl. An
 // authentication refusal exits nonzero WITHOUT writing any control
@@ -1630,8 +1638,15 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	// before the ledger is looked at: loading it earlier would print the
 	// root's posture and a root-local path to a caller who is not allowed to
 	// learn either. Nothing between the check above and the read below
-	// writes, so no repair ever runs on a root this build cannot honour.
-	if _, err := loadIntegrity(*controlLog); err != nil {
+	// writes, so no repair ever runs on a root this build cannot honour. The
+	// sink it names is built here (no network yet) and handed to Repair.
+	in, err := loadIntegrity(*controlLog)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "audit repair control: %v\n", err)
+		return 2
+	}
+	sink, err := sinkFor(in, 2*time.Minute)
+	if err != nil {
 		_, _ = fmt.Fprintf(out, "audit repair control: %v\n", err)
 		return 2
 	}
@@ -1667,7 +1682,7 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, lockErr)
 		return 1
 	}
-	res, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness(), nil)
+	res, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness(), sink)
 	unlock()
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)

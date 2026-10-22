@@ -310,6 +310,24 @@ func TestVerifyControlIntegrityVerdictsOutrankAnIncompleteRotation(t *testing.T)
 	}
 }
 
+// appendRecordAfterSeal emulates an older binary appending after the seal
+// line of a state-B root: one raw record, chained by hand.
+func appendRecordAfterSeal(t *testing.T, ctl string) {
+	t.Helper()
+	recs := controlRecords(t, ctl)
+	sum := sha256.Sum256(recs[len(recs)-1].Raw)
+	f, err := os.OpenFile(ctl, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"v":"control/1","seq":` + strconv.Itoa(len(recs)+1) + `,"time":"2026-10-15T10:00:00Z","action":"prune","outcome":"success","invoker":{"subject":"old","issuer":"local","method":"static"},"witness":{"os_user":"o","hostname":"h"},"prev":"` + hex.EncodeToString(sum[:]) + `"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestAuditRepairControlCompletesAPostSealRotation: the command prints the
 // state-B repair line, verify exits 3 (tainted) with the segment line.
 func TestAuditRepairControlCompletesAPostSealRotation(t *testing.T) {
@@ -319,12 +337,7 @@ func TestAuditRepairControlCompletesAPostSealRotation(t *testing.T) {
 	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_manifest")
 	auditSeal(t, ctl)
 	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
-	// An older binary appends after the seal: emulate with a raw chained record.
-	recs := controlRecords(t, ctl)
-	sum := sha256.Sum256(recs[len(recs)-1].Raw)
-	f, _ := os.OpenFile(ctl, os.O_APPEND|os.O_WRONLY, 0)
-	_, _ = f.WriteString(`{"v":"control/1","seq":` + strconv.Itoa(len(recs)+1) + `,"time":"2026-10-15T10:00:00Z","action":"prune","outcome":"success","invoker":{"subject":"old","issuer":"local","method":"static"},"witness":{"os_user":"o","hostname":"h"},"prev":"` + hex.EncodeToString(sum[:]) + `"}` + "\n")
-	_ = f.Close()
+	appendRecordAfterSeal(t, ctl)
 	var out bytes.Buffer
 	code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
 	if code != 0 || !regexp.MustCompile(`(?m)^repaired: moved \d+ bytes \(sha256=[0-9a-f]{64}\) to .*control\.jsonl\.torn-\d+; rotation of segment 1 completed; control ledger tainted\n`).MatchString(out.String()) {
