@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -422,11 +423,13 @@ func wormSealedRoot(t *testing.T) (string, *sinktest.Fake) {
 }
 
 // segmentKey is the fake's key for segment n of ctl's ledger under the
-// "agenthof" prefix.
+// "agenthof" prefix. A set fault (a torn root) still yields the verified
+// prefix, and the genesis is in it.
 func segmentKey(t *testing.T, ctl string, n int) string {
 	t.Helper()
 	v, err := control.Read(ctl, ledger.Locked)
-	if err != nil {
+	var se *control.SetError
+	if err != nil && !errors.As(err, &se) {
 		t.Fatal(err)
 	}
 	id, err := control.GenesisLogID(v.Records)

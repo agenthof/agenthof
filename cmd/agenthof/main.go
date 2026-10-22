@@ -1559,10 +1559,10 @@ func segmentLines(v control.View) []string {
 // The root's integrity posture is consumed, not just checked: on a sink:
 // worm root the sink is built from sink_backend exactly as audit seal
 // builds it (the seal's default 2m bound on each call; repair takes no
-// flag) and handed to control.Repair, so a post-seal repair puts the
-// protected copy before it rotates — the one path that would otherwise
-// rotate a worm root past an unprotected segment. A posture this build
-// cannot honour exits 2 before the ledger is looked at.
+// flag) and handed to control.Repair, so a post-seal repair confirms the
+// protected copy before it truncates and rotates — the one path that would
+// otherwise rotate a worm root past an unprotected segment. A posture this
+// build cannot honour exits 2 before the ledger is looked at.
 //
 // A missing control log is reported plainly rather than as a generic
 // open error, matching cmdAuditControl/cmdAuditVerifyControl. An

@@ -2,6 +2,7 @@ package control
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -266,14 +267,19 @@ type RepairResult struct {
 //     IsTainted finds it in the logical chain;
 //   - the active's verified records hold a successful seal that recomputes
 //     and bytes follow its line — records a writer older than this root's
-//     seals appended (FaultSealNotLast), a torn write, or both: every byte
-//     after the seal line is moved to a fragment, the active truncated at the
-//     end of the seal line (state B exactly), the rotation completed
-//     (CompleteSeal: link, the protected copy when the seal record names
-//     one, manifest, swap — the same commit points; sink is the root's
-//     posture now, nil on the floor), and the
-//     "repair" record appended as the new active's first record, prev the
-//     seal line's hash, seq the seal's + 1. A seal whose payload does not
+//     seals appended (FaultSealNotLast), a torn write, or both: when the
+//     seal record names a protected copy, that copy is confirmed FIRST,
+//     through the sink (the root's posture now; a posture that no longer
+//     names the record's sink refuses here) — the repair's one network step,
+//     on the bytes through the seal line, which the chain fixes; a sink that
+//     cannot confirm it refuses with nothing changed, the ledger still torn,
+//     and a retry re-Puts the same bytes to the same key. Only then every
+//     byte after the seal line is moved to a fragment, the active truncated
+//     at the end of the seal line (state B exactly), the rotation completed
+//     (link, manifest, swap — the same commit points, consuming the copy
+//     already confirmed: no sink call after the truncate), and the "repair"
+//     record appended as the new active's first record, prev the seal
+//     line's hash, seq the seal's + 1. A seal whose payload does not
 //     recompute is a planted seal: refused with that fault before anything
 //     is touched, because completing it would fail after the truncate.
 //
@@ -306,16 +312,17 @@ type RepairResult struct {
 // keeps every pointer writer out of the rotation.
 //
 // Residual risks: a crash between the truncate and the repair append leaves
-// a clean, shorter chain with no taint, the fragment its only evidence; in
-// the post-seal case a crash between the truncate and the rotation — or, on
-// a sink: worm root, a sink that cannot confirm the protected copy (an
-// outage, a denied read-back) — leaves state B (audit seal completes it;
-// the repair record is then owed and nothing writes it: a re-run of repair
-// refuses with "run audit seal" before the completion and with "not torn"
-// after it) and a crash between the rotation and the append leaves a clean
-// rotated root with a fragment and no taint. Making the steps atomic would
-// need a write-new-set-then-rename, beyond V1's scope; recognizing an owed
-// repair record from the fragment beside the active is reserved.
+// a clean, shorter chain with no taint, the fragment its only evidence — the
+// same on a sink: worm root as on the floor, since the copy is confirmed
+// before the truncate and nothing after it touches the sink. In the
+// post-seal case a crash between the truncate and the rotation leaves state
+// B (audit seal completes it; the repair record is then owed and nothing
+// writes it: a re-run of repair refuses with "run audit seal" before the
+// completion and with "not torn" after it) and a crash between the rotation
+// and the append leaves a clean rotated root with a fragment and no taint.
+// Making the steps atomic would need a write-new-set-then-rename, beyond
+// V1's scope; recognizing an owed repair record from the fragment beside the
+// active is reserved.
 func Repair(path string, op identity.Invoker, assertedAs string, witness Witness, sink SinkWriter) (RepairResult, error) {
 	resolved, err := resolveControlLog(path)
 	if err != nil {
@@ -355,18 +362,42 @@ func Repair(path string, op identity.Invoker, assertedAs string, witness Witness
 		}
 		return res, appendRepair(resolved, res, op, assertedAs, witness)
 	}
+	sealed := active[:sealAt+1] // the sealed segment's records, seal line last
+	last, ok := decodeRecord(sealed[len(sealed)-1])
+	if !ok || last.Seal == nil {
+		return RepairResult{}, fmt.Errorf("control: ledger %s: the seal to complete does not decode as a seal; run audit verify control", path)
+	}
+	// The protected copy, confirmed BEFORE anything local is touched: the
+	// one fallible network step of the repair, on bytes the chain fixes
+	// (the records through the seal line) under the record's own block, so
+	// a sink that cannot confirm it leaves the ledger exactly as found —
+	// torn, nothing owed — and a retry re-Puts the same bytes to the same
+	// key (Existed, never occupied). The rotation below consumes this
+	// receipt and makes no sink call of its own.
+	var pre *confirmedCopy
+	if block := last.Seal.Sink; block != nil {
+		if sink == nil || sink.Kind() != block.Kind || sink.URL() != block.URL {
+			return RepairResult{}, fmt.Errorf("control: ledger %s: segment was sealed for a protected copy at %s %s; integrity.yaml no longer names it — restore that posture to repair", path, block.Kind, block.URL)
+		}
+		whole, _ := segmentDigests(sealed)
+		rcpt, perr := sink.Put(context.Background(), *block, segmentBytes(sealed), whole)
+		if perr != nil {
+			return RepairResult{}, fmt.Errorf("control: ledger %s: the protected copy could not be confirmed; nothing was changed — retry when the sink is reachable: %w", path, perr)
+		}
+		pre = &confirmedCopy{block: *block, whole: whole, receipt: rcpt}
+	}
 	var offset int64
-	for _, r := range active[:sealAt+1] {
+	for _, r := range sealed {
 		offset += int64(len(r.Raw)) + 1
 	}
-	res, err := moveTailAside(resolved, offset, active[:sealAt+1])
+	res, err := moveTailAside(resolved, offset, sealed)
 	if err != nil {
 		return RepairResult{}, err
 	}
 	if crashAt("repair_after_truncate_before_rotate") {
 		return RepairResult{}, errStoppedByTestHook
 	}
-	seal, err := CompleteSeal(resolved, sink)
+	seal, err := completeSealWith(resolved, sink, pre)
 	if err != nil {
 		return RepairResult{}, fmt.Errorf("control: moved %d bytes after the seal line aside and truncated the active at the seal, but completing the rotation failed: %w; run audit seal to complete it — the fragment file is the evidence of the repair", res.FragmentLen, err)
 	}

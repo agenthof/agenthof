@@ -248,7 +248,16 @@ func SealActive(controlLog string, e Event, sink SinkWriter) (SealResult, error)
 	if crashAt("after_seal_before_manifest") {
 		return SealResult{}, &SealError{Step: SealStepManifest, Err: errStoppedByTestHook}
 	}
-	return rotate(resolved, v, sink)
+	return rotate(resolved, v, sink, nil)
+}
+
+// confirmedCopy is a protected copy a post-seal repair confirmed BEFORE the
+// destructive truncate, so the rotation can take it without a second sink
+// call.
+type confirmedCopy struct {
+	block   SealSink // the seal record's sink block (the Put's authority/key)
+	whole   string   // the sealed segment's whole-digest the Put confirmed
+	receipt PutReceipt
 }
 
 // CompleteSeal finishes a rotation found in state B (the protected copy
@@ -260,6 +269,12 @@ func SealActive(controlLog string, e Event, sink SinkWriter) (SealResult, error)
 // active has nothing to complete. sink is the root's posture now; what the
 // record was sealed for is rotate's to compare.
 func CompleteSeal(controlLog string, sink SinkWriter) (SealResult, error) {
+	return completeSealWith(controlLog, sink, nil)
+}
+
+// completeSealWith is CompleteSeal with a copy the caller already confirmed
+// (Repair's post-seal case; nil for audit seal), handed down to rotate.
+func completeSealWith(controlLog string, sink SinkWriter, pre *confirmedCopy) (SealResult, error) {
 	f, v, err := lockActive(controlLog, false, func(f *os.File, s ledger.Start) ([]ledger.Record, ledger.Head, error) {
 		return ledger.VerifyReader(f, s)
 	})
@@ -275,7 +290,7 @@ func CompleteSeal(controlLog string, sink SinkWriter) (SealResult, error) {
 	}
 	resolved := v.Active.Path
 	sweepTemps(resolved)
-	res, err := rotate(resolved, v, sink)
+	res, err := rotate(resolved, v, sink, pre)
 	res.Completed = true
 	return res, err
 }
@@ -291,12 +306,19 @@ func CompleteSeal(controlLog string, sink SinkWriter) (SealResult, error) {
 // confirmed protected copy, or carries no block. State C makes no sink
 // call: the manifest's listing is the confirmation.
 //
+// pre is a copy the caller confirmed before it changed anything local (a
+// post-seal repair, which must make no sink call between its truncate and
+// its repair record): when it names this record's block and the digest of
+// the bytes read here, the Put is skipped and its receipt taken — no sink
+// call. Anything else falls through to the Put; a confirmation is never
+// trusted for bytes it did not cover. nil is every other caller.
+//
 // The record is the authority for what a segment was sealed FOR: a block
 // completes only through a sink of the same kind and URL (nil or another
 // refuses, state B stands — flipping integrity.yaml is not an escape); no
 // block completes without an upload whatever the posture now says, since
 // the chained seal line cannot be retrofitted.
-func rotate(resolved string, v View, sink SinkWriter) (SealResult, error) {
+func rotate(resolved string, v View, sink SinkWriter, pre *confirmedCopy) (SealResult, error) {
 	var n int
 	var seg Segment
 	var sunk *SealSink // the block a Put confirmed on this run; nil in state C and on the floor
@@ -327,16 +349,20 @@ func rotate(resolved string, v View, sink SinkWriter) (SealResult, error) {
 			if sink == nil || sink.Kind() != block.Kind || sink.URL() != block.URL {
 				return SealResult{}, &SealError{Step: SealStepSink, Err: fmt.Errorf("segment %d was sealed for a protected copy at %s %s; integrity.yaml no longer names it — restore that posture to complete the rotation", n, block.Kind, block.URL)}
 			}
-			if crashAt("after_seal_before_sink") {
-				return SealResult{}, &SealError{Step: SealStepSink, Err: errStoppedByTestHook}
-			}
-			if rcpt, err = sink.Put(context.Background(), *block, segmentBytes(active), whole); err != nil {
-				return SealResult{}, &SealError{Step: SealStepSink, Err: err}
+			if pre != nil && pre.block.Kind == block.Kind && pre.block.URL == block.URL && pre.whole == whole {
+				rcpt = pre.receipt
+			} else {
+				if crashAt("after_seal_before_sink") {
+					return SealResult{}, &SealError{Step: SealStepSink, Err: errStoppedByTestHook}
+				}
+				if rcpt, err = sink.Put(context.Background(), *block, segmentBytes(active), whole); err != nil {
+					return SealResult{}, &SealError{Step: SealStepSink, Err: err}
+				}
+				if crashAt("after_sink_before_manifest") {
+					return SealResult{}, &SealError{Step: SealStepManifest, Err: errStoppedByTestHook}
+				}
 			}
 			sunk = block
-			if crashAt("after_sink_before_manifest") {
-				return SealResult{}, &SealError{Step: SealStepManifest, Err: errStoppedByTestHook}
-			}
 		}
 		m := Manifest{V: ManifestVersion, LogID: logID}
 		for _, s := range append(v.Sealed, seg) {
