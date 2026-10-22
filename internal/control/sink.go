@@ -26,7 +26,7 @@ type SealSink struct {
 	URL         string    `json:"url"`          // sink_backend.url as configured, one trailing slash trimmed
 	Key         string    `json:"key"`          // "<prefix>/<log_id>/seg-NNNNNN"
 	Mode        string    `json:"mode"`         // "compliance"
-	RetainUntil time.Time `json:"retain_until"` // UTC, whole seconds
+	RetainUntil time.Time `json:"retain_until"` // UTC, whole seconds; the floor the copy's lock holds to, not its exact date
 }
 
 // MaxSinkKeyLen caps a seal's sink key, judged at Append beside the URL cap
@@ -37,7 +37,7 @@ const MaxSinkKeyLen = 1024
 // PutReceipt is what a sink reports back from a Put.
 type PutReceipt struct {
 	VersionID   string
-	RetainUntil time.Time // as the sink reports it (not before the locator's)
+	RetainUntil time.Time // the lock as the sink reports it: never before the record's date, often after it
 	Existed     bool      // confirmed without writing: the key's oldest version already was this segment
 }
 
@@ -52,13 +52,17 @@ type SinkWriter interface {
 	Prepare(ctx context.Context, s SealSink) error
 	// Locator is pure: the sink block the seal record will carry.
 	Locator(logID string, n int, sealedAt time.Time) SealSink
-	// Put writes data under s, locked as s says, and confirms it by reading
-	// the lock back on the version it wrote. It lists the key first: an
-	// empty key is written; a key whose oldest version hashes to data (and
-	// is locked as s says) is confirmed without a new PUT; a key occupied by
-	// any version that does NOT hash to data is refused — never written on
-	// top — so the oldest version at a key is always the seal's own. sha256
-	// is data's hex digest, which the sink must have stored.
+	// Put writes data under s, locked in s's mode to at least s's date, and
+	// confirms it by reading the lock back on the version it wrote. It lists
+	// the key first: an empty key is written; a key whose oldest version
+	// hashes to data (and is locked to at least s's date) is confirmed
+	// without a new PUT; a key occupied by any version that does NOT hash to
+	// data is refused — never written on top — so the oldest version at a
+	// key is always the seal's own. sha256 is data's hex digest, which the
+	// sink must have stored. The lock may be longer than s says: a sink
+	// writes the later of s.RetainUntil and its own retention from now, so a
+	// record whose date has passed (a rotation left incomplete past its
+	// retention) still completes — a store refuses a lock date in the past.
 	Put(ctx context.Context, s SealSink, data []byte, sha256 string) (PutReceipt, error)
 }
 

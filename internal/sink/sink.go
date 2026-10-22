@@ -32,9 +32,9 @@ type S3Options struct {
 	Region    string                                        // "" → read from an S3 regional amazonaws.com host; another AWS host is refused; a non-AWS host signs for us-east-1
 	Client    *http.Client                                  // nil → fresh; always copied, redirects disabled on the copy
 	Keys      func(context.Context) (broker.KeyPair, error) // resolved per request; required
-	Retention time.Duration                                 // Locator: retain_until = sealedAt + Retention; required
+	Retention time.Duration                                 // Locator: retain_until = sealedAt + Retention; Put: the lock is at least now + Retention; required
 	Timeout   time.Duration                                 // per store call; 0 → 60s
-	Now       func() time.Time                              // nil → time.Now; x-amz-date and the scope
+	Now       func() time.Time                              // nil → time.Now; x-amz-date, the scope, and the lock a Put writes
 }
 
 // defaultTimeout bounds each store call when S3Options.Timeout is unset.
@@ -51,6 +51,7 @@ type S3 struct {
 	region    string
 	retention time.Duration
 	timeout   time.Duration
+	now       func() time.Time
 	store     objectStore
 }
 
@@ -81,17 +82,21 @@ func NewS3(rawURL string, o S3Options) (*S3, error) {
 		return nil, err
 	}
 	store := newSigV4Store(parsed.Scheme+"://"+parsed.Host, parsed.Host, bucket, region, o.Client, o.Keys, o.Now)
-	s := newS3(u, bucket, strings.Trim(prefix, "/"), store, o.Retention, o.Timeout)
+	s := newS3(u, bucket, strings.Trim(prefix, "/"), store, o.Retention, o.Timeout, o.Now)
 	s.region = region
 	return s, nil
 }
 
-// newS3 is the logic over any store; the tests hand in an in-memory one.
-func newS3(u, bucket, prefix string, store objectStore, retention, timeout time.Duration) *S3 {
+// newS3 is the logic over any store; the tests hand in an in-memory one and
+// a fixed clock.
+func newS3(u, bucket, prefix string, store objectStore, retention, timeout time.Duration, now func() time.Time) *S3 {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	return &S3{url: u, bucket: bucket, prefix: prefix, retention: retention, timeout: timeout, store: store}
+	if now == nil {
+		now = time.Now
+	}
+	return &S3{url: u, bucket: bucket, prefix: prefix, retention: retention, timeout: timeout, now: now, store: store}
 }
 
 // parseBackendURL admits an absolute http or https URL with a host and no
@@ -226,14 +231,23 @@ func (s *S3) Prepare(ctx context.Context, loc control.SealSink) error {
 	return nil
 }
 
-// Put writes data under loc, locked as loc says, and confirms it by reading
-// the lock back. The order: list the exact key; every non-marker version
-// there must hash to data (any that does not refuses the seal — no PUT);
-// if one does, the OLDEST is the seal's own: its lock is read back and the
-// receipt says Existed. An empty key is written with the lock headers; the
-// version the store minted must then list as the key's OLDEST and has its
-// lock read back. A write with no version id, one that is not the oldest,
-// a refused read-back, or a lesser lock is unconfirmed.
+// Put writes data under loc, locked to at least loc's date, and confirms it
+// by reading the lock back. The order: list the exact key; every non-marker
+// version there must hash to data (any that does not refuses the seal — no
+// PUT; one that cannot be read back is unconfirmed); if one does, the
+// OLDEST is the seal's own: its lock is read back and the receipt says
+// Existed. An empty key is written with the lock headers; the version the
+// store minted must then list as the key's OLDEST and has its lock read
+// back. A write with no version id, one that is not the oldest, a refused
+// read-back, or a lesser lock is unconfirmed.
+//
+// The lock a write carries is the later of loc.RetainUntil and now plus the
+// configured retention (lockUntil). The record's date is fixed when the seal
+// line is written; a store refuses a date that has passed, so a seal left in
+// state B past its own retention could otherwise never complete (§8.4: never
+// a permanent wedge). The read-back still holds the lock to loc's date —
+// a longer lock is what verify accepts too — so the guarantee stands: the
+// copy is protected for at least the recorded retention.
 func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256hex string) (control.PutReceipt, error) {
 	if loc.Mode != "compliance" {
 		return control.PutReceipt{}, fmt.Errorf("sink: mode %q is not compliance; this sink writes compliance locks only", loc.Mode)
@@ -255,7 +269,7 @@ func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256h
 			return control.PutReceipt{}, occupiedErr(loc.Key)
 		}
 		if err != nil {
-			return control.PutReceipt{}, err
+			return control.PutReceipt{}, unconfirmed(err)
 		}
 		if !bytes.Equal(body, data) {
 			return control.PutReceipt{}, occupiedErr(loc.Key)
@@ -274,7 +288,7 @@ func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256h
 	}
 
 	cctx, cancel := s.bounded(ctx)
-	id, err := s.store.putLocked(cctx, loc.Key, data, "COMPLIANCE", loc.RetainUntil)
+	id, err := s.store.putLocked(cctx, loc.Key, data, "COMPLIANCE", s.lockUntil(loc))
 	cancel()
 	if err != nil {
 		return control.PutReceipt{}, err
@@ -303,14 +317,30 @@ func (s *S3) Put(ctx context.Context, loc control.SealSink, data []byte, sha256h
 	return control.PutReceipt{VersionID: id, RetainUntil: l.RetainUntil}, nil
 }
 
-// unconfirmed is the text for a lock read-back that failed on the seal's
-// own version — on the run that wrote it or on a re-run that found it: the
-// copy is there, unconfirmed. A 403 names the IAM remedy, since a PUT-only
-// policy fails here every time until it is fixed.
+// lockUntil is the date a write is locked to: the later of loc's date and
+// now plus the configured retention, whole seconds UTC like Locator's.
+func (s *S3) lockUntil(loc control.SealSink) time.Time {
+	floor := s.now().UTC().Truncate(time.Second).Add(s.retention)
+	if floor.After(loc.RetainUntil) {
+		return floor
+	}
+	return loc.RetainUntil
+}
+
+// unconfirmed is the text for a read-back that failed on the seal's own
+// version — on the run that wrote it or on a re-run that found it: the copy
+// is there, unconfirmed. A 403 names the IAM remedy, since a policy missing
+// one of the read permissions fails here every time until it is fixed: a
+// PUT-only policy on the lock read-back, a policy without GetObject on the
+// re-run's byte compare.
 func unconfirmed(err error) error {
 	var se *StatusError
 	if errors.As(err, &se) && se.Status == http.StatusForbidden {
-		return fmt.Errorf("protected copy written but NOT confirmed: the credential cannot read the object's retention; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (%w)", err)
+		what := "the object's retention"
+		if se.Op == "GetObject" {
+			what = "the object back"
+		}
+		return fmt.Errorf("protected copy written but NOT confirmed: the credential cannot read %s; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (%w)", what, err)
 	}
 	return fmt.Errorf("protected copy written but NOT confirmed: %w", err)
 }

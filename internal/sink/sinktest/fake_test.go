@@ -189,6 +189,18 @@ func TestFakeRefusals(t *testing.T) {
 			t.Error("a refused PUT stored a version")
 		}
 	})
+	t.Run("past retain-until", func(t *testing.T) {
+		// S3: "The retain until date must be in the future" — a lock PUT
+		// whose date has passed is InvalidArgument and stores nothing.
+		f := sinktest.NewFake(t)
+		past := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+		if st, _, body := lockPut(t, f, "k", []byte("x"), func(h map[string]string) { h["X-Amz-Object-Lock-Retain-Until-Date"] = past }); st != 400 || code(t, body) != "InvalidArgument" {
+			t.Errorf("lock PUT with a past date: %d %s", st, body)
+		}
+		if len(f.Versions("k")) != 0 {
+			t.Error("a refused PUT stored a version")
+		}
+	})
 	t.Run("signature", func(t *testing.T) {
 		f := sinktest.NewFake(t)
 		if st, _, body := do(t, f, http.MethodGet, "?object-lock", nil, nil, true); st != 403 || code(t, body) != "SignatureDoesNotMatch" {

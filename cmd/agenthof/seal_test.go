@@ -452,8 +452,10 @@ func fakeHost(f *sinktest.Fake) string {
 
 // TestAuditSealWormPrintsProtected: the protected: line, immediately before
 // sealed:, names the record's block and the sink's receipt; the fake holds
-// exactly one version at the key whose bytes are the sealed file; the
-// block's retain_until is the lock the fake holds.
+// exactly one version at the key whose bytes are the sealed file; the lock
+// the fake holds is at least the block's retain_until (the sink locks to
+// the later of the record's date and its retention from now, so a second
+// boundary between the record and the PUT may make it a second longer).
 func TestAuditSealWormPrintsProtected(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	_, ctl, f := wormRoot(t)
@@ -468,7 +470,7 @@ func TestAuditSealWormPrintsProtected(t *testing.T) {
 		t.Fatalf("versions at %s: %+v", key, vs)
 	}
 	v, err := control.Read(ctl, ledger.Locked)
-	if err != nil || v.Sealed[0].Sink == nil || !v.Sealed[0].Sink.RetainUntil.Equal(vs[0].Until) || v.Sealed[0].Sink.Key != key {
+	if err != nil || v.Sealed[0].Sink == nil || vs[0].Until.Before(v.Sealed[0].Sink.RetainUntil) || v.Sealed[0].Sink.Key != key {
 		t.Fatalf("%v %+v vs %+v", err, v.Sealed[0].Sink, vs[0])
 	}
 }

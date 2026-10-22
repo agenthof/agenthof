@@ -21,7 +21,7 @@ var (
 )
 
 func newLogic(store objectStore) *S3 {
-	return newS3("https://s3.eu-central-1.amazonaws.com/worm/agenthof", "worm", "agenthof", store, 7*365*24*time.Hour, time.Minute)
+	return newS3("https://s3.eu-central-1.amazonaws.com/worm/agenthof", "worm", "agenthof", store, 7*365*24*time.Hour, time.Minute, func() time.Time { return fixedNow })
 }
 
 func locatorFor(s *S3) control.SealSink { return s.Locator(logID, 1, fixedNow) }
@@ -43,7 +43,7 @@ func TestLogicLocatorAndPrefix(t *testing.T) {
 		t.Error("retain_until is not whole seconds UTC")
 	}
 	// No prefix: the key starts at the log id.
-	bare := newS3("https://h/worm", "worm", "", newMemStore(), time.Hour, time.Minute)
+	bare := newS3("https://h/worm", "worm", "", newMemStore(), time.Hour, time.Minute, nil)
 	if got := bare.Locator(logID, 3, fixedNow).Key; got != logID+"/seg-000003" {
 		t.Errorf("bare key = %q", got)
 	}
@@ -135,6 +135,42 @@ func TestLogicPutWritesAndConfirms(t *testing.T) {
 	if rcpt, err := s.Put(ctx, loc, segData, segHash); err != nil || !rcpt.Existed || !rcpt.RetainUntil.Equal(fixedUntil.Add(24*time.Hour)) {
 		t.Errorf("longer lock: %+v %v", rcpt, err)
 	}
+}
+
+// TestLogicPutLocksToTheLaterDate: the lock a write carries is the later of
+// the locator's date and now plus the configured retention — a record whose
+// date has passed is written with a future lock (a store refuses a past
+// one), and a record further out than that keeps its own date.
+func TestLogicPutLocksToTheLaterDate(t *testing.T) {
+	ctx := context.Background()
+	t.Run("recorded date passed", func(t *testing.T) {
+		m := newMemStore()
+		s := newLogic(m)
+		loc := locatorFor(s)
+		loc.RetainUntil = fixedNow.Add(-time.Hour).Truncate(time.Second)
+		rcpt, err := s.Put(ctx, loc, segData, segHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := m.objects[loc.Key][0]; !v.lock.RetainUntil.Equal(fixedUntil) || v.lock.Mode != "COMPLIANCE" {
+			t.Errorf("stored lock: %+v", v.lock)
+		}
+		if !rcpt.RetainUntil.Equal(fixedUntil) || rcpt.Existed {
+			t.Errorf("receipt: %+v", rcpt)
+		}
+	})
+	t.Run("recorded date further out", func(t *testing.T) {
+		m := newMemStore()
+		s := newLogic(m)
+		loc := locatorFor(s)
+		loc.RetainUntil = fixedUntil.Add(48 * time.Hour)
+		if _, err := s.Put(ctx, loc, segData, segHash); err != nil {
+			t.Fatal(err)
+		}
+		if v := m.objects[loc.Key][0]; !v.lock.RetainUntil.Equal(loc.RetainUntil) {
+			t.Errorf("stored lock: %+v", v.lock)
+		}
+	})
 }
 
 func TestLogicPutRefusesOccupiedKey(t *testing.T) {
@@ -232,6 +268,21 @@ func TestLogicPutUnconfirmed(t *testing.T) {
 		}
 		if len(m.objects[loc.Key]) != 1 {
 			t.Error("the PUT did not land")
+		}
+	})
+	t.Run("object read denied on a re-run", func(t *testing.T) {
+		m := newMemStore()
+		s := newLogic(m)
+		loc := locatorFor(s)
+		m.plant(loc.Key, segData, "COMPLIANCE", fixedUntil)
+		m.fail = map[string]error{"get": &StatusError{Op: "GetObject", Status: 403, Host: "127.0.0.1:1", Code: "AccessDenied"}}
+		_, err := s.Put(ctx, loc, segData, segHash)
+		want := "protected copy written but NOT confirmed: the credential cannot read the object back; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 AccessDenied from 127.0.0.1:1 (GetObject))"
+		if err == nil || err.Error() != want {
+			t.Errorf("err = %v", err)
+		}
+		if m.count("put") != 0 {
+			t.Error("wrote on a key it could not read")
 		}
 	})
 	t.Run("retention failed otherwise", func(t *testing.T) {
@@ -409,7 +460,7 @@ func TestLogicReader(t *testing.T) {
 
 func TestLogicTimeoutPerCall(t *testing.T) {
 	b := &blockingStore{}
-	s := newS3("https://h/worm", "worm", "", b, time.Hour, 20*time.Millisecond)
+	s := newS3("https://h/worm", "worm", "", b, time.Hour, 20*time.Millisecond, nil)
 	start := time.Now()
 	err := s.Prepare(context.Background(), s.Locator(logID, 1, fixedNow))
 	if !errors.Is(err, context.DeadlineExceeded) {

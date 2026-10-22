@@ -236,6 +236,34 @@ func TestPutConfirms(t *testing.T) {
 	}
 }
 
+// TestPutLocksFromNowWhenTheRecordedDateHasPassed (§8.4, never a permanent
+// wedge): a seal left in state B past its own retention is re-Put with a
+// lock from the sink's clock — the later of the record's date and now plus
+// the configured retention — so the store, which refuses a date in the
+// past, takes it; the record's date is still the floor the read-back holds
+// the lock to.
+func TestPutLocksFromNowWhenTheRecordedDateHasPassed(t *testing.T) {
+	f := sinktest.NewFake(t)
+	s := newS3(t, f, "/agenthof")
+	loc := s.Locator(logID, 1, fixedNow)
+	loc.RetainUntil = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	rcpt, err := s.Put(ctx, loc, segData, segHash)
+	if err != nil {
+		t.Fatalf("Put after the recorded date: %v", err)
+	}
+	if rcpt.VersionID != "v-1" || rcpt.Existed || !rcpt.RetainUntil.Equal(fixedUntil) {
+		t.Errorf("receipt: %+v", rcpt)
+	}
+	if vs := f.Versions(loc.Key); len(vs) != 1 || vs[0].Mode != "COMPLIANCE" || !vs[0].Until.Equal(fixedUntil) {
+		t.Errorf("stored lock: %+v", vs)
+	}
+	// A re-run finds the copy under the longer lock: confirmed, no PUT.
+	rcpt, err = s.Put(ctx, loc, segData, segHash)
+	if err != nil || !rcpt.Existed || !rcpt.RetainUntil.Equal(fixedUntil) {
+		t.Errorf("re-run: %+v %v", rcpt, err)
+	}
+}
+
 func TestPutRefusesOccupiedKey(t *testing.T) {
 	f := sinktest.NewFake(t)
 	s := newS3(t, f, "/agenthof")
@@ -297,6 +325,26 @@ func TestPutUnconfirmed(t *testing.T) {
 		_, err = s.Put(ctx, loc, segData, segHash)
 		if err == nil || err.Error() != want {
 			t.Errorf("re-run err = %v", err)
+		}
+		if vs := f.Versions(loc.Key); len(vs) != 1 {
+			t.Errorf("the re-run wrote: %+v", vs)
+		}
+	})
+	t.Run("object read denied on a re-run", func(t *testing.T) {
+		// A policy with PUT, List and GetObjectRetention but no GetObject
+		// confirms a fresh write (nothing is read back whole) and fails the
+		// re-run's byte compare: the §8.4 remedy is named, no second PUT.
+		f := sinktest.NewFake(t)
+		s := newS3(t, f, "/agenthof")
+		loc := s.Locator(logID, 1, fixedNow)
+		if _, err := s.Put(ctx, loc, segData, segHash); err != nil {
+			t.Fatal(err)
+		}
+		f.Deny = map[string]bool{"GetObject": true}
+		_, err := s.Put(ctx, loc, segData, segHash)
+		want := "protected copy written but NOT confirmed: the credential cannot read the object back; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run (status 403 AccessDenied from " + hostOf(f) + " (GetObject))"
+		if err == nil || err.Error() != want {
+			t.Errorf("err = %v", err)
 		}
 		if vs := f.Versions(loc.Key); len(vs) != 1 {
 			t.Errorf("the re-run wrote: %+v", vs)

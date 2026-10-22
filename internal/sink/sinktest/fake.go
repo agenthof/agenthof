@@ -2,9 +2,10 @@
 // the worm sink uses, faithful in the ways a hand-rolled client is wrong:
 // it verifies SigV4 signatures with its own canonicalization of the request
 // AS RECEIVED, checks Content-MD5, x-amz-checksum-sha256 and the payload
-// hash against the body, keeps versions newest first with delete markers,
-// pages ListObjectVersions with both markers, and answers each endpoint's
-// XML in the 2006-03-01 namespace. Imported only by tests, so it never
+// hash against the body, refuses a lock whose retain-until date is not in
+// the future, keeps versions newest first with delete markers, pages
+// ListObjectVersions with both markers, and answers each endpoint's XML in
+// the 2006-03-01 namespace. Imported only by tests, so it never
 // compiles into the binary (the anchortest precedent).
 package sinktest
 
@@ -422,6 +423,11 @@ func (f *Fake) put(w http.ResponseWriter, r *http.Request, key string, body []by
 		}
 		var err error
 		if until, err = time.Parse(time.RFC3339Nano, untilRaw); err != nil {
+			f.fail(w, http.StatusBadRequest, "InvalidArgument")
+			return
+		}
+		// S3: "The retain until date must be in the future".
+		if !until.After(time.Now()) {
 			f.fail(w, http.StatusBadRequest, "InvalidArgument")
 			return
 		}
