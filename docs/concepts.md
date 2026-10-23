@@ -291,9 +291,11 @@ indefinitely, as the compliance record, not run ephemera — nothing is pruned. 
 sealed segment is a file like any other: whoever can write the control root can
 still rewrite it, and the chain detects a dropped, duplicated, reordered or
 inconsistently edited segment, not a consistent rewrite of the whole set — the
-same bound as the single file, closed the same way, by a head kept off the
-machine or an anchor, or, under `sink: worm`, by the sealed segment's protected
-copy. Its invoker
+same bound as the single file, narrowed the same way: by a head kept off the
+machine or an anchor, and, under `sink: worm`, by the sink, which catches such a
+rewrite only where the rewritten set no longer accounts for what the sink holds
+(the active segment, and any segment sealed before the root declared the sink,
+have no protected copy). Its invoker
 subjects are personal data like any other identity the ledger records, so
 the self-hosting operator is the data controller for it, same as for the
 run ledger.
