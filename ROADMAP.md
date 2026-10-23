@@ -209,8 +209,9 @@ The governed core is real and runnable today:
   plainly: between anchors the head rests on the chain alone (cadence is the
   operator's cron); independence holds only when the log's key and address do
   not both come from the root being verified; and a public-good log exposes
-  opaque head hashes and their timing. A non-erasable storage sink for the
-  whole ledger (`sink: worm`/`external`) and `anchor: signed` remain reserved.
+  opaque head hashes and their timing. `sink: worm` (below) keeps a protected
+  copy of each sealed segment; a non-erasable storage sink for the whole
+  ledger (`sink: external`) and `anchor: signed` remain reserved.
 
 - **Sealing and rotating the control ledger** — `agenthof audit seal` closes the
   active log into a sealed segment and opens a fresh one, so a long-running
@@ -228,8 +229,15 @@ The governed core is real and runnable today:
   file whoever owns the host can still rewrite — the chain detects a dropped,
   duplicated, reordered, or inconsistently edited segment, not a consistent
   rewrite of the whole set. Pinning sealed segments into write-once storage
-  (`sink: worm`/`external`) remains reserved; this is the foundation it builds
-  on.
+  ships as `sink: worm`, built on this foundation: each seal also writes the
+  sealed segment's exact bytes to S3 Object Lock storage the operator brings,
+  under a compliance-mode retention lock the provider enforces, and does not
+  complete until that copy is confirmed; `audit verify control` checks every
+  protected copy and `audit restore control` puts a damaged sealed segment
+  back from it. The bound is stated plainly: the active segment and every
+  local file stay ordinary files, and the copy is protected for the retention
+  period alone, by the provider's compliance mode. `sink: external` remains
+  reserved.
 
 ## Next
 

@@ -114,9 +114,16 @@ Pre-release, and the governed core is real and runnable today:
   on the next run, never left broken. The limit is stated plainly: a sealed
   segment is a regular file whoever owns the host can still rewrite — the chain
   detects a dropped, duplicated, reordered or inconsistently edited segment, not
-  a consistent rewrite of the whole set. Pinning sealed segments into a
-  non-erasable storage sink (`sink: worm`/`external`) remains reserved; this is
-  the foundation it builds on (see
+  a consistent rewrite of the whole set. Declaring `sink: worm` builds on that
+  foundation: each seal also writes the sealed segment's exact bytes to
+  write-once storage you bring (S3 Object Lock, compliance mode), under a
+  retention lock the provider enforces, and does not complete until that copy
+  is confirmed; `audit verify control` fails on a copy that is missing,
+  under-locked or holds other bytes, and `audit restore control` puts a
+  damaged sealed segment back from it. The bound is stated too: the active
+  segment and every local file stay ordinary files, and the copy is protected
+  for the retention period alone, by the provider's compliance mode, not by
+  Agenthof. `sink: external` remains reserved (see
   [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md));
 - incident investigation — `agenthof investigate` merges the control log and
   every run log into one filterable, time-ordered timeline (human or `--json`),

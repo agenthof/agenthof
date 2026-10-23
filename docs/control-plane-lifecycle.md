@@ -443,8 +443,11 @@ recorded as its own `anchor` event — and `audit verify control` checks every
 recorded anchor against the chain, failing (exit 6) only on a head the chain no
 longer reproduces, or a stored proof that fails under a key that verified, and
 reporting an unreachable log or a rotated key as unverifiable (exit 7), never
-as tampering. A posture naming
-a still-reserved sink or anchor (`worm`, `external`, `signed`) is one the build
+as tampering. Setting `sink: worm` is honoured too: `audit seal` then
+writes each sealed segment's exact bytes to the write-once sink the posture
+names (S3 Object Lock, compliance mode) and does not complete until that copy
+is confirmed (the life of a sealed segment, below). A posture naming
+a still-reserved sink or anchor (`external`, `signed`) is one the build
 cannot honour, so every control write — `apply`, a `registry` flip, `config
 vouch`, `gateway provision`, `runs prune`, `audit repair control`, `audit
 anchor`, `audit seal` — refuses before it opens the ledger, and `serve` refuses to start; a running server
@@ -1000,11 +1003,13 @@ the `anchor` record with its proof, `audit control`'s rendering of it, and
 `audit verify control`'s per-anchor verdicts with `--expect-head K:H`,
 `--anchor-key`, `--offline` and `--anchor-timeout`, and the anchor facts and
 offline verdict on `anchor` events in `investigate`'s timeline and
-`investigate/1` document, locally and over `serve`. Reserved, and refused by
-name today if you write them: an RFC 3161 timestamp-authority backend (`kind:
-rfc3161`), the storage sinks (`sink: worm`, `sink: external`) and `anchor:
-signed`. Reserved, and simply not there yet: a periodic or `serve`-driven
-cadence. Only shipped behavior is a guarantee.
+`investigate/1` document, locally and over `serve`; and, beside the anchor,
+the `sink: worm` posture — a protected copy of each sealed segment, described
+with the life of a sealed segment below. Reserved, and refused by name today
+if you write them: an RFC 3161 timestamp-authority backend (`kind: rfc3161`),
+the `sink: external` storage sink and `anchor: signed`. Reserved, and simply
+not there yet: a periodic or `serve`-driven cadence. Only shipped behavior is
+a guarantee.
 
 ## The life of a sealed segment
 
@@ -1264,11 +1269,17 @@ manifest, reading and appending across the set as one chain in every reader
 and writer (the CLI and `serve`), completion of an interrupted rotation by the
 next `audit seal`, `audit verify control`'s per-segment lines and exit 8,
 `audit repair control`'s completion of a rotation that had bytes after its
-seal, and the distinct cause for an older binary's fresh genesis. Reserved:
-pinning sealed segments into a non-erasable storage sink (`sink: worm`/
-`external` — refused by name today; a sealed segment is what such a sink would
-receive), pruning sealed segments under a retention rule, and sealing a ledger
-whose genesis carries no `log_id`. Only shipped behavior is a guarantee.
+seal, the distinct cause for an older binary's fresh genesis, and — under
+`sink: worm` — the seal's protected copy of each sealed segment, written to
+S3 Object Lock storage under a compliance-mode retention lock and confirmed
+before the rotation completes, with `audit verify control`'s verdict on every
+copy and `audit restore control` to put a damaged sealed segment back from
+it; the active segment and every local file stay ordinary files, and the copy
+is protected for the retention period alone, by the provider's compliance
+mode. Reserved: pinning the whole ledger into a non-erasable `sink: external` storage sink
+(refused by name today), pruning sealed segments under a retention rule, and
+sealing a ledger whose genesis carries no `log_id`. Only shipped behavior is a
+guarantee.
 
 ## The config_hash bridge to runs
 
@@ -1297,8 +1308,8 @@ adopted. Because both carry the same key:
 | default-deny authorization of every control action against the `control:` grants of the **installed** configuration (what the last successful `apply` installed; the first apply bootstraps); the authorization read verifies the snapshot's bytes against the pointer and requires the control ledger to vouch for that pointer as its last install — an unvouched pointer is a recorded `not_on_record` refusal (`audit repair control` excepted: bytes verified, ledger not consulted); refusals recorded (repair: printed); `config vouch` puts an unrecorded install on record — bytes untouched, any identity, always recorded | per-object ownership; pruning of the snapshot store; a byte-verification verdict in `audit control` / `audit verify control` (today they compare pointer and ledger, never bytes); `config vouch` over the API |
 | `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read, on the authorization read, and on the kill switch's re-snapshot read; the execution read executes only an install the control ledger records as its last (an `apply`, a kill-switch flip, or a `config vouch`) — a pointer it does not vouch for is a recorded refusal, a damaged ledger refuses runs until repaired, a held configuration lock a retryable busy | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
 | `gateway provision` and `runs prune` authorized against the installed roles (`provision`, `prune`) and recorded; prune spares the control ledger by name and by identity | `provision`/`prune` over the API; a structured prune record; `detail` in `investigate/1` |
-| hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts; `anchor: tlog` external anchoring of the head (`audit anchor` pins it into a transparency log, `audit verify control` checks every recorded anchor — exit 6 only for a genuine content mismatch (a head the chain no longer reproduces, or a proof that fails under a verified key), exit 7 when unverifiable; a still-reserved sink or anchor is refused) | a non-erasable storage sink for the whole ledger (`sink: worm`/`external`) and `anchor: signed` |
-| sealing and rotating the control ledger: `audit seal` closes the active segment into a sealed file (`<log>.seg-NNNNNN`) and opens the next, recorded as an authorized `seal` action and listed in an advisory `<log>.segments` manifest; the segments and the active read, verify and append as one chain with one `seq`; an interrupted rotation is completed by the next `audit seal`, never left broken (`audit verify control` exit 8 while it is owed); `audit repair control` recovers a torn tail of the active and, when bytes landed after a seal, moves them aside and completes that rotation — a sealed segment is never repaired in place; `--if-larger-than` for a cron; a never-sealed ledger is unchanged | pinning sealed segments into the non-erasable sink (`sink: worm`/`external`) — this is the foundation it builds on; pruning sealed segments under a retention rule (the manifest reserves the keys); sealing a ledger whose genesis predates `log_id` (refused today, single file) |
+| hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts; `anchor: tlog` external anchoring of the head (`audit anchor` pins it into a transparency log, `audit verify control` checks every recorded anchor — exit 6 only for a genuine content mismatch (a head the chain no longer reproduces, or a proof that fails under a verified key), exit 7 when unverifiable; a still-reserved sink or anchor — `sink: external`, `anchor: signed` — is refused) | a non-erasable storage sink for the whole ledger (`sink: external`) and `anchor: signed` |
+| sealing and rotating the control ledger: `audit seal` closes the active segment into a sealed file (`<log>.seg-NNNNNN`) and opens the next, recorded as an authorized `seal` action and listed in an advisory `<log>.segments` manifest; the segments and the active read, verify and append as one chain with one `seq`; an interrupted rotation is completed by the next `audit seal`, never left broken (`audit verify control` exit 8 while it is owed); `audit repair control` recovers a torn tail of the active and, when bytes landed after a seal, moves them aside and completes that rotation — a sealed segment is never repaired in place; `--if-larger-than` for a cron; a never-sealed ledger is unchanged; `sink: worm`: each seal also writes the sealed segment's exact bytes to S3 Object Lock storage (compliance mode) and does not complete until the copy is confirmed — the seal record names the copy and its lock date, `audit verify control` fails on a copy that is missing, under-locked or holds other bytes (exit 9; unreachable is exit 10, never tampering), `audit restore control` puts a damaged sealed segment back from it; the active and every local file stay ordinary files | pinning the whole ledger into a non-erasable `sink: external` storage sink; pruning sealed segments under a retention rule (the manifest reserves the keys); sealing a ledger whose genesis predates `log_id` (refused today, single file) |
 | three identities per action (invoker / asserted_as / witness) | agent-to-IdP federation for the invoker's authority |
 | `--expect-head` off-machine head check | continuous/remote attestation of the head |
 | `config_hash` join to runs (`audit <run-id>`, `investigate`) | SIEM export / multi-org investigation at scale |
