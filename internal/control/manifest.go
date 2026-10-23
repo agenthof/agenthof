@@ -21,10 +21,12 @@ import (
 const ManifestVersion = "segments/1"
 
 // Manifest is <controlLog>.segments: the ordered, non-empty list of sealed segments with
-// their Starts, heads and content hashes. It is an advisory index and the
-// list a future worm sink ships; every value in it is recomputed from the
-// files on every read and any disagreement refuses the read. It is never
-// edited in place: written whole by temp+fsync+rename.
+// their Starts, heads and content hashes. It is an advisory index; every
+// value in it is recomputed from the files on every read and any
+// disagreement refuses the read. On a sink: worm root it is written only
+// after the segment's protected copy is confirmed, so a listed segment has
+// one (or its seal record carries no sink block). It is never edited in
+// place: written whole by temp+fsync+rename.
 type Manifest struct {
 	V        string          `json:"v"`
 	LogID    string          `json:"log_id"`
@@ -99,6 +101,13 @@ func ParseManifest(data []byte, resolved string) (Manifest, error) {
 	return m, nil
 }
 
+// manifestEntry is the manifest's line for a verified sealed segment — what
+// a seal writes at rotation and what a rebuild recomputes from the fetched
+// bytes. File is derived from the ordinal, never from the Segment's Path.
+func manifestEntry(resolved string, s Segment) ManifestEntry {
+	return ManifestEntry{N: s.N, File: filepath.Base(SegmentPath(resolved, s.N)), FirstSeq: s.FirstSeq, HeadSeq: s.HeadSeq, HeadHash: s.HeadHash, SHA256: s.SHA256, Bytes: s.Bytes, SealedAt: s.SealedAt}
+}
+
 // loadManifest reads the manifest beside resolved: (nil, nil) when absent;
 // a *SetError{FaultManifest, Segment 0} when present and unusable.
 func loadManifest(resolved string) (*Manifest, error) {
@@ -131,6 +140,17 @@ func segmentDigests(records []ledger.Record) (whole string, size int64) {
 		size += int64(len(r.Raw)) + 1
 	}
 	return hex.EncodeToString(h.Sum(nil)), size
+}
+
+// segmentBytes is the exact file bytes segmentDigests hashes — each record's
+// Raw plus '\n' — assembled: what a sink stores for a sealed segment, and
+// what hashes to the manifest's sha256. Nil for no records.
+func segmentBytes(records []ledger.Record) []byte {
+	var out []byte
+	for _, r := range records {
+		out = append(append(out, r.Raw...), '\n')
+	}
+	return out
 }
 
 // sealContentDigest is the seal payload's content_sha256: sha256 of every
@@ -207,15 +227,17 @@ func replaceFile(dest, pattern string, data []byte) error {
 	return nil
 }
 
-// sweepTemps removes manifest and swap temps an earlier crash left beside the
-// ledger: <base>.segments-* and .<base>.next-*, matched by name prefix on a
+// sweepTemps removes manifest, swap and restore temps an earlier crash left
+// beside the ledger: <base>.segments-*, .<base>.next-* and .<base>.restore-*,
+// matched by name prefix on a
 // directory listing, never a glob (a path with [ or * in it is pattern syntax
 // to filepath.Glob and would sweep nothing). Best effort: a temp that cannot
 // be removed is harmless — siblingNames never reads it as a segment and the
 // next write makes its own. Call it only while holding the active's exclusive
 // lock: every writer of these temps holds that lock, so a temp seen under it
 // is stale by construction; a sweep outside it could remove a concurrent
-// seal's live temp and fail that seal's rename.
+// seal's live temp and fail that seal's rename. A <base>.replaced-* file is
+// never a temp: it is the evidence a restore kept.
 func sweepTemps(resolved string) {
 	dir, base := filepath.Dir(resolved), filepath.Base(resolved)
 	entries, err := os.ReadDir(dir)
@@ -224,7 +246,7 @@ func sweepTemps(resolved string) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, base+".segments-") || strings.HasPrefix(name, "."+base+".next-") {
+		if strings.HasPrefix(name, base+".segments-") || strings.HasPrefix(name, "."+base+".next-") || strings.HasPrefix(name, "."+base+".restore-") {
 			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}

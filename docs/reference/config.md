@@ -873,10 +873,11 @@ authorized against no role, permitted for any identity the host resolves (see
 | `agenthof config vouch [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--as`, `--groups`, `--token` |
 | `agenthof registry enable\|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | same |
 | `agenthof audit control [--control-log <path>]` | `--control-log` |
-| `agenthof audit verify control [--control-log <path>] [--expect-head <hex>\|<seq>:<hex>] [--anchor-key <path>] [--offline] [--anchor-timeout <dur>]` | `--control-log`, `--expect-head`, `--anchor-key`, `--offline`, `--anchor-timeout` |
+| `agenthof audit verify control [--control-log <path>] [--expect-head <hex>\|<seq>:<hex>] [--anchor-key <path>] [--integrity <path>] [--offline] [--anchor-timeout <dur>] [--sink-timeout <dur>]` | `--control-log`, `--expect-head`, `--anchor-key`, `--integrity`, `--offline`, `--anchor-timeout`, `--sink-timeout` |
 | `agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--config`, `--as`, `--groups`, `--token` |
+| `agenthof audit restore control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--segment N]... [--integrity <path>] [--sink-timeout <dur>] [--rebuild --log-id <id>]` | `--control-log`, `--config`, `--as`, `--groups`, `--token`, `--segment`, `--integrity`, `--sink-timeout`, `--rebuild`, `--log-id` |
 | `agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout <dur>]` | `--control-log`, `--as`, `--groups`, `--token`, `--timeout` |
-| `agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>]` | `--control-log`, `--as`, `--groups`, `--token`, `--if-larger-than` |
+| `agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>] [--sink-timeout <dur>]` | `--control-log`, `--as`, `--groups`, `--token`, `--if-larger-than`, `--sink-timeout` |
 | `agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]` | `--control-log`, `--as`, `--groups`, `--token`, `--admin-base` |
 | `agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--older-than`, `--log-dir`, `--artifact-dir`, `--control-log`, `--as`, `--groups`, `--token` |
 | `agenthof investigate [--since <dur\|ts>] [--until <dur\|ts>] [--invoker <id>] [--agent <name>] [--outcome <value>] [--run <run-id>] [--config-hash <sha256:…>] [--json] [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>]` | `--since`, `--until`, `--invoker`, `--agent`, `--outcome`, `--run`, `--config-hash`, `--json`, `--log-dir`, `--control-log`, `--anchor-key` |
@@ -912,6 +913,34 @@ against it afterwards**: every seal leaves an empty active segment that a binary
 without sealing would start a fresh ledger in; the next read by a current binary
 reports it (`does not chain from … a writer older than this root's seals`) and
 names the remedy.
+
+A sealed segment is never repaired in place. On a `sink: worm` root, `audit
+restore control` puts one back from the protected copy its seal record names:
+the version selected is the one the chain proves, and whatever was under the
+segment's name is kept beside the ledger as
+`control.jsonl.replaced-NNNNNN-<timestamp>` — the evidence of what was there,
+never removed by Agenthof (the `.replaced-` name, like the restore's temp
+`.control.jsonl.restore-*`, never begins with `control.jsonl.seg-`, so no
+reader mistakes it for a segment). It runs under the `repair` grant and, like
+repair, authorizes without consulting the ledger it is about to restore; unlike
+repair it taints nothing — nothing is truncated, and every byte written is one
+the manifest and the next segment already commit to — and it is recorded as a
+`restore` event. `audit restore control --rebuild --log-id <id>` is the
+whole-set form, for a root whose sealed segments and manifest are gone,
+damaged beyond the manifest, or tidied short: it lists the ledger's keys in
+the sink, fetches the oldest version at each and verifies the entire chain
+before writing anything — a key with no version, or a copy that does not
+chain, refuses the whole rebuild and changes nothing — then writes the
+segments that are absent or differ (a differing file is kept as
+`control.jsonl.replaced-NNNNNN-<timestamp>`), the manifest recomputed from
+the fetched bytes (an old one that differs is kept as
+`control.jsonl.replaced-segments-<timestamp>`), and an empty active segment
+when none exists. The sink is read before the ledger is locked, so other
+readers are not held off while the copies are fetched. `--log-id` is required: the ledger's identity names the
+sink's prefix, and when the local set is gone the operator is its only honest
+source (the `sealed:`/`control head:` lines shipped off the box, `audit
+control`'s header, or the sink's own listing). A present active segment is
+left as it is; records that were only ever in the active are not in the sink.
 
 The **installed-configuration store** lives beside it: `<dir>/installed/`
 (default `.agenthof/installed/`), holding one snapshot directory per applied
@@ -993,17 +1022,18 @@ beside it too: `<dir>/integrity.yaml`, operator-written — Agenthof never write
 it. It has two knobs — `sink` (where the ledger's bytes live) and `anchor`
 (what pins its head) — and, absent, means the floor: `sink: local`, `anchor:
 none`, which is exactly the hash-chained local file the control ledger is
-today. Two postures are honored: the floor, and `anchor: tlog` with an
-`anchor_backend` naming a transparency log. Every other value is reserved
-and refused by name:
+today. Three postures are honored: the floor; `anchor: tlog` with an
+`anchor_backend` naming a transparency log; and `sink: worm` with a
+`sink_backend` naming an S3-compatible bucket with Object Lock, which the two
+knobs let you layer. Every other value is reserved and refused by name:
 
 | key | accepted | reserved — refused |
 |---|---|---|
-| `sink` | absent, `""`, `local` | `worm`, `external` (and `duplicate`, which when it ships is written as the `duplicate:` list, not as the sink) |
+| `sink` | absent, `""`, `local`, `worm` | `external` (and `duplicate`, which when it ships is written as the `duplicate:` list, not as the sink) |
 | `anchor` | absent, `""`, `none`, `tlog` | `signed` |
 | `duplicate` | absent, `null`, `[]` | any entry — a list of further sinks written in parallel with `sink` |
-| `sink_backend` | absent, `null`, `{}` | any set field |
-| `anchor_backend` | with `anchor: tlog`: `kind` absent or `transparency-log`, `url` **required** — an absolute `http(s)` URL with no credentials, query or fragment (the Sigstore public-good log is `https://rekor.sigstore.dev`; it is never defaulted, so nothing is published to a service you did not name) — and an optional `credential` (direct bearer via `token_env`, or `grant_type: client_credentials`) | `kind: rfc3161`; any other kind; `grant_type: token_exchange`; a `credential_source` other than `static_env`; any set field while `anchor` is `none` |
+| `sink_backend` | with `sink: worm`: `kind: s3-object-lock`, `url` **required** — an absolute `http(s)` URL with no credentials, query or fragment whose path names the bucket and an optional prefix (`https://s3.<region>.amazonaws.com/<bucket>[/<prefix>]`; `http://` is accepted so a private store or MinIO works) — `mode: compliance` **required**, `retention` **required** (`<n>d` or `<n>y`, from `1d` to `100y`; a year is a fixed 365 days), an optional `region` (lower-case letters, digits and `-`; derived from an `amazonaws.com` host when absent), and a `credential` with `credential_source: static_env` (or absent), `client_auth: sigv4`, and `client_id_env` and `client_secret_env` naming the access key id and secret access key (plus an optional `token_env` for a session token) | any `kind` other than `s3-object-lock` (the other cloud-store kinds are reserved); `mode: governance` (a privileged user can lift a governance-mode lock) or any mode other than `compliance`; a `retention` outside the grammar or the bounds; `grant_type`; `issuer`, `token_endpoint`, `scope` or `audience`; a `credential_source` other than `static_env`; any set field unless `sink` is `worm` |
+| `anchor_backend` | with `anchor: tlog`: `kind` absent or `transparency-log`, `url` **required** — an absolute `http(s)` URL with no credentials, query or fragment (the Sigstore public-good log is `https://rekor.sigstore.dev`; it is never defaulted, so nothing is published to a service you did not name) — and an optional `credential` (direct bearer via `token_env`, or `grant_type: client_credentials`) | `kind: rfc3161`; any other kind; `grant_type: token_exchange`; a `credential_source` other than `static_env`; `region`, `mode` or `retention` (those belong to a `sink_backend`); any set field while `anchor` is `none` |
 
 A backend's `credential` is the same broker-reference vocabulary a tool
 resource's credential uses — `credential_source`, `token_env`, `grant_type`,
@@ -1086,7 +1116,8 @@ The same invoker-identity flags `agenthof run` takes. `--as` asserts an
 invoker identity (default: the OS user); `--groups` is a comma-separated
 list recorded alongside it — self-asserted, not verified — and the groups
 these commands authorize against: `apply`, `registry enable|disable`,
-`audit repair control`, `gateway provision`, and `runs prune` each require
+`audit repair control`, `audit restore control` (under the `repair` grant),
+`gateway provision`, and `runs prune` each require
 that some role **of the installed configuration** (before any apply: of
 `--config`; `gateway provision` and `runs prune` have no such fallback and are
 refused while nothing is installed) name one of the invoker's
@@ -1095,8 +1126,8 @@ groups in `allowed_groups` **and** list that operation in its
 caller no role grants is refused: `apply` and `registry enable|disable`
 record it as a `refused` event with reason `not_authorized` (apply's carries
 the `config_hash` of the config it tried to apply); `audit repair control`
-prints it and records nothing, since the only ledger to write to may be the
-torn one. Before any of them authorizes, the installed pointer must be the
+and `audit restore control` print it and record nothing, since the only ledger
+to write to may be the damaged one. Before any of them authorizes, the installed pointer must be the
 install the control ledger records last; if it is not, the action is refused
 with reason `not_on_record` — recorded, with the proposal's hash for `apply`
 and the installed hash for `gateway provision` — and the text names `config
@@ -1270,6 +1301,15 @@ It does not apply to completing an interrupted seal. A cron can pair it with
 anchoring, `audit seal --if-larger-than 50m && audit anchor`, which anchors a
 rotation's final head whenever one happens.
 
+### `--sink-timeout`
+
+`audit seal`, `audit verify control` and `audit restore control`. The bound on
+each call to the sink a `sink: worm` posture names — listing the key, the
+write of a sealed segment's protected copy, the read-back of its lock. The
+default is `2m` for `audit seal` and `audit restore control` and `60s` for
+`audit verify control`; a value outside Go's duration grammar is a usage error
+(exit 2). It has no effect on a root whose posture names no sink.
+
 ### Exit codes
 
 `agenthof apply` / `agenthof registry enable|disable`:
@@ -1311,23 +1351,63 @@ rotation's final head whenever one happens.
 | `2` | Usage error |
 
 `agenthof audit verify control` computes every verdict, prints every line,
-then exits by precedence **1, 6, 3, 4, 5, 7, 8**:
+then exits by precedence **1, 6, 9, 3, 4, 5, 7, 10, 8**:
 
 | Exit | Meaning |
 |---|---|
-| `1` | No control log at that path yet, another open/IO failure, a torn/broken chain, or a segment-set fault (a torn or broken sealed segment, a boundary that does not chain, a missing or unexpected segment file, a manifest that disagrees with the files, a seal record that is not its segment's last), each named with its seq and remedy — checked first and alone; no anchor is examined |
+| `1` | No control log at that path yet, another open/IO failure, a torn/broken chain, or a segment-set fault (a torn or broken sealed segment, a boundary that does not chain, a missing or unexpected segment file, a manifest that disagrees with the files, a seal record that is not its segment's last), each named with its seq and remedy — checked first and alone; no anchor and no protected copy is examined |
 | `6` | **Anchor mismatch** — a definitive content disagreement for at least one anchor the chain records: the chain no longer reproduces the recorded head at the recorded position (a rewritten root); or, under the trusted log key, the stored entry names another hash, its leaf hash is not the recorded entry, the inclusion proof fails, the checkpoint names another tree or its signature is invalid; or the log serves a different body for the recorded entry. Every anchor is still listed |
+| `9` | **Protected copy mismatch** — a definitive disagreement between the local set and the sink for at least one sealed segment: the key the seal record names holds no version (`MISSING`); the oldest version at that key does not hold the local segment's bytes (`LOCAL MISMATCH` — the seal wrote the oldest, so a later matching version is not the copy; the local file was altered); the version holds the bytes but is locked less strongly or less long than the seal recorded (`UNDER-LOCKED`: `GOVERNANCE`, unlocked, or a compliance lock ending before the recorded date, while that date has not passed); or the sink holds an object under this ledger's prefix that no local segment accounts for — an ordinal past the last local segment, a local segment with no sink block at that ordinal, or one whose oldest version does not match — which is the local set having lost or replaced what the sink still holds. Every copy is still listed, with `agenthof audit restore control --segment N` as the remedy where one applies |
 | `3` | Tainted — a `repair` event has ever been appended |
 | `4` | `--expect-head` did not hold (either form) |
 | `5` | The installed pointer (`installed/current` beside the log) does not name the last recorded install (the last successful `apply`, kill-switch flip, or `config vouch`) — an install whose event was never appended or whose record was lost (`config vouch` is the remedy) — or the pointer itself is damaged (unreadable or malformed). Only the pointer is read, never the snapshot directory, so a matching pointer whose snapshot bytes were deleted is still exit 0 |
 | `7` | **Anchor unverifiable** — no verdict could be reached for at least one anchor and none mismatched: the log unreachable, slow, redirecting, or answering anything but the entry; a log key the verifier does not hold (the proof's signer is not the pinned key, or the served key is not the one recorded at anchor time); no key at all (`--offline` without a pin); `anchor.pub`/`--anchor-key` missing, malformed or not ECDSA P-256; a proof format or backend kind this build does not read. Never tamper detected: retry, or pin a key, as the line says |
-| `8` | **Rotation not completed** — a seal was recorded but its rotation did not finish (the manifest update or the swap into the fresh active is still owed). Every control writer refuses until `agenthof audit seal` completes it. Not an integrity verdict: the chain is intact, and it is last in precedence (**1, 6, 3, 4, 5, 7, 8**), so every other verdict outranks it |
-| `0` | None of the above. On a root that has sealed, one `segment k:` line per sealed segment and an `active:` line print before the pointer and anchor lines |
+| `10` | **Protected copy unverifiable** — no verdict could be reached for at least one protected copy, or for the listing of this ledger's prefix, and none was definitive: the sink unreachable, slow, redirecting, refusing (`status 403 … from <host> (<operation>)`) or answering anything but the object, its versions or its retention, or answering an incomplete one (a listing and an object that disagree on size, a retention document with a date but no mode); an object sealed while the verification ran (the ledger is re-read under its lock before any object past the verified set can count — `sealed during this verification; re-run`); no sink credential configured (a `sink: local` posture while seal records carry sink blocks); the posture (`integrity.yaml` beside the ledger, or the `--integrity` file) missing, unreadable, not parsing or not validating; a sink kind this build does not read; or a seal record naming a sink other than the one the posture names (pass the posture that names it). Never tamper detected, and never exit 2: a reader never exits 2 on root state |
+| `8` | **Rotation not completed** — a seal was recorded but its rotation did not finish (the manifest update or the swap into the fresh active is still owed). Every control writer refuses until `agenthof audit seal` completes it. Not an integrity verdict: the chain is intact, and it is last in precedence (**1, 6, 9, 3, 4, 5, 7, 10, 8**), so every other verdict outranks it. A protected copy the sink already holds for the segment whose rotation did not complete is reported as pending, not as unaccounted for |
+| `0` | None of the above. On a root that has sealed, one `segment k:` line per sealed segment and an `active:` line print, then the protected-copy block, before the pointer and anchor lines |
 | `2` | Usage, including an `--expect-head` outside its grammar |
 
 The anchor lines print together after every anchor is checked, so against an
 unreachable log the command is silent for up to `--anchor-timeout` per anchor
 before printing — the whole run is bounded by anchors × calls × timeout. `--anchor-timeout` bounds each anchor's log call (default 30s); a non-positive value (`0` or negative) uses that default — to skip the log entirely, pass `--offline`.
+
+On a root that has sealed, the protected-copy block follows the segment
+lines. For each sealed segment whose seal record carries a sink block it
+prints `  protected copy: s3-object-lock <url> key=<key>` and, beneath it,
+the verdict: `verified — oldest version <id> compliance until <date> (bytes
+match)` (with `; N later versions differ: written over, the protected copy
+stands` when something was written over it — the oldest version is the copy,
+by construction), `MISSING`, `LOCAL MISMATCH`, `UNDER-LOCKED` (exit 9) or
+`unverifiable — <cause>` (exit 10); `expiring — verified; retention ends in N
+days` (within 30 days) and `unlocked — verified; the retention period ended
+<date>` are information, as is `key has a delete marker; the locked versions
+stand`. A segment sealed before the root declared `sink: worm` prints
+`protected copy: none (sealed before sink: worm)`. The sink's side is then
+listed: every object under this ledger's prefix must be the copy of a local
+segment that carries a sink block; `sink: key <key> is not accounted for by
+this ledger's local segments — segment N missing or replaced locally` is
+exit 9. The summary reads `protected copies: N (a verified, b missing, c
+mismatch, d under-locked, e unverifiable); sink holds H objects for this
+ledger, A accounted for` — or `sink not listed — <cause>` when the listing
+could not be done (exit 10); on a sealed root with no `sink: worm` posture and
+no sink block on record it reads `protected copies: none (if this root is
+meant to keep protected copies — integrity.yaml sink: worm — run audit seal)`.
+A never-sealed root prints no block and reads no posture.
+
+The sink pass is the one place a reader consults the integrity posture,
+because the sink needs what the chain cannot carry: a read credential, and
+an address that does not come from the root being verified (a re-forged root
+can drop every sink block). It reads `sink_backend` from `integrity.yaml`
+beside the ledger by default, and the summary then ends
+`(sink address taken from the root being verified — not independent; pass --integrity)`;
+`--integrity <path>` names a copy of the posture held off the box instead,
+and the suffix disappears — the same independence `--anchor-key` gives the
+anchor pass. Each segment's address still comes from its own seal
+record; the posture's address must name the same sink, or the copy is
+unverifiable. The credential is used for reads only. `--sink-timeout` bounds
+each call to the sink (default 60s). `--offline` skips the pass entirely —
+it is network by nature — and prints `protected copies: not checked (--offline)`;
+the exit code is unaffected.
 
 `agenthof audit anchor`:
 
@@ -1350,9 +1430,9 @@ near these.
 
 | Exit | Meaning |
 |---|---|
-| `0` | Sealed and recorded: a `seal` `success` event is the last record of the closed segment, the segment is linked under its name, the manifest is updated, and a fresh active is in place. Prints `sealed: segment N seq=A..B sha256=<file> (<name>)` and `control head: seq=B sha256=<head>`. Or completed an interrupted seal, printing `completed rotation of segment N` first. Or, with `--if-larger-than`, the active is not larger than the threshold: printed, nothing recorded, nothing changed |
-| `1` | A recorded `refused` (no role grants `seal`; a token that failed verification; nothing installed; a pointer the ledger does not vouch for) or `error` (the installed pointer cannot be honored — malformed, snapshot gone, or bytes that do not hash as the pointer, with the hatch naming `installed/current` — or the installed-configuration lock cannot be taken for an IO reason); or, not recorded: the ledger is busy, torn or broken (the repair hint for a torn active; a sealed-segment, boundary, missing-segment or manifest fault names its own remedy), the active segment is empty (`nothing to seal`), the filesystem has no hard links (`nothing sealed`, judged before anything is recorded), the control ledger's genesis carries no `log_id` — a root written before ledgers carried one — which cannot be sealed and remains a single file (refused before anything is linked or recorded; the root stays writable), a seal that was recorded but whose manifest update or swap did not finish (`sealed; rotation NOT completed — re-run: agenthof audit seal`; nothing is lost, and the next run completes it), or a refused completion of an interrupted seal (printed, not recorded) |
-| `2` | Usage: bad flags; `--if-larger-than` outside its grammar; `--token` without `AGENTHOF_OIDC_ISSUER`; an `integrity.yaml` that cannot be read or does not validate |
+| `0` | Sealed and recorded: a `seal` `success` event is the last record of the closed segment, the segment is linked under its name, the manifest is updated, and a fresh active is in place. Prints `sealed: segment N seq=A..B sha256=<file> (<name>)` and `control head: seq=B sha256=<head>`. On a `sink: worm` root the seal also wrote the sealed segment's exact bytes to the sink and read its lock back before the rotation completed: a `protected: <kind> <url> key=<key> version=<id> <mode> until <date>` line precedes `sealed:`, naming the version the sink confirmed and the lock as the sink reports it (never shorter than the seal record's date, often longer). Or completed an interrupted seal, printing `completed rotation of segment N` first — a completion that found the protected copy already confirmed at the key writes nothing again and marks its `protected:` line `(already confirmed)`. Or, with `--if-larger-than`, the active is not larger than the threshold: printed, nothing recorded, nothing changed |
+| `1` | A recorded `refused` (no role grants `seal`; a token that failed verification; nothing installed; a pointer the ledger does not vouch for) or `error` (the installed pointer cannot be honored — malformed, snapshot gone, or bytes that do not hash as the pointer, with the hatch naming `installed/current` — or the installed-configuration lock cannot be taken for an IO reason); or, not recorded: the ledger is busy, torn or broken (the repair hint for a torn active; a sealed-segment, boundary, missing-segment or manifest fault names its own remedy), the active segment is empty (`nothing to seal`), the filesystem has no hard links (`nothing sealed`, judged before anything is recorded), the control ledger's genesis carries no `log_id` — a root written before ledgers carried one — which cannot be sealed and remains a single file (refused before anything is linked or recorded; the root stays writable), or — on a `sink: worm` root — the sink's preflight refused (after authorization, before anything is linked or recorded: the credential does not resolve, the bucket does not answer or `does not have Object Lock enabled`, or the seal's own key already holds a version — `key <key> is occupied by a version, and a fresh seal's key must be empty` — which is either a segment this ledger sealed before that the local set no longer lists, the remedy being `audit verify control` and then `audit restore control --rebuild --log-id <id>` to put the sealed set back, or a foreign object at the key; a compliance-locked version cannot be removed either way); a seal that was recorded but whose protected copy was not confirmed — the cause, then `sealed; protected copy NOT confirmed — rotation NOT completed; re-run: agenthof audit seal` — the sink call failed; the copy was `written but NOT confirmed` because the credential cannot read it back (`grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run`), or because another writer landed a version at the key first (`the key was written concurrently`); on a re-run, `already at the key but NOT confirmed` for the same read-back causes; or the sink answered `without a version id` (versioning is off, so nothing was locked) — nothing is lost, the rotation is owed (`audit verify control` exit 8, every control writer refuses meanwhile), and the next `audit seal` completes it, confirming the copy already at the key without writing again — except a key `occupied by a version that is not this segment`, which the seal never writes on top of: an unlocked foreign version a credential with delete may remove before the re-run; a compliance-locked one blocks the key until its retention ends; a seal that was recorded but whose manifest update or swap did not finish (`sealed; rotation NOT completed — re-run: agenthof audit seal`; nothing is lost, and the next run completes it), or a refused completion of an interrupted seal (printed, not recorded) |
+| `2` | Usage: bad flags; `--if-larger-than` or `--sink-timeout` outside its grammar; `--token` without `AGENTHOF_OIDC_ISSUER`; an `integrity.yaml` that cannot be read or does not validate; a sink this build cannot construct (judged before any network and before authorization; nothing recorded) |
 
 `agenthof audit repair control`:
 
@@ -1361,6 +1441,14 @@ near these.
 | `0` | A torn tail was repaired: the damaged bytes were moved to a `<log>.torn-<timestamp>` fragment, the live log truncated to its last valid record, and a `repair` event appended — the ledger is now tainted; or records were appended after a successful seal in the active (a writer older than this root's seals): they were moved to the fragment, the rotation completed, and the `repair` event appended as the new active's first record (`rotation of segment K completed`) — tainted all the same |
 | `1` | No control log at that path; the ledger is not torn (already clean, or broken at a well-formed record mid-file — only a torn tail is repairable this way); `--token` failed verification; no role grants `repair` to the invoker, the installed pointer cannot be read or its snapshot's bytes do not hash as the pointer (repair verifies the bytes but, by design, does not ask the ledger it is repairing to vouch for the pointer), or — nothing installed — `--config` cannot be read (all printed, never recorded); or another IO error. A fault in a sealed segment is never repaired in place (its own text names the remedy, such as restoring it from a copy); an active that does not chain from the last sealed head names its cause; a sealed, not-yet-rotated active is completed by `agenthof audit seal`, not repaired, and a repair interrupted after its truncate leaves that same state; records after a seal in a ledger whose genesis carries no `log_id` are not moved aside, since the rotation that would follow cannot complete (`cannot be sealed and remains a single file`; nothing is truncated). None of these write a control event, since the ledger being repaired may itself be the file in question |
 | `2` | Usage error |
+
+`agenthof audit restore control`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | A sealed segment the manifest lists — missing, torn, broken, not chaining from the segment before it, or disagreeing with its manifest entry — was put back from the protected copy at the key its seal record names. The versions at the key are read oldest first and the one selected is the one the chain proves: its records chain from the previous segment's head (the genesis for segment 1), its last line is a successful seal that recomputes, and the next segment's first record chains from it — never the manifest's figure. The bytes found under the segment's name are kept beside the ledger as `<log>.replaced-NNNNNN-<timestamp>` (never deleted: the evidence of what was there), the set is read again and verifies clean, and a `restore` `success` event is appended per segment restored. Prints `restored: segment N from <kind> <url> version=<id> sha256=<file> (<replaced name>)` — `(nothing was there)` when the file was missing — then the head line; beneath it, when it applies: the selected version is not the oldest at the key (`audit verify control` will report `LOCAL MISMATCH` until the sink is examined), or it was restored from an `UNLOCKED` version (the sink's lock is not what the posture claims). A restore taints nothing: nothing is truncated, and every byte written is one the chain already commits to. With `--rebuild --log-id <id>`: every sealed segment the sink holds for the ledger was fetched (the oldest version at each key) and the whole chain verified before anything was written; segments absent or differing locally were written (a differing file kept as `<log>.replaced-NNNNNN-<timestamp>`), the manifest recomputed and rewritten when it differed (the old one kept as `<log>.replaced-segments-<timestamp>`), an empty active created when none existed, the set read clean, and one `restore` `success` event appended saying what was verified, written and replaced — appended even when nothing needed writing, since a set verified against the sink is a visible act. Prints `segment N: UNDER-LOCKED in the sink` for any copy whose lock is not `COMPLIANCE` to at least the date its seal record names (reported, never refused: the bytes are still the chain's); a line for a key above the last rebuilt segment that holds only a delete marker (every version at it was removed; nothing is rebuilt from it) and for each local segment beyond the rebuilt set — kept as a trailing entry when it verifies from the rebuilt head, else dropped from the manifest with the file left in place; then `rebuilt: segments 1–N from <kind> <url> (W written, R replaced)` with the names of the files kept, then the head line |
+| `1` | Refused or nothing done, never recorded: no role grants `repair` to the invoker (restore runs under the `repair` grant, authorized against the installed snapshot's byte-verified roles — or `--config`'s while nothing is installed — without consulting the ledger it is about to restore, exactly as repair is; the caller learns nothing of the root); `--token` failed verification; the installed pointer cannot be read or its bytes do not hash as the pointer; no sink configured (`sink: local`, or no `integrity.yaml` — a protected copy exists only under `sink: worm`); the set is clean (`nothing to restore`; a sink holding more than the root is `--rebuild`'s question); `--segment` names an ordinal that is not at fault (the text names the one that is); a fault restore does not answer — a fault in the active (repair's remedy, or its own), a sealed segment a record was appended to, a sealed, not-yet-rotated active (`audit seal` completes it; refused before anything is written, whichever segment is at fault), a missing or unusable manifest or a missing active beside history (`--rebuild --log-id <id>`); no version at the key chains (`the protected copy is missing`; nothing written); a copy chains but what follows it locally does not continue it (either the copy is not the seal's own or the local file after it was replaced — `--rebuild` decides from the sink's whole chain; nothing written); a sink call failed, the selected version's lock included (its cause; nothing written); another process holds the installed-configuration lock or the ledger lock; or the set does not read clean after a write — the segments written are printed, the bytes left in place (they are the chain's), and the fault printed with `NOT recorded`: in particular a manifest entry whose `sha256` disagrees with the restored bytes (the entry is the wrong one; rewrite it from `audit verify control`'s segment lines, then re-run to record the restore). With `--rebuild`: `--log-id` names a ledger that is not the one a local genesis or manifest names (a rebuild reconstructs one ledger); a sealed, not-yet-rotated active (`audit seal` completes it; a rebuild never completes a rotation); a key under the ledger's prefix that is not a sealed segment's; a key with no version in the sink (`segment N is missing from the bucket — a chain with a hole cannot be reconstructed`; nothing written); the oldest version at a key that is not the next link of the chain — not a sealed segment of this ledger, not chaining from the segment before it, a seal that does not recompute or names another key (`cannot rebuild: segment N: …`; the whole rebuild refused, nothing written); a sink call failed, a copy's lock included (its cause; nothing written); or the set rebuilt but not read clean, so nothing recorded — above all a present active that no longer chains from the last sealed segment's head (`rebuilt N sealed segments; NOT recorded — the active does not chain from segment N's head`, with the remedy: move the active aside, create an empty one, re-run `--rebuild` to record) |
+| `2` | Usage: bad flags; `--segment` not a positive integer; `--rebuild` without `--log-id`, with one that is not 32 lowercase hex characters, or combined with `--segment`; `--token` without `AGENTHOF_OIDC_ISSUER`; an `integrity.yaml` — or the `--integrity` copy, absent or unreadable — that cannot be read or does not validate; a sink this build cannot construct |
 
 `agenthof gateway provision`:
 

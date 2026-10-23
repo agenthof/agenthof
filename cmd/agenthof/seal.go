@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/authz"
 	"github.com/agenthof/agenthof/internal/config"
@@ -44,8 +45,10 @@ func parseSize(s string) (int64, bool) {
 // pinned (audit anchor's order with the seal steps added):
 //
 //  1. the invoker (--token without AGENTHOF_OIDC_ISSUER → exit 2) and the
-//     --if-larger-than grammar (exit 2), unrecorded;
-//  2. the posture (a fault → exit 2);
+//     --if-larger-than and --sink-timeout grammars (exit 2), unrecorded;
+//  2. the posture (a fault → exit 2), consumed: sink: worm builds the sink
+//     from sink_backend (a posture the build cannot honour → exit 2; no
+//     network yet);
 //  3. the set, writable: busy → exit 1 unrecorded; a torn active → the
 //     repair hint; ErrSealed (state B or C) → a COMPLETION run: steps 4–5,
 //     then CompleteSeal, every refusal printed and not recorded (the closed
@@ -60,11 +63,13 @@ func parseSize(s string) (int64, bool) {
 //     nothing recorded (after authorization, so every refusal is recorded
 //     and an authorized cron's no-op leaves no record);
 //  7. steps 7 to 11 are control.SealActive on one held chain (or
-//     CompleteSeal): the empty check, the link, the record, the manifest,
-//     the swap;
+//     CompleteSeal): the empty check, the sink's preflight (network only
+//     from here, after authorization), the link, the record, the protected
+//     copy confirmed, the manifest, the swap;
 //  12. print `sealed: segment N seq=A..B sha256=<file> (<name>)` and the
 //     head line — the head is the seal record; a completion prints
-//     `completed rotation of segment N` first.
+//     `completed rotation of segment N` first; a protected copy prints its
+//     `protected:` line before `sealed:`.
 func cmdAuditSeal(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit seal", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; integrity.yaml, installed/ and installed.lock are read from beside it; the sealed segments and the manifest are created beside it")
@@ -72,6 +77,7 @@ func cmdAuditSeal(args []string, out io.Writer) int {
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
 	token := fs.String("token", "", "raw OIDC token to authenticate the invoker (env AGENTHOF_TOKEN fallback); a production cron presents this, not --as/--groups")
 	ifLarger := fs.String("if-larger-than", "", "seal only if the active segment is strictly larger than this size (bytes; k, m or g suffix, 1024-based); otherwise print and exit 0, nothing recorded")
+	sinkTimeout := fs.Duration("sink-timeout", 2*time.Minute, "bound on each call to the write-once sink")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -90,7 +96,13 @@ func cmdAuditSeal(args []string, out io.Writer) int {
 		}
 		threshold = n
 	}
-	if _, err := loadIntegrity(*controlLog); err != nil {
+	in, err := loadIntegrity(*controlLog)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "audit seal: %v\n", err)
+		return 2
+	}
+	sink, err := sinkFor(in, *sinkTimeout)
+	if err != nil {
 		_, _ = fmt.Fprintf(out, "audit seal: %v\n", err)
 		return 2
 	}
@@ -182,17 +194,19 @@ func cmdAuditSeal(args []string, out io.Writer) int {
 	}
 
 	var res control.SealResult
-	var err error
 	if completing {
-		res, err = control.CompleteSeal(*controlLog)
+		res, err = control.CompleteSeal(*controlLog, sink)
 	} else {
-		res, err = control.SealActive(*controlLog, control.Event{Action: "seal", Outcome: "success", Invoker: inv, AssertedAs: assertedAs, Witness: control.CaptureWitness()})
+		res, err = control.SealActive(*controlLog, control.Event{Action: "seal", Outcome: "success", Invoker: inv, AssertedAs: assertedAs, Witness: control.CaptureWitness()}, sink)
 	}
 	if err != nil {
 		return printSealFailure(err, out)
 	}
 	if res.Completed {
 		_, _ = fmt.Fprintf(out, "completed rotation of segment %d\n", res.Segment)
+	}
+	if res.Sink != nil {
+		_, _ = fmt.Fprintln(out, protectedLine(res))
 	}
 	_, _ = fmt.Fprintf(out, "sealed: segment %d seq=%d..%d sha256=%s (%s)\n", res.Segment, res.FirstSeq, res.HeadSeq, res.SHA256, filepath.Base(res.Path))
 	_, _ = fmt.Fprintf(out, "control head: seq=%d sha256=%s\n", res.HeadSeq, res.HeadHash)
@@ -212,9 +226,13 @@ func flagGiven(fs *flag.FlagSet, name string) bool {
 }
 
 // printSealFailure prints the fixed line for a seal that did not complete and
-// returns 1. A link failure recorded nothing; a record failure left the
-// segment open; a manifest or swap failure left state B or C, which a re-run
-// completes; a set fault names its own remedy.
+// returns 1. A preflight or link failure recorded nothing (the cause only);
+// a record failure left the segment open; a sink failure left state B with
+// the protected copy owed — the re-run line says so; a manifest or swap
+// failure left state B or C, which a re-run completes; a set fault names
+// its own remedy. The sink's cause carries the store's status and S3 code
+// as it answered, so an operator can tell a denied permission from a
+// missing bucket.
 func printSealFailure(err error, out io.Writer) int {
 	var se *control.SealError
 	switch {
@@ -224,6 +242,9 @@ func printSealFailure(err error, out io.Writer) int {
 		_, _ = fmt.Fprintf(out, "audit seal: %s\n", msgLockBusy)
 	case errors.Is(err, control.ErrUnsealable):
 		_, _ = fmt.Fprintf(out, "audit seal: %v\n", err)
+	case errors.As(err, &se) && se.Step == control.SealStepSink:
+		_, _ = fmt.Fprintf(out, "audit seal: %v\n", err)
+		_, _ = fmt.Fprintln(out, "audit seal: sealed; protected copy NOT confirmed — rotation NOT completed; re-run: agenthof audit seal")
 	case errors.As(err, &se) && (se.Step == control.SealStepManifest || se.Step == control.SealStepSwap):
 		_, _ = fmt.Fprintf(out, "audit seal: %v\n", err)
 		_, _ = fmt.Fprintln(out, "audit seal: sealed; rotation NOT completed — re-run: agenthof audit seal")

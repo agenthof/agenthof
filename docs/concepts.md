@@ -260,9 +260,25 @@ checks every recorded anchor against the chain — so a determined whole-root
 rewrite becomes detectable by a third party, not just locally, within the
 bounds Article III states (independence holds only when the log's key and
 address do not both come from the root being verified; an unreachable log or a
-rotated key reads as unverifiable, never as tampering). The stronger storage
-tiers (`sink: worm`/`external`) and `anchor: signed` are named but reserved —
-refused, never silently treated as the floor.
+rotated key reads as unverifiable, never as tampering). Setting `sink: worm`
+adds a protected copy: each `audit seal` also writes the sealed segment's
+exact bytes to write-once storage you bring (S3 Object Lock, compliance mode),
+under a retention lock the provider enforces for the period the posture
+declares, and the seal does not complete until that copy is confirmed; the
+seal record names where the copy is and the date its lock lasts to.
+`audit verify control` fails on a copy that is missing, locked less strongly
+or less long than recorded, or holding other bytes, and `audit restore
+control` puts a damaged sealed segment back from it. The bounds are stated:
+within the retention period that copy cannot be deleted, altered or shortened
+by any storage operation, whoever issues it, the account's owner included —
+the provider's one escape is closing the account, which is outside Agenthof's
+view and is not silent — a claim that describes that copy alone, for that
+period alone, on the strength of the provider's compliance mode, which
+Agenthof does not run and verifies only by reading what the provider reports;
+the active segment and every local file stay ordinary files; and when the
+period ends the copy is a file like any other. `sink: external` and
+`anchor: signed` are named but reserved — refused, never silently treated as
+the floor.
 
 The default path is `.agenthof/control.jsonl`, resolved relative to the
 current working directory — run
@@ -275,8 +291,11 @@ indefinitely, as the compliance record, not run ephemera — nothing is pruned. 
 sealed segment is a file like any other: whoever can write the control root can
 still rewrite it, and the chain detects a dropped, duplicated, reordered or
 inconsistently edited segment, not a consistent rewrite of the whole set — the
-same bound as the single file, closed the same way, by a head kept off the
-machine or an anchor. Its invoker
+same bound as the single file, narrowed the same way: by a head kept off the
+machine or an anchor, and, under `sink: worm`, by the sink, which catches such a
+rewrite only where the rewritten set no longer accounts for what the sink holds
+(the active segment, and any segment sealed before the root declared the sink,
+have no protected copy). Its invoker
 subjects are personal data like any other identity the ledger records, so
 the self-hosting operator is the data controller for it, same as for the
 run ledger.

@@ -38,6 +38,15 @@ func reservedFault(path string) string {
 	return "integrity " + path + `: anchor "signed" is reserved and not yet supported in this build (only none and tlog are implemented)`
 }
 
+// wormMisconfigure is a sink: worm posture the build refuses (governance
+// mode can be lifted by a privileged user), and wormFault the exact line a
+// command prints for it after its own "<command>: " prefix.
+const wormMisconfigure = "sink: worm\nsink_backend:\n  kind: s3-object-lock\n  url: https://s3.example/bucket\n  mode: governance\n  retention: 7y\n"
+
+func wormFault(path string) string {
+	return "integrity " + path + `: sink_backend.mode "governance" is refused: a governance-mode lock can be bypassed by a privileged user; use compliance`
+}
+
 // tlogPosture is a complete, accepted tlog posture naming a log nothing in
 // these tests ever dials: the writers must proceed without contacting it.
 const tlogPosture = "anchor: tlog\nanchor_backend:\n  url: http://127.0.0.1:9\n"
@@ -202,6 +211,94 @@ func TestControlWritersRefuseAReservedPosture(t *testing.T) {
 		if readPointer(t, ctl) != pointer {
 			t.Fatalf("%s: the pointer must not move", c.name)
 		}
+	}
+}
+
+// TestAllWritersRefuseAWormMisconfigure: a sink: worm posture the build cannot
+// honour is refused at every loadIntegrity caller exactly as a reserved one is
+// — the caller's own prefix, the fault naming the file once, exit 2, nothing
+// recorded — never silently read as the floor.
+func TestAllWritersRefuseAWormMisconfigure(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	t.Setenv("LITELLM_MASTER_KEY", "sk-master-test")
+
+	root := writeSample(t)
+	fresh := filepath.Join(t.TempDir(), "control.jsonl")
+	p := writeIntegrity(t, fresh, wormMisconfigure)
+	var out bytes.Buffer
+	if code := cmdApply([]string{"--config", root, "--control-log", fresh, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 2 || !strings.Contains(out.String(), "apply: "+wormFault(p)+"\n") {
+		t.Fatalf("fresh apply: exit %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(fresh); !os.IsNotExist(err) {
+		t.Fatalf("no genesis may be written: stat err = %v", err)
+	}
+
+	ctl := applied(t, root)
+	p = writeIntegrity(t, ctl, wormMisconfigure)
+	before, pointer := ledgerBytes(t, ctl), readPointer(t, ctl)
+	who := []string{"--as", "dana@example.com", "--groups", "platform-eng"}
+	for _, c := range []struct {
+		name, prefix string
+		run          func(out *bytes.Buffer) int
+	}{
+		{"apply", "apply", func(out *bytes.Buffer) int {
+			return cmdApply(append([]string{"--config", root, "--control-log", ctl}, who...), out)
+		}},
+		{"registry disable", "registry disable", func(out *bytes.Buffer) int {
+			return cmdRegistry(append([]string{"disable", "coder", "--config", root, "--control-log", ctl}, who...), out)
+		}},
+		{"config vouch", "config vouch", func(out *bytes.Buffer) int {
+			return cmdConfigVouch(append([]string{"--control-log", ctl}, who...), out)
+		}},
+		{"gateway provision", "gateway provision", func(out *bytes.Buffer) int {
+			return cmdGateway(provisionArgs(ctl, "http://127.0.0.1:0"), out) // never dialed
+		}},
+		{"runs prune", "runs prune", func(out *bytes.Buffer) int {
+			return cmdRuns(append([]string{"prune", "--older-than", "180d", "--log-dir", t.TempDir(), "--artifact-dir", t.TempDir(), "--control-log", ctl}, who...), out)
+		}},
+		{"audit seal", "audit seal", func(out *bytes.Buffer) int {
+			return cmdAuditSeal(append([]string{"--control-log", ctl}, who...), out)
+		}},
+		{"audit anchor", "audit anchor", func(out *bytes.Buffer) int {
+			return cmdAuditAnchor(append([]string{"--control-log", ctl}, who...), out)
+		}},
+	} {
+		var out bytes.Buffer
+		if code := c.run(&out); code != 2 {
+			t.Fatalf("%s: exit %d, want 2\n%s", c.name, code, out.String())
+		}
+		if want := c.prefix + ": " + wormFault(p) + "\n"; !strings.Contains(out.String(), want) {
+			t.Fatalf("%s: missing %q\n%s", c.name, want, out.String())
+		}
+		if strings.Count(out.String(), p) != 1 {
+			t.Fatalf("%s: the path must appear exactly once:\n%s", c.name, out.String())
+		}
+		if !bytes.Equal(before, ledgerBytes(t, ctl)) || readPointer(t, ctl) != pointer {
+			t.Fatalf("%s: nothing may be recorded", c.name)
+		}
+	}
+
+	// audit repair control: after authorization, on a torn ledger.
+	tctl, torn := tornLedger(t)
+	tp := writeIntegrity(t, tctl, wormMisconfigure)
+	out.Reset()
+	code := cmdAuditRepairControl([]string{"control", "--control-log", tctl, "--config", root, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	if code != 2 || !strings.Contains(out.String(), "audit repair control: "+wormFault(tp)+"\n") {
+		t.Fatalf("audit repair control: exit %d\n%s", code, out.String())
+	}
+	if after, err := os.ReadFile(tctl); err != nil || !bytes.Equal(after, torn) {
+		t.Fatalf("the torn tail must be untouched: %v", err)
+	}
+
+	// serve refuses to start.
+	t.Chdir(t.TempDir())
+	t.Setenv("AGENTHOF_OIDC_ISSUER", "https://idp.test")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out.Reset()
+	code = cmdServe(ctx, []string{"--addr", "127.0.0.1:0", "--control-log", ctl, "--log-dir", t.TempDir()}, &out, io.Discard)
+	if code != 2 || !strings.Contains(out.String(), "serve: "+wormFault(p)+"\n") || strings.Contains(out.String(), "serving on") {
+		t.Fatalf("serve: exit %d\n%s", code, out.String())
 	}
 }
 

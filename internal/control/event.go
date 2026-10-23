@@ -118,13 +118,20 @@ type Event struct {
 // sha256(file[0, offset of this line)) — every byte of the segment before the
 // seal line, newlines included, never a whole-file hash (that is the
 // manifest's sha256). Redundant by construction, cross-checked at write and
-// recomputed at read; it identifies the unit, it adds no detection.
+// recomputed at read; it identifies the unit, it adds no detection. Sink is
+// the one field a reader cannot recompute: it is carried as recorded
+// (sealChainFieldsAgree compares the five chain fields and ignores it).
 type Seal struct {
 	Segment       int    `json:"segment"`        // the ordinal this record closes (1-based; the manifest's n)
 	FirstSeq      int    `json:"first_seq"`      // the segment's first seq (its Start.Base + 1)
 	HeadSeq       int    `json:"head_seq"`       // the last record before this one: this record's seq - 1
 	HeadHash      string `json:"head_hash"`      // its hash: this record's own prev
 	ContentSHA256 string `json:"content_sha256"` // sha256 of the segment's bytes before this line
+	// Sink is where the segment's protected copy goes and until when, on a
+	// root whose posture is sink: worm; absent on a floor root, whose seal
+	// line is byte-identical to one written before the block existed.
+	// Additive and omitempty (Article VI).
+	Sink *SealSink `json:"sink,omitempty"`
 }
 
 // Anchor is what an "anchor" record says about the head it pins, written by

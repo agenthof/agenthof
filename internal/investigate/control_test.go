@@ -331,7 +331,7 @@ func TestLoadControlReadsAcrossASealedSegment(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := control.SealActive(p, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness()}); err != nil {
+	if _, err := control.SealActive(p, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: control.CaptureWitness()}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := control.Append(p, ev); err != nil {

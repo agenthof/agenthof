@@ -94,6 +94,7 @@ type Segment struct {
 	Bytes    int64     // the file's size
 	Records  int       // records in this segment
 	SealedAt time.Time // the seal record's time; zero for the active
+	Sink     *SealSink // the seal record's sink block, carried as recorded; nil on a floor seal and for the active
 }
 
 // View is the ledger read as one logical chain. Head is LOGICAL: Count is
@@ -455,6 +456,7 @@ func verifySealed(resolved string, k int, start ledger.Start, e ManifestEntry) (
 		return &SetError{Fault: FaultManifest, Segment: k, Path: path, Err: fmt.Errorf("%s %v recorded, %v verified", field, recorded, verified)}
 	}
 	var sealedAt time.Time
+	var sink *SealSink
 	for i, r := range recs {
 		rec, ok := decodeRecord(r)
 		if !ok || rec.Action != "seal" || rec.Outcome != "success" {
@@ -464,10 +466,15 @@ func verifySealed(resolved string, k int, start ledger.Start, e ManifestEntry) (
 			return Segment{}, recs, &SetError{Fault: FaultSealNotLast, Segment: k, Path: path, Seq: rec.Seq + 1, want: strconv.Itoa(headSeq)}
 		}
 		want := Seal{Segment: k, FirstSeq: int(start.Base) + 1, HeadSeq: rec.Seq - 1, HeadHash: rec.Prev, ContentSHA256: sealContentDigest(recs[:i])}
-		if rec.Seal == nil || *rec.Seal != want {
-			return Segment{}, recs, disagree("seal", rec.Seal, want)
+		if !sealChainFieldsAgree(rec.Seal, want) {
+			return Segment{}, recs, disagree("seal", sealChainText(rec.Seal), sealChainText(&want))
 		}
-		sealedAt = rec.Time
+		// The sink block is carried, not recomputed; the one thing the chain
+		// can say about it is that its retain_until is after the seal's time.
+		if rec.Seal.Sink != nil && !rec.Seal.Sink.RetainUntil.After(rec.Time) {
+			return Segment{}, recs, &SetError{Fault: FaultManifest, Segment: k, Path: path, Err: sinkRetainErr(rec.Seal.Sink, rec.Time)}
+		}
+		sealedAt, sink = rec.Time, rec.Seal.Sink
 	}
 	if sealedAt.IsZero() {
 		return Segment{}, recs, disagree("seal", "none", "a successful seal as the last record")
@@ -484,7 +491,7 @@ func verifySealed(resolved string, k int, start ledger.Start, e ManifestEntry) (
 	case e.Bytes != info.Size() || size != info.Size():
 		return Segment{}, recs, disagree("bytes", e.Bytes, info.Size())
 	}
-	return Segment{N: k, Path: path, FirstSeq: int(start.Base) + 1, HeadSeq: headSeq, HeadHash: head.Hash, SHA256: whole, Bytes: info.Size(), Records: head.Count, SealedAt: sealedAt}, recs, nil
+	return Segment{N: k, Path: path, FirstSeq: int(start.Base) + 1, HeadSeq: headSeq, HeadHash: head.Hash, SHA256: whole, Bytes: info.Size(), Records: head.Count, SealedAt: sealedAt, Sink: sink}, recs, nil
 }
 
 // mapActiveFault translates the ledger's per-file error on the active into
@@ -550,8 +557,11 @@ func finishActive(v View, sealedCount int) (View, error) {
 			return v, &SetError{Fault: FaultSealNotLast, Segment: 0, Path: v.Active.Path, Seq: rec.Seq + 1, want: strconv.Itoa(v.Head.Count)}
 		}
 		want := Seal{Segment: sealedCount + 1, FirstSeq: v.Active.FirstSeq, HeadSeq: rec.Seq - 1, HeadHash: rec.Prev, ContentSHA256: sealContentDigest(active[:i])}
-		if rec.Seal == nil || *rec.Seal != want {
-			return v, &SetError{Fault: FaultManifest, Segment: sealedCount + 1, Path: v.Active.Path, Seq: rec.Seq, Err: fmt.Errorf("seal payload %+v recorded, %+v verified", rec.Seal, want)}
+		if !sealChainFieldsAgree(rec.Seal, want) {
+			return v, &SetError{Fault: FaultManifest, Segment: sealedCount + 1, Path: v.Active.Path, Seq: rec.Seq, Err: fmt.Errorf("seal payload %s recorded, %s verified", sealChainText(rec.Seal), sealChainText(&want))}
+		}
+		if rec.Seal.Sink != nil && !rec.Seal.Sink.RetainUntil.After(rec.Time) {
+			return v, &SetError{Fault: FaultManifest, Segment: sealedCount + 1, Path: v.Active.Path, Seq: rec.Seq, Err: sinkRetainErr(rec.Seal.Sink, rec.Time)}
 		}
 		v.State = StateSealedNotRotated
 	}

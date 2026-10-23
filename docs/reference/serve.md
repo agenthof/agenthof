@@ -208,9 +208,11 @@ mid-step; its ledger then has no final event and reads back as
   `integrity.yaml` beside the ledger. The default (no file) is the local
   hash-chained file (sink `local`, anchor `none`). An `anchor: tlog` posture is
   honoured — `serve` reads it and keeps serving; it does not anchor, since
-  anchoring is `agenthof audit anchor`, run from a cron. A posture naming a
-  still-reserved sink or anchor (`worm`, `external`, `signed`) is one this build
-  cannot honour, so `serve` refuses to start rather than run under a guarantee
+  anchoring is `agenthof audit anchor`, run from a cron. A `sink: worm` posture
+  is honoured the same way — `serve` reads it and keeps serving; it writes no
+  protected copy itself, since sealing is `agenthof audit seal`. A posture
+  naming a still-reserved sink or anchor (`external`, `signed`) is one this
+  build cannot honour, so `serve` refuses to start rather than run under a guarantee
   it does not provide: it exits non-zero and nothing is listening. A change to
   the file takes effect on restart.
 - The invoker's token is also the subject token for on-behalf-of tool

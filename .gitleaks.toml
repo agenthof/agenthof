@@ -11,4 +11,5 @@ paths = [
   '''internal/identity/oidc_test\.go''',        # offline test JWTs minted with throwaway keys
   '''internal/gateway/provision_test\.go''',    # fake "sk-..." strings returned by an in-test mock LiteLLM admin server; never real credentials
   '''internal/config/signingkey_test\.go''',    # the Ed25519 golden seed 00..1f as PKCS#8 PEM — a published test vector pinning the key-file format, never a credential
+  '''internal/sink/testdata/sigv4/.*''',         # AWS's published SigV4 test-suite vectors (AKIDEXAMPLE + the documented example STS token); offline signing fixtures, never credentials
 ]

@@ -4,13 +4,19 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
+	"github.com/agenthof/agenthof/internal/control"
+	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/sink"
+	"github.com/agenthof/agenthof/internal/sink/sinktest"
 )
 
 // TestAuditRepairControlTornTailSucceeds covers the happy path (spec
@@ -487,4 +493,175 @@ func TestAuditRepairControlAuthorizesFromByteVerifiedRolesWithoutVouching(t *tes
 	if _, mismatch := installedPointerLine(ctl, mustRecords(t, ctl)); !mismatch || readPointer(t, ctl) != hex2 {
 		t.Fatal("a repair vouches for nothing and moves nothing")
 	}
+}
+
+// tornWormRoot is a worm root in state B (a seal that crashed before its
+// upload) with a record appended after the seal line by hand: the one shape
+// a post-seal repair completes, and on a worm root the repair must confirm
+// the protected copy before it truncates and rotates.
+func tornWormRoot(t *testing.T) (string, string, *sinktest.Fake) {
+	t.Helper()
+	root, ctl, f := wormRoot(t)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "after_seal_before_sink")
+	code, out := auditSeal(t, ctl)
+	t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
+	if code != 1 || !strings.HasSuffix(out, sealStateBLine) {
+		t.Fatalf("hook: %d\n%s", code, out)
+	}
+	appendRecordAfterSeal(t, ctl)
+	return root, ctl, f
+}
+
+func auditRepairControl(t *testing.T, root, ctl string) (int, string) {
+	t.Helper()
+	var out bytes.Buffer
+	code := cmdAuditRepairControl([]string{"control", "--control-log", ctl, "--config", root, "--as", "dana@example.com", "--groups", "platform-eng"}, &out)
+	return code, out.String()
+}
+
+// TestAuditRepairControlPostSealUploadsOnAWormRoot (§8.2's explicit task):
+// the repair confirms the protected copy THROUGH THE SINK — the fake holds
+// one version at the key whose bytes are the sealed file — then moves the
+// tail aside, completes the rotation and appends the repair record: the
+// taint is on the chain (verify exits 3, never 9; a second repair finds
+// nothing torn). On the wire the repair is exactly one Put — its listing,
+// the PUT and its read-back — with no request after it: the rotation after
+// the truncate made no sink call of its own.
+func TestAuditRepairControlPostSealUploadsOnAWormRoot(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root, ctl, f := tornWormRoot(t)
+	n0 := len(f.Requests())
+	code, out := auditRepairControl(t, root, ctl)
+	if code != 0 || !regexp.MustCompile(`(?m)^repaired: moved \d+ bytes \(sha256=[0-9a-f]{64}\) to .*control\.jsonl\.torn-\d+; rotation of segment 1 completed; control ledger tainted\n`).MatchString(out) || !strings.Contains(out, "control ledger TAINTED: repaired at seq 4") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if ops := requestOps(f, n0); strings.Join(ops, ",") != "ListObjectVersions,PutObject,ListObjectVersions,GetObjectRetention" {
+		t.Fatalf("one Put and nothing after it: %v", ops)
+	}
+	key := segmentKey(t, ctl, 1)
+	vs := f.Versions(key)
+	seg, err := os.ReadFile(control.SegmentPath(ctl, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vs) != 1 || !bytes.Equal(vs[0].Data, seg) || vs[0].Mode != "COMPLIANCE" {
+		t.Fatalf("versions at %s: %+v", key, vs)
+	}
+	v, err := control.Read(ctl, ledger.Locked)
+	if err != nil || len(v.Sealed) != 1 || v.Active.Records != 1 {
+		t.Fatalf("rotated, the repair record alone in the new active: %v %+v", err, v)
+	}
+	if e, err := control.Decode(v.Records[len(v.Records)-1].Raw); err != nil || e.Action != "repair" || e.Outcome != "success" || e.Seq != 4 {
+		t.Fatalf("the repair record is the new active's first: %v %+v", err, e)
+	}
+	if code, vout := verifyControl(t, "--control-log", ctl); code != 3 || !strings.Contains(vout, "TAINTED: repaired at seq 4") || !strings.Contains(vout, "verified — oldest version v-1 compliance until") {
+		t.Fatalf("verify: %d\n%s", code, vout)
+	}
+	if code, out := auditRepairControl(t, root, ctl); code != 1 || !strings.Contains(out, "not torn; nothing to repair") {
+		t.Fatalf("second repair: %d\n%s", code, out)
+	}
+}
+
+// TestAuditRepairControlPassesTheSink: the sink is built from the posture
+// exactly as audit seal builds it — one call for the s3-object-lock backend
+// with the seal's default 2m bound; a floor root builds none.
+func TestAuditRepairControlPassesTheSink(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	var specs []sinkSpec
+	newSink = func(s sinkSpec) (sink.Backend, error) {
+		specs = append(specs, s)
+		return sinkBackendFor(s)
+	}
+	t.Cleanup(func() { newSink = sinkBackendFor })
+
+	root, ctl, _ := tornWormRoot(t) // the fixture's own seal builds one; the repair's is counted alone
+	specs = nil
+	if code, out := auditRepairControl(t, root, ctl); code != 0 {
+		t.Fatalf("worm: %d\n%s", code, out)
+	}
+	if len(specs) != 1 || specs[0].Backend.Kind != "s3-object-lock" || specs[0].Timeout != 2*time.Minute {
+		t.Fatalf("sink built %+v", specs)
+	}
+
+	specs = nil
+	root = sealSample(t)
+	ctl = applied(t, root)
+	tearTail(t, ctl)
+	if code, out := auditRepairControl(t, root, ctl); code != 0 {
+		t.Fatalf("floor: %d\n%s", code, out)
+	}
+	if len(specs) != 0 {
+		t.Fatalf("a floor root built a sink: %+v", specs)
+	}
+}
+
+// TestAuditRepairControlRefusesWhenTheSinkCannotConfirm (§8.4 through the
+// repair): a credential that can PUT but not read the lock back — the copy
+// is written but not confirmed, so the repair refuses BEFORE its truncate,
+// naming the IAM remedy: no fragment, the active byte for byte as it was,
+// the ledger still torn (audit seal refuses it with the repair hint; verify
+// never says clean). Once the policy is fixed, the repair re-run confirms
+// the copy already at the key — one version, nothing written over it —
+// completes, and verify exits 3 with the taint on the chain.
+func TestAuditRepairControlRefusesWhenTheSinkCannotConfirm(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	root, ctl, f := tornWormRoot(t)
+	before, err := os.ReadFile(ctl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Deny = map[string]bool{"GetObjectRetention": true}
+	code, out := auditRepairControl(t, root, ctl)
+	if code != 1 || !strings.Contains(out, "the protected copy could not be confirmed; nothing was changed — retry when the sink is reachable: protected copy written but NOT confirmed: the credential cannot read the object's retention; grant s3:GetObjectRetention, s3:GetObject and s3:ListBucketVersions, then re-run") || strings.Contains(out, "run audit seal") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if after, _ := os.ReadFile(ctl); !bytes.Equal(before, after) {
+		t.Fatal("a refused repair changes the active")
+	}
+	if frags, _ := filepath.Glob(ctl + ".torn-*"); len(frags) != 0 {
+		t.Fatalf("a refused repair writes no fragment: %v", frags)
+	}
+	var se *control.SetError
+	if _, err := control.Read(ctl, ledger.Locked); !errors.As(err, &se) || se.Fault != control.FaultSealNotLast {
+		t.Fatalf("the ledger stays torn: %v", err)
+	}
+	if code, vout := verifyControl(t, "--control-log", ctl); code == 0 || strings.Contains(vout, "TAINTED") {
+		t.Fatalf("verify must not say clean: %d\n%s", code, vout)
+	}
+	if code, out := auditSeal(t, ctl); code != 1 || !strings.Contains(out, "audit repair control") {
+		t.Fatalf("audit seal refuses a torn root: %d\n%s", code, out)
+	}
+	key := segmentKey(t, ctl, 1)
+	if vs := f.Versions(key); len(vs) != 1 {
+		t.Fatalf("the unconfirmed copy sits at the key: %+v", vs)
+	}
+
+	delete(f.Deny, "GetObjectRetention")
+	n0 := len(f.Requests())
+	code, out = auditRepairControl(t, root, ctl)
+	if code != 0 || !strings.Contains(out, "rotation of segment 1 completed; control ledger tainted") || !strings.Contains(out, "control ledger TAINTED: repaired at seq 4") {
+		t.Fatalf("the re-run completes: %d\n%s", code, out)
+	}
+	if ops := requestOps(f, n0); strings.Join(ops, ",") != "ListObjectVersions,GetObject,GetObjectRetention" {
+		t.Fatalf("the re-run confirms the existing copy without a PUT and makes no call after it: %v", ops)
+	}
+	seg, err := os.ReadFile(control.SegmentPath(ctl, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vs := f.Versions(key); len(vs) != 1 || !bytes.Equal(vs[0].Data, seg) || vs[0].Mode != "COMPLIANCE" {
+		t.Fatalf("one version, the sealed file, never written over: %+v", vs)
+	}
+	if code, vout := verifyControl(t, "--control-log", ctl); code != 3 || !strings.Contains(vout, "TAINTED: repaired at seq 4") {
+		t.Fatalf("verify: %d\n%s", code, vout)
+	}
+}
+
+// requestOps is the S3 operations the fake served from request n0 on.
+func requestOps(f *sinktest.Fake, n0 int) []string {
+	var ops []string
+	for _, r := range f.Requests()[n0:] {
+		ops = append(ops, r.Op)
+	}
+	return ops
 }

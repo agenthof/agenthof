@@ -49,11 +49,12 @@ Usage:
   agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--allow-api-bootstrap] [--addr-file <path>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--max-concurrent-runs <n>] [--shutdown-timeout <dur>] [--log-level ...] [--log-format ...]  (AGENTHOF_OIDC_ISSUER required)
   agenthof audit <run-id> [--log-dir <dir>] [--server <url>] [--token <jwt>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
-  agenthof audit verify control [--control-log <path>] [--expect-head <hex>|<seq>:<hex>] [--anchor-key <path>] [--offline] [--anchor-timeout 30s]
+  agenthof audit verify control [--control-log <path>] [--expect-head <hex>|<seq>:<hex>] [--anchor-key <path>] [--integrity <path>] [--offline] [--anchor-timeout 30s] [--sink-timeout 60s]
   agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout 30s]  (pins the control-ledger head into the transparency log integrity.yaml names; an authorized control action, recorded whether it succeeded or failed; prints the anchored head and entry to ship off the box)
-  agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>]  (closes the control ledger's active segment into a sealed file and opens the next; the chain and seq continue unbroken; an authorized control action, recorded whether it succeeded or failed)
+  agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>] [--sink-timeout 2m]  (closes the control ledger's active segment into a sealed file and opens the next; the chain and seq continue unbroken; on a sink: worm root the sealed segment's protected copy is written and confirmed before the rotation completes; an authorized control action, recorded whether it succeeded or failed)
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
+  agenthof audit restore control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--segment N]... [--integrity <path>] [--sink-timeout 2m] [--rebuild --log-id <id>]  (puts a sealed segment of the control ledger back from the protected copy in the sink, selected by the chain; under the repair grant; recorded, never a taint)
   agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]  (mints a per-role model key at the reserved model gateway for the installed roles; recorded in the control ledger; no run consumes it)
   agenthof investigate [--since <dur|RFC3339>] [--until <dur|RFC3339>] [--invoker <id>] [--agent <name>] [--outcome <name>] [--run <run-id>] [--config-hash <hex>] [--json] [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>] [--server <url>] [--token <jwt>]
@@ -1238,6 +1239,14 @@ func cmdAudit(args []string, out io.Writer) int {
 	if args[0] == "repair" {
 		return cmdAuditRepairControl(args[1:], out)
 	}
+	// "restore" is disambiguated the same way: a run id is always "r-<hex>"
+	// (engine.NewRunID), which "restore" can never match. Only "restore
+	// control" exists (a sealed segment of the control ledger, from its
+	// protected copy), so the "control" sub-dispatch lives inside
+	// cmdAuditRestoreControl as repair's does.
+	if args[0] == "restore" {
+		return cmdAuditRestoreControl(args[1:], out)
+	}
 	// "anchor" is disambiguated the same way: a run id is always "r-<hex>"
 	// (engine.NewRunID), which "anchor" can never match.
 	if args[0] == "anchor" {
@@ -1402,27 +1411,38 @@ func cmdAuditControl(args []string, out io.Writer) int {
 // unexpected segment, a manifest that disagrees) exit 1 first and stop,
 // after the head of the valid prefix: such a chain has no positions to
 // reproduce heads at. A set that verifies prints a line per sealed segment
-// and the active (segmentLines). Every recorded anchor is then checked (verifyAnchors:
-// the structural check, then the stored proof under the pinned log key, then
-// a presence check unless --offline) and its line printed. Then, in
-// precedence order: 6 an anchor disagrees with the chain or the log; 3 tainted (control.IsTainted
-// — a "repair" record was ever appended); 4 --expect-head did not hold
-// (either form: <hex> is the current head, <seq>:<hex> is the head the chain
-// must reproduce at seq); 5 the installed pointer
+// and the active (segmentLines), then — on a root that has sealed, or with
+// --integrity — the sink pass (verifySink: every protected copy checked
+// against the sink both ways, the posture read from --integrity or from
+// integrity.yaml beside the ledger, in which case the summary says the
+// address is not independent; skipped by --offline). Every recorded anchor
+// is then checked (verifyAnchors: the structural check, then the stored
+// proof under the pinned log key, then a presence check unless --offline)
+// and its line printed. Then, in precedence order 1, 6, 9, 3, 4, 5, 7, 10,
+// 8: 6 an anchor disagrees with the chain or the log; 9 a protected copy is
+// missing, altered locally or under-locked, or the sink holds an object no
+// local segment accounts for; 3 tainted (control.IsTainted — a "repair"
+// record was ever appended); 4 --expect-head did not hold (either form:
+// <hex> is the current head, <seq>:<hex> is the head the chain must
+// reproduce at seq); 5 the installed pointer
 // (<dir of --control-log>/installed/current) does not name the last recorded
 // install (control.Installing) — an install whose event was never appended,
 // or whose record was lost; 7 an anchor could not be decided (an unreachable
 // log, a key the verifier does not hold) — never a tamper verdict, and
-// outranked by every definitive one; 8 a seal's rotation did not complete
-// (the chain is intact; an operator step is owed — run audit seal), last,
-// so every integrity verdict outranks it; 0 otherwise; 2 usage.
+// outranked by every definitive one; 10 a protected copy could not be
+// decided (a sink unreachable or refusing, no credential, a posture that
+// could not be read) — the same doctrine; 8 a seal's rotation did not
+// complete (the chain is intact; an operator step is owed — run audit seal),
+// last, so every integrity verdict outranks it; 0 otherwise; 2 usage.
 func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit verify control", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
 	expectHead := fs.String("expect-head", "", "expected control ledger head: <hex> (the current head) or <seq>:<hex> (the head the chain must reproduce at seq)")
 	anchorKey := fs.String("anchor-key", "", "pin the transparency log's checkpoint key at this path (PEM, ECDSA P-256) instead of anchor.pub beside the ledger; absent or unreadable fails closed")
-	offline := fs.Bool("offline", false, "verify anchors from their stored proofs only: no served-key fetch, no presence check (needs a pinned key)")
+	integrity := fs.String("integrity", "", "read the sink posture from this copy of integrity.yaml instead of the one beside the ledger — hold it off the box to verify independently; absent or unreadable makes every protected copy unverifiable")
+	offline := fs.Bool("offline", false, "verify anchors from their stored proofs only: no served-key fetch, no presence check (needs a pinned key); the sink is not checked")
 	anchorTimeout := fs.Duration("anchor-timeout", 30*time.Second, "per-anchor bound on the log calls made while verifying anchors")
+	sinkTimeout := fs.Duration("sink-timeout", 60*time.Second, "bound on each call to the sink made while verifying protected copies")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1451,6 +1471,14 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	for _, l := range segmentLines(v) {
 		_, _ = fmt.Fprintln(out, l)
 	}
+	// The sink pass runs where the segment lines do (a root that has sealed
+	// or whose rotation did not complete) and whenever --integrity names a
+	// posture explicitly; a never-sealed root on the box prints nothing and
+	// reads nothing, so its output is what it always was.
+	var sinks sinkVerdicts
+	if len(v.Sealed) > 0 || v.State != control.StateOpen || *integrity != "" {
+		sinks = verifySink(*controlLog, *integrity, v, *offline, *sinkTimeout, out)
+	}
 	line, pointerMismatch := installedPointerLine(*controlLog, records)
 	_, _ = fmt.Fprint(out, line)
 	anchors := verifyAnchors(*controlLog, records, *anchorKey, *offline, *anchorTimeout, out)
@@ -1468,6 +1496,8 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 	switch {
 	case anchors.mismatch > 0:
 		return exitAnchorMismatch
+	case sinks.definitive():
+		return exitSinkMismatch
 	case tainted:
 		return 3
 	case expectFailed:
@@ -1476,6 +1506,8 @@ func cmdAuditVerifyControl(args []string, out io.Writer) int {
 		return exitInstalledMismatch
 	case anchors.unverifiable > 0:
 		return exitAnchorUnverifiable
+	case sinks.undecided():
+		return exitSinkUnverifiable
 	case v.State != control.StateOpen:
 		return exitRotationIncomplete
 	}
@@ -1532,6 +1564,14 @@ func segmentLines(v control.View) []string {
 // 3). An incomplete rotation (state B or C), a fault in a sealed segment, a
 // chain break and every structural fault are refused with their own remedy
 // and nothing changes — only a damaged tail of the ACTIVE is ever truncated.
+//
+// The root's integrity posture is consumed, not just checked: on a sink:
+// worm root the sink is built from sink_backend exactly as audit seal
+// builds it (the seal's default 2m bound on each call; repair takes no
+// flag) and handed to control.Repair, so a post-seal repair confirms the
+// protected copy before it truncates and rotates — the one path that would
+// otherwise rotate a worm root past an unprotected segment. A posture this
+// build cannot honour exits 2 before the ledger is looked at.
 //
 // A missing control log is reported plainly rather than as a generic
 // open error, matching cmdAuditControl/cmdAuditVerifyControl. An
@@ -1607,8 +1647,15 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 	// before the ledger is looked at: loading it earlier would print the
 	// root's posture and a root-local path to a caller who is not allowed to
 	// learn either. Nothing between the check above and the read below
-	// writes, so no repair ever runs on a root this build cannot honour.
-	if _, err := loadIntegrity(*controlLog); err != nil {
+	// writes, so no repair ever runs on a root this build cannot honour. The
+	// sink it names is built here (no network yet) and handed to Repair.
+	in, err := loadIntegrity(*controlLog)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "audit repair control: %v\n", err)
+		return 2
+	}
+	sink, err := sinkFor(in, 2*time.Minute)
+	if err != nil {
 		_, _ = fmt.Fprintf(out, "audit repair control: %v\n", err)
 		return 2
 	}
@@ -1644,7 +1691,7 @@ func cmdAuditRepairControl(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, lockErr)
 		return 1
 	}
-	res, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness())
+	res, err := control.Repair(*controlLog, inv, assertedAs, control.CaptureWitness(), sink)
 	unlock()
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)

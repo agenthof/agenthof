@@ -31,7 +31,7 @@ func TestSealActiveRotates(t *testing.T) {
 	old, _ := os.ReadFile(p)
 	oldSum := sha256.Sum256(old)
 	before, _ := Read(p, ledger.Locked)
-	res, err := SealActive(p, sealEvent())
+	res, err := SealActive(p, sealEvent(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestSealActiveRotates(t *testing.T) {
 	}
 	// A second seal chains from the first; log_id is not minted again.
 	appendN(t, p, 2)
-	res2, err := SealActive(p, sealEvent())
+	res2, err := SealActive(p, sealEvent(), nil)
 	if err != nil || res2.Segment != 2 || res2.FirstSeq != 7 || res2.HeadSeq != 9 {
 		t.Fatalf("second seal: %v %+v", err, res2)
 	}
@@ -93,7 +93,7 @@ func TestSealActiveRefusals(t *testing.T) {
 	if _, err := os.Create(p); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SealActive(p, sealEvent()); !errors.Is(err, ErrNothingToSeal) {
+	if _, err := SealActive(p, sealEvent(), nil); !errors.Is(err, ErrNothingToSeal) {
 		t.Fatalf("empty: %v", err)
 	}
 	appendN(t, p, 2)
@@ -101,7 +101,7 @@ func TestSealActiveRefusals(t *testing.T) {
 	defer func() { linkFile = orig }()
 	linkFile = func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EPERM} }
 	before, _ := os.ReadFile(p)
-	_, err := SealActive(p, sealEvent())
+	_, err := SealActive(p, sealEvent(), nil)
 	linkFile = orig
 	var se *SealError
 	if !errors.Is(err, ErrNoHardLinks) || !errors.As(err, &se) || se.Step != SealStepLink {
@@ -117,7 +117,7 @@ func TestSealActiveRefusals(t *testing.T) {
 	if err := os.WriteFile(SegmentPath(p, 1), []byte("foreign\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err = SealActive(p, sealEvent())
+	_, err = SealActive(p, sealEvent(), nil)
 	var set *SetError
 	if !errors.As(err, &set) || set.Fault != FaultUnexpectedSegment {
 		t.Fatalf("foreign file: %v", err)
@@ -127,14 +127,14 @@ func TestSealActiveRefusals(t *testing.T) {
 		q := filepath.Join(t.TempDir(), "control.jsonl")
 		appendN(t, q, 3)
 		sealByHand(t, q, stop)
-		if _, err := SealActive(q, sealEvent()); !errors.Is(err, ErrSealed) {
+		if _, err := SealActive(q, sealEvent(), nil); !errors.Is(err, ErrSealed) {
 			t.Fatalf("%s: %v", stop, err)
 		}
 	}
 	q := filepath.Join(t.TempDir(), "control.jsonl")
 	appendN(t, q, 3)
 	sealByHand(t, q, "")
-	if _, err := SealActive(q, sealEvent()); !errors.Is(err, ErrNothingToSeal) {
+	if _, err := SealActive(q, sealEvent(), nil); !errors.Is(err, ErrNothingToSeal) {
 		t.Fatalf("empty rotated active: %v", err)
 	}
 }
@@ -161,7 +161,7 @@ func TestSealCrashHooksAndCompletion(t *testing.T) {
 					appendN(t, p, 2)
 				}
 				t.Setenv("AGENTHOF_TEST_CRASH_AT", tc.hook)
-				_, err := SealActive(p, sealEvent())
+				_, err := SealActive(p, sealEvent(), nil)
 				t.Setenv("AGENTHOF_TEST_CRASH_AT", "")
 				var se *SealError
 				if !errors.As(err, &se) || se.Step != tc.step || !errors.Is(err, errStoppedByTestHook) {
@@ -175,9 +175,9 @@ func TestSealCrashHooksAndCompletion(t *testing.T) {
 				_ = os.WriteFile(filepath.Join(filepath.Dir(p), ".control.jsonl.next-stale"), []byte("x"), 0o600)
 				var res SealResult
 				if tc.state == StateOpen {
-					res, err = SealActive(p, sealEvent()) // reuses the link: EEXIST ∧ SameFile
+					res, err = SealActive(p, sealEvent(), nil) // reuses the link: EEXIST ∧ SameFile
 				} else {
-					res, err = CompleteSeal(p)
+					res, err = CompleteSeal(p, nil)
 					if err == nil && !res.Completed {
 						t.Fatal("a completion says so")
 					}
@@ -199,7 +199,7 @@ func TestSealCrashHooksAndCompletion(t *testing.T) {
 	}
 	p := filepath.Join(t.TempDir(), "control.jsonl")
 	appendN(t, p, 1)
-	if _, err := CompleteSeal(p); err == nil || !strings.Contains(err.Error(), "nothing to complete") {
+	if _, err := CompleteSeal(p, nil); err == nil || !strings.Contains(err.Error(), "nothing to complete") {
 		t.Fatalf("CompleteSeal on an open active: %v", err)
 	}
 }
@@ -253,7 +253,7 @@ func TestSealPermit(t *testing.T) {
 	if v, _ := Read(p, ledger.Locked); v.State != StateSealedNotRotated {
 		t.Fatal("a seal record written through Append is state B")
 	}
-	if _, err := CompleteSeal(p); err != nil {
+	if _, err := CompleteSeal(p, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Installing never accepts a seal.
@@ -275,7 +275,7 @@ func TestSealActiveHoldsOneChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	_, err := SealActive(p, sealEvent())
+	_, err := SealActive(p, sealEvent(), nil)
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	_ = f.Close()
 	if !errors.Is(err, ledger.ErrLockHeld) || time.Since(start) < 4*time.Second {
@@ -315,7 +315,7 @@ func TestSealRefusesGenesisWithoutLogID(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "control.jsonl")
 	genesisWithoutLogID(t, p, 2)
 	before, _ := os.ReadFile(p)
-	_, err := SealActive(p, sealEvent())
+	_, err := SealActive(p, sealEvent(), nil)
 	if !errors.Is(err, ErrUnsealable) || strings.Contains(err.Error(), "re-run") {
 		t.Fatalf("SealActive: %v", err)
 	}

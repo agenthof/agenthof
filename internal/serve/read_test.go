@@ -266,7 +266,7 @@ func TestInvestigateEndpointOverASealedRoot(t *testing.T) {
 	if d := get(); !d.Integrity.OK || len(d.Sources) != 1 || d.Sources[0].Count != 2 {
 		t.Fatalf("before the seal: %+v", d)
 	}
-	if _, err := control.SealActive(ctl, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w}); err != nil {
+	if _, err := control.SealActive(ctl, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := control.Append(ctl, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc"}); err != nil {
@@ -293,7 +293,7 @@ func TestInvestigateEndpointOverAFaultedSealedRoot(t *testing.T) {
 			if _, err := control.Append(ctl, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc"}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := control.SealActive(ctl, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w}); err != nil {
+			if _, err := control.SealActive(ctl, control.Event{Action: "seal", Outcome: "success", Invoker: inv, Witness: w}, nil); err != nil {
 				t.Fatal(err)
 			}
 			f, err := os.OpenFile(ctl, os.O_APPEND|os.O_WRONLY, 0)
