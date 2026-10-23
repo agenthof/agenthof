@@ -42,6 +42,15 @@ clearly: a loud error an operator can act on beats a guess that corrupts a
 ledger. For anything that records or enforces governance, the test that proves
 the guarantee holds is part of the feature.
 
+**Proven end to end.** A feature is not done until its user-facing behavior is
+exercised through the real binary, not only its parts in isolation. The CLI
+journeys (`go test ./cmd/agenthof -run TestScript`) and the scripted acceptance
+runs are where a feature earns that; where it crosses a trust boundary or
+integrates an external system — an identity provider, a container runtime, a
+write-once sink — add an end-to-end test against that real backend. The suite is
+kept honest: coverage is reviewed from time to time for behavior no end-to-end
+test exercises, and a gap is closed or written down, never left silent.
+
 **Easy to reason about.** A reader should be able to hold a file in their head
 and answer: what does this do, how do I use it, what does it depend on. One
 responsibility per file; split when a file starts answering two questions. Name
