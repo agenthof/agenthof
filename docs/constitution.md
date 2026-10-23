@@ -148,6 +148,18 @@ as dependencies, not rebuilt as product surface. A change that reimplements
 functionality already solved by an off-the-shelf facade is out of scope
 unless that facade cannot satisfy Articles I through VI.
 
+## Article VIII — Releases
+
+Agenthof ships as tagged releases. A release is cut when a coherent, usable
+capability is complete and proven — its tests green end to end, its behavior
+documented, its limits stated honestly — not on a fixed clock, and never gated
+on speculative or commercial features. A version is a point a user may depend
+on: within a major version the public contract — the CLI, the configuration
+schema, the ledger's recorded shapes (Article VI), the compliance floors
+(Article IV), and the license (Article V) — changes only additively; a change
+that would break it waits for the next major and is named in the release. No
+release weakens the guarantees of these articles to ship sooner.
+
 ## Amendment
 
 These articles change only by an explicit commit that edits this file, with
