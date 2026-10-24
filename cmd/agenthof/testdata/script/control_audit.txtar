@@ -15,7 +15,7 @@ stdout 'agent coder enabled'
 stdout 'control head: seq=3 sha256=[0-9a-f]{64}'
 
 exec agenthof audit control --control-log control.jsonl
-stdout 'control ledger — 3 events'
+stdout 'control ledger — 3 events\nlog_id: [0-9a-f]{32}\n\n'
 stdout 'config applied'
 stdout 'disabled agent coder'
 stdout 'enabled agent coder'

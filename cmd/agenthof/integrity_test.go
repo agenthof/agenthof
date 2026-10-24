@@ -508,12 +508,13 @@ func floorScenario(t *testing.T, root, ctl, logDir string, floorFile bool) ([]co
 // logDir — one shared, empty directory per test, so a path printed by any
 // reader is the same across the runs being compared) and returns their exit
 // codes and outputs with the per-run noise masked: timestamps, 64-hex
-// hashes, and the root directory.
+// hashes, the ledger's log_id, and the root directory.
 func readerOutputs(t *testing.T, ctl, logDir string) []string {
 	t.Helper()
 	mask := func(s string) string {
 		s = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?`).ReplaceAllString(s, "<time>")
 		s = regexp.MustCompile(`[0-9a-f]{64}`).ReplaceAllString(s, "<hex>")
+		s = regexp.MustCompile(`log_id: [0-9a-f]{32}`).ReplaceAllString(s, "log_id: <id>") // random per ledger
 		return strings.ReplaceAll(s, filepath.Dir(ctl), "<root>")
 	}
 	var got []string

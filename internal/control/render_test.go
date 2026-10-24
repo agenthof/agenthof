@@ -449,3 +449,38 @@ func TestIntegrityLineSetFaults(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderHeaderShowsTheLogID: the header names the ledger's identity on its
+// own line directly under the first line, so an operator can read the id the
+// rebuild asks for (audit restore control --rebuild --log-id) off audit
+// control; the id is the genesis record's, and the existing lines keep their
+// order.
+func TestRenderHeaderShowsTheLogID(t *testing.T) {
+	p, _, _ := appliedLedger(t)
+	recs, head, err := ledger.ReadVerify(p, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := control.GenesisLogID(recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := control.Render(recs, head, nil)
+	if want := "control ledger — 1 events\nlog_id: " + id + "\n\n"; !strings.HasPrefix(out, want) {
+		t.Fatalf("header must carry the log_id under its first line, want prefix %q in:\n%s", want, out)
+	}
+}
+
+// TestRenderHeaderOmitsAMissingLogID: a root written before ledgers carried a
+// log_id has none to show, and the header prints no log_id line at all, never
+// an empty one.
+func TestRenderHeaderOmitsAMissingLogID(t *testing.T) {
+	recs := []ledger.Record{rec(1, "apply", "", "success", "dana@example.com", "static")}
+	out := control.Render(recs, ledger.Head{Hash: "h", Count: 1}, nil)
+	if strings.Contains(out, "log_id") {
+		t.Fatalf("a root with no log_id must print no log_id line:\n%s", out)
+	}
+	if !strings.HasPrefix(out, "control ledger — 1 events\n\n") {
+		t.Fatalf("header unchanged for a pre-log_id root:\n%s", out)
+	}
+}

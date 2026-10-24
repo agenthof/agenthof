@@ -233,11 +233,12 @@ The governed core is real and runnable today:
   sealed segment's exact bytes to S3 Object Lock storage the operator brings,
   under a compliance-mode retention lock the provider enforces, and does not
   complete until that copy is confirmed; `audit verify control` checks every
-  protected copy and `audit restore control` puts a damaged sealed segment
-  back from it. The bound is stated plainly: the active segment and every
-  local file stay ordinary files, and the copy is protected for the retention
-  period alone, by the provider's compliance mode. `sink: external` remains
-  reserved.
+  protected copy, `audit restore control` puts a damaged sealed segment back
+  from it, and `audit restore control --rebuild` reconstructs the whole sealed
+  set and its manifest from the sink. The bound is stated plainly: the active
+  segment and every local file stay ordinary files, and the copy is protected
+  for the retention period alone, by the provider's compliance mode. `sink:
+  external` remains reserved.
 
 ## Next
 

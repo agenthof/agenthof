@@ -245,7 +245,7 @@ func TestAuditRestoreControlNoTaint(t *testing.T) {
 		t.Fatalf("%d\n%s", code, out)
 	}
 	var buf bytes.Buffer
-	if code := cmdAudit([]string{"control", "--control-log", ctl}, &buf); code != 0 || strings.Contains(buf.String(), "TAINTED") || !strings.Contains(buf.String(), "control ledger integrity: verified (4 events, 1 sealed segments)") {
+	if code := cmdAudit([]string{"control", "--control-log", ctl}, &buf); code != 0 || strings.Contains(buf.String(), "TAINTED") || !strings.Contains(buf.String(), "control ledger integrity: verified (4 events, 1 sealed segments)") || !strings.Contains(buf.String(), "control ledger — 4 events\nlog_id: "+ledgerID(t, ctl)+"\n\n") {
 		t.Fatalf("audit control: %d\n%s", code, buf.String())
 	}
 	v, err := control.Read(ctl, ledger.Locked)
@@ -513,14 +513,14 @@ func TestAuditRestoreRebuildUsage(t *testing.T) {
 	ctl, _ := wormSealedRoot(t)
 	id := ledgerID(t, ctl)
 	var out bytes.Buffer
-	if code := cmdAudit([]string{"restore", "control", "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance", "--rebuild"}, &out); code != 2 || out.String() != "audit restore control: --rebuild requires --log-id <id> (the ledger's identity — from the sealed:/control head: lines shipped off the box, audit control's header, or the bucket listing)\n" {
+	if code := cmdAudit([]string{"restore", "control", "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance", "--rebuild"}, &out); code != 2 || out.String() != "audit restore control: --rebuild requires --log-id <id> (the ledger's identity — from audit control's header or the bucket listing)\n" {
 		t.Fatalf("no --log-id: %d\n%s", code, out.String())
 	}
 	if code, text := restoreControl(t, ctl, "--rebuild", "--log-id", id, "--segment", "1"); code != 2 || text != "audit restore control: --segment cannot be combined with --rebuild\n" {
 		t.Fatalf("--segment: %d\n%s", code, text)
 	}
 	for _, bad := range []string{"<id>", "x", strings.ToUpper(id), id + "0"} {
-		if code, text := restoreControl(t, ctl, "--rebuild", "--log-id", bad); code != 2 || text != "audit restore control: --log-id must be the ledger's identity, 32 lowercase hex characters (as the sealed:/control head: lines, audit control's header and the bucket listing spell it)\n" {
+		if code, text := restoreControl(t, ctl, "--rebuild", "--log-id", bad); code != 2 || text != "audit restore control: --log-id must be the ledger's identity, 32 lowercase hex characters (as audit control's header and the bucket listing spell it)\n" {
 			t.Fatalf("--log-id %q: %d\n%s", bad, code, text)
 		}
 	}

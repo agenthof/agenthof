@@ -84,14 +84,14 @@ func cmdAuditRestoreControl(args []string, out io.Writer) int {
 	integrity := fs.String("integrity", "", "read the sink posture from this copy of integrity.yaml instead of the one beside the ledger")
 	sinkTimeout := fs.Duration("sink-timeout", 2*time.Minute, "bound on each call to the sink")
 	rebuild := fs.Bool("rebuild", false, "reconstruct the whole sealed set and its manifest from the sink (with --log-id)")
-	logID := fs.String("log-id", "", "with --rebuild: the ledger's identity, from the sealed:/control head: lines shipped off the box or the bucket listing")
+	logID := fs.String("log-id", "", "with --rebuild: the ledger's identity, from audit control's header or the bucket listing")
 	fs.SetOutput(out)
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
 	if *rebuild {
 		if *logID == "" {
-			_, _ = fmt.Fprintln(out, "audit restore control: --rebuild requires --log-id <id> (the ledger's identity — from the sealed:/control head: lines shipped off the box, audit control's header, or the bucket listing)")
+			_, _ = fmt.Fprintln(out, "audit restore control: --rebuild requires --log-id <id> (the ledger's identity — from audit control's header or the bucket listing)")
 			return 2
 		}
 		if len(segments) > 0 {
@@ -99,7 +99,7 @@ func cmdAuditRestoreControl(args []string, out io.Writer) int {
 			return 2
 		}
 		if !control.IsLogID(*logID) {
-			_, _ = fmt.Fprintln(out, "audit restore control: --log-id must be the ledger's identity, 32 lowercase hex characters (as the sealed:/control head: lines, audit control's header and the bucket listing spell it)")
+			_, _ = fmt.Fprintln(out, "audit restore control: --log-id must be the ledger's identity, 32 lowercase hex characters (as audit control's header and the bucket listing spell it)")
 			return 2
 		}
 	}
