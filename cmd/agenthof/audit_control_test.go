@@ -96,6 +96,9 @@ func TestAuditControlCleanExitsZero(t *testing.T) {
 		"config applied", "disabled agent coder", "enabled agent coder",
 		"dana@example.com (asserted)",
 		"control ledger integrity: verified (3 events)",
+		// The header names the ledger's identity, the id audit restore
+		// control --rebuild --log-id asks for.
+		"control ledger — 3 events\nlog_id: " + ledgerID(t, controlLog) + "\n\n",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("missing %q:\n%s", want, out.String())

@@ -239,8 +239,22 @@ func Render(records []ledger.Record, head ledger.Head, verr error) string {
 	return RenderView(View{Records: records, Head: head, FirstSeq: 1}, verr)
 }
 
+// headerLogID is the identity the header shows: the manifest's when the View
+// carries one, else the genesis record's; "" for a root that has neither.
+func headerLogID(v View) string {
+	if v.LogID != "" {
+		return v.LogID
+	}
+	id, err := GenesisLogID(v.Records)
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
 // RenderView renders the ledger as one logical chain, as a human-readable
-// audit trail (spec §3.6): a header, one `segment k: seq A–B sealed <time>
+// audit trail (spec §3.6): a header (the event count and the ledger's log_id
+// when it has one), one `segment k: seq A–B sealed <time>
 // <file>` line per sealed segment (only when there is one), the rotation
 // state when a seal did not complete, one line per event carrying its
 // derived label, invoker, and time, and a final integrity line. verr is
@@ -250,7 +264,13 @@ func Render(records []ledger.Record, head ledger.Head, verr error) string {
 // recovered and it is rendered in full.
 func RenderView(v View, verr error) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "control ledger — %d events\n\n", v.Head.Count)
+	fmt.Fprintf(&sb, "control ledger — %d events\n", v.Head.Count)
+	// The ledger's identity, which a rebuild from the sink asks for. A root
+	// written before ledgers carried one has none: no line, never an empty one.
+	if id := headerLogID(v); id != "" {
+		fmt.Fprintf(&sb, "log_id: %s\n", id)
+	}
+	sb.WriteString("\n")
 	for _, s := range v.Sealed {
 		fmt.Fprintf(&sb, "segment %d: seq %d–%d sealed %s %s\n", s.N, s.FirstSeq, s.HeadSeq, s.SealedAt.UTC().Format(time.RFC3339), filepath.Base(s.Path))
 	}
