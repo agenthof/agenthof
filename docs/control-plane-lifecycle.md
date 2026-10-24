@@ -1045,14 +1045,20 @@ page describes, byte for byte.
       ▼
   4. Record             append seal / success { segment: 1, first_seq: 1, head_seq: B, head_hash: H_B, content_sha256 }
       │                   as seq B+1 — the segment's last line; the chain's head is now this line
+      │                   (sink: worm: the record also carries a sink block — kind, url, key, mode: compliance, retain_until)
+      ▼
+  4b. Protected copy    sink: worm only — the sealed file's exact bytes ──► the sink, at the key the record names,
+      │                   locked compliance to at least retain_until; the lock is read back ──► confirmed
+      │                   not confirmed ──► the seal stands, the manifest is NOT written; the next audit seal completes it
       ▼
   5. Manifest           control.jsonl.segments  ◄── written whole: temp, fsync, rename  (segment 1: seq 1–B+1, sha256 of the file)
       ▼
   6. Swap               control.jsonl  ──►  a fresh, empty file under the active's name
       │                   the old bytes live on under .seg-000001 alone
       ▼
-  7. Ship the line      sealed: segment 1 seq=1..B+1 sha256=<file> (control.jsonl.seg-000001)
-                        control head: seq=B+1 sha256=<the seal line>        ◄── save both off the box
+  7. Ship the line      protected: s3-object-lock <url> key=<key> version=<id> compliance until <date>   ◄── sink: worm only
+                        sealed: segment 1 seq=1..B+1 sha256=<file> (control.jsonl.seg-000001)
+                        control head: seq=B+1 sha256=<the seal line>        ◄── save these off the box
       │
       ▼
   8. Carry on           the next apply is seq B+2, prev = the seal line's hash, in the new active
@@ -1108,6 +1114,12 @@ order is what makes an interruption safe:
 4. **Swap.** A fresh, empty file is put under the active's name (temp, fsync,
    rename, directory fsync). The sealed bytes now live under the segment name
    alone.
+
+On a `sink: worm` root one more step sits between **Record** and
+**Manifest**: the sealed file's exact bytes are written to the sink the record
+names and the copy is *confirmed* before the manifest lists the segment.
+[The protected copy](#the-protected-copy--sink-worm) below follows it; the
+four steps above are unchanged by it.
 
 The command then prints `sealed: segment N seq=A..B sha256=<file> (<name>)`
 and the head, which is the seal line itself. Both are verifier inputs: the
@@ -1179,9 +1191,10 @@ that each landing is a state the next run finishes, not a fault to diagnose:
 |---|---|---|
 | the **link**, before the record | an open active with a second name beside it | nothing is owed: appends continue; the next `audit seal` finds the link already pointing at the same file and continues from there |
 | the **record**, before the manifest | the active's last line is a successful seal; the manifest does not list it yet | the segment is closed; the set is **not yet rotated** |
+| the **record**, before the protected copy is confirmed (`sink: worm`) | as above, and the seal names a sink key that holds no confirmed copy yet — nothing, or an unconfirmed write | the same state: closed, **not yet rotated**; the next `audit seal` confirms the copy before it writes the manifest — writing it, or finding the seal's own bytes already at the key and confirming them without writing again (`(already confirmed)`) |
 | the **manifest**, before the swap | the manifest lists the segment; the active's name still refers to the sealed file | the set is rotated; the fresh active is **not yet in place** |
 
-In the last two states the ledger is *sealed and not yet rotated*. Reads are
+In the last three states the ledger is *sealed and not yet rotated*. Reads are
 unaffected — the chain is whole and verifies, `audit control` prints
 `control ledger: segment N sealed, rotation not completed; run: agenthof audit
 seal` and exits 0, `investigate` reads `verified`, and `run` and `serve` keep
@@ -1191,16 +1204,21 @@ executing (the vouch is a read). **Writes refuse**: every control writer —
 as the remedy; over the API, `POST /v1/config/apply` answers `500`
 `{status:"rotation_incomplete"}` with a fixed body, nothing recorded, and the
 server's log names the command. `audit verify control` exits **8** for it —
-*rotation not completed* — the last code in its precedence (1, 6, 3, 4, 5, 7,
-8), so a tamper or an unverifiable anchor on the same root is what you see
-first; the chain itself is intact. Running `agenthof audit seal` **completes**
-the rotation: it takes the same authorization (the `seal` grant; a refused
-completion is printed, not recorded, because the closed segment takes no record
-and the next does not yet exist), skips `--if-larger-than`, redoes whichever of
-link, manifest and swap is missing — each step is harmless to repeat — and
+*rotation not completed* — the last code in its precedence (1, 6, 9, 3, 4, 5,
+7, 10, 8), so a tamper, a protected-copy verdict or an unverifiable anchor on
+the same root is what you see first; the chain itself is intact. Running
+`agenthof audit seal` **completes** the rotation: it takes the same
+authorization (the `seal` grant; a refused completion is printed, not
+recorded, because the closed segment takes no record and the next does not yet
+exist), skips `--if-larger-than`, redoes whichever of link, protected copy
+(on a `sink: worm` root), manifest and swap is missing — each step is harmless
+to repeat — and
 prints `completed rotation of segment N` before the usual `sealed:` line. A
 seal that fails at the manifest or the swap says so on the spot (`sealed;
-rotation NOT completed — re-run: agenthof audit seal`); nothing is lost.
+rotation NOT completed — re-run: agenthof audit seal`), and one whose
+protected copy could not be confirmed says so too (`sealed; protected copy NOT
+confirmed — rotation NOT completed; re-run: agenthof audit seal`); nothing is
+lost.
 
 ### Repairing the active, and only the active
 
@@ -1236,6 +1254,228 @@ identity, so `audit seal` refuses before anything is linked or recorded, and the
 root remains a single, writable file; no remedy is invented, because none exists
 short of editing the ledger.
 
+### The protected copy — `sink: worm`
+
+Everything above happens on one machine, in files whoever owns the host can
+rewrite. Where the control root's `integrity.yaml` declares `sink: worm` —
+`sink_backend` naming an S3-compatible bucket with Object Lock, compliance
+mode, and a retention period (the shape is in
+[`reference/config.md`](reference/config.md)) — every seal **also writes the
+sealed segment's exact bytes to that bucket**, under a compliance-mode
+retention lock the storage provider enforces, and the seal does not complete
+until that copy is confirmed. That copy is the **protected copy**. This
+subsection follows it from the seal that writes it to the reads and
+recoveries that use it. It ships today; the bounds at the end are part of
+the description, not a footnote.
+
+```
+  agenthof audit seal                                    on a root whose integrity.yaml says sink: worm
+      │
+      ▼
+  preflight            the credential resolves; the bucket answers and has Object Lock enabled;
+      │                 the seal's own key holds no version   ──► else refused: nothing linked, nothing recorded
+      ▼
+  link, record         steps 3–4 above; the seal record carries a sink block:
+      │                 { kind: s3-object-lock, url, key: <prefix>/<log_id>/seg-000001, mode: compliance, retain_until }
+      ▼
+  protected copy       PUT the sealed file's exact bytes at the key, locked COMPLIANCE to at least retain_until
+      │                 read back: the version is the OLDEST at the key and its lock holds to at least that date  ──► confirmed
+      │                 anything less ──► the seal stands, the manifest is not written; the next audit seal completes it
+      ▼
+  manifest, swap       steps 5–6 above — so a segment the manifest lists has a confirmed copy, or carries no block
+      ▼
+  later                audit verify control      record ──► sink (each copy)   and   sink ──► local set (each object)
+                       audit restore control     one damaged sealed segment back from its copy, selected by the chain
+                       audit restore control --rebuild --log-id <id>   the whole sealed set and its manifest, from the sink alone
+```
+
+**Where the copy goes is decided before the seal line is written.** The key
+is derived from two things only — the ledger's `log_id` and the segment's
+ordinal, under the prefix the URL names: `<prefix>/<log_id>/seg-000001` — so
+one bucket may hold many ledgers and each key is one segment's and no other's.
+The seal record carries a **sink block** naming the sink's kind and URL as
+configured, that key, `mode: compliance`, and `retain_until`: the seal's time
+plus the configured retention, the *floor* the copy's lock must hold to. All
+of it is on the chain; the upload's outcome is not — that is the sink's own
+state, which every reader checks by asking the sink. Never a credential, a
+signed URL or a receipt.
+
+**Preflight, before anything is linked or recorded.** The credential must
+resolve (the environment variables the posture names), the bucket must answer
+and report Object Lock enabled (versioning is implied), and the seal's own key
+must hold no version. A key already occupied refuses the seal with nothing
+linked and nothing recorded, naming the two things it can mean — this ledger
+sealed this segment before and the local set no longer lists it (the sink
+still holds the original: run `audit verify control`, then `audit restore
+control --rebuild`), or a foreign object sits at the key — and that a
+compliance-locked version cannot be removed either way.
+
+**The copy, confirmed.** After the seal record — the segment is closed — the
+sealed file's bytes are written at the key with the lock headers: compliance
+mode, locked to the later of the recorded `retain_until` and now plus the
+retention (a provider refuses a lock date in the past, so a seal left
+incomplete past its own retention still completes; the read-back still holds
+the lock to the recorded date). *Confirmed* means three things the sink
+itself reports: it minted a version id (none means versioning is off and
+nothing was locked), that version lists as the **oldest** at the key, and its
+retention reads back as compliance to at least the recorded date. Only then
+is the manifest written. That ordering is what makes the manifest a
+confirmation: **a segment the manifest lists has a confirmed protected copy**,
+or its seal record carries no sink block. The command prints `protected:
+s3-object-lock <url> key=<key> version=<id> compliance until <date>` before
+`sealed:` — the version the sink confirmed and the lock as the sink reports
+it, never shorter than the record's date, often longer — and `audit control`
+renders the seal with `→ protected copy <kind> <url> until <date>`.
+
+**Not confirmed: fail-closed, nothing lost.** The sink unreachable or slow, a
+credential that can write but not read back, no version id, another writer
+landing a version at the key between the empty listing and the write — each
+leaves the seal record standing and the manifest unwritten: the ledger is
+*sealed and not yet rotated*, exactly the state the table above describes,
+every control writer refuses, `audit verify control` exits 8, and the
+command says `sealed; protected copy NOT confirmed — rotation NOT completed;
+re-run: agenthof audit seal`. The re-run completes it: it lists the key, and
+where every version there holds this segment's bytes — the oldest under a
+sufficient lock — it confirms the oldest without writing again (`(already
+confirmed)`); an empty key is written; a key holding any version that is not
+this segment is refused, whatever else sits there. **The seal never writes on top of a version that is
+not this segment** — the oldest version at a key is always the seal's own, by
+construction, which is what lets every reader judge the oldest and only the
+oldest. A foreign version at the key blocks that key: an unlocked one a
+credential with delete may remove before the re-run; a compliance-locked one
+until its retention ends. Rewriting `integrity.yaml` is not an escape: a seal
+recorded for a copy completes only through a sink of the same kind and URL,
+at the key that sink derives for this ledger's segment.
+
+**Verify, in both directions.** After the chain pass, `audit verify control`
+on a sealed root asks the sink about every copy. *Record → sink*: for each
+sealed segment whose seal names a sink block, it lists the key — no version
+is `MISSING`; reads the oldest version whole and compares the bytes with the
+local file — other bytes is `LOCAL MISMATCH` (the local file was altered; a
+later version that happens to match is not the copy, because the seal wrote
+the oldest); and reads the lock — unlocked, governance, or compliance ending
+before the recorded date while that date has not passed is `UNDER-LOCKED`.
+*Sink → local set*: it lists the ledger's prefix, and every object there must
+be the copy of a local segment that carries a block and whose copy was not
+just found altered; an object at an ordinal the local set does not account
+for — a segment the local set lost or replaced, or one past its last segment
+— is named with `audit restore control --segment N` as the remedy (a seal
+that lands while the verification runs is judged again against a fresh read
+of the ledger and reported as in flight, never as a verdict). Any one of
+those is a **definitive** verdict: exit **9**. Anything the verifier could
+not decide — the sink unreachable, slow or refusing (`status 403 … from
+<host> (<operation>)`), half an answer, a posture it cannot read, a record
+naming a sink other than the posture's — is **unverifiable**: exit **10**,
+reported as exactly that and never as tampering. Both sit in the precedence
+where they belong (1, 6, 9, 3, 4, 5, 7, 10, 8): a definitive copy verdict is
+outranked only by a chain fault and an anchor mismatch, and an unverifiable
+copy is reported just after an unverifiable anchor — never ahead of a
+definitive verdict of any kind. A segment sealed before the root declared the
+sink prints `protected copy: none (sealed before sink: worm)`; `--offline`
+skips the pass and says so. One more honesty: the posture read from beside
+the ledger names the sink's address from the root being verified, and the
+summary says so (*not independent; pass `--integrity`*) — a copy of
+`integrity.yaml` held off the box is the independent input.
+
+**Repair confirms before it cuts.** On a `sink: worm` root, the repair case
+that completes a rotation — bytes after a seal line — confirms the protected
+copy *first*, on the bytes the chain fixes (the records through the seal
+line), and only then moves the tail aside and truncates; the torn-tail case
+never touches the sink. A sink that cannot confirm leaves the ledger exactly
+as it was found, torn and nothing owed; a retry writes the same bytes to the
+same key. A sink outage during a repair changes nothing locally.
+
+**Restore one segment.** `audit restore control [--segment N]` runs under the
+`repair` grant and answers one kind of fault: a sealed segment the manifest
+lists that is missing, torn, broken, does not chain from the segment before
+it, or disagrees with its manifest entry. It reads the versions at that
+segment's key oldest first and selects **by the chain, never by the
+manifest**: the version is sealed segment N whose records chain from the
+previous segment's head (the genesis for segment 1), whose last line is a
+seal that recomputes as segment N and names this key, and whose seal line is
+what the next segment's first record — or the active's — chains from. The
+manifest's `sha256` is a cross-check only. Every sink call runs before the
+ledger is locked; a lock that cannot be read back fails closed with nothing
+written. Then, under the active's exclusive lock, whatever bytes sit under
+the segment's name are moved aside as `<log>.replaced-NNNNNN-<timestamp>` —
+never deleted; they are the evidence of what was there — the fetched bytes
+are written (temp, fsync, rename), the set is read again and must verify
+clean, and a `restore` `success` record is appended under the invoker's three
+identities. It prints `restored: segment N from <kind> <url> version=<id>
+sha256=<file> (<replaced name>)` — `(nothing was there)` when the file was
+missing — and tells you when the version it selected is not the oldest at the
+key, or is not under a compliance lock. A restore **taints nothing**: nothing
+is truncated, and every byte it writes is one the chain already commits to.
+No version at the key chains: *the protected copy is missing*, nothing
+written.
+
+**Rebuild the whole set.** `audit restore control --rebuild --log-id <id>`
+is for a root whose sealed files and manifest are gone, damaged beyond the
+manifest, or tidied short — the ledger's identity is in the `protected:`
+line's key (`<prefix>/<log_id>/seg-N`) shipped off the box with each seal, on
+the ledger's genesis record (`log_id`), and in the bucket listing itself,
+where it is the folder every segment sits under. It lists the
+ledger's prefix (every key must be a segment's; the ordinals must run 1..N
+without a gap — *a chain with a hole cannot be reconstructed*), fetches each
+ordinal's oldest version and verifies
+the **entire chain** link by link, genesis to the last seal, **before
+anything is written**; any failure refuses the whole rebuild and nothing
+local changes. Then it writes, ascending: a local file byte-identical to the
+copy is left alone, a differing one moved aside as evidence and rewritten, an
+absent one written; the manifest is recomputed from the fetched bytes (the
+old one kept as `<log>.replaced-segments-<timestamp>` when it differed); an
+empty active is created when none exists. The set is read again, and one
+`restore` record says what was verified, written and replaced — appended even
+when nothing needed writing, because a set verified against the sink is a
+visible act. It prints `rebuilt: segments 1–N from <kind> <url> (W written,
+R replaced)` with the names kept, and names any copy whose lock is weaker
+than its seal recorded (reported, not refused — the bytes are still the
+chain's). A rebuild never completes a rotation, and a present active that no
+longer chains from the rebuilt head is named with its remedy, not cut. One
+limit, stated: a rebuild holds the fetched set in memory while it verifies —
+bounded, and sized for control-ledger segments.
+
+**What the protected copy is, and is not** (Article III):
+
+- **It covers sealed segments, from the seal that writes it, and nothing
+  else.** The active segment, every local file — the segments, the manifest,
+  the active — and any segment sealed *before* the root declared the sink are
+  ordinary files with no protected copy. Declaring `sink: worm` on a root
+  that has already sealed protects the seals from then on; the earlier ones
+  print `protected copy: none`.
+- **Within the retention period the copy cannot be deleted, altered or
+  shortened by any storage operation, whoever issues it, the account's owner
+  included.** The provider's one escape is closing the account, which is
+  outside Agenthof's view and is not silent. The words write-once and
+  non-erasable describe that copy alone, for that period alone — never a
+  sealed file, never the ledger.
+- **The guarantee is the provider's compliance mode, not Agenthof's.**
+  Agenthof does not run the lock; it asks for it, reads back what the
+  provider reports, and refuses to call anything less *confirmed*. That is
+  why `mode: governance` is refused in the posture (a privileged user can
+  lift it), why the lock is read back rather than assumed, and why a sink
+  that cannot be asked is *unverifiable*, never *verified*.
+- **It catches a consistent rewrite of the whole local set only where the
+  rewritten set no longer accounts for what the sink holds.** A sealed file
+  replaced under its name is caught byte for byte against the oldest version;
+  a sealed segment dropped from the local set is caught by the object the
+  sink still holds. A rewrite that keeps every sealed file exactly as it was
+  and rewrites the active alone is not the sink's to catch — that is the
+  anchored head's, checked against a reference held off the machine
+  ([the life of an anchor](#the-life-of-an-anchor)). The two layer.
+- **A credential that can write can still write more.** Further versions on
+  top of a key and delete markers on it are possible for anyone who can write
+  to the bucket; neither touches the locked oldest version, which is the one
+  every verifier judges, and both are reported as information (*later
+  versions differ: written over, the protected copy stands*).
+- **Availability is the cost, never integrity.** A sink that is down blocks
+  the next seal's completion and makes `audit verify control` exit 10; it
+  never produces a wrong verdict, and reads of the ledger continue.
+- **When the retention period ends, the copy is a file like any other.** The
+  verdict says so (`unlocked — verified; the retention period ended …`), and
+  says `expiring` as the end approaches. Retention is the operator's choice
+  in the posture; nothing here extends it.
+
 ### Honest bounds
 
 What a sealed segment is, and is not (Article III):
@@ -1260,6 +1500,12 @@ What a sealed segment is, and is not (Article III):
 - **Nothing is pruned.** Every sealed segment is kept in full, indefinitely,
   as the compliance record. A retention rule over sealed segments is reserved
   (the manifest reserves the keys for it and refuses them today).
+- **Under `sink: worm`, the protected copy is the one exception, and it is
+  bounded.** The copy — not the sealed file — is non-erasable for the
+  retention period, on the strength of the provider's compliance mode; the
+  local files stay regular files, and the bounds above apply to them
+  unchanged. [The protected copy](#the-protected-copy--sink-worm) states
+  its own.
 
 ### Shipped today vs reserved
 
@@ -1272,11 +1518,14 @@ next `audit seal`, `audit verify control`'s per-segment lines and exit 8,
 seal, the distinct cause for an older binary's fresh genesis, and — under
 `sink: worm` — the seal's protected copy of each sealed segment, written to
 S3 Object Lock storage under a compliance-mode retention lock and confirmed
-before the rotation completes, with `audit verify control`'s verdict on every
-copy and `audit restore control` to put a damaged sealed segment back from
-it; the active segment and every local file stay ordinary files, and the copy
-is protected for the retention period alone, by the provider's compliance
-mode. Reserved: pinning the whole ledger into a non-erasable `sink: external` storage sink
+before the rotation completes, `audit verify control`'s verdict on every copy
+in both directions (exit 9 definitive, exit 10 unverifiable), `audit repair
+control` confirming the copy before it cuts, `audit restore control` to put a
+damaged sealed segment back from its copy, and `audit restore control
+--rebuild --log-id <id>` to reconstruct the whole sealed set and its manifest
+from the sink; the active segment and every local file stay ordinary files,
+and the copy is protected for the retention period alone, by the provider's
+compliance mode. Reserved: pinning the whole ledger into a non-erasable `sink: external` storage sink
 (refused by name today), pruning sealed segments under a retention rule, and
 sealing a ledger whose genesis carries no `log_id`. Only shipped behavior is a
 guarantee.
@@ -1309,7 +1558,7 @@ adopted. Because both carry the same key:
 | `run` and `serve` execute the installed configuration, resolved per run; nothing installed is a recorded refusal; the kill switch re-installs; the snapshot's bytes are verified against the pointer on the execution read, on the authorization read, and on the kill switch's re-snapshot read; the execution read executes only an install the control ledger records as its last (an `apply`, a kill-switch flip, or a `config vouch`) — a pointer it does not vouch for is a recorded refusal, a damaged ledger refuses runs until repaired, a held configuration lock a retryable busy | a warning at `apply` when it reverts a kill-switch flip; a disabled agent downing only the workflows that reference it; `registry list` over the installed snapshot |
 | `gateway provision` and `runs prune` authorized against the installed roles (`provision`, `prune`) and recorded; prune spares the control ledger by name and by identity | `provision`/`prune` over the API; a structured prune record; `detail` in `investigate/1` |
 | hash-chained control ledger with `seq`/`prev` + torn/broken/tainted verdicts; `anchor: tlog` external anchoring of the head (`audit anchor` pins it into a transparency log, `audit verify control` checks every recorded anchor — exit 6 only for a genuine content mismatch (a head the chain no longer reproduces, or a proof that fails under a verified key), exit 7 when unverifiable; a still-reserved sink or anchor — `sink: external`, `anchor: signed` — is refused) | a non-erasable storage sink for the whole ledger (`sink: external`) and `anchor: signed` |
-| sealing and rotating the control ledger: `audit seal` closes the active segment into a sealed file (`<log>.seg-NNNNNN`) and opens the next, recorded as an authorized `seal` action and listed in an advisory `<log>.segments` manifest; the segments and the active read, verify and append as one chain with one `seq`; an interrupted rotation is completed by the next `audit seal`, never left broken (`audit verify control` exit 8 while it is owed); `audit repair control` recovers a torn tail of the active and, when bytes landed after a seal, moves them aside and completes that rotation — a sealed segment is never repaired in place; `--if-larger-than` for a cron; a never-sealed ledger is unchanged; `sink: worm`: each seal also writes the sealed segment's exact bytes to S3 Object Lock storage (compliance mode) and does not complete until the copy is confirmed — the seal record names the copy and its lock date, `audit verify control` fails on a copy that is missing, under-locked or holds other bytes (exit 9; unreachable is exit 10, never tampering), `audit restore control` puts a damaged sealed segment back from it; the active and every local file stay ordinary files | pinning the whole ledger into a non-erasable `sink: external` storage sink; pruning sealed segments under a retention rule (the manifest reserves the keys); sealing a ledger whose genesis predates `log_id` (refused today, single file) |
+| sealing and rotating the control ledger: `audit seal` closes the active segment into a sealed file (`<log>.seg-NNNNNN`) and opens the next, recorded as an authorized `seal` action and listed in an advisory `<log>.segments` manifest; the segments and the active read, verify and append as one chain with one `seq`; an interrupted rotation is completed by the next `audit seal`, never left broken (`audit verify control` exit 8 while it is owed); `audit repair control` recovers a torn tail of the active and, when bytes landed after a seal, moves them aside and completes that rotation — a sealed segment is never repaired in place; `--if-larger-than` for a cron; a never-sealed ledger is unchanged; `sink: worm`: each seal also writes the sealed segment's exact bytes to S3 Object Lock storage (compliance mode) and does not complete until the copy is confirmed — the seal record names the copy and its lock date, `audit verify control` fails on a copy that is missing, under-locked or holds other bytes (exit 9; unreachable is exit 10, never tampering), `audit restore control` puts a damaged sealed segment back from it and `--rebuild --log-id <id>` reconstructs the whole sealed set and its manifest from the sink; the active and every local file stay ordinary files | pinning the whole ledger into a non-erasable `sink: external` storage sink; pruning sealed segments under a retention rule (the manifest reserves the keys); sealing a ledger whose genesis predates `log_id` (refused today, single file) |
 | three identities per action (invoker / asserted_as / witness) | agent-to-IdP federation for the invoker's authority |
 | `--expect-head` off-machine head check | continuous/remote attestation of the head |
 | `config_hash` join to runs (`audit <run-id>`, `investigate`) | SIEM export / multi-org investigation at scale |

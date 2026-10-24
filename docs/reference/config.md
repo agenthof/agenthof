@@ -1079,6 +1079,74 @@ verification. A pinned key other than the one that signed is reported as
 `anchor` record in its timeline carries the verdict reached offline under it
 (see the `investigate` exit codes and the `investigate/1` contract below).
 
+**The least a `sink: worm` credential needs.** The key pair `sink_backend`'s
+`credential` names is used by `audit seal`, `audit verify control`, `audit
+repair control` and `audit restore control`, and the whole of what they ask
+of the bucket is six actions, scoped to the bucket and its objects — the
+policy the shipped MinIO journey (`scripts/e2e-worm-minio.sh`) grants its
+seal user:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "s3:PutObject",
+      "s3:PutObjectRetention",
+      "s3:GetObject",
+      "s3:ListBucketVersions",
+      "s3:GetObjectRetention",
+      "s3:GetBucketObjectLockConfiguration"
+    ],
+    "Resource": ["arn:aws:s3:::<bucket>", "arn:aws:s3:::<bucket>/*"]
+  }]
+}
+```
+
+Each action is one thing the sink does. `s3:PutObject` writes the protected
+copy; because that PUT carries the lock headers (compliance mode, a
+retain-until date), the provider also judges it against
+`s3:PutObjectRetention` — AWS states that setting a retention period requires
+it — and under compliance mode that permission can only ever *extend* a lock,
+never shorten or remove one. `s3:GetObject` reads a version back whole for
+the byte comparison (`audit verify control`, a restore, a rebuild, and a seal
+re-run that finds its copy already at the key). `s3:ListBucketVersions` lists
+a key's versions (the oldest is the copy) and the ledger's prefix (the sink's
+side of the verification). `s3:GetObjectRetention` reads a lock back — the
+confirmation, without which nothing is called confirmed.
+`s3:GetBucketObjectLockConfiguration` is the seal's preflight: the bucket
+must report Object Lock enabled before anything is linked or recorded.
+**Nothing grants `s3:DeleteObject`, `s3:DeleteObjectVersion` or
+`s3:BypassGovernanceRetention`** — the sink never deletes, and a governance
+bypass has no meaning under compliance mode. What such a credential can still
+do is write further versions on top of a key and place delete markers;
+neither touches the locked oldest version, which is the one every reader
+judges, and `audit verify control` reports both as information. A permission
+missing from the policy fails closed, and where it fails depends on which it
+is. A permission the preflight needs — reading the bucket's lock
+configuration, listing the seal's key — refuses the seal before anything is
+linked or recorded (`status 403 … from <host> (<operation>)`, exit 1). A
+missing `s3:PutObject` or `s3:PutObjectRetention` fails at the write itself,
+after the seal record: the plain `status 403 … (PutObject)` cause, then
+`sealed; protected copy NOT confirmed — rotation NOT completed; re-run:
+agenthof audit seal`. A missing `s3:GetObjectRetention` lets the write land
+and fails the lock read-back, leaving the copy `written but NOT confirmed`
+with the remedy `grant s3:GetObjectRetention, s3:GetObject and
+s3:ListBucketVersions, then re-run`. In both of the latter cases nothing is
+lost: the seal is recorded, the rotation is owed, and the next `audit seal`
+completes it once the permission is granted, confirming the copy already at
+the key without writing again. `s3:GetObject` alone is not exercised by a
+fresh seal — an empty key is written, then listed and its lock read — so a
+policy missing only it surfaces later: on a re-run's byte comparison (the
+same remedy), and in `audit verify control` (unverifiable, exit 10) and
+`audit restore control` (its cause, nothing written). On AWS
+itself add `s3:GetObjectVersion`: the sink always reads by version id, and
+AWS's reference states that a read of a specific version requires it (and
+that `s3:GetObject` is not required for that read). Confirm against your
+provider's own action reference for any other store; the six above are what
+the MinIO journey runs with.
+
 ### `--config`
 
 `apply` validates and installs it. `run` accepts it but executes the installed
