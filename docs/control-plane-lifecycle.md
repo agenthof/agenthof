@@ -1413,7 +1413,8 @@ written.
 is for a root whose sealed files and manifest are gone, damaged beyond the
 manifest, or tidied short — the ledger's identity is in the `protected:`
 line's key (`<prefix>/<log_id>/seg-N`) shipped off the box with each seal, on
-the ledger's genesis record (`log_id`), and in the bucket listing itself,
+`audit control`'s header, on the ledger's genesis record (`log_id`), and in the
+bucket listing itself,
 where it is the folder every segment sits under. It lists the
 ledger's prefix (every key must be a segment's; the ordinals must run 1..N
 without a gap — *a chain with a hole cannot be reconstructed*), fetches each

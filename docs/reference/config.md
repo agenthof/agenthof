@@ -938,8 +938,8 @@ the fetched bytes (an old one that differs is kept as
 when none exists. The sink is read before the ledger is locked, so other
 readers are not held off while the copies are fetched. `--log-id` is required: the ledger's identity names the
 sink's prefix, and when the local set is gone the operator is its only honest
-source (the `sealed:`/`control head:` lines shipped off the box, `audit
-control`'s header, or the sink's own listing). A present active segment is
+source (the `protected:` line's key, `audit control`'s header, or the sink's
+own listing). A present active segment is
 left as it is; records that were only ever in the active are not in the sink.
 
 The **installed-configuration store** lives beside it: `<dir>/installed/`
