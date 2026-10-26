@@ -2466,9 +2466,24 @@ func TestToolCallHoldSpansTheHandler(t *testing.T) {
 // not end an upstream call. Stop cancels the gateway's step context before
 // it waits, so an upstream call in flight ends, is recorded failed, and
 // Stop returns with the count.
+//
+// Two waits, each pinned to one fact. First: the cancel ends the upstream
+// call and the gateway records it — the tool_call lands while the stub is
+// still blocked, so nothing but the step-context cancel can have ended the
+// call. Then the stub is released and Stop must return. The release is not
+// optional: Stop closes the upstream session after its hold wait, and the
+// SDK's session close holds the connection's in-flight mutex through a
+// synchronous DELETE that the upstream serves only once its handler
+// returns — which waits for the cancel notification, which is queued
+// behind that same mutex. The SDK bounds the cycle at its own 5 s close
+// timeout (see Stop's comment); releasing the stub once the record has
+// landed takes it off the path, so the second wait is a hang guard, not a
+// race against that bound.
 func TestToolCallAcrossStopIsCancelledAndRecorded(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "upstream-secret-xyz")
 	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	blocking := mcp.NewServer(&mcp.Implementation{Name: "upstream-blocking-stub", Version: "v0.1.0"}, nil)
 	mcp.AddTool(blocking, &mcp.Tool{Name: "block", Description: "blocks until cancelled"}, func(ctx context.Context, req *mcp.CallToolRequest, args EchoArgs) (*mcp.CallToolResult, any, error) {
 		close(entered)
@@ -2484,12 +2499,17 @@ func TestToolCallAcrossStopIsCancelledAndRecorded(t *testing.T) {
 	})
 	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return blocking }, nil))
 	defer ts.Close()
-	defer close(release) // deferred after ts.Close, so it runs first
+	defer unblock() // deferred after ts.Close, so it runs first
 	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
 		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
 	}}, "", broker.StaticEnv{}, nil, "")
 	rec := &eventRecorder{}
-	proxyURL, token, err := p.Start(context.Background(), testBinding(), testAgentDef("github"), rec.record)
+	recorded := make(chan struct{})
+	var recordedOnce sync.Once
+	proxyURL, token, err := p.Start(context.Background(), testBinding(), testAgentDef("github"), func(e engine.Event) {
+		rec.record(e)
+		recordedOnce.Do(func() { close(recorded) })
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2506,6 +2526,12 @@ func TestToolCallAcrossStopIsCancelledAndRecorded(t *testing.T) {
 	stopped := make(chan int, 1)
 	go func() { stopped <- p.Stop() }()
 	select {
+	case <-recorded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the step-context cancel did not end the upstream call: no tool_call was recorded while the stub was still blocked")
+	}
+	unblock()
+	select {
 	case n := <-stopped:
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
@@ -2513,7 +2539,7 @@ func TestToolCallAcrossStopIsCancelledAndRecorded(t *testing.T) {
 			t.Fatalf("Stop() = %d, events = %+v; want 1 and exactly one failed tool_call", n, rec.ev)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Stop() did not return: the step context did not cancel the upstream call")
+		t.Fatal("Stop() did not return after the cancelled call was recorded and the upstream handler had returned")
 	}
 	<-callDone
 }

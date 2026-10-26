@@ -289,18 +289,21 @@ The audit trail shows:
 - **Artifact SHA**: First 8 hex chars of SHA256 hash; a fingerprint of what was computed
 - **Step attribution**: Every agent step tied to the invoker and run ID
 
-`audit` verifies the chain against itself; it can't tell a truncated tail
-or a wholesale re-forged file from a genuine short run, since both are
-internally consistent. If you recorded the head hash somewhere off the
-machine beforehand, `audit verify --expect-head` catches exactly that:
+`audit` verifies the chain against itself, and its completeness line
+checks the ledger's shape: a tail that loses the run's final event reads
+`UNTERMINATED` (exit `12`), and a door event dropped from a step reads `GAP`
+(exit `11`). What the file alone cannot catch is a ledger re-forged to a
+consistent shape — rewritten wholesale, final event included — since that
+is internally consistent too. If you recorded the head hash somewhere off
+the machine beforehand, `audit verify --expect-head` catches exactly that:
 
 ```bash
 ./agenthof audit verify r-9e31cf9b --expect-head <hex>
 ```
 
-A mismatch here means the run's tail was truncated or the file was
-re-forged after the head was recorded; a match confirms the ledger you're
-looking at is the one whose head you saved.
+A mismatch here means the file was re-forged or replaced after the head was
+recorded; a match confirms the ledger you're looking at is the one whose
+head you saved.
 
 ### 2.2 OIDC variant: use a password-grant token from Dex
 

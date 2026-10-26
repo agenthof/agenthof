@@ -448,8 +448,9 @@ does not; `UNTERMINATED` when there is no final event — still running or
 tail lost, which the file alone cannot tell; `no claim` for a ledger
 recorded before door accounting. A parent run's audit adds one `subtree:`
 line per child it spawned, and its exit code is the worst verdict in the
-tree (`1` a damaged chain, `11` a gap, `12` unterminated, `4` an
-`--expect-head` mismatch, `0`). Then it lists the timeline: workflow started, each
+tree (`1` a damaged chain, `11` a gap, `12` unterminated, else `0`;
+`audit verify` adds `4` for an `--expect-head` mismatch, ranked below
+those). Then it lists the timeline: workflow started, each
 step started/succeeded/failed, any bounces, and how the run finished. That is
 the full loop — *who asked → what ran → what it touched → whether the record can
 be trusted* — with no cross-referencing required. When the run's

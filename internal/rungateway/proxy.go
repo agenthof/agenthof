@@ -428,6 +428,15 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 // server happens to treat an in-flight connection when closed. It returns the
 // number of door calls admitted during the step; read after it returns, the
 // value is final.
+//
+// Bound: the step-context cancel ends an upstream tool call at once, so the
+// hold wait is prompt; the upstream session close that follows can then take
+// up to the SDK's own session-close timeout (the go-sdk's closeDeleteTimeout,
+// 5 s today) when a call was in flight, because the SDK's close
+// sends a synchronous DELETE that the upstream answers only once its handler
+// has seen the cancel notification queued behind the same connection lock.
+// So a tool call in flight across step-end can delay Stop's return by up to
+// that much — bounded, where the hold alone once waited for the whole call.
 func (p *Gateway) Stop() int {
 	p.mu.Lock()
 	if p.closing {
@@ -448,7 +457,9 @@ func (p *Gateway) Stop() int {
 	p.mu.Unlock()
 
 	// End the step's upstream tool calls first, so a call in flight fails,
-	// records and releases its hold; then cut connections.
+	// records and releases its hold; then cut connections. The order matters:
+	// closing the sessions first would remove the only cancel path and make
+	// the SDK's close timeout the rule rather than the bound (see above).
 	if cancel != nil {
 		cancel()
 	}
@@ -486,7 +497,9 @@ func (p *Gateway) forward(stepCtx context.Context, bind engine.Binding, agent co
 		// The admission hold is toolsCallMiddleware's and spans this handler.
 		// The upstream call ends when the agent gives up (ctx, the session's)
 		// or when the step is over (stepCtx — Stop cancels it), so a call in
-		// flight across Stop fails, records, and lets Stop return.
+		// flight across Stop fails, records, and releases its hold at once;
+		// Stop's return is then gated only by the upstream session close,
+		// which the SDK bounds at its own close timeout (see Stop).
 		callCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		stopAfter := context.AfterFunc(stepCtx, cancel)

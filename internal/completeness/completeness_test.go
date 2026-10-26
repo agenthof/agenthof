@@ -129,7 +129,7 @@ func TestPreMigrationFixtureReadsNoClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	if r := Check(events); r.Verdict != NoClaim {
-		t.Fatalf("the pre-R10.13 fixture must read no-claim, got %+v", r)
+		t.Fatalf("a ledger recorded before door-call accounting existed must read no-claim, got %+v", r)
 	}
 }
 

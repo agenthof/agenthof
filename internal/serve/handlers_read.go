@@ -119,7 +119,15 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, _ identity.Inv
 	}
 	integrity, _ := s.integrityOf(id, verr)
 	if word := tree.ChildIntegrityFailure(); word != "" && verr == nil {
-		integrity = word // a descendant's torn or broken chain: the local command exits 1 on it, so the client must too
+		// A descendant's torn or broken chain: the local command exits 1 on
+		// it, so the client must too. A child that cannot be read at all
+		// says `error` in the subtree text; the header keeps its closed
+		// enum and reads broken, as integrityOf does for the run's own
+		// unreadable chain.
+		integrity = word
+		if word != apiclient.IntegrityTorn && word != apiclient.IntegrityBroken {
+			integrity = apiclient.IntegrityBroken
+		}
 	}
 	comp := s.completenessOf(id, tree.Root.Report)
 	switch tree.ChildCompletenessWorst() {

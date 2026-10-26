@@ -174,6 +174,30 @@ func TestAuditHeadersCarryTheTreeWorst(t *testing.T) {
 	}
 }
 
+// TestAuditHeaderMapsUnreadableChildToBroken: a child ledger that cannot be
+// read at all (here: a directory where the file should be — an open/IO
+// failure, neither torn nor broken) is reported as `error` in the subtree
+// text, but the Agenthof-Integrity header keeps its closed enum and reads
+// `broken`, the way integrityOf already maps the run's own unreadable
+// chain; the client exits 1 on it as the local command does.
+func TestAuditHeaderMapsUnreadableChildToBroken(t *testing.T) {
+	ts := newTestServer(t, &fakeHost{}, fakeAuth{}, 1)
+	n1 := 1
+	const root, child = "r-aa", "r-cc"
+	if err := os.MkdirAll(filepath.Join(ts.logDir, child+".jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	re := []engine.Event{{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, {Type: "step_started", Step: "a"}, {Type: "spawn", Status: "succeeded", ChildRunID: child, Depth: 1}, {Type: "step_succeeded", Step: "a", DoorCalls: &n1}, {Type: "workflow_finished", Status: "succeeded"}}
+	writeLinked(t, ts.logDir, root, "", re...)
+	resp, text := ts.do(t, http.MethodGet, "/v1/runs/"+root+"/audit", goodToken, nil)
+	if got := resp.Header.Get(apiclient.IntegrityHeader); got != apiclient.IntegrityBroken {
+		t.Fatalf("%s = %q, want %q (the header's enum is closed)\n%s", apiclient.IntegrityHeader, got, apiclient.IntegrityBroken, text)
+	}
+	if !strings.Contains(string(text), "subtree: run "+child+" — integrity error, completeness not judged") {
+		t.Fatalf("text:\n%s", text)
+	}
+}
+
 // writeLinked writes events as a run ledger, linked under parent when given.
 func writeLinked(t *testing.T, dir, id, parent string, events ...engine.Event) {
 	t.Helper()
