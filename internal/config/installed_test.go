@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// installByHand is this task's test-side install, independent of
-// StageSnapshot/CommitSnapshot (Task 3): copy src's enumerated files into
+// installByHand is the test-side install, independent of
+// StageSnapshot/CommitSnapshot: copy src's enumerated files into
 // store/<hex> and write the pointer. It returns the hash.
 func installByHand(t *testing.T, store, src string) string {
 	t.Helper()

@@ -523,7 +523,7 @@ func TestSealPreflightRefusalRecordsNothing(t *testing.T) {
 
 const sealStateBLine = "audit seal: sealed; protected copy NOT confirmed — rotation NOT completed; re-run: agenthof audit seal\n"
 
-// TestSealPutOnlyCredentialLandsInStateB (§8.4): a credential that can PUT
+// TestSealPutOnlyCredentialLandsInStateB: a credential that can PUT
 // but not read the lock back lands the seal in state B naming the IAM
 // remedy; writers refuse, verify exits 8; a re-run with the same policy
 // fails the same way without a second PUT — its line says the copy was
@@ -575,7 +575,7 @@ func TestSealPutOnlyCredentialLandsInStateB(t *testing.T) {
 	}
 }
 
-// TestRotateRefusesOccupiedKeyLeavesStateB (§7.2 through the seal): a
+// TestRotateRefusesOccupiedKeyLeavesStateB (through the seal): a
 // foreign object at the seal's key is refused by the preflight with nothing
 // linked or recorded; planted after the record, it is refused by the
 // completion with no PUT and state B stands.
@@ -641,7 +641,7 @@ func TestSealSinkTimeoutAndPostureBuild(t *testing.T) {
 	}
 }
 
-// TestSealPostureFlippedToLocalRefusesCompletion (§8.5 through the command):
+// TestSealPostureFlippedToLocalRefusesCompletion (through the command):
 // a state-B worm root whose integrity.yaml now says local is refused with
 // the record's own coordinates; restoring the posture completes it.
 func TestSealPostureFlippedToLocalRefusesCompletion(t *testing.T) {
@@ -710,7 +710,7 @@ func backdateSealLine(t *testing.T, ctl string, sealedAt, retainUntil time.Time)
 	}
 }
 
-// TestSealCompletesAfterTheRetentionLapsed (§8.4: never a permanent wedge):
+// TestSealCompletesAfterTheRetentionLapsed (never a permanent wedge):
 // a worm root left in state B until its recorded retain_until has passed
 // still completes — the sink locks the copy from now, at least the
 // configured retention, and verify holds the lock to the recorded date.

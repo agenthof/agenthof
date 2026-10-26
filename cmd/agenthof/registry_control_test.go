@@ -19,7 +19,7 @@ import (
 )
 
 // TestRegistryFlipSuccessRecordsControlEvent covers the happy path of
-// the write ordering (spec §3.4): disable then enable each append a
+// the write ordering: disable then enable each append a
 // "success" control/1 event carrying action, agent, invoker, and a
 // freshly recomputed config_hash, and each prints the "control head:
 // seq=" line.
@@ -103,8 +103,8 @@ func TestRegistryFlipUnknownAgentRefused(t *testing.T) {
 
 // TestRegistryFlipUnreadableConfigRecordsIOErrorEvent covers a config
 // that fails to load at all (a bad --config, not a genuinely unknown
-// agent). Per spec §3.7 (a denial is itself an event whenever the
-// control ledger is known writable), this must be recorded — outcome
+// agent). Because a denial is itself an event whenever the
+// control ledger is known writable, this must be recorded — outcome
 // "error", reason io_error — and must never be conflated with
 // agent_not_found, which would misattribute a bad path as a governance
 // decision about a specific agent.
@@ -405,8 +405,8 @@ func TestRegistryFlipCrashHookAfterStateBeforeAppend(t *testing.T) {
 
 // TestRegistryFlipNoOpRecordsSuccess covers the no-op case: flipping
 // an agent to the state it is already in is not a diff-detection no-op —
-// it still rewrites the file and still records a "success" event (spec
-// §3.4: "the record is of the action and actor, not a diff").
+// it still rewrites the file and still records a "success" event (the
+// record is of the action and actor, not a diff).
 func TestRegistryFlipNoOpRecordsSuccess(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	root := writeSample(t)

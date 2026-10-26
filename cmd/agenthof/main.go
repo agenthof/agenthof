@@ -637,7 +637,7 @@ func cmdRegistryFlip(action, target, cfgDir, controlLog, as, groups, token strin
 	}
 	_, _ = fmt.Fprintf(out, "agent %s %s\n", target, state)
 
-	// Test-only crash hook (spec §3.8): simulates the process dying after
+	// Test-only crash hook: simulates the process dying after
 	// SetEnabled has already changed on-disk state but before the success
 	// control.Append below, so that documented residual-risk window is
 	// exercisable by a test instead of only by an unreproducible race.
@@ -1381,7 +1381,7 @@ func cmdAuditVerify(args []string, out io.Writer) int {
 }
 
 // cmdAuditControl implements `audit control`: it renders the control
-// ledger (spec §3.6) as a human-readable audit trail via control.RenderView,
+// ledger as a human-readable audit trail via control.RenderView,
 // across every sealed segment and the active as one chain. A missing control
 // log (nothing has ever been recorded there) is reported plainly rather than
 // as a generic open error, and so is a missing active beside a manifest or
@@ -1579,8 +1579,8 @@ func segmentLines(v control.View) []string {
 }
 
 // cmdAuditRepairControl implements `audit repair control [--control-log
-// <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]`
-// (spec §3.6): it resolves the repairing operator's identity exactly as
+// <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]`:
+// it resolves the repairing operator's identity exactly as
 // apply/registry do and authorizes that invoker against the installed
 // configuration's roles — or, when nothing is installed yet, the --config
 // dir's — (authz.ControlAllows, "repair"); a refusal — like an

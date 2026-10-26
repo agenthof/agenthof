@@ -202,7 +202,7 @@ func TestMintNeverReusesAnInFlightOrOnDiskID(t *testing.T) {
 }
 
 func TestShutdownRefusesNewRunsCancelsInFlightAndWaits(t *testing.T) {
-	// Exercised end-to-end in run_test.go (Task 9) once POST exists; here
+	// Exercised end-to-end in run_test.go once POST exists; here
 	// the lifecycle primitive alone: reserve, drain, release.
 	ts := newTestServer(t, &fakeHost{}, fakeAuth{}, 1)
 	release, code := ts.srv.reserve()

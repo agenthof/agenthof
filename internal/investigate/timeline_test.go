@@ -167,7 +167,7 @@ func TestTimelineFilters(t *testing.T) {
 
 // TestTimelineTornRunContributesValidPrefix checks that a run log with a
 // torn tail contributes its valid prefix and lists Source.Integrity ==
-// "torn" with Count == the valid-prefix length (spec §5).
+// "torn" with Count == the valid-prefix length.
 func TestTimelineTornRunContributesValidPrefix(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Now().Add(-48 * time.Hour)
@@ -255,7 +255,7 @@ func TestTimelineMtimePrefilterSinceOnly(t *testing.T) {
 
 // TestTimelineMtimeAfterUntilStillContributes checks that a run whose file
 // mtime is AFTER Until still contributes its pre-Until events — the mtime
-// prefilter is Since-only (spec §4) and must never skip based on Until, or
+// prefilter is Since-only and must never skip based on Until, or
 // evidence would be silently dropped.
 func TestTimelineMtimeAfterUntilStillContributes(t *testing.T) {
 	dir := t.TempDir()
@@ -299,7 +299,7 @@ func TestTimelineMtimeAfterUntilStillContributes(t *testing.T) {
 }
 
 // TestTimelineMissingControlLogOmitted checks that a missing control-log
-// path yields no control entry in Sources, and no error (spec §5).
+// path yields no control entry in Sources, and no error.
 func TestTimelineMissingControlLogOmitted(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "nope-control.jsonl")

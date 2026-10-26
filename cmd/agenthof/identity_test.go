@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// TestResolveInvokerMatrix is the brief's matrix on method (not subject —
+// TestResolveInvokerMatrix is the matrix on method (not subject —
 // the test env has no stable USER): as-only asserts, and a --token with no
 // issuer configured is a usage error.
 func TestResolveInvokerMatrix(t *testing.T) {

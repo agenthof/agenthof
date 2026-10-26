@@ -129,7 +129,7 @@ func Restore(controlLog string, only []int, r SinkReader, e Event) (RestoreResul
 		if k <= last {
 			return res, verr // the write did not clear the verdict: the fault stands
 		}
-		// An incomplete rotation refuses BEFORE any write (§11.2 step 4).
+		// An incomplete rotation refuses BEFORE any write.
 		// Read cannot say so here — its sealed walk stopped at k before the
 		// active's state was decided — so the active is peeked at directly.
 		incomplete, err := incompleteRotation(resolved, len(m.Segments))

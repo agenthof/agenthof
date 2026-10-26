@@ -771,7 +771,7 @@ func roleOnlyCfg(role config.RoleDef) config.Config {
 	return cfg
 }
 
-// TestValidateControlGrants covers the four control: rules (spec §7): known
+// TestValidateControlGrants covers the four control: rules: known
 // tokens only, present-empty rejected, no public control role, and a role
 // must own a workflow OR grant a control operation.
 func TestValidateControlGrants(t *testing.T) {

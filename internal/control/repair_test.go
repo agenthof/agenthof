@@ -15,8 +15,8 @@ import (
 	"github.com/agenthof/agenthof/internal/ledger"
 )
 
-// TestRepairTornTailMovesFragmentAndTaints covers the happy path (spec
-// §3.6): a torn-tail control log is repaired by moving the fragment aside,
+// TestRepairTornTailMovesFragmentAndTaints covers the happy path: a
+// torn-tail control log is repaired by moving the fragment aside,
 // truncating the live file to the last valid record, and appending a
 // chained "repair" event that permanently taints the ledger.
 func TestRepairTornTailMovesFragmentAndTaints(t *testing.T) {
@@ -149,8 +149,8 @@ func TestRepairTornTailMovesFragmentAndTaints(t *testing.T) {
 	}
 }
 
-// TestRepairTerminatedUnparseableFinalLineTaints covers the brief's other
-// named torn shape (spec §3.6): the ledger also classifies a
+// TestRepairTerminatedUnparseableFinalLineTaints covers a second
+// torn shape: the ledger also classifies a
 // terminated-but-unparseable final line — not just a missing trailing
 // newline — as a *ledger.TornError. Repair must move that whole garbage
 // line into the fragment, truncate back to the clean prefix, and succeed.

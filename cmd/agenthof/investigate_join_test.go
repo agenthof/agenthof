@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestAuditRunConfigJoinShowsApply covers spec §2: `audit <run-id>` prints an
+// TestAuditRunConfigJoinShowsApply covers the config join: `audit <run-id>` prints an
 // extra config-join line naming the apply that put the config the run
 // executed under, when the control ledger has a matching successful apply
 // at or before the run's workflow_started time.
@@ -19,7 +19,7 @@ func TestAuditRunConfigJoinShowsApply(t *testing.T) {
 	var out bytes.Buffer
 
 	// apply FIRST so the apply's time precedes the run's workflow_started
-	// time (spec §2 requires apply.Time <= run.Time).
+	// time (the join requires apply.Time <= run.Time).
 	if code := cmdApply([]string{"--config", root, "--control-log", controlLog, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
 		t.Fatalf("apply: %d\n%s", code, out.String())
 	}
@@ -47,7 +47,7 @@ func TestAuditRunConfigJoinShowsApply(t *testing.T) {
 	}
 }
 
-// TestAuditRunConfigJoinNoRegressionWhenControlMissing covers spec §2's
+// TestAuditRunConfigJoinNoRegressionWhenControlMissing covers the join's
 // no-regression rule: a missing/unavailable control ledger must never
 // change `audit <run-id>`'s exit code, even though the join line still
 // reports the ledger as unavailable.

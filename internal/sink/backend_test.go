@@ -236,7 +236,7 @@ func TestPutConfirms(t *testing.T) {
 	}
 }
 
-// TestPutLocksFromNowWhenTheRecordedDateHasPassed (§8.4, never a permanent
+// TestPutLocksFromNowWhenTheRecordedDateHasPassed (never a permanent
 // wedge): a seal left in state B past its own retention is re-Put with a
 // lock from the sink's clock — the later of the record's date and now plus
 // the configured retention — so the store, which refuses a date in the
@@ -334,7 +334,7 @@ func TestPutUnconfirmed(t *testing.T) {
 	t.Run("object read denied on a re-run", func(t *testing.T) {
 		// A policy with PUT, List and GetObjectRetention but no GetObject
 		// confirms a fresh write (nothing is read back whole) and fails the
-		// re-run's byte compare: the §8.4 remedy is named, no second PUT.
+		// re-run's byte compare: the remedy is named, no second PUT.
 		f := sinktest.NewFake(t)
 		s := newS3(t, f, "/agenthof")
 		loc := s.Locator(logID, 1, fixedNow)

@@ -29,7 +29,7 @@ func rec(seq int, action, agent, outcome, subject, method string) ledger.Record 
 	return ledger.Record{Raw: []byte(raw)}
 }
 
-// TestControlRenderTaint covers the brief's Step 1 (task-8-brief.md): two
+// TestControlRenderTaint covers taint rendering: two
 // clean records plus a repair record must render TAINTED at the first
 // repair record's seq, and the apply record's derived label must appear.
 func TestControlRenderTaint(t *testing.T) {
@@ -50,7 +50,7 @@ func TestControlRenderTaint(t *testing.T) {
 
 // TestControlRenderLabelsAndInvoker covers the per-action derived labels
 // and the "<subject> (<method>)" invoker rendering for every action/outcome
-// combination named in the brief.
+// combination.
 func TestControlRenderLabelsAndInvoker(t *testing.T) {
 	recs := []ledger.Record{
 		rec(1, "apply", "", "success", "dana@example.com", "static"),
@@ -104,7 +104,7 @@ func TestControlRenderBroken(t *testing.T) {
 	}
 }
 
-// TestControlRenderBrokenAndTainted covers the brief's "both facts" rule:
+// TestControlRenderBrokenAndTainted covers the "both facts" rule:
 // a torn/broken AND tainted log must show both the taint line and the
 // torn/broken line.
 func TestControlRenderBrokenAndTainted(t *testing.T) {

@@ -307,7 +307,7 @@ const (
 )
 
 // verifySink is audit verify control's sink pass over a verified set: both
-// directions of §10 and every line of the block, from the first protected
+// directions of the check (chain-first and bucket-first, below) and every line of the block, from the first protected
 // copy line to the summary. It runs only on a root that has sealed (or
 // whose rotation did not complete), or when --integrity names a posture
 // explicitly — a never-sealed root on the box prints nothing and reads

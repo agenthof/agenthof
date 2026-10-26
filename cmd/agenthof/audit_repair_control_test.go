@@ -19,8 +19,8 @@ import (
 	"github.com/agenthof/agenthof/internal/sink/sinktest"
 )
 
-// TestAuditRepairControlTornTailSucceeds covers the happy path (spec
-// §3.6): a torn-tail control log is repaired, the fragment is moved
+// TestAuditRepairControlTornTailSucceeds covers the happy path: a
+// torn-tail control log is repaired, the fragment is moved
 // aside, the live file verifies clean again, and the ledger is
 // permanently tainted.
 func TestAuditRepairControlTornTailSucceeds(t *testing.T) {
@@ -75,7 +75,7 @@ func TestAuditRepairControlTornTailSucceeds(t *testing.T) {
 }
 
 // TestAuditRepairControlTerminatedUnparseableLineTaints covers the
-// brief's other named torn shape end-to-end through the real CLI
+// terminated-but-unparseable torn shape end-to-end through the real CLI
 // commands: a newline-TERMINATED final line that still fails to parse as
 // JSON (not just a missing trailing newline) is also a torn tail. Repair
 // must move that whole line into the fragment, truncate back to the
@@ -519,7 +519,7 @@ func auditRepairControl(t *testing.T, root, ctl string) (int, string) {
 	return code, out.String()
 }
 
-// TestAuditRepairControlPostSealUploadsOnAWormRoot (§8.2's explicit task):
+// TestAuditRepairControlPostSealUploadsOnAWormRoot:
 // the repair confirms the protected copy THROUGH THE SINK — the fake holds
 // one version at the key whose bytes are the sealed file — then moves the
 // tail aside, completes the rotation and appends the repair record: the
@@ -595,7 +595,7 @@ func TestAuditRepairControlPassesTheSink(t *testing.T) {
 	}
 }
 
-// TestAuditRepairControlRefusesWhenTheSinkCannotConfirm (§8.4 through the
+// TestAuditRepairControlRefusesWhenTheSinkCannotConfirm (through the
 // repair): a credential that can PUT but not read the lock back — the copy
 // is written but not confirmed, so the repair refuses BEFORE its truncate,
 // naming the IAM remedy: no fragment, the active byte for byte as it was,

@@ -397,7 +397,7 @@ func tidy(t *testing.T, ctl string) {
 	repointTo(t, ctl, last.ConfigHash)
 }
 
-// TestSealAfterTidiedTruncationNamesTheRebuild (§11.4 met by the preflight):
+// TestSealAfterTidiedTruncationNamesTheRebuild (met by the preflight):
 // after the tidied truncation the next honest seal computes segment 2, whose
 // key the sink still holds — the original, compliance-locked segment 2. The
 // preflight refuses with nothing linked or recorded, no PUT, and the remedy

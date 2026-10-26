@@ -30,7 +30,7 @@ import (
 // error, or any other open/IO failure control.Read surfaces that is neither
 // "not exist" nor a set fault). The ledger exists, so ok is true per the
 // "ok=false only when MISSING" rule above; ConfigJoin treats "error" the same
-// as "missing"/"torn"/"broken" (spec §5: an IO error on an existing source is
+// as "missing"/"torn"/"broken" (an IO error on an existing source is
 // treated like torn/broken).
 func LoadControl(path string) (events []control.DecodedEvent, verdict string, ok bool) {
 	_, events, verdict, ok = loadControl(path)
