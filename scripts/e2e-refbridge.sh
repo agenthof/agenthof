@@ -97,6 +97,7 @@ RUNID="$(echo "$OUT" | sed -n 's/^run \(r-[a-f0-9]*\) finished.*/\1/p')"
 AUDIT="$("$WORK/agenthof" audit "$RUNID" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
 echo "$AUDIT"
 echo "$AUDIT" | grep -q "ledger integrity: verified" || fail "ledger not verified"
+echo "$AUDIT" | grep -q "ledger completeness: complete (" || fail "ledger does not account for itself"
 for tool in echo credential environment; do
 	echo "$AUDIT" | grep -Eq "tool $tool — args [0-9a-f]{8} \(static_env\)" || fail "no succeeded tool_call for $tool"
 	echo "$AUDIT" | grep -Eq "tool $tool — args [0-9a-f]{8} \(static_env\) \[runtime-attested: refbridge /stdio-tool -credential-env DEMO_TOKEN pid [0-9]+ spawn 1\]" || fail "no runtime attestation rendered for $tool"

@@ -65,6 +65,7 @@ Expected:
 - eight events: workflow started, three steps started and succeeded, workflow finished
 - each successful step's artifact preview `fix the login bug` and SHA-256 prefix `f7459994` (the echo of the input)
 - `ledger integrity: verified (8 events)`
+- `ledger completeness: complete (0 door call(s) accounted)`
 
 ## What this does not exercise
 

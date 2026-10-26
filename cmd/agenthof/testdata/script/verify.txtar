@@ -10,3 +10,4 @@ stdout 'finished: succeeded'
 lastrun logs
 exec agenthof audit verify $RUNID --log-dir logs
 stdout 'head: [0-9a-f]{64} \(8 events\)'
+stdout 'ledger completeness: complete \(0 door call\(s\) accounted\)'

@@ -12,6 +12,8 @@ stdout 'finished: succeeded'
 lastrun logs
 exec agenthof audit $RUNID --log-dir logs
 stdout 'exec true — exit 0 \(runtime\) \[runtime-attested: refexec true pid 4242 spawn 1\]'
+stdout 'ledger completeness: complete \(1 door call\(s\) accounted\)'
+grep '"type":"step_succeeded".*"door_calls":1' logs/${RUNID}.jsonl
 
 # backstop: the raw ledger carries the first-hand exec event
 grep '"type":"exec"' logs/${RUNID}.jsonl
@@ -25,6 +27,7 @@ stdout 'finished: failed'
 lastrun logs
 exec agenthof audit $RUNID --log-dir logs
 stdout 'exec true refused — exec on this agent is first-hand'
+stdout 'ledger completeness: complete \(1 door call\(s\) accounted\)'
 
 -- config/agents/runner.yaml --
 name: runner
