@@ -202,20 +202,24 @@ func (c *Client) Cancel(ctx context.Context, id string) (RunStatus, error) {
 	return st, nil
 }
 
-// Audit fetches the server-rendered audit text and its integrity verdict.
-func (c *Client) Audit(ctx context.Context, id string) (text, integrity string, err error) {
+// Audit fetches the server-rendered audit text and its header verdicts.
+func (c *Client) Audit(ctx context.Context, id string) (AuditResult, error) {
 	resp, err := c.do(ctx, http.MethodGet, "/v1/runs/"+id+"/audit", nil)
 	if err != nil {
-		return "", "", err
+		return AuditResult{}, err
 	}
 	body, err := readBody(resp)
 	if err != nil {
-		return "", "", err
+		return AuditResult{}, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", "", statusError(resp, body)
+		return AuditResult{}, statusError(resp, body)
 	}
-	return string(body), resp.Header.Get(IntegrityHeader), nil
+	return AuditResult{
+		Text:         string(body),
+		Integrity:    resp.Header.Get(IntegrityHeader),
+		Completeness: resp.Header.Get(CompletenessHeader),
+	}, nil
 }
 
 // Investigate fetches the investigate/1 document for q, verbatim.

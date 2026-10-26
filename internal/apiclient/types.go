@@ -79,16 +79,45 @@ const (
 
 // RunEvents answers GET /v1/runs/{id}/events: the verified prefix, its
 // head, the verdict, and — when broken — the 1-based line that broke it.
+// Completeness and CompletenessDetail carry the run's own completeness
+// verdict and, for a gap, where; absent when integrity failed.
 type RunEvents struct {
-	Events     []engine.Event `json:"events"`
-	Head       Head           `json:"head"`
-	Integrity  string         `json:"integrity"`
-	BrokenLine int            `json:"broken_line,omitempty"`
+	Events             []engine.Event `json:"events"`
+	Head               Head           `json:"head"`
+	Integrity          string         `json:"integrity"`
+	BrokenLine         int            `json:"broken_line,omitempty"`
+	Completeness       string         `json:"completeness,omitempty"`
+	CompletenessDetail string         `json:"completeness_detail,omitempty"`
 }
 
 // IntegrityHeader carries GET /v1/runs/{id}/audit's verdict beside its
 // text body, so a client can exit the way the local audit command does.
 const IntegrityHeader = "Agenthof-Integrity"
+
+// Completeness verdicts for a run ledger as the API reads them — a second
+// axis beside Integrity, never one of its values. CompletenessInFlight is
+// the server's refinement of unterminated for a run it is still running:
+// no final event yet because the run is not over, not because a tail was
+// lost. The local command cannot tell the two apart and says so.
+const (
+	CompletenessComplete     = "complete"
+	CompletenessGap          = "gap"
+	CompletenessUnterminated = "unterminated"
+	CompletenessInFlight     = "in_flight"
+	CompletenessNoClaim      = "no-claim"
+)
+
+// CompletenessHeader carries GET /v1/runs/{id}/audit's completeness verdict
+// beside Agenthof-Integrity: the verdict the local command exits on — the
+// worst in the run's delegation tree, with the run's own unterminated
+// refined to in_flight while the server runs it.
+const CompletenessHeader = "Agenthof-Completeness"
+
+// AuditResult is GET /v1/runs/{id}/audit: the rendered text and the two
+// header verdicts a client exits on.
+type AuditResult struct {
+	Text, Integrity, Completeness string
+}
 
 // InvestigateQuery is GET /v1/investigate's query string. Since and Until
 // are RFC3339; a client resolves durations before sending.

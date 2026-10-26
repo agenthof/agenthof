@@ -40,7 +40,20 @@ func fakeServeAPI(t *testing.T) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(apiclient.RunStatus{RunID: "r-ok", Status: "succeeded"})
 		case "GET /v1/runs/r-ok/audit":
 			w.Header().Set(apiclient.IntegrityHeader, apiclient.IntegrityVerified)
+			w.Header().Set(apiclient.CompletenessHeader, apiclient.CompletenessComplete)
 			_, _ = w.Write([]byte("run r-ok — w (role se)\nstatus: succeeded\n"))
+		case "GET /v1/runs/r-gap/audit":
+			w.Header().Set(apiclient.IntegrityHeader, apiclient.IntegrityVerified)
+			w.Header().Set(apiclient.CompletenessHeader, apiclient.CompletenessGap)
+			_, _ = w.Write([]byte("run r-gap — w (role se)\n"))
+		case "GET /v1/runs/r-unterm/audit":
+			w.Header().Set(apiclient.IntegrityHeader, apiclient.IntegrityVerified)
+			w.Header().Set(apiclient.CompletenessHeader, apiclient.CompletenessUnterminated)
+			_, _ = w.Write([]byte("run r-unterm — w (role se)\n"))
+		case "GET /v1/runs/r-inflight/audit":
+			w.Header().Set(apiclient.IntegrityHeader, apiclient.IntegrityVerified)
+			w.Header().Set(apiclient.CompletenessHeader, apiclient.CompletenessInFlight)
+			_, _ = w.Write([]byte("run r-inflight — w (role se)\n"))
 		case "GET /v1/investigate":
 			if r.URL.Query().Get("run") == "r-torn" {
 				_, _ = w.Write([]byte(`{"v":"investigate/1","query":{"run":"r-torn"},"sources":[{"path":".agenthof/runs/r-torn.jsonl","kind":"run","integrity":"torn","count":2}],"events":[],"integrity":{"ok":false,"issues":[".agenthof/runs/r-torn.jsonl: torn"]}}`))
@@ -135,6 +148,33 @@ func TestAuditAndInvestigateServer(t *testing.T) {
 	out.Reset()
 	if code := cmdInvestigate([]string{"--run", "r-torn"}, &out); code != 1 {
 		t.Fatalf("torn text: code %d out %q", code, out.String())
+	}
+}
+
+// TestAuditServerExitsOnCompletenessHeader pins the client's completeness
+// exits: a verified chain with the Agenthof-Completeness header reads as
+// the server's verdict — gap exits 11, unterminated and in_flight both exit
+// 12 (not finished either way; the client cannot tell them apart and need
+// not).
+func TestAuditServerExitsOnCompletenessHeader(t *testing.T) {
+	srv := fakeServeAPI(t)
+	t.Setenv("AGENTHOF_SERVER", srv.URL)
+	t.Setenv("AGENTHOF_TOKEN", "tok")
+	var out bytes.Buffer
+	if code := cmdAudit([]string{"r-ok"}, &out); code != 0 {
+		t.Fatalf("complete: code %d out %q", code, out.String())
+	}
+	out.Reset()
+	if code := cmdAudit([]string{"r-gap"}, &out); code != exitGap {
+		t.Fatalf("gap: code %d (want %d) out %q", code, exitGap, out.String())
+	}
+	out.Reset()
+	if code := cmdAudit([]string{"r-unterm"}, &out); code != exitUnterminated {
+		t.Fatalf("unterminated: code %d (want %d) out %q", code, exitUnterminated, out.String())
+	}
+	out.Reset()
+	if code := cmdAudit([]string{"r-inflight"}, &out); code != exitUnterminated {
+		t.Fatalf("in_flight: code %d (want %d) out %q", code, exitUnterminated, out.String())
 	}
 }
 
