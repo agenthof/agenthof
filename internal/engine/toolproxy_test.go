@@ -26,7 +26,7 @@ func (s *spyProxy) Start(_ context.Context, _ Binding, agent config.AgentDef, _ 
 	s.gotAgent = agent.Name
 	return "http://127.0.0.1:12345/mcp", "tok-abc", nil
 }
-func (s *spyProxy) Stop() { s.stopped++ }
+func (s *spyProxy) Stop() int { s.stopped++; return 0 }
 
 // failProxy fails Start, so Run must fail the step without ever calling Stop.
 type failProxy struct{ stopped int }
@@ -34,7 +34,7 @@ type failProxy struct{ stopped int }
 func (f *failProxy) Start(_ context.Context, _ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
 	return "", "", errors.New("upstream unreachable")
 }
-func (f *failProxy) Stop() { f.stopped++ }
+func (f *failProxy) Stop() int { f.stopped++; return 0 }
 
 // urlLeakProxy fails Start with a transport-derived error that wraps a
 // *url.Error carrying the tool resource URL (query string included), the way a
@@ -46,7 +46,7 @@ func (urlLeakProxy) Start(_ context.Context, _ Binding, _ config.AgentDef, _ fun
 	return "", "", fmt.Errorf("connect upstream %q: %w", "github",
 		&url.Error{Op: "Get", URL: "https://mcp/x?key=SUPERSECRET", Err: errors.New("connection refused")})
 }
-func (urlLeakProxy) Stop() {}
+func (urlLeakProxy) Stop() int { return 0 }
 
 // coordExec captures the proxy coordinates it sees in ctx during Execute.
 type coordExec struct {
@@ -220,5 +220,108 @@ func TestRunFailsStepWhenToolProxyStartErrors(t *testing.T) {
 	last := events[len(events)-1]
 	if last.Type != "workflow_finished" || last.Status != "failed" {
 		t.Fatalf("workflow must finish failed: %+v", last)
+	}
+}
+
+// countingProxy is a ToolProxy whose Stop reports a fixed door-call count,
+// the way the real gateway reports what it admitted during the step.
+type countingProxy struct{ n, stopped int }
+
+func (c *countingProxy) Start(_ context.Context, _ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
+	return "http://127.0.0.1:12345/mcp", "tok-abc", nil
+}
+func (c *countingProxy) Stop() int { c.stopped++; return c.n }
+
+func terminals(events []Event) []Event {
+	var out []Event
+	for _, e := range events {
+		if e.Type == "step_succeeded" || e.Type == "step_failed" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func TestStepTerminalsCarryDoorCallsFromStop(t *testing.T) {
+	dir := t.TempDir()
+	res, err := Run(context.Background(), ftCfg(), "se", "wf", "x",
+		staticInvoker(), &coordExec{}, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return &countingProxy{n: 3} }})
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("run: status=%q err=%v", res.Status, err)
+	}
+	events, _, _ := ReadLog(dir, res.RunID)
+	if events[0].Type != "workflow_started" || events[0].DoorAccounting != DoorAccountingAdmission {
+		t.Fatalf("workflow_started must carry the accounting marker: %+v", events[0])
+	}
+	ts := terminals(events)
+	if len(ts) != 1 || ts[0].DoorCalls == nil || *ts[0].DoorCalls != 3 {
+		t.Fatalf("step_succeeded must carry the gateway's count 3: %+v", ts)
+	}
+}
+
+func TestNonFrontedStepStampsZeroDoorCalls(t *testing.T) {
+	dir := t.TempDir()
+	ex := &fakeExec{fail: map[string]int{"coder": 1}} // one bounce: a step_failed terminal too
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x", identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: dir + "/a"})
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("run: status=%q err=%v", res.Status, err)
+	}
+	events, _, _ := ReadLog(dir, res.RunID)
+	ts := terminals(events)
+	if len(ts) < 4 {
+		t.Fatalf("want a step_failed among the terminals: %+v", ts)
+	}
+	for _, e := range ts {
+		if e.DoorCalls == nil || *e.DoorCalls != 0 {
+			t.Fatalf("a step with no gateway stamps 0, never absent: %+v", e)
+		}
+		raw, _ := json.Marshal(e)
+		if !strings.Contains(string(raw), `"door_calls":0`) {
+			t.Fatalf("the zero must survive encoding (pointer, not omitempty int): %s", raw)
+		}
+	}
+}
+
+// startFailProxy fails Start but would report a stale count if anyone read it.
+type startFailProxy struct{ stopped int }
+
+func (f *startFailProxy) Start(_ context.Context, _ Binding, _ config.AgentDef, _ func(Event)) (string, string, error) {
+	return "", "", errors.New("upstream unreachable")
+}
+func (f *startFailProxy) Stop() int { f.stopped++; return 99 }
+
+func TestStartFailureStampsZeroWithoutReadingGateway(t *testing.T) {
+	dir := t.TempDir()
+	fp := &startFailProxy{}
+	res, _ := Run(context.Background(), ftCfg(), "se", "wf", "x",
+		staticInvoker(), &coordExec{}, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return fp }})
+	if res.Status != "failed" || fp.stopped != 0 {
+		t.Fatalf("status=%q stopped=%d: a failed Start never reaches Stop", res.Status, fp.stopped)
+	}
+	events, _, _ := ReadLog(dir, res.RunID)
+	ts := terminals(events)
+	if len(ts) != 1 || ts[0].Type != "step_failed" || ts[0].DoorCalls == nil || *ts[0].DoorCalls != 0 {
+		t.Fatalf("a step whose gateway never served stamps a literal 0: %+v", ts)
+	}
+}
+
+// alwaysConfigErrExec fails every step with an error wrapping ErrStepConfig.
+type alwaysConfigErrExec struct{}
+
+func (alwaysConfigErrExec) Execute(_ context.Context, _ Binding, _ config.AgentDef, _ string, _ map[string]string) (StepResult, error) {
+	return StepResult{}, fmt.Errorf("no route: %w", ErrStepConfig)
+}
+
+func TestStepConfigErrorStampsTheCount(t *testing.T) {
+	dir := t.TempDir()
+	res, _ := Run(context.Background(), ftCfg(), "se", "wf", "x",
+		staticInvoker(), alwaysConfigErrExec{}, Options{LogDir: dir, ArtifactDir: dir + "/a", NewGateway: func() ToolProxy { return &countingProxy{n: 5} }})
+	if res.Status != "failed" {
+		t.Fatalf("status=%q", res.Status)
+	}
+	events, _, _ := ReadLog(dir, res.RunID)
+	ts := terminals(events)
+	if len(ts) != 1 || ts[0].Type != "step_failed" || ts[0].DoorCalls == nil || *ts[0].DoorCalls != 5 {
+		t.Fatalf("the ErrStepConfig step_failed carries the count (Stop ran first): %+v", ts)
 	}
 }

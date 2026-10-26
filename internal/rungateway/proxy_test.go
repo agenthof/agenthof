@@ -1632,7 +1632,7 @@ func startModelGateway(t *testing.T, up *modelUpstream, agent config.AgentDef, k
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { p.Stop() })
 	return p, base, token, &events
 }
 

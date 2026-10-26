@@ -90,7 +90,7 @@ func startSpawnGateway(t *testing.T, ctx context.Context, gw config.GatewayConfi
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { p.Stop() })
 	return base, token, p
 }
 
@@ -306,7 +306,7 @@ func TestSpawnTotalCapSurvivesStartStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { p.Stop() })
 	code, out := postSpawn(t, context.Background(), base, token, spawnBody("worker", "child-wf", "x"))
 	if code != http.StatusForbidden || out.Reason != reasonSpawnTotal {
 		t.Fatalf("third child of a run capped at 2: code=%d out=%+v", code, out)

@@ -121,7 +121,7 @@ func startAgentProxy(t *testing.T, agent config.AgentDef, rec *eventRecorder) (b
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { p.Stop() })
 	return base, token, p
 }
 
@@ -446,7 +446,7 @@ func TestExecRunDialsTheOverrideRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { p.Stop() })
 	code, body := execPost(t, base, "exec/run", token, `{"command":["cat","/work/x"]}`)
 	if code != 200 || !strings.Contains(body, `"exit":0`) {
 		t.Fatalf("code=%d body=%s: the override runtime was not dialed", code, body)

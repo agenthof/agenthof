@@ -426,11 +426,11 @@ func (p *Gateway) guardedAppend(appendEvent func(engine.Event), e engine.Event) 
 // the caller can safely close the run's ledger immediately after. The wait is
 // tracked by the proxy's own bookkeeping (inflight), not by however the HTTP
 // server happens to treat an in-flight connection when closed.
-func (p *Gateway) Stop() {
+func (p *Gateway) Stop() int {
 	p.mu.Lock()
 	if p.closing {
 		p.mu.Unlock()
-		return
+		return 0
 	}
 	p.closing = true
 	srv := p.srv
@@ -456,6 +456,7 @@ func (p *Gateway) Stop() {
 	if srv != nil {
 		logger.Info("gateway listener stopped")
 	}
+	return 0
 }
 
 // forward returns the ToolHandler mirrored onto the inbound server for one
