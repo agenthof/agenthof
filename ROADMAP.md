@@ -28,6 +28,14 @@ The governed core is real and runnable today:
   and `audit verify --expect-head` checks it against a head you record
   off-machine. The docs are precise about what the chain does and does not
   prove.
+- **Completeness beside integrity** — `audit <run-id>` and `audit verify`
+  report a second line: whether the ledger accounts for itself — every
+  step's final event carries the number of door calls its gateway
+  admitted, and exactly that many door events are recorded inside the step
+  — with `GAP`, `UNTERMINATED` and `no claim` verdicts and their own exit
+  codes (`11`, `12`), rolled up across a run's spawned children. Judged
+  against the gateway's own count: it catches an honest source's
+  accidental loss, not a dishonest source, and says so.
 - **Identity & RBAC** — invokers are established by a pluggable authenticator
   (`static` for dev, OIDC for production); roles gate access by group.
 - **Fronted agents** — every agent is an external HTTP endpoint, governed at
@@ -292,12 +300,6 @@ Earlier-stage ideas we're thinking through; the least settled tier.
   data source, with per-resource read/write scope and per-resource provenance.
 - **Agent discovery** — surfacing agents running across an organization that
   aren't yet in the registry ("the registry as radar").
-- **Verifying a run against its expected shape** — `audit verify` proves the
-  recorded events are unedited and the chain is unbroken (sequence numbers, a
-  torn-tail check); a further, optional check against a workflow's expected event
-  shape — one event per door call plus the step's start and end — would let a
-  *missing* event fail verification, not only an edited one, so `verified (N
-  events)` carries completeness as well as integrity.
 
 ---
 

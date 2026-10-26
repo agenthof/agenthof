@@ -265,6 +265,7 @@ run r-9e31cf9b — fix-bug (role software-engineer)
 invoked by dana@example.com (asserted, issuer local)
 status: succeeded
 ledger integrity: verified (8 events)
+ledger completeness: complete (0 door call(s) accounted)
 
   08:57:52  workflow started
   08:57:52  step plan (agent planner) started
@@ -365,6 +366,7 @@ run r-<run-id> — fix-bug (role software-engineer)
 invoked by dana@example.com (oidc, issuer http://localhost:5556/dex)
 status: succeeded
 ledger integrity: verified (8 events)
+ledger completeness: complete (0 door call(s) accounted)
 ...
 ```
 
@@ -432,6 +434,7 @@ run r-ac91cc6a — reconcile-lite (role accountant)
 invoked by engineer@example.com (asserted, issuer local)
 status: refused
 ledger integrity: verified (1 events)
+ledger completeness: complete (0 door call(s) accounted)
 
   08:58:04  run refused — role "accountant" requires membership in one of its allowed groups (finance); the invoker's groups don't qualify
 ```

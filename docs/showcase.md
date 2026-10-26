@@ -147,6 +147,13 @@ each kind of line proves.
   recompute every later hash. It is tamper-evident within those limits, not
   tamper-proof; see [`concepts.md`](concepts.md#the-ledger) for the honest
   limits.
+- **`ledger completeness: …`** beside it: `complete (K door call(s)
+  accounted)` when every step's recorded door events match the count its
+  gateway admitted, `GAP` naming the step and both numbers when they do
+  not, `UNTERMINATED` for a run with no final event. Integrity says the
+  record is unedited; completeness says it accounts for itself — judged
+  against the gateway's own count, so it catches an honest loss, not a
+  dishonest source.
 
 `investigate --run <run>` then shows the same story as one timeline across
 the whole tree: the parent's events, and each child's events indented under

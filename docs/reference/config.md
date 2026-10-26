@@ -897,6 +897,15 @@ the installed-config store, or anything else left in a misconfigured
 `--artifact-dir` is left untouched. Keeping the ledger out from under
 `--log-dir`/`--artifact-dir` is still the tidy layout.
 
+`runs prune` keeps a delegation tree whole: a run ledger whose first event
+names a parent that is also under `--log-dir` is never removed on its own,
+however old; a root older than `--older-than` is removed together with
+every descendant, whatever their own ages (a child always finishes before
+its parent's step does). A ledger naming a parent that is no longer under
+`--log-dir` is the root of its own subtree. This is what lets `audit`
+verify a parent's `spawn` events against its children's ledgers without a
+routine prune reading as a gap.
+
 Once `audit seal` has run, the ledger is a set of files beside the active one:
 `control.jsonl.seg-000001`, `control.jsonl.seg-000002`, … (the sealed segments,
 named `<log>.seg-NNNNNN`) and `control.jsonl.segments` (the manifest). They are
@@ -1380,6 +1389,17 @@ default is `2m` for `audit seal` and `audit restore control` and `60s` for
 
 ### Exit codes
 
+`agenthof audit <run-id>` and `agenthof audit verify <run-id>` compute every verdict, print every line, then exit by precedence **1, 11, 12, 4, 0** — from the run's ledgers alone (the control log's health never changes these codes):
+
+| Exit | Meaning |
+|---|---|
+| `1` | The run's ledger is torn or broken, cannot be opened or read — or a child run's ledger (one a `spawn` event names) is |
+| `11` | **Completeness gap** — the chain is intact but the ledger does not account for itself: a step whose recorded door events differ from the `door_calls` its gateway admitted (the line names the step and both numbers); a step with no final event; a door event outside a step; a `spawn` naming a child whose ledger is not under `--log-dir`, or whose first event does not link back; a child ledger naming this finished run as its parent that no `spawn` event names; `door_calls` missing where the run's `door_accounting` marker promised it. Anywhere in the run's delegation tree |
+| `12` | **Unterminated** — a run with no final event, in this run or a child: still running, or its tail was lost; the file cannot tell which, so re-check once the run should be over. Outranks `4`: a live run's head legitimately differs from any recorded one |
+| `4` | (`audit verify` only) `--expect-head` did not match |
+| `0` | Integrity verified and completeness `complete` — or `no claim`, a ledger recorded before door accounting, verified on integrity alone |
+| `2` | Usage |
+
 `agenthof apply` / `agenthof registry enable|disable`:
 
 | Exit | Meaning |
@@ -1719,7 +1739,9 @@ that put that exact config on record, drawn from `--control-log` (default
 A run recorded before `config_hash` existed omits the join line entirely.
 
 **Guarantee:** `audit <run-id>`'s own exit code (`0` clean, `1`
-torn/broken/IO error) is computed from the run's own log alone. The control
-log's health — missing, torn, broken, or fine — never changes `audit
-<run-id>`'s exit code; at worst it changes the join line's wording to
-"control ledger unavailable".
+torn/broken/IO error, `11` completeness gap, `12` unterminated — the same
+codes `audit verify <run-id>` uses) is computed from the run ledgers
+alone: this run's, and its children's where `spawn` events name them. The
+control log's health — missing, torn, broken, or fine — never changes
+`audit <run-id>`'s exit code; at worst it changes the join line's wording
+to "control ledger unavailable".
