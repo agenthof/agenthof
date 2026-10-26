@@ -35,12 +35,18 @@ func TestRouteDoorsRegisterThroughOneHelper(t *testing.T) {
 }
 
 // TestEveryAppendSitsUnderTheAdmissionHold pins the one-hold invariant by
-// source: the drop-on-closing appender is gone (the tool door's assertions
-// — one inflight.Add, closing read only at admission — join once that door
-// is converted).
+// source: the drop-on-closing appender is gone, only admit takes the hold,
+// and no handler reads closing after admission.
 func TestEveryAppendSitsUnderTheAdmissionHold(t *testing.T) {
 	src := packageSource(t)
 	if strings.Contains(src, "guardedAppend") {
 		t.Fatal("guardedAppend must not exist: it drops a counted call's event once closing is set")
+	}
+	if n := strings.Count(src, "inflight.Add("); n != 1 {
+		t.Fatalf("inflight.Add( appears %d time(s); only admit may take the hold", n)
+	}
+	if n := strings.Count(src, "p.closing"); n != 4 {
+		// admit's read, Start's reset, Stop's read and Stop's set: no door reads closing after admission.
+		t.Fatalf("p.closing appears %d time(s), want 4 (admit, Start, Stop ×2)", n)
 	}
 }

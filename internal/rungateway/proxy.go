@@ -17,6 +17,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -81,8 +82,13 @@ type Gateway struct {
 	// another goroutine, so without this a caller — or a test — could observe
 	// Stop return before the socket file is gone.
 	sockPath string
-	// inflight counts forward calls currently running, so Stop can wait for
-	// them to finish independent of how the underlying HTTP server treats
+	// stepCancel ends the step context Start derived for this step's doors.
+	// Stop calls it before waiting: the SDK hands a tool handler the
+	// session's context, not the HTTP request's, so cutting the connection
+	// does not end an upstream tool call — this does. Under mu.
+	stepCancel context.CancelFunc
+	// inflight counts admitted door calls currently running, so Stop can wait
+	// for them to finish independent of how the underlying HTTP server treats
 	// in-flight connections when closed.
 	inflight sync.WaitGroup
 	// doorCalls counts the door calls admitted during the current step —
@@ -249,7 +255,9 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	inbound := mcp.NewServer(&mcp.Implementation{Name: "agenthof-tool-proxy", Version: "v0.1.0"}, nil)
 
 	var sessions []upstream
+	stepCtx, stepCancel := context.WithCancel(ctx)
 	closeSessions := func() {
+		stepCancel()
 		for _, s := range sessions {
 			s.close()
 		}
@@ -320,7 +328,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 			}
 			mirroredBy[tool.Name] = id
 			logger.Debug("tool mirrored", "resource", id, "tool", tool.Name)
-			inbound.AddTool(tool, p.forward(bind, agent, id, allow, sess, appendEvent, logger))
+			inbound.AddTool(tool, p.forward(stepCtx, bind, agent, id, allow, sess, appendEvent, logger))
 		}
 		// What a missing name means depends on where it came from. A name
 		// the OPERATOR classified read-only is a standing list, not a claim
@@ -364,7 +372,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 		}
 	}
 
-	inbound.AddReceivingMiddleware(p.refusedTraceMiddleware(mirroredBy, bind, agent, appendEvent, logger))
+	inbound.AddReceivingMiddleware(p.toolsCallMiddleware(mirroredBy, bind, agent, appendEvent, logger))
 
 	mux := http.NewServeMux()
 	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil))
@@ -372,7 +380,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	p.registerDoor(mux, "/exec/attest", p.execAssertedHandler(bind, agent, appendEvent))
 	p.registerDoor(mux, "/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
 	p.registerDoor(mux, "/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
-	p.registerDoor(mux, "/spawn", p.spawnHandler(ctx, bind, agent, appendEvent, logger))
+	p.registerDoor(mux, "/spawn", p.spawnHandler(stepCtx, bind, agent, appendEvent, logger))
 	handler := authMiddleware(mux, token)
 
 	var ln net.Listener
@@ -396,6 +404,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	p.mu.Lock()
 	p.srv = srv
 	p.sessions = sessions
+	p.stepCancel = stepCancel
 	p.closing = false
 	p.doorCalls = 0
 	p.sockPath = ""
@@ -412,7 +421,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 }
 
 // Stop tears down the inbound listener and closes every upstream session. It
-// is synchronous: it waits for every forward call already in flight to finish
+// is synchronous: it waits for every admitted door call already in flight to finish
 // (and so for any appendEvent call it made to return) before it returns —
 // the caller can safely close the run's ledger immediately after. The wait is
 // tracked by the proxy's own bookkeeping (inflight), not by however the HTTP
@@ -431,11 +440,18 @@ func (p *Gateway) Stop() int {
 	sessions := p.sessions
 	sockPath := p.sockPath
 	logger := p.stepLogger
+	cancel := p.stepCancel
 	p.srv = nil
 	p.sessions = nil
 	p.sockPath = ""
+	p.stepCancel = nil
 	p.mu.Unlock()
 
+	// End the step's upstream tool calls first, so a call in flight fails,
+	// records and releases its hold; then cut connections.
+	if cancel != nil {
+		cancel()
+	}
 	if srv != nil {
 		_ = srv.Close() // cut connections now: an admitted call's r.Context() ends, its work is cancelled, it records and releases its hold
 	}
@@ -465,22 +481,19 @@ func (p *Gateway) Stop() int {
 // never the call body or any credential. When the resource declares a
 // trusted runtime, the runtime's attestation is taken from the result's
 // _meta and recorded with the event; see attestation.go.
-func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow allowedTools, upstream *mcp.ClientSession, appendEvent func(engine.Event), logger *slog.Logger) mcp.ToolHandler {
+func (p *Gateway) forward(stepCtx context.Context, bind engine.Binding, agent config.AgentDef, resourceID string, allow allowedTools, upstream *mcp.ClientSession, appendEvent func(engine.Event), logger *slog.Logger) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		p.mu.Lock()
-		if p.closing {
-			p.mu.Unlock()
-			return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{&mcp.TextContent{Text: "tool proxy is shutting down"}},
-			}, nil
-		}
-		p.inflight.Add(1)
-		p.mu.Unlock()
-		defer p.inflight.Done()
+		// The admission hold is toolsCallMiddleware's and spans this handler.
+		// The upstream call ends when the agent gives up (ctx, the session's)
+		// or when the step is over (stepCtx — Stop cancels it), so a call in
+		// flight across Stop fails, records, and lets Stop return.
+		callCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		stopAfter := context.AfterFunc(stepCtx, cancel)
+		defer stopAfter()
 
 		// Defense-in-depth: only allowlisted tools are ever mirrored, so the
-		// receiving middleware (refusedTraceMiddleware) is the real denial
+		// receiving middleware (toolsCallMiddleware) is the real denial
 		// path and this branch is unreachable in normal operation. It stays
 		// as a per-tool second gate independent of the mirroring logic.
 		if !allow.allows(resourceID, req.Params.Name) {
@@ -504,7 +517,7 @@ func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID
 		}
 
 		logger.Debug("tool call routed", "resource", resourceID, "tool", req.Params.Name)
-		result, callErr := upstream.CallTool(ctx, &mcp.CallToolParams{
+		result, callErr := upstream.CallTool(callCtx, &mcp.CallToolParams{
 			Name:      req.Params.Name,
 			Arguments: req.Params.Arguments, // raw passthrough — never the run token
 		})
@@ -808,48 +821,38 @@ const (
 	reasonModelRouteMalformed     = "model route endpoint malformed"
 )
 
-// refusedTraceMiddleware records a tool_call the proxy does not expose as a
-// refused event. Off-allowlist tools are never mirrored onto the inbound
-// server, so the server would reject them as "unknown tool" with no ledger
-// trace; this middleware runs before dispatch, names the attempted tool, and
-// records it — turning a previously-invisible denial into first-hand evidence.
-// It only ADDS a refused event for unexposed tools; exposed tools pass through
-// untouched (forward emits their event), so there is no double emit.
-//
-// It is a method on *Gateway (not a free function) so its appendEvent call can
-// share forward's closing/inflight bookkeeping: without that, an in-flight
-// appendEvent here could run after Stop() returns and race the run's
-// log.Close(), violating Stop()'s documented invariant.
-func (p *Gateway) refusedTraceMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) mcp.Middleware {
+// toolsCallMiddleware is the tool door's admission: every tools/call —
+// exposed tool or not — takes the gateway's hold here, before dispatch, and
+// releases it after the handler returns, so one hold covers the mirrored
+// handler and its append (the SDK dispatches on this call stack). An
+// unexposed tool is recorded refused here, since the server would otherwise
+// reject it as "unknown tool" with no ledger trace; an exposed one is
+// recorded by forward — one event per admitted call either way. On closing
+// the call is refused without reaching the handler: neither counted nor
+// recorded. Every other MCP method (initialize, tools/list, ping) passes
+// through untouched — not a door call.
+func (p *Gateway) toolsCallMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			if method == mcpMethodToolsCall {
-				if params, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok {
-					if _, exposed := mirrored[params.Name]; !exposed {
-						// Bracket the ledger append with the same closing/inflight
-						// bookkeeping forward uses, so Stop() waits for it and no
-						// append races the run's log.Close() after teardown. If the
-						// proxy is already closing, skip the emit and still delegate.
-						p.mu.Lock()
-						if p.closing {
-							p.mu.Unlock()
-						} else {
-							p.inflight.Add(1)
-							p.mu.Unlock()
-							logger.Warn("tool call refused", "tool", capRunes(params.Name, 200), "reason", "tool is not available to this run")
-							appendEvent(engine.Event{
-								Type:    "tool_call",
-								Agent:   agent.Name,
-								Status:  "refused",
-								Reason:  "tool is not available to this run",
-								Tool:    params.Name,
-								ArgsSHA: argsSHA(params.Arguments),
-								Binding: bind,
-							})
-							p.inflight.Done()
-						}
-					}
-				}
+			if method != mcpMethodToolsCall {
+				return next(ctx, method, req)
+			}
+			release, ok := p.admit()
+			if !ok {
+				return nil, errors.New("tool proxy is shutting down")
+			}
+			defer release()
+			var name string
+			var args json.RawMessage
+			if params, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok {
+				name, args = params.Name, params.Arguments
+			}
+			if _, exposed := mirrored[name]; !exposed {
+				logger.Warn("tool call refused", "tool", capRunes(name, 200), "reason", "tool is not available to this run")
+				appendEvent(engine.Event{
+					Type: "tool_call", Agent: agent.Name, Status: "refused",
+					Reason: "tool is not available to this run", Tool: name, ArgsSHA: argsSHA(args), Binding: bind,
+				})
 			}
 			return next(ctx, method, req)
 		}
