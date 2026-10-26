@@ -49,6 +49,11 @@ the door rather than trusting the agent.
   root is
   detectable by anyone holding an anchored head's reference and the log's key —
   and none of it makes the ledger tamper-proof;
+- its enforcement is **self-enforcement, not third-party enforcement**: an
+  agent cannot exceed its grant without the gateway agreeing, and the gateway
+  is yours. A refused call is stated up front in `agenthof audit`. Independent
+  corroboration of the gateway's decisions is a reserved future direction, not
+  something claimed today;
 - **only shipped items are guarantees** — what is shipped versus coming is in the
   [roadmap](ROADMAP.md).
 

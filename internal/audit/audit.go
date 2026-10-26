@@ -66,6 +66,7 @@ func Render(events []engine.Event, head ledger.Head, verr error, comp completene
 	fmt.Fprintf(&sb, "run %s — %s (role %s)\n", b.RunID, b.Workflow, b.Role)
 	fmt.Fprintf(&sb, "invoked by %s (%s, issuer %s)\n", b.Invoker.Subject, b.Invoker.Method, b.Invoker.Issuer)
 	fmt.Fprintf(&sb, "status: %s\n", status)
+	sb.WriteString(refusalHeadline(events))
 	sb.WriteString(integrityLine(head, verr))
 	sb.WriteString(comp.Line())
 	fmt.Fprint(&sb, "\n")
@@ -169,6 +170,59 @@ func Render(events []engine.Event, head ledger.Head, verr error, comp completene
 		}
 	}
 	return sb.String()
+}
+
+// refusalHeadline surfaces every refusal in the run, so a door saying no is
+// stated up front rather than left buried in the event list. A refusal is a
+// run_refused event or a door event (tool_call, model_call, exec, spawn)
+// whose status is "refused"; a door call that merely failed is not one.
+// It is additive and never alters the run's status: a blocked door call does
+// not fail an otherwise-succeeded run, and saying so is the point. A run with
+// no refusal yields the empty string, leaving the render unchanged.
+func refusalHeadline(events []engine.Event) string {
+	var lines []string
+	for _, e := range events {
+		if d, ok := refusalDesc(e); ok {
+			lines = append(lines, "  - "+d+"\n")
+		}
+	}
+	switch len(lines) {
+	case 0:
+		return ""
+	case 1:
+		return "refused: 1 refusal in this run\n" + lines[0]
+	}
+	return fmt.Sprintf("refused: %d refusals in this run\n", len(lines)) + strings.Join(lines, "")
+}
+
+// refusalDesc names one refusal in the same terms the event list uses for
+// it: the door, what was attempted, and the recorded reason.
+func refusalDesc(e engine.Event) (string, bool) {
+	switch e.Type {
+	case "run_refused":
+		return "run refused — " + e.Reason, true
+	case "exec":
+		if e.Status == "refused" {
+			return fmt.Sprintf("exec %s refused — %s", strings.Join(e.Command, " "), e.Reason), true
+		}
+	case "model_call":
+		if e.Status == "refused" {
+			return fmt.Sprintf("model %s refused — %s", e.Model, e.Reason), true
+		}
+	case "tool_call":
+		if e.Status == "refused" {
+			return fmt.Sprintf("tool %s refused — %s", e.Tool, e.Reason), true
+		}
+	case "spawn":
+		if e.Status == "refused" {
+			reason := e.Reason
+			if reason == "" {
+				reason = "see the child run's ledger"
+			}
+			return fmt.Sprintf("spawn %s/%s refused — %s", e.ChildRole, e.ChildWorkflow, reason), true
+		}
+	}
+	return "", false
 }
 
 // runtimeAttested renders a trusted runtime's attestation on a tool_call or

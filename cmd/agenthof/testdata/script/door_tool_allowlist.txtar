@@ -29,6 +29,8 @@ stdout 'finished: failed'
 
 lastrun logs-refused
 exec agenthof audit $RUNID --log-dir logs-refused
+stdout 'refused: 1 refusal in this run'
+stdout '  - tool other refused — tool is not available to this run'
 stdout 'tool other refused — tool is not available to this run'
 stdout 'ledger completeness: complete \(1 door call\(s\) accounted\)'
 grep '"type":"step_failed".*"door_calls":1' logs-refused/${RUNID}.jsonl

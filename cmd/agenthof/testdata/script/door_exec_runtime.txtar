@@ -26,6 +26,8 @@ grep '"runtime_attestation":{"runtime":"refexec"' logs/${RUNID}.jsonl
 stdout 'finished: failed'
 lastrun logs
 exec agenthof audit $RUNID --log-dir logs
+stdout 'refused: 1 refusal in this run'
+stdout '  - exec true refused — exec on this agent is first-hand'
 stdout 'exec true refused — exec on this agent is first-hand'
 stdout 'ledger completeness: complete \(1 door call\(s\) accounted\)'
 

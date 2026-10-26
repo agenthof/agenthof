@@ -518,6 +518,7 @@ bound "$LN" "$NOEXEC" dana@example.com
 [ "$(count "$LN" exec)" = 1 ] || fail "the refused run recorded an exec that was not the refusal"
 [ "$(field "$LN" exec reason refused)" = "command is not on the exec allowlist" ] || fail "the exec refusal is not the allowlist reason"
 grep -qF "exec env refused — command is not on the exec allowlist" <<<"$AUDIT" || fail "audit did not render the exec refusal"
+grep -qE '^refused: [0-9]+ refusals? in this run$' <<<"$AUDIT" || fail "audit did not headline the exec refusal"
 grep -qF "step drive (agent acceptance-noexec) failed — exec call failed" <<<"$AUDIT" || fail "the agent did not report the exec leg's fixed reason"
 [ "$(count "$LN" tool_call)" = 0 ] || fail "the driver went on to the tool door after a refused exec"
 [ "$(count "$LN" spawn)" = 0 ] || fail "the driver went on to the spawn door after a refused exec"

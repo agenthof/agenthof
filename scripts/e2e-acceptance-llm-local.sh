@@ -229,6 +229,9 @@ bound "$LN" "$NOEXEC" dana@example.com
 [ "$(count "$LN" exec)" = 1 ] || fail "the refused run recorded an exec that was not the refusal"
 [ "$(field "$LN" exec reason refused)" = "command is not on the exec allowlist" ] || fail "the exec refusal is not the allowlist reason"
 grep -qF "exec env refused — command is not on the exec allowlist" <<<"$AUDIT" || fail "audit did not render the exec refusal"
+grep -qxF "status: succeeded" <<<"$AUDIT" || fail "a refused exec must leave the workflow status succeeded"
+grep -qE '^refused: [0-9]+ refusals? in this run$' <<<"$AUDIT" || fail "audit did not headline the buried exec refusal"
+grep -qxF "  - exec env refused — command is not on the exec allowlist" <<<"$AUDIT" || fail "audit headline did not name the exec refusal"
 if ! NOEXEC_ART="$(parent_artifact "$NOEXEC")"; then
 	echo "$NOEXEC_ART"
 	fail "no artifact on the off-allowlist run"
