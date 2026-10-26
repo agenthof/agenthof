@@ -3,7 +3,6 @@ package rungateway
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 
@@ -20,6 +19,8 @@ const (
 	reasonSpawnParallel    = "spawn would exceed max_parallel"
 	reasonSpawnTotal       = "spawn would exceed max_total_spawns"
 	reasonSpawnIncomplete  = "spawn did not complete"
+
+	reasonSpawnRequestMalformed = "spawn request malformed"
 )
 
 // SpawnResult is what a Spawner reports back for one child run. Status is
@@ -86,41 +87,15 @@ type spawnResponse struct {
 // Spawner under a context derived from the step's (stepCtx) that is also
 // cancelled when the agent hangs up, and records one spawn event on the
 // parent's ledger once the child is over. The whole call runs under the
-// proxy's closing/inflight bookkeeping, like the first-hand exec door: Stop
-// waits for it and for its append, so the append is unguarded (guardedAppend
-// would drop an event once closing is set, and a spawn Stop is waiting on
-// must still be recorded). A request that arrives once the proxy is already
-// closing is answered 503 and NOT recorded: the step is over and the run's
-// ledger may already be closed, so an append there would race log.Close.
-// That is the one deliberately unrecorded refusal.
-func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+// admission hold registerDoor took, so Stop waits for it and for its append;
+// a request that arrives once the proxy is closing is answered 503 by
+// registerDoor before it is a door call — neither counted nor recorded.
+// A body that is a JSON object but not the request's shape is a recorded
+// refusal answered 400.
+func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) doorHandler {
+	return func(w http.ResponseWriter, r *http.Request, body []byte) {
 		var req spawnRequest
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		// Drain to EOF: only then does the server watch the connection, so a
-		// closed one — Stop cutting it, or the agent gone — cancels r.Context()
-		// and with it the child.
-		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 1<<20))
-		p.mu.Lock()
-		if p.closing {
-			p.mu.Unlock()
-			http.Error(w, "gateway is shutting down", http.StatusServiceUnavailable)
-			return
-		}
-		p.inflight.Add(1)
-		p.mu.Unlock()
-		defer p.inflight.Done()
-
-		// The role and workflow are agent-supplied: capped before they enter
-		// the ledger or a log line, and matched exactly against config.
-		childRole, childWorkflow := capRunes(req.Role, 200), capRunes(req.Workflow, 200)
+		childRole, childWorkflow := "", ""
 		depth := bind.Depth + 1
 		answer := func(code int, resp spawnResponse) {
 			w.Header().Set("Content-Type", "application/json")
@@ -133,6 +108,15 @@ func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, age
 				ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth, Binding: bind})
 			answer(http.StatusForbidden, spawnResponse{Status: "refused", Reason: reason})
 		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			logger.Warn("spawn refused", "reason", reasonSpawnRequestMalformed)
+			appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: "refused", Reason: reasonSpawnRequestMalformed, Depth: depth, Binding: bind})
+			answer(http.StatusBadRequest, spawnResponse{Status: "refused", Reason: reasonSpawnRequestMalformed})
+			return
+		}
+		// The role and workflow are agent-supplied: capped before they enter
+		// the ledger or a log line, and matched exactly against config.
+		childRole, childWorkflow = capRunes(req.Role, 200), capRunes(req.Workflow, 200)
 		if p.spawner == nil {
 			refuse(reasonSpawnUnavailable)
 			return

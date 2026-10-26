@@ -473,3 +473,102 @@ func TestStartChecksTheOverrideNotTheConfiguredExecURL(t *testing.T) {
 		t.Fatal("a non-unix override must fail Start exactly as a non-unix exec.url does")
 	}
 }
+
+// TestPreAdmissionAnswersAreNeitherCountedNorRecorded: a request answered
+// before the admission hold — wrong method, unreadable or non-object body,
+// bad token, closing — is not a door call: no event, and Stop reports 0.
+func TestPreAdmissionAnswersAreNeitherCountedNorRecorded(t *testing.T) {
+	stub := newRefexecStub(t, echoRefexec)
+	rec := &eventRecorder{}
+	base, token, p := startAgentProxy(t, firstHandAgent(stub.url, time.Minute, config.ExecEntry{Exe: "true"}), rec)
+	for _, route := range []string{"exec/run", "exec/authorize", "exec/attest", "spawn"} {
+		get, _ := http.NewRequest(http.MethodGet, base+route, nil)
+		get.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(get)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("%s GET: %d, want 405", route, resp.StatusCode)
+		}
+		if code, _ := execPost(t, base, route, token, `{not json`); code != http.StatusBadRequest {
+			t.Fatalf("%s unreadable body: %d, want 400", route, code)
+		}
+		if code, _ := execPost(t, base, route, token, `[1,2]`); code != http.StatusBadRequest {
+			t.Fatalf("%s non-object body: %d, want 400", route, code)
+		}
+		if code, _ := execPost(t, base, route, "wrong-token", `{"command":["true"]}`); code != http.StatusUnauthorized {
+			t.Fatalf("%s bad token: %d, want 401", route, code)
+		}
+	}
+	if len(rec.execs()) != 0 || len(spawnEvents(rec)) != 0 {
+		t.Fatalf("pre-admission answers must record nothing: %+v", rec.ev)
+	}
+	if n := p.Stop(); n != 0 {
+		t.Fatalf("Stop() = %d door calls, want 0: nothing was admitted", n)
+	}
+}
+
+// TestPostAdmissionDecodeFailureIsARecordedRefusal: a syntactically valid
+// JSON object whose fields have the wrong type passes admission, so it is a
+// door call — counted, and recorded as a refusal with the fixed reason.
+func TestPostAdmissionDecodeFailureIsARecordedRefusal(t *testing.T) {
+	stub := newRefexecStub(t, echoRefexec)
+	rec := &eventRecorder{}
+	base, token, p := startAgentProxy(t, firstHandAgent(stub.url, time.Minute, config.ExecEntry{Exe: "true"}), rec)
+	for _, route := range []string{"exec/run", "exec/authorize", "exec/attest"} {
+		if code, body := execPost(t, base, route, token, `{"command":"not-a-list"}`); code != http.StatusBadRequest || !strings.Contains(body, reasonExecRequestMalformed) {
+			t.Fatalf("%s: code=%d body=%q", route, code, body)
+		}
+	}
+	ev := rec.execs()
+	if len(ev) != 3 {
+		t.Fatalf("want three recorded refusals, got %+v", ev)
+	}
+	for _, e := range ev {
+		if e.Status != "refused" || e.Reason != reasonExecRequestMalformed || e.Mode != "runtime" || e.Command != nil {
+			t.Fatalf("event = %+v", e)
+		}
+	}
+	if stub.calls.Load() != 0 {
+		t.Fatal("a malformed request must dial nothing")
+	}
+	if n := p.Stop(); n != 3 {
+		t.Fatalf("Stop() = %d, want 3 admitted door calls", n)
+	}
+}
+
+// TestStopCountsEveryAdmittedExecCallAndStartResets: refused, failed and
+// succeeded exec calls each count once; a new Start starts from 0.
+func TestStopCountsEveryAdmittedExecCallAndStartResets(t *testing.T) {
+	stub := newRefexecStub(t, echoRefexec)
+	rec := &eventRecorder{}
+	agent := firstHandAgent(stub.url, time.Minute, config.ExecEntry{Exe: "true"}, config.ExecEntry{Exe: "false"})
+	p := New(config.GatewayConfig{}, "", broker.StaticEnv{}, nil, "")
+	base, token, err := p.Start(context.Background(), testBinding(), agent, rec.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execPost(t, base, "exec/run", token, `{"command":["true"]}`)       // succeeded
+	execPost(t, base, "exec/run", token, `{"command":["false"]}`)      // failed (exit 1)
+	execPost(t, base, "exec/run", token, `{"command":["rm","-rf"]}`)   // refused: off the allowlist
+	execPost(t, base, "exec/authorize", token, `{"command":["true"]}`) // refused: first-hand only
+	if n := p.Stop(); n != 4 {
+		t.Fatalf("Stop() = %d, want 4", n)
+	}
+	if got := len(rec.execs()); got != 4 {
+		t.Fatalf("recorded %d exec events, want 4 (one per admitted call)", got)
+	}
+	if n := p.Stop(); n != 4 {
+		t.Fatalf("a second Stop() = %d, want the same 4", n)
+	}
+	base, token, err = p.Start(context.Background(), testBinding(), agent, rec.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execPost(t, base, "exec/run", token, `{"command":["true"]}`)
+	if n := p.Stop(); n != 1 {
+		t.Fatalf("after a fresh Start, Stop() = %d, want 1 (the counter is per step)", n)
+	}
+}

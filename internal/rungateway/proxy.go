@@ -85,6 +85,12 @@ type Gateway struct {
 	// them to finish independent of how the underlying HTTP server treats
 	// in-flight connections when closed.
 	inflight sync.WaitGroup
+	// doorCalls counts the door calls admitted during the current step —
+	// every request that took the admission hold (admit), whether it then
+	// succeeded, failed or was refused. Under mu; Start resets it; Stop
+	// returns it after inflight.Wait, when no admitted call can still be
+	// running, so the engine reads it race-free on its own goroutine.
+	doorCalls int
 	// spawner runs a child run for the spawn door; nil means the door
 	// refuses (fail-closed). Set once by WithSpawner, before the first Start.
 	spawner Spawner
@@ -362,11 +368,11 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 
 	mux := http.NewServeMux()
 	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil))
-	mux.HandleFunc("/exec/authorize", p.execAssertedHandler(bind, agent, appendEvent))
-	mux.HandleFunc("/exec/attest", p.execAssertedHandler(bind, agent, appendEvent))
-	mux.HandleFunc("/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
-	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
-	mux.HandleFunc("/spawn", p.spawnHandler(ctx, bind, agent, appendEvent, logger))
+	p.registerDoor(mux, "/exec/authorize", p.execAssertedHandler(bind, agent, appendEvent))
+	p.registerDoor(mux, "/exec/attest", p.execAssertedHandler(bind, agent, appendEvent))
+	p.registerDoor(mux, "/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
+	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger)) // model door takes its own hold inline via guardedAppend
+	p.registerDoor(mux, "/spawn", p.spawnHandler(ctx, bind, agent, appendEvent, logger))
 	handler := authMiddleware(mux, token)
 
 	var ln net.Listener
@@ -391,6 +397,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	p.srv = srv
 	p.sessions = sessions
 	p.closing = false
+	p.doorCalls = 0
 	p.sockPath = ""
 	p.stepLogger = logger
 	if path, ok := strings.CutPrefix(proxyURL, config.UnixScheme); ok {
@@ -425,12 +432,15 @@ func (p *Gateway) guardedAppend(appendEvent func(engine.Event), e engine.Event) 
 // (and so for any appendEvent call it made to return) before it returns —
 // the caller can safely close the run's ledger immediately after. The wait is
 // tracked by the proxy's own bookkeeping (inflight), not by however the HTTP
-// server happens to treat an in-flight connection when closed.
+// server happens to treat an in-flight connection when closed. It returns the
+// number of door calls admitted during the step; read after it returns, the
+// value is final.
 func (p *Gateway) Stop() int {
 	p.mu.Lock()
 	if p.closing {
+		n := p.doorCalls
 		p.mu.Unlock()
-		return 0
+		return n
 	}
 	p.closing = true
 	srv := p.srv
@@ -456,7 +466,10 @@ func (p *Gateway) Stop() int {
 	if srv != nil {
 		logger.Info("gateway listener stopped")
 	}
-	return 0
+	p.mu.Lock()
+	n := p.doorCalls
+	p.mu.Unlock()
+	return n
 }
 
 // forward returns the ToolHandler mirrored onto the inbound server for one
@@ -706,6 +719,66 @@ func mintToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// admit takes the gateway's admission hold for one door call: the one
+// place closing is consulted and inflight is incremented. A request that
+// gets ok=false was answered before it could act and is neither counted
+// nor recorded; a request that gets ok=true is a door call — counted here,
+// and it MUST append exactly one event before calling release. Stop waits
+// on exactly these holds.
+func (p *Gateway) admit() (release func(), ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closing {
+		return nil, false
+	}
+	p.inflight.Add(1)
+	p.doorCalls++
+	return p.inflight.Done, true
+}
+
+// maxDoorBody bounds a route door's request body. The bound predates the
+// hold: an oversized body is answered 400 before it is a door call.
+const maxDoorBody = 1 << 20
+
+// doorHandler is a route door's body, run under the admission hold with the
+// request's bounded body, already checked to be one JSON object. Everything
+// it does — the door-specific decode included — is a door call's work, so a
+// field of the wrong type is a RECORDED refusal, never a silent 400.
+type doorHandler func(w http.ResponseWriter, r *http.Request, body []byte)
+
+// registerDoor is the one way a route door joins the mux. Before the hold:
+// the method, a bounded read to EOF (only then does the server watch the
+// connection, so Stop cutting it — or the agent hanging up — cancels
+// r.Context()), and a syntactic JSON-object check. Then admit: on closing
+// the request is answered 503 and is not a door call; otherwise it is
+// counted and the door runs under the hold until it returns.
+func (p *Gateway) registerDoor(mux *http.ServeMux, pattern string, door doorHandler) {
+	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxDoorBody))
+		if err != nil || !isJSONObject(body) {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		release, ok := p.admit()
+		if !ok {
+			http.Error(w, "gateway is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		defer release()
+		door(w, r, body)
+	})
+}
+
+// isJSONObject reports whether b is one syntactically valid JSON object.
+func isJSONObject(b []byte) bool {
+	t := bytes.TrimLeft(b, " \t\r\n")
+	return len(t) > 0 && t[0] == '{' && json.Valid(b)
 }
 
 // capRunes truncates s to at most n runes. It is the one place the ledger
