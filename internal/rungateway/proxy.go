@@ -371,7 +371,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	p.registerDoor(mux, "/exec/authorize", p.execAssertedHandler(bind, agent, appendEvent))
 	p.registerDoor(mux, "/exec/attest", p.execAssertedHandler(bind, agent, appendEvent))
 	p.registerDoor(mux, "/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
-	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger)) // model door takes its own hold inline via guardedAppend
+	p.registerDoor(mux, "/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
 	p.registerDoor(mux, "/spawn", p.spawnHandler(ctx, bind, agent, appendEvent, logger))
 	handler := authMiddleware(mux, token)
 
@@ -411,22 +411,6 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	return proxyURL, token, nil
 }
 
-// guardedAppend appends a ledger event under the same closing/inflight
-// bookkeeping forward uses, so Stop() waits for it and no append races the
-// run's log.Close() after teardown. If the proxy is already closing, the event
-// is dropped rather than racing the close.
-func (p *Gateway) guardedAppend(appendEvent func(engine.Event), e engine.Event) {
-	p.mu.Lock()
-	if p.closing {
-		p.mu.Unlock()
-		return
-	}
-	p.inflight.Add(1)
-	p.mu.Unlock()
-	appendEvent(e)
-	p.inflight.Done()
-}
-
 // Stop tears down the inbound listener and closes every upstream session. It
 // is synchronous: it waits for every forward call already in flight to finish
 // (and so for any appendEvent call it made to return) before it returns —
@@ -453,7 +437,7 @@ func (p *Gateway) Stop() int {
 	p.mu.Unlock()
 
 	if srv != nil {
-		_ = srv.Close() // cut connections now; forward()'s own bookkeeping (not this) is what Stop waits on
+		_ = srv.Close() // cut connections now: an admitted call's r.Context() ends, its work is cancelled, it records and releases its hold
 	}
 	if sockPath != "" {
 		_ = os.Remove(sockPath)
@@ -815,6 +799,15 @@ func hashResult(result *mcp.CallToolResult, callErr error) (sha, preview string)
 // mcpMethodToolsCall is the MCP method name for a tool invocation.
 const mcpMethodToolsCall = "tools/call"
 
+// The model door's ledger reasons for the branches it reaches after
+// admission and before an upstream answers: fixed strings, never an error's
+// text (Article III).
+const (
+	reasonModelRequestMalformed   = "model request malformed"
+	reasonModelRequestUnbuildable = "model request could not be rebuilt"
+	reasonModelRouteMalformed     = "model route endpoint malformed"
+)
+
 // refusedTraceMiddleware records a tool_call the proxy does not expose as a
 // refused event. Off-allowlist tools are never mirrored onto the inbound
 // server, so the server would reject them as "unknown tool" with no ledger
@@ -911,17 +904,20 @@ func resultErrorText(result *mcp.CallToolResult) string {
 // modelHandler is the OpenAI-compatible door on the per-run listener. The
 // agent authenticates with the run token; the proxy authorizes the logical
 // model, injects the per-role provider key, and never forwards the run token
-// or any X-Agenthof-* header.
-func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+// or any X-Agenthof-* header. The whole call runs under the admission hold
+// registerDoor took; every admitted call appends exactly one event, including
+// one still in flight when Stop runs (Stop cuts the connection, which cancels
+// the outbound request and lands in ErrorHandler).
+func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) doorHandler {
+	return func(w http.ResponseWriter, r *http.Request, body []byte) {
+		var logical string
+		refuse := func(reason string, code int) {
+			appendEvent(engine.Event{Type: "model_call", Agent: agent.Name, Status: "refused", Reason: reason, Model: logical, Binding: bind})
+			http.Error(w, reason, code)
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
+		fail := func(reason string, code int) {
+			appendEvent(engine.Event{Type: "model_call", Agent: agent.Name, Status: "failed", Reason: reason, Model: logical, Binding: bind})
+			http.Error(w, reason, code)
 		}
 		// Decode into json.RawMessage per field rather than map[string]any: an
 		// any-decode + re-marshal round-trips every JSON number through
@@ -930,10 +926,10 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 		// "model" is parsed and later replaced.
 		var req map[string]json.RawMessage
 		if err := json.Unmarshal(body, &req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			logger.Warn("model call refused", "reason", reasonModelRequestMalformed)
+			refuse(reasonModelRequestMalformed, http.StatusBadRequest)
 			return
 		}
-		var logical string
 		if raw, ok := req["model"]; ok {
 			_ = json.Unmarshal(raw, &logical) // non-string "model" leaves logical "", matching the old .(string) assertion
 		}
@@ -949,7 +945,8 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 			// event.
 			echoed := capRunes(logical, 200)
 			logger.Warn("model call refused", "model", echoed)
-			p.guardedAppend(appendEvent, engine.Event{
+			logical = echoed
+			appendEvent(engine.Event{
 				Type: "model_call", Agent: agent.Name, Status: "refused",
 				Reason: fmt.Sprintf("model %q is not allowed for this agent", echoed),
 				Model:  echoed, Binding: bind,
@@ -967,7 +964,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 			// Resolve's error names an env VARIABLE, never a value, but the
 			// message stays fixed anyway: one rule for the whole door.
 			logger.Error("model route not resolved", "model", logical)
-			p.guardedAppend(appendEvent, engine.Event{
+			appendEvent(engine.Event{
 				Type: "model_call", Agent: agent.Name, Status: "failed",
 				Reason: "model route not resolved", Model: logical, Binding: bind,
 			})
@@ -977,19 +974,20 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 
 		modelRaw, err := json.Marshal(route.Model)
 		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			fail(reasonModelRequestUnbuildable, http.StatusBadRequest)
 			return
 		}
 		req["model"] = modelRaw
 		newBody, err := json.Marshal(req)
 		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			fail(reasonModelRequestUnbuildable, http.StatusBadRequest)
 			return
 		}
 
 		target, err := url.Parse(route.Endpoint)
 		if err != nil || target.Scheme == "" || target.Host == "" {
-			http.Error(w, "bad route", http.StatusBadGateway)
+			logger.Error("model route endpoint malformed", "model", logical)
+			fail(reasonModelRouteMalformed, http.StatusBadGateway)
 			return
 		}
 
@@ -1017,7 +1015,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 		var recorded bool
 		record := func(e engine.Event) {
 			recorded = true
-			p.guardedAppend(appendEvent, e)
+			appendEvent(e)
 		}
 
 		rp := &httputil.ReverseProxy{
@@ -1119,7 +1117,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				// reason the ledger reason is fixed.
 				if !recorded {
 					logger.Error("model call did not complete", "model", logical, "class", errClass(err))
-					p.guardedAppend(appendEvent, engine.Event{
+					appendEvent(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "failed",
 						Reason: "model call did not complete", Model: logical, Binding: bind,
 					})

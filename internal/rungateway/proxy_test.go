@@ -1599,6 +1599,8 @@ func (u *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = gz.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`))
 		_ = gz.Close()
 		_, _ = w.Write(buf.Bytes())
+	case "hang":
+		<-r.Context().Done()
 	default:
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":0}}`))
@@ -2400,5 +2402,109 @@ func TestProxyTokenExchangeStartFailureNoLeak(t *testing.T) {
 		if strings.Contains(logBuf.String(), forbidden) {
 			t.Fatalf("operational log echoed %q", forbidden)
 		}
+	}
+}
+
+// TestModelCallAcrossStopIsRecordedOnce: a model call in flight when Stop
+// runs is counted (it was admitted), so it must be recorded — Stop cuts the
+// agent's connection, which cancels r.Context(), which cancels the outbound
+// request and drives ReverseProxy into ErrorHandler, which records failed;
+// Stop returns only then, with the count.
+func TestModelCallAcrossStopIsRecordedOnce(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{mode: "hang"}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	p, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	callDone := make(chan struct{})
+	go func() {
+		defer close(callDone)
+		// Stop cuts this connection, so the client is expected to see an
+		// error: the request is built here rather than through postModel,
+		// which fails the test on one.
+		req, err := http.NewRequest(http.MethodPost, base+"v1/chat/completions", strings.NewReader(`{"model":"planner-model","messages":[]}`))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	waitFor(t, "the model call to reach the upstream", func() bool { c, _, _, _, _ := up.snapshot(); return c == 1 })
+
+	stopped := make(chan int, 1)
+	go func() { stopped <- p.Stop() }()
+	var n int
+	select {
+	case n = <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return: the in-flight model call was not cancelled by the connection cut")
+	}
+	<-callDone
+	var failed int
+	for _, e := range *events {
+		if e.Type == "model_call" && e.Status == "failed" && e.Reason == "model call did not complete" {
+			failed++
+		}
+	}
+	if failed != 1 || len(*events) != 1 {
+		t.Fatalf("events = %+v, want exactly one failed model_call", *events)
+	}
+	if n != 1 {
+		t.Fatalf("Stop() = %d, want 1", n)
+	}
+}
+
+// TestModelBadRouteIsRecordedFailed: a route whose endpoint is not a URL
+// was authorized and admitted, so the 502 it earns is a recorded failure.
+func TestModelBadRouteIsRecordedFailed(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	gw := config.GatewayConfig{Models: map[string]config.ModelRoute{
+		"planner-model": {Endpoint: "nourl", Model: "gpt-4o", APIKeyEnv: "MODEL_KEY"},
+	}}
+	gw.Defaults.Model = "planner-model"
+	p := New(gw, t.TempDir(), broker.StaticEnv{}, nil, "")
+	rec := &eventRecorder{}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	base, token, err := p.Start(context.Background(), testBinding(), agent, rec.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[]}`, nil)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+	if n := p.Stop(); n != 1 {
+		t.Fatalf("Stop() = %d, want 1", n)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.ev) != 1 || rec.ev[0].Type != "model_call" || rec.ev[0].Status != "failed" || rec.ev[0].Reason != reasonModelRouteMalformed {
+		t.Fatalf("events = %+v, want one failed model_call with the fixed reason", rec.ev)
+	}
+}
+
+// TestModelPreAdmissionAnswersAreNotDoorCalls: 405, a non-object body and a
+// bad token are answered before the hold — nothing recorded, Stop() == 0.
+func TestModelPreAdmissionAnswersAreNotDoorCalls(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	p, base, token, events := startModelGateway(t, &modelUpstream{}, agent, t.TempDir())
+	get, _ := http.NewRequest(http.MethodGet, base+"v1/chat/completions", nil)
+	get.Header.Set("Authorization", "Bearer "+token)
+	if resp, err := http.DefaultClient.Do(get); err != nil || resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET: %v %v", resp, err)
+	}
+	if resp := postModel(t, base, token, `[1]`, nil); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("array body: %d, want 400", resp.StatusCode)
+	}
+	if resp := postModel(t, base, "nope", `{"model":"planner-model"}`, nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad token: %d, want 401", resp.StatusCode)
+	}
+	if n := p.Stop(); n != 0 || len(*events) != 0 {
+		t.Fatalf("Stop() = %d, events = %+v; want 0 and none", n, *events)
 	}
 }
