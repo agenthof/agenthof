@@ -338,7 +338,7 @@ func TestRotateStateCNeverCallsTheSink(t *testing.T) {
 
 const postureChangedText = "segment 1 was sealed for a protected copy at s3-object-lock https://sink.example/bucket/p; integrity.yaml no longer names it — restore that posture to complete the rotation"
 
-// TestRotatePostureChanged (§8.5): a record with a block completes only
+// TestRotatePostureChanged: a record with a block completes only
 // through the sink it names — a nil sink or another URL is refused and
 // state B stands; a record without a block completes without an upload
 // whatever the posture now says.
@@ -387,7 +387,7 @@ func TestRotatePostureChanged(t *testing.T) {
 	}
 }
 
-// TestRotateRefusesARecordNamingAnotherKey (§8.5, the key): the chain fixes
+// TestRotateRefusesARecordNamingAnotherKey (the key): the chain fixes
 // a seal's five chain fields and carries its sink block as recorded, so a
 // correctly chained seal line written by hand can name any key — another
 // ledger's seg-000001 in a shared bucket. A block completes only through
@@ -709,7 +709,7 @@ func TestRepairPostSealFloorUnchanged(t *testing.T) {
 	})
 }
 
-// TestRepairPostSealRefusesFlippedPostureBeforeTruncate (§8.5 from the
+// TestRepairPostSealRefusesFlippedPostureBeforeTruncate (from the
 // repair): the record names a protected copy; a posture that no longer does
 // — nil, another kind, another URL — is refused BEFORE the truncate, with no
 // sink call, no fragment, the active byte for byte as it was.

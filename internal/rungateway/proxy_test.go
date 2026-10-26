@@ -394,7 +394,7 @@ func TestProxyForwardDeniesNonAllowlistedResource(t *testing.T) {
 // TestProxyForwardSetsReasonOnUpstreamFailure exercises forward's "failed"
 // path directly: an upstream call that comes back IsError must produce a
 // tool_call event with Status "failed" and a non-empty Reason describing the
-// failure (spec §3g: Reason on refusal/failure), same as the "refused" path.
+// failure (Reason is set on refusal/failure), same as the "refused" path.
 func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 	const upstreamToken = "upstream-secret-xyz"
 	ts, _ := newStubUpstream(t, upstreamToken)

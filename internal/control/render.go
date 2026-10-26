@@ -15,7 +15,7 @@ import (
 // IsTainted reports whether any of records carries action "repair", and,
 // if so, the seq of the FIRST such record. A repair record means the
 // ledger was regenerated after damage — that fact is decidable purely
-// from file contents (spec §3.6) and, once true, is reported forever:
+// from file contents and, once true, is reported forever:
 // nothing in this package clears it, and a later clean stretch of records
 // does not un-taint an earlier repair.
 func IsTainted(records []ledger.Record) (bool, int) {
@@ -32,7 +32,7 @@ func IsTainted(records []ledger.Record) (bool, int) {
 }
 
 // label derives the human-readable line label for a control record's
-// action/outcome pair (spec §3.6). It never claims a state change that
+// action/outcome pair. It never claims a state change that
 // didn't happen: enable/disable/repair/prune only get their past-tense label on
 // outcome "success" — every other outcome is worded around the action,
 // not past it.
@@ -151,8 +151,8 @@ func flipLabel(verb, pastTense string, rec record) string {
 // Taint (IsTainted) is decidable independently of chain verification, so
 // it is checked regardless of verr: on an otherwise-clean chain it
 // replaces "verified" outright, and on a failed one it is reported
-// alongside the fault, never instead of it (spec §3.6: "a torn+tainted log
-// shows both facts"). Every seq printed is the GLOBAL seq of the logical
+// alongside the fault, never instead of it (a torn+tainted log
+// shows both facts). Every seq printed is the GLOBAL seq of the logical
 // chain, which is the line number on a never-sealed ledger.
 func integrityLine(v View, verr error) string {
 	tainted, seq := IsTainted(v.Records)
@@ -253,7 +253,7 @@ func headerLogID(v View) string {
 }
 
 // RenderView renders the ledger as one logical chain, as a human-readable
-// audit trail (spec §3.6): a header (the event count and the ledger's log_id
+// audit trail: a header (the event count and the ledger's log_id
 // when it has one), one `segment k: seq A–B sealed <time>
 // <file>` line per sealed segment (only when there is one), the rotation
 // state when a seal did not complete, one line per event carrying its

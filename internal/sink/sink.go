@@ -273,7 +273,7 @@ func (s *S3) Prepare(ctx context.Context, loc control.SealSink) error {
 // The lock a write carries is the later of loc.RetainUntil and now plus the
 // configured retention (lockUntil). The record's date is fixed when the seal
 // line is written; a store refuses a date that has passed, so a seal left in
-// state B past its own retention could otherwise never complete (§8.4: never
+// state B past its own retention could otherwise never complete (never
 // a permanent wedge). The read-back still holds the lock to loc's date —
 // a longer lock is what verify accepts too — so the guarantee stands: the
 // copy is protected for at least the recorded retention.

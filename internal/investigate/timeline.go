@@ -208,7 +208,7 @@ func Timeline(logDir, controlLog string, f Filter, o Options) (Result, error) {
 		}
 		runID := strings.TrimSuffix(name, ".jsonl")
 
-		// mtime prefilter (spec §4): Since-only, with slack for coarse-mtime
+		// mtime prefilter: Since-only, with slack for coarse-mtime
 		// filesystems. NEVER prefilter on Until — a run that started
 		// before Until but finished at/after it still holds pre-Until
 		// events that must appear; only the per-event predicate below may
@@ -238,8 +238,8 @@ func Timeline(logDir, controlLog string, f Filter, o Options) (Result, error) {
 			} else if _, ok := errors.AsType[*ledger.ChainBrokenError](rerr); ok {
 				rl.source = Source{Path: path, Kind: "run", Integrity: "broken", Count: len(events)}
 			} else {
-				// An IO error on a source that exists must surface (spec
-				// §5), not be swallowed.
+				// An IO error on a source that exists must surface,
+				// not be swallowed.
 				rl.source = Source{Path: path, Kind: "run", Integrity: "error", Count: 0}
 			}
 		}
@@ -261,7 +261,7 @@ func Timeline(logDir, controlLog string, f Filter, o Options) (Result, error) {
 	ctlRecords, controlEvents, verdict, ok := loadControl(controlLog)
 	if ok {
 		// A missing control log (ok==false) means "nothing recorded" and
-		// is omitted from Sources entirely (spec §5) — never listed with
+		// is omitted from Sources entirely — never listed with
 		// a synthetic "missing" integrity value.
 		sources = append(sources, Source{Path: controlLog, Kind: "control", Integrity: verdict, Count: len(controlEvents)})
 		verdicts := anchorVerdicts(ctlRecords, controlEvents, verdict, o)
@@ -270,7 +270,7 @@ func Timeline(logDir, controlLog string, f Filter, o Options) (Result, error) {
 		}
 	}
 
-	// spec §4: sort key is (Time, Source, RunID, pos) via a stable sort,
+	// Sort key is (Time, Source, RunID, pos) via a stable sort,
 	// compared with Before/Equal (never ==). Source is compared as a plain
 	// string, which happens to place "control" before "run" alphabetically —
 	// matching the intent that a control apply at time T precedes a run

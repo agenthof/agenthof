@@ -12,7 +12,7 @@ import (
 	"github.com/agenthof/agenthof/internal/control"
 )
 
-// TestApplyRecordsSuccessEvent covers apply's happy path (spec §3.4/§3.7):
+// TestApplyRecordsSuccessEvent covers apply's happy path:
 // a valid config records a "success" control/1 event carrying
 // the invoker and a config_hash, and prints the control head.
 func TestApplyRecordsSuccessEvent(t *testing.T) {
@@ -105,7 +105,7 @@ func TestApplyRecordsRejectedEventWithConfigHash(t *testing.T) {
 // and HashDir read the exact same bytes through the exact same
 // enumeration, so there is no filesystem-only way to make one fail
 // without the other), must never be recorded as a hash-less "success":
-// config_hash is required on that outcome (spec §3.2), so the honest
+// config_hash is required on that outcome, so the honest
 // record is outcome "error" / reason io_error instead.
 func TestApplyHashFailureRecordsIOErrorNotSuccess(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")

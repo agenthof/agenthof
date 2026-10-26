@@ -90,7 +90,7 @@ func TestStartRunAdmitRefusalIs403AndLedgered(t *testing.T) {
 	// A tab is the one control byte Go's transport lets through in a header
 	// value (ESC and friends are rejected client-side); unicode.IsPrint
 	// rejects it, so it proves strip + cap through the real HTTP path. The
-	// ESC case is pinned by Task 1's unit tests.
+	// ESC case is pinned by the unit tests.
 	req.Header.Set("User-Agent", "probe\t"+strings.Repeat("A", 500))
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
 	resp, err := http.DefaultClient.Do(req)

@@ -323,7 +323,7 @@ func TestRestoreDamagedSegmentKeepsEvidence(t *testing.T) {
 	})
 }
 
-// TestRestoreNamesAreNotSiblings (§14.3): the restore temp and the replaced
+// TestRestoreNamesAreNotSiblings: the restore temp and the replaced
 // name fall outside the <base>.seg- prefix — a root with both beside it
 // reads clean — and sweepTemps removes the temp but never the evidence.
 func TestRestoreNamesAreNotSiblings(t *testing.T) {
@@ -687,7 +687,7 @@ func TestRestoreContinuityWithNextSegment(t *testing.T) {
 		t.Fatal("nothing written")
 	}
 	// An EMPTY active constrains nothing: the forgery alone is accepted for
-	// the last segment (§5.3's oldest-first rule is the defence there).
+	// the last segment (the oldest-first rule is the defence there).
 	p, r = restoreFixture(t)
 	key = segKey(t, p, r, 2)
 	r.objects[key] = []fakeVersion{{id: "v-1", data: forge(r.objects[key][0].data), mode: "COMPLIANCE", until: far}}
@@ -697,7 +697,7 @@ func TestRestoreContinuityWithNextSegment(t *testing.T) {
 	}
 }
 
-// TestRestoreRefusesIncompleteRotationBeforeWriting (§11.2 step 4): a root
+// TestRestoreRefusesIncompleteRotationBeforeWriting: a root
 // in state B or C whose EARLIER segment is at fault — Read's verdict stops
 // at that segment and never decides the rotation state — is refused from
 // the active itself before any write, with no sink call; and in state C

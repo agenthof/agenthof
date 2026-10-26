@@ -45,7 +45,7 @@ func TestGroupsIntersectIsLiteral(t *testing.T) {
 	}
 }
 
-// TestControlAllows is the control-plane truth table (spec §6, §10):
+// TestControlAllows is the control-plane truth table:
 // membership AND grant, never grant alone; "*" is never honored — on either
 // side — because enable/disable/repair authorize against an unvalidated
 // config dir, so the apply-time public-control-role rejection cannot be

@@ -139,7 +139,7 @@ func TestScript(t *testing.T) {
 			e.Setenv("AGENTHOF_OIDC_CLIENT_ID", "")
 			e.Setenv("AGENTHOF_LOG_LEVEL", "")
 			e.Setenv("AGENTHOF_LOG_FORMAT", "")
-			// New reroute/auth knobs this increment adds: blank them like the
+			// New reroute/auth knobs: blank them like the
 			// others, or a developer's exported AGENTHOF_SERVER would send
 			// every script's `run` to a remote.
 			e.Setenv("AGENTHOF_SERVER", "")
