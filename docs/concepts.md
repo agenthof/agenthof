@@ -172,6 +172,17 @@ provider key, and the tool gateway injects the resource credential. A
 non-conforming agent that already holds a key can still call a provider
 directly; the operator's sandbox is what prevents that, and Agenthof does
 not verify it.
+
+What this guarantees is self-enforcement plus containment: the agent cannot
+exceed its grant without the gateway agreeing, and the gateway is the
+operator's own. It is not independent, third-party enforcement, and the
+ledger it writes is the operator's own record of that enforcement. A
+refusal is the visible proof that a door can say no, so `agenthof audit`
+states every refusal in a run up front, separately from the run's status: a
+blocked call does not by itself fail an otherwise-successful run. Independent
+corroboration of the gateway's decisions is a reserved future direction, not
+something Agenthof claims today.
+
 Allowlisted commands run in a trusted operator-side runtime — the reference
 one is `refexec`, a rootless-podman supervisor on the operator's host — that
 runs each command on the agent's behalf and attests first-hand what ran;

@@ -410,3 +410,69 @@ func TestRenderPrintsCompletenessAfterIntegrity(t *testing.T) {
 		t.Fatalf("%q", empty)
 	}
 }
+
+func TestRenderRefusalHeadlineFullyRefusedRun(t *testing.T) {
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "se", Workflow: "fix-bug", RunID: "r-refhead1"}
+	events := []engine.Event{{Time: ts(5), Type: "run_refused", Reason: "role \"se\" is not in the registry", Binding: bind}}
+	out := Render(events, ledger.Head{Count: 1}, nil, completeness.Check(events))
+	for _, want := range []string{
+		"status: refused\n",
+		"refused: 1 refusal in this run\n",
+		"  - run refused — role \"se\" is not in the registry\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderRefusalHeadlineSurfacesBuriedDoorRefusal(t *testing.T) {
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "software-engineer", Workflow: "fix-bug", RunID: "r-refhead2"}
+	events := []engine.Event{
+		{Time: ts(5), Type: "workflow_started", Binding: bind},
+		{Time: ts(6), Type: "tool_call", Status: "refused", Tool: "danger", Reason: "tool not allowed", Binding: bind},
+		{Time: ts(6), Type: "exec", Status: "refused", Command: []string{"rm", "-rf", "/"}, Reason: "command is not on the exec allowlist", Binding: bind},
+		{Time: ts(6), Type: "model_call", Status: "refused", Model: "big", Reason: "model not allowed", Binding: bind},
+		{Time: ts(6), Type: "spawn", Status: "refused", ChildRole: "reviewer", ChildWorkflow: "review", Reason: "depth limit", Binding: bind},
+		{Time: ts(7), Type: "workflow_finished", Status: "succeeded", Binding: bind},
+	}
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	for _, want := range []string{
+		"status: succeeded\n", // a blocked door call does not change the workflow outcome
+		"refused: 4 refusals in this run\n",
+		"  - tool danger refused — tool not allowed\n",
+		"  - exec rm -rf / refused — command is not on the exec allowlist\n",
+		"  - model big refused — model not allowed\n",
+		"  - spawn reviewer/review refused — depth limit\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "refused: 4") > strings.Index(out, "12:04:05  workflow started") {
+		t.Fatalf("headline must precede the event list:\n%s", out)
+	}
+	// A failed (not refused) door call is not a refusal.
+	failed := []engine.Event{
+		{Time: ts(5), Type: "tool_call", Status: "failed", Tool: "echo", Reason: "upstream unreachable", Binding: bind},
+		{Time: ts(6), Type: "workflow_finished", Status: "succeeded", Binding: bind},
+	}
+	if strings.Contains(Render(failed, ledger.Head{Count: 2}, nil, completeness.Check(failed)), "refused:") {
+		t.Fatal("a failed door call must not produce a refusal headline")
+	}
+}
+
+func TestRenderNoRefusalHeadlineOnCleanRun(t *testing.T) {
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "software-engineer", Workflow: "fix-bug", RunID: "r-refhead3"}
+	exit := 0
+	events := []engine.Event{
+		{Time: ts(5), Type: "workflow_started", Binding: bind},
+		{Time: ts(6), Type: "exec", Status: "succeeded", Command: []string{"true"}, ExitCode: &exit, Mode: "runtime", Binding: bind},
+		{Time: ts(6), Type: "tool_call", Status: "succeeded", Tool: "echo", ArgsSHA: "abcdef1234", AuthMode: "static_env", Binding: bind},
+		{Time: ts(7), Type: "workflow_finished", Status: "succeeded", Binding: bind},
+	}
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	if strings.Contains(out, "refusal") || strings.Contains(out, "refused:") {
+		t.Fatalf("clean run must print no refusal headline:\n%s", out)
+	}
+}

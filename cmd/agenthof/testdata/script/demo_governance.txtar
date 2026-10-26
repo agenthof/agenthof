@@ -13,6 +13,8 @@ stdout 'allowed groups \(finance\)'
 lastrun logs
 exec agenthof audit $RUNID --log-dir logs
 stdout 'status: refused'
+stdout 'refused: 1 refusal in this run'
+stdout '  - run refused — role "accountant"'
 stdout 'ledger integrity: verified \(1 events\)'
 stdout 'ledger completeness: complete \(0 door call\(s\) accounted\)'
 stdout 'run refused — role "accountant" requires membership in one of its allowed groups \(finance\)'
