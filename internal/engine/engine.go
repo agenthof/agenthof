@@ -69,6 +69,12 @@ type Options struct {
 
 const defaultMaxBounces = 2
 
+// reasonArtifactStoreWriteFailed is the fixed step_failed reason for a step
+// whose agent reported success but whose artifact the store could not keep:
+// storage failed, not the agent, and the step still gets its terminal
+// (precedent: "tool proxy start failed" for a step whose agent never ran).
+const reasonArtifactStoreWriteFailed = "artifact store write failed"
+
 func Run(ctx context.Context, reg *registry.Registry, role, workflow, input string,
 	inv identity.Invoker, exec StepExecutor, opts Options) (Result, error) {
 
@@ -244,6 +250,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 				if perr != nil {
 					storeErr := fmt.Errorf("artifact store: %w", perr)
 					logger.Error("artifact store write failed", "step", step.Name, "err", perr)
+					finishStep(false, Event{Step: step.Name, Agent: agent.Name, Reason: reasonArtifactStoreWriteFailed, Execution: execTier}, doorCalls)
 					emit(Event{Type: "workflow_finished", Status: "failed", Reason: "artifact store: " + perr.Error()})
 					if logErr != nil {
 						logger.Error("ledger write failed", "err", logErr)

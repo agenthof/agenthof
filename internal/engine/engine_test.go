@@ -429,3 +429,48 @@ func TestRunEventsCarryExecutionTier(t *testing.T) {
 		t.Fatalf("expected 6 step events, saw %d", seen)
 	}
 }
+
+// readOnlyStoreExec succeeds with an artifact after making the artifact
+// store unwritable, so the engine's store.Put fails for a step whose agent
+// reported success.
+type readOnlyStoreExec struct{ dir string }
+
+func (r readOnlyStoreExec) Execute(_ context.Context, _ Binding, agent config.AgentDef, _ string, _ map[string]string) (StepResult, error) {
+	if err := os.Chmod(r.dir, 0o500); err != nil {
+		return StepResult{}, err
+	}
+	return StepResult{Success: true, Artifact: "artifact-from-" + agent.Name}, nil
+}
+
+func TestArtifactStoreWriteFailureEmitsStepFailed(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "arts")
+	t.Cleanup(func() { _ = os.Chmod(arts, 0o700) })
+	res, err := Run(context.Background(), engCfg(), "se", "fix-bug", "x",
+		identity.Static("dev@x"), readOnlyStoreExec{dir: arts}, Options{LogDir: dir, ArtifactDir: arts})
+	if res.Status != "failed" || err == nil || !strings.Contains(err.Error(), "artifact store") {
+		t.Fatalf("status=%q err=%v", res.Status, err)
+	}
+	events, _, rerr := ReadLog(dir, res.RunID)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	var types []string
+	for _, e := range events {
+		types = append(types, e.Type)
+	}
+	want := []string{"workflow_started", "step_started", "step_failed", "workflow_finished"}
+	if strings.Join(types, ",") != strings.Join(want, ",") {
+		t.Fatalf("types = %v, want %v", types, want)
+	}
+	sf := events[2]
+	if sf.Step != "plan" || sf.Reason != reasonArtifactStoreWriteFailed || sf.DoorCalls == nil || *sf.DoorCalls != 0 {
+		t.Fatalf("step_failed must name the step, carry the fixed reason and door_calls: %+v", sf)
+	}
+	if events[3].Status != "failed" || !strings.HasPrefix(events[3].Reason, "artifact store: ") {
+		t.Fatalf("workflow_finished unchanged: %+v", events[3])
+	}
+}
