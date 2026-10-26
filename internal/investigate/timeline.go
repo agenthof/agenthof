@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/anchorverify"
+	"github.com/agenthof/agenthof/internal/completeness"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/ledger"
@@ -27,10 +28,11 @@ type Filter struct {
 // Source summarizes one input that Timeline drew evidence from: a run log
 // or the control log.
 type Source struct {
-	Path      string
-	Kind      string // "run" | "control"
-	Integrity string // "verified" | "torn" | "broken" | "tainted" | "error"
-	Count     int    // valid-prefix records parsed from this source, before Filter is applied
+	Path         string
+	Kind         string // "run" | "control"
+	Integrity    string // "verified" | "torn" | "broken" | "tainted" | "error"
+	Completeness string // "complete" | "gap" | "unterminated" | "no-claim" for a verified run log; "" for the control log or when integrity failed
+	Count        int    // valid-prefix records parsed from this source, before Filter is applied
 }
 
 // Result is Timeline's output: the merged, filtered records plus a
@@ -225,7 +227,7 @@ func Timeline(logDir, controlLog string, f Filter, o Options) (Result, error) {
 		rl := runLog{id: runID}
 		switch {
 		case rerr == nil:
-			rl.source = Source{Path: path, Kind: "run", Integrity: "verified", Count: len(events)}
+			rl.source = Source{Path: path, Kind: "run", Integrity: "verified", Completeness: completeness.Check(events).Verdict, Count: len(events)}
 		case errors.Is(rerr, os.ErrNotExist):
 			// Pruned between ReadDir and read: no source to report, not
 			// an error.

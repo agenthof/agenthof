@@ -12,7 +12,8 @@ import (
 // verdicts: 1 if any source is torn, broken, or unreadable (error) — this
 // takes precedence over 3; else 3 if any source is tainted; else 0, meaning
 // every source verified, or there were no sources at all (nothing recorded
-// is not a problem).
+// is not a problem). Completeness never changes the exit code (reserved for
+// a later contract change).
 func ExitCode(r Result) int {
 	_, fatal, tainted := integritySummary(r.Sources)
 	switch {
@@ -90,7 +91,11 @@ func RenderText(r Result) string {
 	fmt.Fprintf(&b, "investigation timeline: %d event(s) across %d source(s)\n", len(r.Events), len(r.Sources))
 
 	for _, s := range r.Sources {
-		fmt.Fprintf(&b, "source: %s %s integrity=%s count=%d\n", s.Kind, s.Path, s.Integrity, s.Count)
+		comp := ""
+		if s.Completeness != "" {
+			comp = " completeness=" + s.Completeness
+		}
+		fmt.Fprintf(&b, "source: %s %s integrity=%s%s count=%d\n", s.Kind, s.Path, s.Integrity, comp, s.Count)
 	}
 
 	for _, e := range r.Events {
@@ -202,10 +207,11 @@ type queryJSON struct {
 
 // sourceJSON is Source's JSON shape (Source itself carries no json tags).
 type sourceJSON struct {
-	Path      string `json:"path"`
-	Kind      string `json:"kind"`
-	Integrity string `json:"integrity"`
-	Count     int    `json:"count"`
+	Path         string `json:"path"`
+	Kind         string `json:"kind"`
+	Integrity    string `json:"integrity"`
+	Completeness string `json:"completeness,omitempty"`
+	Count        int    `json:"count"`
 }
 
 // integrityJSON is the envelope's overall integrity verdict: ok mirrors
