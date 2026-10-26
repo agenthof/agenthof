@@ -29,6 +29,7 @@ import (
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/identity/oidctest"
 	"github.com/agenthof/agenthof/internal/ledger"
 )
@@ -2681,4 +2682,92 @@ func stubCallSpawn(proxyURL, token, spec string) (string, error) {
 		detail = out.Reason
 	}
 	return strings.TrimSpace(fmt.Sprintf("spawn %s %s %s", out.Status, id, detail)), nil
+}
+
+// linkedRun writes a real one-event run ledger under dir, linked under
+// parent when given, and ages it when old.
+func linkedRun(t *testing.T, dir, id string, parent string, old bool) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log, err := engine.OpenLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "r", Workflow: "w", RunID: id}
+	if parent != "" {
+		b.ParentRunID, b.Depth = parent, 1
+	}
+	if err := log.Append(engine.Event{Time: time.Now().UTC(), Type: "workflow_started", Binding: b}); err != nil {
+		t.Fatal(err)
+	}
+	_ = log.Close()
+	p := filepath.Join(dir, id+".jsonl")
+	if old {
+		past := time.Now().Add(-200 * 24 * time.Hour)
+		if err := os.Chtimes(p, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return p
+}
+
+func TestRunsPruneKeepsChildOfLiveRoot(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	root := linkedRun(t, dir, "r-root", "", false)
+	child := linkedRun(t, dir, "r-child", "r-root", true) // older than the cutoff, but its root is not
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out); code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 0 run(s)") {
+		t.Fatalf("out: %s", out.String())
+	}
+	for _, p := range []string{root, child} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive: a child is never pruned on its own: %v", p, err)
+		}
+	}
+}
+
+func TestRunsPruneRemovesRootWithDescendants(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	root := linkedRun(t, dir, "r-root", "", true)
+	child := linkedRun(t, dir, "r-child", "r-root", false) // newer mtime: the tree rule, not the file's own age, decides
+	grandchild := linkedRun(t, dir, "r-grand", "r-child", false)
+	other := linkedRun(t, dir, "r-other", "", false)
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out); code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 3 run(s)") {
+		t.Fatalf("out: %s", out.String())
+	}
+	for _, p := range []string{root, child, grandchild} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s should be gone with its root: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("an unrelated live root must remain: %v", err)
+	}
+}
+
+func TestRunsPruneOrphanIsItsOwnRoot(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	orphan := linkedRun(t, dir, "r-orphan", "r-vanished", true)
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out); code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("a child whose parent ledger is gone is the root of its own subtree and is pruned past the cutoff: %v", err)
+	}
 }

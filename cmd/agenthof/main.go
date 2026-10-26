@@ -23,6 +23,7 @@ import (
 	"github.com/agenthof/agenthof/internal/audit"
 	"github.com/agenthof/agenthof/internal/authz"
 	"github.com/agenthof/agenthof/internal/broker"
+	"github.com/agenthof/agenthof/internal/completeness"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
@@ -1952,6 +1953,13 @@ var statControlLog = os.Stat
 // it is not a resolvable run log and cannot be the ledger, whose own stat
 // succeeded. investigate.Timeline and serve's run listing carry the same
 // skips.
+//
+// The sweep is tree-aware: a ledger whose first event names a parent that
+// is also under logDir is never removed on its own — a verifier that
+// follows spawn events to child ledgers must not find them gone while the
+// parent stands; a root (no parent, or a parent not under logDir) past the
+// cutoff is removed together with every descendant, whatever their own
+// ages. Discovery is completeness.Parents' one-line read.
 func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error) {
 	ctlInfo, err := statControlLog(controlLog)
 	if err != nil {
@@ -1965,7 +1973,41 @@ func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error)
 		}
 		return 0, err
 	}
+	parents, err := completeness.Parents(logDir)
+	if err != nil {
+		return 0, err
+	}
+	children := map[string][]string{}
+	for id, parent := range parents {
+		if _, present := parents[parent]; parent != "" && present {
+			children[parent] = append(children[parent], id)
+		}
+	}
+	isRoot := func(id string) bool {
+		parent := parents[id]
+		_, present := parents[parent]
+		return parent == "" || !present
+	}
 	pruned := 0
+	removed := map[string]bool{}
+	var remove func(id string)
+	remove = func(id string) {
+		if removed[id] {
+			return
+		}
+		removed[id] = true
+		for _, c := range children[id] {
+			remove(c)
+		}
+		path := filepath.Join(logDir, id+".jsonl")
+		target, serr := os.Stat(path)
+		if serr != nil || os.SameFile(target, ctlInfo) {
+			return
+		}
+		if err := os.Remove(path); err == nil {
+			pruned++
+		}
+	}
 	for _, entry := range entries {
 		if entry.Name() == "control.jsonl" || strings.Contains(entry.Name(), ".torn-") {
 			continue
@@ -1973,12 +2015,8 @@ func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error)
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}
-		path := filepath.Join(logDir, entry.Name())
-		target, serr := os.Stat(path)
-		if serr != nil {
-			continue
-		}
-		if os.SameFile(target, ctlInfo) {
+		id := strings.TrimSuffix(entry.Name(), ".jsonl")
+		if !isRoot(id) {
 			continue
 		}
 		info, err := entry.Info()
@@ -1986,9 +2024,7 @@ func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error)
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			if err := os.Remove(path); err == nil {
-				pruned++
-			}
+			remove(id)
 		}
 	}
 	return pruned, nil
