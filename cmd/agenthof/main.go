@@ -1216,6 +1216,22 @@ func cmdGatewayProvision(args []string, out io.Writer) int {
 	return record("success", nil, hash, 0)
 }
 
+// The completeness axis's exit codes for audit <run-id> and audit verify
+// <run-id>: fresh numbers (3 is the control ledger's taint verdict, 4
+// --expect-head, 5 installed, 6–10 anchor/sink). A watcher tells "investigate
+// now" (11) from "re-check later" (12) without parsing text.
+const (
+	exitGap          = 11
+	exitUnterminated = 12
+)
+
+// cmdAudit implements `agenthof audit <run-id>`: render the run's ledger
+// (events, integrity, completeness), the control-ledger join line that
+// names the apply that put its config in place, and the subtree lines for
+// every descendant reached through spawn events. Exit: 1 torn/broken/IO
+// (the run's own chain, or a descendant's); 11 a completeness gap anywhere
+// in the tree; 12 an unterminated run anywhere in the tree; 0 otherwise —
+// computed from the run ledgers alone, never from the control log.
 func cmdAudit(args []string, out io.Writer) int {
 	if len(args) < 1 {
 		_, _ = fmt.Fprintln(out, "audit needs a run id")
@@ -1281,7 +1297,9 @@ func cmdAudit(args []string, out io.Writer) int {
 			return 1
 		}
 	}
-	_, _ = fmt.Fprint(out, audit.Render(events, head, err))
+	tree := completeness.VerifyTree(*logDir, runID, events, err)
+	_, _ = fmt.Fprint(out, audit.Render(events, head, err, tree.Root.Report))
+	_, _ = fmt.Fprint(out, tree.SubtreeLines())
 	for _, e := range events {
 		if e.Type == "workflow_started" && e.ConfigHash != "" {
 			cev, verdict, _ := investigate.LoadControl(*controlLog)
@@ -1295,19 +1313,23 @@ func cmdAudit(args []string, out io.Writer) int {
 		// but the exit code must not lie about a corrupted ledger.
 		return 1
 	}
-	return 0
+	return completeness.ExitCode(tree)
 }
 
 // cmdAuditVerify implements `audit verify <run-id> [--expect-head <hex>]`,
 // dispatching to cmdAuditVerifyControl when the next arg is "control": it
 // reports the verified chain's head hash and event count, and, given
 // --expect-head, compares it against a previously recorded hash. For a
-// run (this function's own path, unchanged from before the control
-// dispatch was added): exit codes are 0 clean (and, when given,
-// --expect-head matches); 1 torn/broken ledger or an open/IO failure; 4
-// --expect-head mismatch (hash only — count is informational and not
-// compared); 2 usage errors. 3 (the taint verdict) is returned only via
-// the "control" dispatch — see cmdAuditVerifyControl.
+// run (this function's own path): exit codes follow the precedence
+// 1 > 11 > 12 > 4 > 0 — 0 clean (and, when given, --expect-head matches);
+// 1 torn/broken ledger (the run's own chain or a descendant's) or an
+// open/IO failure; 11 a completeness gap anywhere in the tree; 12 an
+// unterminated run anywhere in the tree; 4 --expect-head mismatch (hash
+// only — count is informational and not compared); 2 usage errors. 12
+// precedes 4 because a live run's head legitimately differs from any
+// recorded expectation. The mismatch line still prints when 12 wins, so a
+// watcher sees both facts. 3 (the taint verdict) is returned only via the
+// "control" dispatch — see cmdAuditVerifyControl.
 func cmdAuditVerify(args []string, out io.Writer) int {
 	if len(args) < 1 {
 		_, _ = fmt.Fprintln(out, "audit verify needs a run id")
@@ -1327,7 +1349,7 @@ func cmdAuditVerify(args []string, out io.Writer) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
-	_, head, err := engine.ReadLog(*logDir, runID)
+	events, head, err := engine.ReadLog(*logDir, runID)
 	if err != nil {
 		var te *ledger.TornError
 		var be *ledger.ChainBrokenError
@@ -1342,8 +1364,17 @@ func cmdAuditVerify(args []string, out io.Writer) int {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
-	if *expectHead != "" && *expectHead != head.Hash {
+	tree := completeness.VerifyTree(*logDir, runID, events, nil)
+	_, _ = fmt.Fprint(out, tree.Root.Report.Line())
+	_, _ = fmt.Fprint(out, tree.SubtreeLines())
+	mismatch := *expectHead != "" && *expectHead != head.Hash
+	if mismatch {
 		_, _ = fmt.Fprintf(out, "expect-head mismatch: want %s, got %s\n", *expectHead, head.Hash)
+	}
+	if code := completeness.ExitCode(tree); code != 0 {
+		return code // 1 (a descendant's chain), 11, 12 — each outranks 4
+	}
+	if mismatch {
 		return 4
 	}
 	return 0

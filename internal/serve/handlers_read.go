@@ -8,6 +8,7 @@ import (
 
 	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/audit"
+	"github.com/agenthof/agenthof/internal/completeness"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/investigate"
@@ -81,7 +82,11 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, _ identity.Inv
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString(audit.Render(events, head, verr))
+	var comp completeness.Report
+	if verr == nil {
+		comp = completeness.Check(events)
+	}
+	sb.WriteString(audit.Render(events, head, verr, comp))
 	for _, e := range events {
 		if e.Type == "workflow_started" && e.ConfigHash != "" {
 			cev, verdict, _ := investigate.LoadControl(s.cfg.ControlLog)

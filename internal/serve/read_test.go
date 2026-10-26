@@ -16,6 +16,7 @@ import (
 	"github.com/agenthof/agenthof/internal/anchor/anchortest"
 	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/audit"
+	"github.com/agenthof/agenthof/internal/completeness"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
@@ -113,7 +114,7 @@ func TestAuditEndpointRendersConfigJoin(t *testing.T) {
 	}
 	events, head, verr := engine.ReadLog(ts.logDir, acc.RunID)
 	cev, verdict, _ := investigate.LoadControl(ctl)
-	want := audit.Render(events, head, verr) + investigate.ConfigJoin(cev, verdict, "cafe0001", events[0].Time) + "\n"
+	want := audit.Render(events, head, verr, completeness.Check(events)) + investigate.ConfigJoin(cev, verdict, "cafe0001", events[0].Time) + "\n"
 	if string(text) != want {
 		t.Fatalf("audit text differs from the local render:\n%s\n--- want ---\n%s", text, want)
 	}
