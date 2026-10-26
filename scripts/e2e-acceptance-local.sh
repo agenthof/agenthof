@@ -312,6 +312,7 @@ run() { # $1 = workflow; sets OUT, RUNID, AUDIT. Identity is the verified
 	OUTS+=("$AUDIT")
 	echo "$AUDIT"
 	grep -q "ledger integrity: verified" <<<"$AUDIT" || fail "$1: ledger not verified"
+	grep -q "ledger completeness: complete (" <<<"$AUDIT" || fail "$1: ledger does not account for itself"
 }
 ledger() { echo "$WORK/logs/$1.jsonl"; }
 parent_artifact() { # $1 = run id: the full step artifact body
@@ -338,6 +339,7 @@ PARENT="$RUNID"
 L="$(ledger "$PARENT")"
 grep -q "invoked by dana@example.com (oidc, issuer $ISSUER)" <<<"$AUDIT" || fail "the run is not attributed to the verified human"
 bound "$L" "$PARENT" dana@example.com
+accounted "$L"
 [ "$(count "$L" step_succeeded)" = 1 ] || fail "expected exactly one succeeded step"
 ART="$(parent_artifact "$PARENT")"
 echo "$ART"
@@ -412,6 +414,7 @@ for c in $CHILDREN; do
 	CL="$(ledger "$c")"
 	[ -f "$CL" ] || fail "child $c has no ledger of its own"
 	bound "$CL" "$c" dana@example.com "$PARENT"
+	accounted "$CL"
 	[ "$(field "$CL" workflow_finished status)" = succeeded ] || fail "child $c did not finish succeeded"
 	[ "$(count "$CL" model_call succeeded)" = 1 ] || fail "child $c did not make exactly one governed model call"
 	CSHA="$(field "$CL" step_succeeded artifact_sha)"
@@ -422,6 +425,7 @@ for c in $CHILDREN; do
 	CA="$(out_of "$WORK/agenthof" audit "$c" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
 	OUTS+=("$CA")
 	grep -q "ledger integrity: verified" <<<"$CA" || fail "child $c's ledger does not verify"
+	grep -q "ledger completeness: complete (" <<<"$CA" || fail "child $c's ledger does not account for itself"
 	grep -q "invoked by dana@example.com (oidc, issuer $ISSUER)" <<<"$CA" || fail "child $c is not attributed to the verified human"
 	grep -qF "model fast — 3 prompt / 5 completion tokens" <<<"$CA" || fail "child $c's audit shows no model_call"
 done

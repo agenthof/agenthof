@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/agenthof/agenthof/internal/completeness"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/ledger"
 )
@@ -35,19 +36,21 @@ func integrityLine(head ledger.Head, verr error) string {
 
 // Render renders the given events (the valid prefix of a run's ledger) as
 // a human-readable audit trail. head and verr are ReadLog's second and
-// third return values.
+// third return values. comp is the run's own completeness report
+// (completeness.Check, or the zero Report when verr != nil — completeness
+// is not judged on a torn or broken chain and prints no line).
 //
 // A torn/broken ledger can leave zero decodable events (e.g. the ledger
 // crashed right after its very first, now-incomplete, write) — that must
 // still surface the integrity failure rather than being mistaken for a
 // genuinely empty run, so the verr check runs before the empty-events
 // short-circuit.
-func Render(events []engine.Event, head ledger.Head, verr error) string {
+func Render(events []engine.Event, head ledger.Head, verr error, comp completeness.Report) string {
 	if len(events) == 0 {
 		if verr != nil {
 			return integrityLine(head, verr)
 		}
-		return "no events for this run\n"
+		return "no events for this run\n" + comp.Line()
 	}
 	b := events[0].Binding
 	status := "incomplete"
@@ -64,6 +67,7 @@ func Render(events []engine.Event, head ledger.Head, verr error) string {
 	fmt.Fprintf(&sb, "invoked by %s (%s, issuer %s)\n", b.Invoker.Subject, b.Invoker.Method, b.Invoker.Issuer)
 	fmt.Fprintf(&sb, "status: %s\n", status)
 	sb.WriteString(integrityLine(head, verr))
+	sb.WriteString(comp.Line())
 	fmt.Fprint(&sb, "\n")
 	for _, e := range events {
 		t := e.Time.UTC().Format("15:04:05")

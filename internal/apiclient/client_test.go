@@ -38,6 +38,7 @@ func TestClientSendsBearerAndDecodes(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(st)
 		case "GET /v1/runs/r-1/audit":
 			w.Header().Set(IntegrityHeader, IntegrityTorn)
+			w.Header().Set(CompletenessHeader, CompletenessComplete)
 			_, _ = w.Write([]byte("run r-1 — w (role se)\n"))
 		case "GET /v1/investigate":
 			if r.URL.Query().Get("run") != "r-1" {
@@ -59,9 +60,9 @@ func TestClientSendsBearerAndDecodes(t *testing.T) {
 	if err != nil || st.Status != "succeeded" || polls < 2 {
 		t.Fatalf("st=%+v err=%v polls=%d", st, err, polls)
 	}
-	text, integrity, err := c.Audit(ctx, "r-1")
-	if err != nil || integrity != IntegrityTorn || !strings.HasPrefix(text, "run r-1") {
-		t.Fatalf("text=%q integrity=%q err=%v", text, integrity, err)
+	res, err := c.Audit(ctx, "r-1")
+	if err != nil || res.Integrity != IntegrityTorn || res.Completeness != CompletenessComplete || !strings.HasPrefix(res.Text, "run r-1") {
+		t.Fatalf("res=%+v err=%v", res, err)
 	}
 	doc, err := c.Investigate(ctx, InvestigateQuery{Run: "r-1"})
 	if err != nil || string(doc) != `{"v":"investigate/1"}` {
@@ -92,7 +93,7 @@ func TestClientRefusalAndErrorsNeverEchoTheToken(t *testing.T) {
 	if !errors.Is(err, ErrUnauthorized) || strings.Contains(err.Error(), token) {
 		t.Fatalf("err = %v", err)
 	}
-	_, _, err = c.Audit(context.Background(), "r-3")
+	_, err = c.Audit(context.Background(), "r-3")
 	var se *StatusError
 	if !errors.As(err, &se) || se.Code != http.StatusBadGateway || len(se.Body) > 200 || strings.Contains(err.Error(), token) {
 		t.Fatalf("err = %v", err)

@@ -23,7 +23,7 @@ func (s *spyGateway) Start(_ context.Context, bind Binding, _ config.AgentDef, _
 	return "http://127.0.0.1:9/", "tok", nil
 }
 
-func (s *spyGateway) Stop() {}
+func (s *spyGateway) Stop() int { return 0 }
 
 func (s *spyGateway) runs() string {
 	s.mu.Lock()
@@ -121,7 +121,7 @@ func (s *ctxSpyGateway) Start(ctx context.Context, _ Binding, _ config.AgentDef,
 	return "http://127.0.0.1:9/", "tok", nil
 }
 
-func (s *ctxSpyGateway) Stop() {}
+func (s *ctxSpyGateway) Stop() int { return 0 }
 
 func TestRunHandsTheStepContextToStart(t *testing.T) {
 	dir := t.TempDir()

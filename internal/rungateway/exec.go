@@ -39,6 +39,8 @@ const (
 	reasonExecOutputHash           = "exec runtime output hash does not match the output"
 	reasonExecAttestationMissing   = "runtime attestation missing"
 	reasonExecAttestationMalformed = "runtime attestation malformed"
+	reasonExecRequestMalformed     = "exec request malformed"
+	reasonExecRequestUnbuildable   = "exec request could not be built"
 )
 
 // maxExecRunResponse bounds what the gateway reads back from refexec. refexec
@@ -69,15 +71,17 @@ type execRunResponse struct {
 // recorded (every refusal is a ledger event). The routes stay registered so
 // a call to them is that recorded refusal, not a fall-through to the MCP
 // handler at / with no ledger line. The body is decoded only for the argv
-// the refusal records; attest's other fields are ignored. A body that is not
-// JSON is answered 400 and records nothing, as on /exec/run.
-func (p *Gateway) execAssertedHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+// the refusal records; attest's other fields are ignored. A body that is a
+// JSON object but not this shape is a recorded refusal answered 400; a body
+// that is not a JSON object never reaches the door.
+func (p *Gateway) execAssertedHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event)) doorHandler {
+	return func(w http.ResponseWriter, _ *http.Request, body []byte) {
 		var req struct {
 			Command []string `json:"command"`
 		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+		if err := json.Unmarshal(body, &req); err != nil {
+			appendEvent(engine.Event{Type: "exec", Agent: agent.Name, Status: "refused", Reason: reasonExecRequestMalformed, Mode: "runtime", Binding: bind})
+			http.Error(w, reasonExecRequestMalformed, http.StatusBadRequest)
 			return
 		}
 		p.refuseAssertedExec(w, bind, agent, appendEvent, req.Command)
@@ -86,9 +90,10 @@ func (p *Gateway) execAssertedHandler(bind engine.Binding, agent config.AgentDef
 
 // refuseAssertedExec records and answers the refusal of /exec/authorize or
 // /exec/attest. The event's mode is the door's — the runtime's — so the line
-// cannot be read as an agent's report.
+// cannot be read as an agent's report. The admission hold is registerDoor's,
+// so the append is plain.
 func (p *Gateway) refuseAssertedExec(w http.ResponseWriter, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), argv []string) {
-	p.guardedAppend(appendEvent, engine.Event{
+	appendEvent(engine.Event{
 		Type: "exec", Agent: agent.Name, Status: "refused",
 		Reason: reasonExecFirstHandOnly, Command: argv, Mode: "runtime", Binding: bind,
 	})
@@ -105,43 +110,18 @@ func (p *Gateway) refuseAssertedExec(w http.ResponseWriter, bind engine.Binding,
 // output hash covers the output returned, and records one exec event with
 // mode "runtime". Every way the call can fail after the allowlist check
 // records a failed event and answers 502: a door that ran nothing still
-// leaves a line. The whole call runs under the proxy's closing/inflight
-// bookkeeping — the same hold forward uses — so Stop waits for it and for
-// its append, and no append can race the run's log.Close; guardedAppend is
-// not used here because it drops an event once closing is set, and a call
-// Stop is waiting on must still be recorded.
-func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			Command []string `json:"command"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		// Drain to EOF: only then does the server watch the connection, so a
-		// closed one — Stop cutting it, or the agent gone — cancels r.Context()
-		// and with it the call to the runtime.
-		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 1<<20))
-		p.mu.Lock()
-		if p.closing {
-			p.mu.Unlock()
-			http.Error(w, "gateway is shutting down", http.StatusServiceUnavailable)
-			return
-		}
-		p.inflight.Add(1)
-		p.mu.Unlock()
-		defer p.inflight.Done()
-
-		argv := req.Command
-		refuse := func(reason string) {
+// leaves a line. The whole call runs under the admission hold registerDoor
+// took when it admitted the request, so Stop waits for it and for its
+// append, and no append can race the run's log.Close; every admitted call
+// appends exactly one event. A body that is a JSON object but not this
+// shape is a recorded refusal answered 400.
+func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) doorHandler {
+	return func(w http.ResponseWriter, r *http.Request, body []byte) {
+		var argv []string
+		refuse := func(reason string, code int) {
 			logger.Warn("exec run refused", "reason", reason)
 			appendEvent(engine.Event{Type: "exec", Agent: agent.Name, Status: "refused", Reason: reason, Command: argv, Mode: "runtime", Binding: bind})
-			http.Error(w, reason, http.StatusForbidden)
+			http.Error(w, reason, code)
 		}
 		fail := func(reason string) {
 			logger.Error("exec run failed", "reason", reason)
@@ -149,12 +129,20 @@ func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, app
 			http.Error(w, reason, http.StatusBadGateway)
 		}
 
+		var req struct {
+			Command []string `json:"command"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			refuse(reasonExecRequestMalformed, http.StatusBadRequest)
+			return
+		}
+		argv = req.Command
 		if !agent.Exec.Declared() {
-			refuse(reasonExecRunNotDeclared)
+			refuse(reasonExecRunNotDeclared, http.StatusForbidden)
 			return
 		}
 		if !agent.Exec.Allows(argv) {
-			refuse(reasonExecNotAllowlisted)
+			refuse(reasonExecNotAllowlisted, http.StatusForbidden)
 			return
 		}
 		// A command the ledger cannot carry must be refused BEFORE it runs:
@@ -163,7 +151,7 @@ func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, app
 		// false first-hand failure of a completed action and blaming the
 		// runtime for a gateway bound. Same bounds validAttestation enforces.
 		if !argvRecordable(argv) {
-			refuse(reasonExecCommandUnrecordable)
+			refuse(reasonExecCommandUnrecordable, http.StatusForbidden)
 			return
 		}
 		sockPath := strings.TrimPrefix(p.execURLFor(agent), config.UnixScheme)
@@ -175,17 +163,17 @@ func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, app
 
 		ctx, cancel := context.WithTimeout(r.Context(), agent.Exec.Timeout)
 		defer cancel()
-		body, err := json.Marshal(map[string]any{"command": argv})
+		out, err := json.Marshal(map[string]any{"command": argv})
 		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			fail(reasonExecRequestUnbuildable)
 			return
 		}
-		out, err := http.NewRequestWithContext(ctx, http.MethodPost, execRunRoute, bytes.NewReader(body))
+		outReq, err := http.NewRequestWithContext(ctx, http.MethodPost, execRunRoute, bytes.NewReader(out))
 		if err != nil {
 			fail(reasonExecUnreachable)
 			return
 		}
-		out.Header.Set("Content-Type", "application/json")
+		outReq.Header.Set("Content-Type", "application/json")
 		client := &http.Client{Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
@@ -193,7 +181,7 @@ func (p *Gateway) execRunHandler(bind engine.Binding, agent config.AgentDef, app
 			DisableKeepAlives: true, // one call, one connection: nothing to pool, nothing to drain
 		}}
 		logger.Debug("exec run routed", "command", argv[0])
-		resp, err := client.Do(out)
+		resp, err := client.Do(outReq)
 		if err != nil {
 			fail(ctxReason(ctx, reasonExecUnreachable))
 			logger.Error("exec runtime call failed", "class", errClass(err))

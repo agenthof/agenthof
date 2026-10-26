@@ -58,6 +58,10 @@ type RuntimeAttestation struct {
 	Materialization string   `json:"materialization"` // refbridge: env-at-spawn | respawn-on-rotation; refexec: empty
 }
 
+// DoorAccountingAdmission is the door_accounting value the engine stamps on
+// workflow_started: door calls are counted where the gateway admits them.
+const DoorAccountingAdmission = "admission"
+
 type Event struct {
 	Time             time.Time `json:"time"`
 	Type             string    `json:"type"`
@@ -84,6 +88,17 @@ type Event struct {
 	ChildRole        string    `json:"child_role,omitempty"`        // set by spawn: the role the child ran, or was asked to run, as
 	ChildWorkflow    string    `json:"child_workflow,omitempty"`    // set by spawn: the child's workflow
 	Depth            int       `json:"depth,omitempty"`             // set by spawn: the child's depth in the delegation tree (this run's depth + 1)
+	// DoorCalls is set by step_succeeded and step_failed: how many door
+	// calls the step's gateway ADMITTED — the count the recorded door events
+	// inside this step's window are checked against. A pointer, like
+	// ExitCode: 0 (a fronted step that opened no door, or a step with no
+	// gateway) is distinct from absent (a ledger written before door
+	// accounting existed). Additive (Article VI).
+	DoorCalls *int `json:"door_calls,omitempty"`
+	// DoorAccounting is set by workflow_started to DoorAccountingAdmission
+	// and promises that every step terminal of this run carries DoorCalls.
+	// Absent on a ledger written before door accounting existed. Additive.
+	DoorAccounting string `json:"door_accounting,omitempty"`
 	// RuntimeAttestation is set by tool_call when the resource declares a
 	// trusted runtime (runtime: refbridge) and by exec, whose door is
 	// first-hand (served by refexec): that runtime's FIRST-HAND account of

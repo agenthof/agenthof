@@ -8,11 +8,23 @@ import (
 
 	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/audit"
+	"github.com/agenthof/agenthof/internal/completeness"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
 )
+
+// completenessOf refines a run's own completeness verdict for the API: an
+// unterminated ledger on a run this process is still running is in_flight.
+func (s *Server) completenessOf(id string, rep completeness.Report) string {
+	if rep.Verdict == completeness.Unterminated {
+		if st, ok := s.runs.get(id); ok && st.status == apiclient.StatusRunning {
+			return apiclient.CompletenessInFlight
+		}
+	}
+	return rep.Verdict
+}
 
 // integrityOf classifies a ledger verdict for the API. A torn tail on a
 // run this process is still writing is in_flight — a record caught
@@ -58,13 +70,26 @@ func (s *Server) getEvents(w http.ResponseWriter, r *http.Request, _ identity.In
 		events = []engine.Event{} // "events": [] — never null
 	}
 	integrity, line := s.integrityOf(id, verr)
-	writeJSON(w, http.StatusOK, apiclient.RunEvents{Events: events, Head: apiclient.Head{Hash: head.Hash, Count: head.Count}, Integrity: integrity, BrokenLine: line})
+	var comp completeness.Report
+	if verr == nil {
+		comp = completeness.Check(events)
+	}
+	writeJSON(w, http.StatusOK, apiclient.RunEvents{
+		Events:             events,
+		Head:               apiclient.Head{Hash: head.Hash, Count: head.Count},
+		Integrity:          integrity,
+		BrokenLine:         line,
+		Completeness:       s.completenessOf(id, comp),
+		CompletenessDetail: comp.Detail,
+	})
 }
 
 // getAudit is `agenthof audit <run-id>` rendered here, where both ledgers
 // are: the run's trail and the control-plane line naming the apply that
-// put its config in place. The verdict rides in a header so a client can
-// exit as the local command does.
+// put its config in place. Both verdicts ride in headers so a client can
+// exit as the local command does; the integrity header reports a
+// descendant's torn or broken chain too, the completeness header the
+// tree's worst.
 func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, _ identity.Invoker, _ string) {
 	id, ok := runID(w, r)
 	if !ok {
@@ -80,8 +105,10 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, _ identity.Inv
 		http.Error(w, "run not found", http.StatusNotFound)
 		return
 	}
+	tree := completeness.VerifyTree(s.cfg.LogDir, id, events, verr)
 	var sb strings.Builder
-	sb.WriteString(audit.Render(events, head, verr))
+	sb.WriteString(audit.Render(events, head, verr, tree.Root.Report))
+	sb.WriteString(tree.SubtreeLines())
 	for _, e := range events {
 		if e.Type == "workflow_started" && e.ConfigHash != "" {
 			cev, verdict, _ := investigate.LoadControl(s.cfg.ControlLog)
@@ -91,8 +118,31 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, _ identity.Inv
 		}
 	}
 	integrity, _ := s.integrityOf(id, verr)
+	if word := tree.ChildIntegrityFailure(); word != "" && verr == nil {
+		// A descendant's torn or broken chain: the local command exits 1 on
+		// it, so the client must too. A child that cannot be read at all
+		// says `error` in the subtree text; the header keeps its closed
+		// enum and reads broken, as integrityOf does for the run's own
+		// unreadable chain.
+		integrity = word
+		if word != apiclient.IntegrityTorn && word != apiclient.IntegrityBroken {
+			integrity = apiclient.IntegrityBroken
+		}
+	}
+	comp := s.completenessOf(id, tree.Root.Report)
+	switch tree.ChildCompletenessWorst() {
+	case completeness.Gap:
+		comp = completeness.Gap
+	case completeness.Unterminated:
+		if comp != completeness.Gap {
+			comp = completeness.Unterminated
+		}
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set(apiclient.IntegrityHeader, integrity)
+	if comp != "" {
+		w.Header().Set(apiclient.CompletenessHeader, comp)
+	}
 	_, _ = w.Write([]byte(sb.String()))
 }
 

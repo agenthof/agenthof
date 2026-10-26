@@ -69,4 +69,5 @@ AUDIT=$(go run ./cmd/agenthof audit "$RUNID" --log-dir "$WORK/logs")
 echo "$AUDIT"
 echo "$AUDIT" | grep -q "invoked by dana@example.com (oidc, issuer http://localhost:5556/dex)"
 echo "$AUDIT" | grep -q "ledger integrity: verified"
+echo "$AUDIT" | grep -q "ledger completeness: complete (" || { echo "ledger does not account for itself" >&2; exit 1; }
 echo "e2e-dex: PASS"

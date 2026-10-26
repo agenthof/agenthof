@@ -91,18 +91,25 @@ func runViaServer(base, token, role, workflow, input string, out io.Writer) int 
 }
 
 // auditViaServer prints the server-rendered audit — the same text the
-// local command renders, config-join included — and exits as it would:
-// 0 only when the ledger verified.
+// local command renders, config-join and subtree lines included — and
+// exits as it would: 1 on an integrity failure anywhere in the tree, 11 on
+// a completeness gap, 12 on an unterminated or in-flight run, 0 otherwise.
 func auditViaServer(base, token, runID string, out io.Writer) int {
 	warnInsecureServer(base, os.Stderr)
-	text, integrity, err := apiclient.New(base, token, nil).Audit(context.Background(), runID)
+	res, err := apiclient.New(base, token, nil).Audit(context.Background(), runID)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "audit: %v\n", err)
 		return 1
 	}
-	_, _ = fmt.Fprint(out, text)
-	if integrity != apiclient.IntegrityVerified {
+	_, _ = fmt.Fprint(out, res.Text)
+	if res.Integrity != apiclient.IntegrityVerified {
 		return 1
+	}
+	switch res.Completeness {
+	case apiclient.CompletenessGap:
+		return exitGap
+	case apiclient.CompletenessUnterminated, apiclient.CompletenessInFlight:
+		return exitUnterminated // not finished either way: re-check later
 	}
 	return 0
 }

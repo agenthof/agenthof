@@ -420,6 +420,15 @@ from that point; catching that needs a chain head recorded off the machine
 ledger is honestly tamper-**evident**, not tamper-**proof**, and no Agenthof
 document should call it otherwise.
 
+Door events (`tool_call`, `model_call`, `exec`, `spawn`) carry the agent,
+not the step: a step's door events are the ones that land between its
+`step_started` and its `step_succeeded`/`step_failed`, and the engine
+guarantees that window — the gateway for a step is started after
+`step_started` is written and stopped, waiting for every admitted call to
+record, before the step's final event is written. The final event carries
+`door_calls`, the number of calls the gateway admitted; `audit` compares
+it with the door events inside the window.
+
 ## 6. Reading it back
 
 ```
@@ -430,7 +439,18 @@ agenthof audit <run-id>
 plain form: the run id, workflow and role; **who invoked it** (subject, method,
 issuer); the final status; and a **ledger integrity** line — `verified (N
 events)`, or `TORN` (the last record was cut off mid-write), or `BROKEN at event
-N` (a link doesn't match). Then it lists the timeline: workflow started, each
+N` (a link doesn't match) — and, on a verified chain, a **ledger
+completeness** line: `complete (K door call(s) accounted)` when every
+step's final event carries the number of door calls its gateway admitted
+and exactly that many door events sit inside the step; `GAP — step <name>:
+N door call(s) admitted, M recorded` (or the structural violation) when it
+does not; `UNTERMINATED` when there is no final event — still running or
+tail lost, which the file alone cannot tell; `no claim` for a ledger
+recorded before door accounting. A parent run's audit adds one `subtree:`
+line per child it spawned, and its exit code is the worst verdict in the
+tree (`1` a damaged chain, `11` a gap, `12` unterminated, else `0`;
+`audit verify` adds `4` for an `--expect-head` mismatch, ranked below
+those). Then it lists the timeline: workflow started, each
 step started/succeeded/failed, any bounces, and how the run finished. That is
 the full loop — *who asked → what ran → what it touched → whether the record can
 be trusted* — with no cross-referencing required. When the run's

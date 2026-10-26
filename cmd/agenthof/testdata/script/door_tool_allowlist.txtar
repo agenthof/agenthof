@@ -15,6 +15,8 @@ stdout 'finished: succeeded'
 lastrun logs-ok
 exec agenthof audit $RUNID --log-dir logs-ok
 stdout 'tool echo — args [0-9a-f]{8} \(static_env\)'
+stdout 'ledger completeness: complete \(1 door call\(s\) accounted\)'
+grep '"type":"step_succeeded".*"door_calls":1' logs-ok/${RUNID}.jsonl
 grep '"type":"tool_call"' logs-ok/${RUNID}.jsonl
 grep '"tool":"echo"' logs-ok/${RUNID}.jsonl
 # no-passthrough: the injected upstream credential never lands in the ledger
@@ -28,6 +30,8 @@ stdout 'finished: failed'
 lastrun logs-refused
 exec agenthof audit $RUNID --log-dir logs-refused
 stdout 'tool other refused — tool is not available to this run'
+stdout 'ledger completeness: complete \(1 door call\(s\) accounted\)'
+grep '"type":"step_failed".*"door_calls":1' logs-refused/${RUNID}.jsonl
 grep '"type":"tool_call"' logs-refused/${RUNID}.jsonl
 grep '"status":"refused"' logs-refused/${RUNID}.jsonl
 grep '"tool":"other"' logs-refused/${RUNID}.jsonl

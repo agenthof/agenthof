@@ -218,6 +218,29 @@ and a preview of at most 200 characters, with bodies in a separate,
 prunable store. Secrets and full artifact bodies are never written to an
 event, under any circumstance.
 
+Integrity and completeness are two different claims, and `audit` reports
+them on two lines. **Integrity** — `ledger integrity: verified (N events)`
+— says the recorded events are unedited and the chain is unbroken.
+**Completeness** — `ledger completeness: …` — says the recorded set
+accounts for itself: every step has its final event, every door event sits
+inside the step that made it, and the door events recorded for a step are
+as many as the step's gateway admitted. The gateway counts a door call at
+the moment it admits one (a request answered before admission — a bad
+token, a wrong method, an unreadable body — never acted and is not a door
+call), and the engine stamps that count as `door_calls` on the step's
+final event; `audit` compares. A door event whose write failed, or a door
+that acted without recording, shows as `GAP`, naming the step and both
+numbers. A ledger with no final event is `UNTERMINATED`: the run is still
+going or its tail was lost, and the file alone cannot tell which (`serve`
+can, for a run it is hosting). A ledger recorded before door accounting
+existed reads `no claim` and is judged on integrity alone. The limits are
+stated plainly: the count is the gateway's own, so this detects an honest
+source's accidental loss, not a source that both mis-counts and
+mis-records; an action that never reached a door is containment's concern,
+not the ledger's; nothing here makes the ledger tamper-proof; and
+completeness says nothing about whether a door *can* refuse — only that
+what it did is on record.
+
 Refusals and failures are different things, and the distinction is visible
 in the ledger:
 

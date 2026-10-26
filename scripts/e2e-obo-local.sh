@@ -226,6 +226,7 @@ run() { # $1 = workflow, $2 = input, rest = identity flags; sets OUT, RUNID, AUD
 	OUTS+=("$AUDIT")
 	echo "$AUDIT"
 	echo "$AUDIT" | grep -q "ledger integrity: verified" || fail "$wf: ledger not verified"
+	echo "$AUDIT" | grep -q "ledger completeness: complete (" || fail "$wf: ledger does not account for itself"
 }
 
 # 1. On behalf of the human: the upstream saw her sub, the ledger says how.

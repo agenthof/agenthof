@@ -241,6 +241,7 @@ run() { # $1 = workflow, $2 = input; sets OUT, RUNID, AUDIT
 	OUTS+=("$AUDIT")
 	echo "$AUDIT"
 	echo "$AUDIT" | grep -q "ledger integrity: verified" || fail "$1: ledger not verified"
+	echo "$AUDIT" | grep -q "ledger completeness: complete (" || fail "$1: ledger does not account for itself"
 }
 ATTESTED='\[runtime-attested: refexec'
 

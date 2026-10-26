@@ -69,6 +69,12 @@ type Options struct {
 
 const defaultMaxBounces = 2
 
+// reasonArtifactStoreWriteFailed is the fixed step_failed reason for a step
+// whose agent reported success but whose artifact the store could not keep:
+// storage failed, not the agent, and the step still gets its terminal
+// (precedent: "tool proxy start failed" for a step whose agent never ran).
+const reasonArtifactStoreWriteFailed = "artifact store write failed"
+
 func Run(ctx context.Context, reg *registry.Registry, role, workflow, input string,
 	inv identity.Invoker, exec StepExecutor, opts Options) (Result, error) {
 
@@ -110,6 +116,20 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		e.Binding = bind
 		logErr = log.Append(e)
 	}
+	// finishStep is the ONE place a step terminal is emitted. It picks the
+	// type from ok and stamps doorCalls, so every step_succeeded and
+	// step_failed carries door_calls — a step whose gateway never served
+	// passes a literal 0 and never reads the gateway (a failed Start never
+	// reaches the counter's reset, so a read there would return the
+	// previous step's count). Both terminals ride the fail-closed emit.
+	finishStep := func(ok bool, e Event, doorCalls int) {
+		e.Type = "step_failed"
+		if ok {
+			e.Type = "step_succeeded"
+		}
+		e.DoorCalls = &doorCalls
+		emit(e)
+	}
 	// ledgerFailed is the one exit for a failed ledger append: a local
 	// filesystem error, so its text (a path, never a secret) may be logged.
 	ledgerFailed := func() (Result, error) {
@@ -132,7 +152,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	}
 	wf, _ := reg.Workflow(workflow) // Admit just confirmed it exists
 
-	emit(Event{Type: "workflow_started", ConfigHash: opts.ConfigHash, Origin: opts.Origin})
+	emit(Event{Type: "workflow_started", ConfigHash: opts.ConfigHash, Origin: opts.Origin, DoorAccounting: DoorAccountingAdmission})
 	logger.Debug("run started", "steps", len(wf.Steps))
 	var gw ToolProxy
 	if opts.NewGateway != nil {
@@ -192,7 +212,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 				// fixed string so no URL or secret reaches an event (Article
 				// III), mirroring the model door's fixed failure reason.
 				logger.Error("tool proxy start failed", "step", step.Name, "agent", agent.Name)
-				emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: "tool proxy start failed", Execution: execTier})
+				finishStep(false, Event{Step: step.Name, Agent: agent.Name, Reason: "tool proxy start failed", Execution: execTier}, 0)
 				emit(Event{Type: "workflow_finished", Status: "failed", Reason: "tool proxy start failed"})
 				if logErr != nil {
 					return ledgerFailed()
@@ -203,15 +223,16 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		}
 		res, execErr := exec.Execute(stepCtx, bind, agent, input, artifacts)
 		cancel()
+		doorCalls := 0
 		if fronted {
-			gw.Stop()
+			doorCalls = gw.Stop()
 		}
 		if execErr != nil {
 			if errors.Is(execErr, ErrStepConfig) {
 				// Configuration errors can't be fixed by retrying: fail the
 				// workflow outright instead of bouncing back to a prior step.
 				logger.Error("step configuration error", "step", step.Name, "agent", agent.Name)
-				emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: execErr.Error(), Execution: execTier})
+				finishStep(false, Event{Step: step.Name, Agent: agent.Name, Reason: execErr.Error(), Execution: execTier}, doorCalls)
 				emit(Event{Type: "workflow_finished", Status: "failed", Reason: execErr.Error()})
 				if logErr != nil {
 					return ledgerFailed()
@@ -229,6 +250,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 				if perr != nil {
 					storeErr := fmt.Errorf("artifact store: %w", perr)
 					logger.Error("artifact store write failed", "step", step.Name, "err", perr)
+					finishStep(false, Event{Step: step.Name, Agent: agent.Name, Reason: reasonArtifactStoreWriteFailed, Execution: execTier}, doorCalls)
 					emit(Event{Type: "workflow_finished", Status: "failed", Reason: "artifact store: " + perr.Error()})
 					if logErr != nil {
 						logger.Error("ledger write failed", "err", logErr)
@@ -241,7 +263,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 				artifacts[agent.Output] = res.Artifact
 			}
 			lastSHA, lastPreview = sha, preview
-			emit(Event{Type: "step_succeeded", Step: step.Name, Agent: agent.Name, Artifact: preview, ArtifactSHA: sha, Execution: execTier})
+			finishStep(true, Event{Step: step.Name, Agent: agent.Name, Artifact: preview, ArtifactSHA: sha, Execution: execTier}, doorCalls)
 			logger.Debug("step succeeded", "step", step.Name, "agent", agent.Name)
 			i++
 			continue
@@ -249,7 +271,7 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		// failure: resolve the fail-back target. The executor's reason text
 		// goes to the ledger only — it may quote an adapter response.
 		logger.Warn("step failed", "step", step.Name, "agent", agent.Name)
-		emit(Event{Type: "step_failed", Step: step.Name, Agent: agent.Name, Reason: res.Reason, Execution: execTier})
+		finishStep(false, Event{Step: step.Name, Agent: agent.Name, Reason: res.Reason, Execution: execTier}, doorCalls)
 		// A step that failed because the RUN was cancelled is not a step to
 		// bounce from: the run is over, and its honest outcome is cancelled,
 		// not failed-with-a-transport-error. The discriminator is the run's

@@ -46,6 +46,7 @@ Pass that id to `audit`. With the echo agent, each of the three steps
 records the same artifact — the input, echoed back:
 
     ledger integrity: verified (8 events)
+    ledger completeness: complete (0 door call(s) accounted)
       ...
       step plan succeeded — artifact f7459994: fix the login bug
       step code succeeded — artifact f7459994: fix the login bug

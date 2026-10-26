@@ -14,6 +14,8 @@ stdout 'finished: succeeded'
 lastrun logs
 exec agenthof audit $RUNID --log-dir logs
 stdout 'tool echo — args [0-9a-f]{8} \(static_env\)'
+stdout 'ledger completeness: complete \(1 door call\(s\) accounted\)'
+grep '"type":"step_succeeded".*"door_calls":1' logs/${RUNID}.jsonl
 
 grep '"type":"tool_call"' logs/${RUNID}.jsonl
 grep '"tool":"echo"' logs/${RUNID}.jsonl

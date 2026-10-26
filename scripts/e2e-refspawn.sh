@@ -236,6 +236,7 @@ run() { # $1 = input; sets OUT, RUNID, AUDIT
 	AUDIT="$("$WORK/agenthof" audit "$RUNID" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
 	echo "$AUDIT"
 	echo "$AUDIT" | grep -q "ledger integrity: verified" || fail "ledger not verified"
+	echo "$AUDIT" | grep -q "ledger completeness: complete (" || fail "ledger does not account for itself"
 }
 ledger() { echo "$WORK/logs/$1.jsonl"; }
 field() { # FILE TYPE KEY [STATUS]

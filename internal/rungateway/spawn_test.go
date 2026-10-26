@@ -90,7 +90,7 @@ func startSpawnGateway(t *testing.T, ctx context.Context, gw config.GatewayConfi
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { p.Stop() })
 	return base, token, p
 }
 
@@ -306,7 +306,7 @@ func TestSpawnTotalCapSurvivesStartStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { p.Stop() })
 	code, out := postSpawn(t, context.Background(), base, token, spawnBody("worker", "child-wf", "x"))
 	if code != http.StatusForbidden || out.Reason != reasonSpawnTotal {
 		t.Fatalf("third child of a run capped at 2: code=%d out=%+v", code, out)
@@ -342,13 +342,14 @@ func TestSpawnClosingIsNotRecorded(t *testing.T) {
 	sp := &stubSpawner{result: SpawnResult{ChildRunID: "r-child", Status: "succeeded"}}
 	rec := &eventRecorder{}
 	p := New(spawnPolicy(3, 2, 4), "", broker.StaticEnv{}, nil, "").WithSpawner(sp)
-	h := p.spawnHandler(context.Background(), testBinding(), spawnAgent(workerChild), rec.record, slog.New(slog.DiscardHandler))
+	mux := http.NewServeMux()
+	p.registerDoor(mux, "/spawn", p.spawnHandler(context.Background(), testBinding(), spawnAgent(workerChild), rec.record, slog.New(slog.DiscardHandler)))
 	p.mu.Lock()
 	p.closing = true
 	p.mu.Unlock()
 	b, _ := json.Marshal(spawnBody("worker", "child-wf", "x"))
 	rr := httptest.NewRecorder()
-	h(rr, httptest.NewRequest(http.MethodPost, "/spawn", bytes.NewReader(b)))
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/spawn", bytes.NewReader(b)))
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("code = %d, want 503", rr.Code)
 	}
@@ -357,6 +358,9 @@ func TestSpawnClosingIsNotRecorded(t *testing.T) {
 	}
 	if sp.callCount() != 0 {
 		t.Fatal("a spawn arriving after close must start nothing")
+	}
+	if n := p.Stop(); n != 0 {
+		t.Fatalf("Stop() = %d, want 0", n)
 	}
 }
 
@@ -595,5 +599,25 @@ func TestSpawnProvisionedRefusedChildCounts(t *testing.T) {
 	defer p.mu.Unlock()
 	if p.spawnTotal != 1 {
 		t.Fatalf("spawnTotal = %d, want 1", p.spawnTotal)
+	}
+}
+
+func TestSpawnMalformedFieldIsRecordedAndCounted(t *testing.T) {
+	sp := &stubSpawner{result: SpawnResult{ChildRunID: "r-child", Status: "succeeded"}}
+	rec := &eventRecorder{}
+	base, token, p := startSpawnGateway(t, context.Background(), spawnPolicy(3, 2, 4), testBinding(), spawnAgent(workerChild), sp, rec)
+	code, _ := postSpawn(t, context.Background(), base, token, map[string]any{"role": 7, "workflow": "child-wf"})
+	if code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", code)
+	}
+	ev := spawnEvents(rec)
+	if len(ev) != 1 || ev[0].Status != "refused" || ev[0].Reason != reasonSpawnRequestMalformed || ev[0].ChildRole != "" {
+		t.Fatalf("events = %+v, want one refused spawn with the fixed reason", ev)
+	}
+	if sp.callCount() != 0 {
+		t.Fatal("a malformed spawn must start nothing")
+	}
+	if n := p.Stop(); n != 1 {
+		t.Fatalf("Stop() = %d, want 1", n)
 	}
 }

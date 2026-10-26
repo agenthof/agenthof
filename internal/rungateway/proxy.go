@@ -17,6 +17,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -81,10 +82,21 @@ type Gateway struct {
 	// another goroutine, so without this a caller — or a test — could observe
 	// Stop return before the socket file is gone.
 	sockPath string
-	// inflight counts forward calls currently running, so Stop can wait for
-	// them to finish independent of how the underlying HTTP server treats
+	// stepCancel ends the step context Start derived for this step's doors.
+	// Stop calls it before waiting: the SDK hands a tool handler the
+	// session's context, not the HTTP request's, so cutting the connection
+	// does not end an upstream tool call — this does. Under mu.
+	stepCancel context.CancelFunc
+	// inflight counts admitted door calls currently running, so Stop can wait
+	// for them to finish independent of how the underlying HTTP server treats
 	// in-flight connections when closed.
 	inflight sync.WaitGroup
+	// doorCalls counts the door calls admitted during the current step —
+	// every request that took the admission hold (admit), whether it then
+	// succeeded, failed or was refused. Under mu; Start resets it; Stop
+	// returns it after inflight.Wait, when no admitted call can still be
+	// running, so the engine reads it race-free on its own goroutine.
+	doorCalls int
 	// spawner runs a child run for the spawn door; nil means the door
 	// refuses (fail-closed). Set once by WithSpawner, before the first Start.
 	spawner Spawner
@@ -243,7 +255,9 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	inbound := mcp.NewServer(&mcp.Implementation{Name: "agenthof-tool-proxy", Version: "v0.1.0"}, nil)
 
 	var sessions []upstream
+	stepCtx, stepCancel := context.WithCancel(ctx)
 	closeSessions := func() {
+		stepCancel()
 		for _, s := range sessions {
 			s.close()
 		}
@@ -314,7 +328,7 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 			}
 			mirroredBy[tool.Name] = id
 			logger.Debug("tool mirrored", "resource", id, "tool", tool.Name)
-			inbound.AddTool(tool, p.forward(bind, agent, id, allow, sess, appendEvent, logger))
+			inbound.AddTool(tool, p.forward(stepCtx, bind, agent, id, allow, sess, appendEvent, logger))
 		}
 		// What a missing name means depends on where it came from. A name
 		// the OPERATOR classified read-only is a standing list, not a claim
@@ -358,15 +372,15 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 		}
 	}
 
-	inbound.AddReceivingMiddleware(p.refusedTraceMiddleware(mirroredBy, bind, agent, appendEvent, logger))
+	inbound.AddReceivingMiddleware(p.toolsCallMiddleware(mirroredBy, bind, agent, appendEvent, logger))
 
 	mux := http.NewServeMux()
 	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return inbound }, nil))
-	mux.HandleFunc("/exec/authorize", p.execAssertedHandler(bind, agent, appendEvent))
-	mux.HandleFunc("/exec/attest", p.execAssertedHandler(bind, agent, appendEvent))
-	mux.HandleFunc("/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
-	mux.HandleFunc("/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
-	mux.HandleFunc("/spawn", p.spawnHandler(ctx, bind, agent, appendEvent, logger))
+	p.registerDoor(mux, "/exec/authorize", p.execAssertedHandler(bind, agent, appendEvent))
+	p.registerDoor(mux, "/exec/attest", p.execAssertedHandler(bind, agent, appendEvent))
+	p.registerDoor(mux, "/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
+	p.registerDoor(mux, "/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
+	p.registerDoor(mux, "/spawn", p.spawnHandler(stepCtx, bind, agent, appendEvent, logger))
 	handler := authMiddleware(mux, token)
 
 	var ln net.Listener
@@ -390,7 +404,9 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	p.mu.Lock()
 	p.srv = srv
 	p.sessions = sessions
+	p.stepCancel = stepCancel
 	p.closing = false
+	p.doorCalls = 0
 	p.sockPath = ""
 	p.stepLogger = logger
 	if path, ok := strings.CutPrefix(proxyURL, config.UnixScheme); ok {
@@ -404,46 +420,51 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	return proxyURL, token, nil
 }
 
-// guardedAppend appends a ledger event under the same closing/inflight
-// bookkeeping forward uses, so Stop() waits for it and no append races the
-// run's log.Close() after teardown. If the proxy is already closing, the event
-// is dropped rather than racing the close.
-func (p *Gateway) guardedAppend(appendEvent func(engine.Event), e engine.Event) {
-	p.mu.Lock()
-	if p.closing {
-		p.mu.Unlock()
-		return
-	}
-	p.inflight.Add(1)
-	p.mu.Unlock()
-	appendEvent(e)
-	p.inflight.Done()
-}
-
 // Stop tears down the inbound listener and closes every upstream session. It
-// is synchronous: it waits for every forward call already in flight to finish
+// is synchronous: it waits for every admitted door call already in flight to finish
 // (and so for any appendEvent call it made to return) before it returns —
 // the caller can safely close the run's ledger immediately after. The wait is
 // tracked by the proxy's own bookkeeping (inflight), not by however the HTTP
-// server happens to treat an in-flight connection when closed.
-func (p *Gateway) Stop() {
+// server happens to treat an in-flight connection when closed. It returns the
+// number of door calls admitted during the step; read after it returns, the
+// value is final.
+//
+// Bound: the step-context cancel ends an upstream tool call at once, so the
+// hold wait is prompt; the upstream session close that follows can then take
+// up to the SDK's own session-close timeout (the go-sdk's closeDeleteTimeout,
+// 5 s today) when a call was in flight, because the SDK's close
+// sends a synchronous DELETE that the upstream answers only once its handler
+// has seen the cancel notification queued behind the same connection lock.
+// So a tool call in flight across step-end can delay Stop's return by up to
+// that much — bounded, where the hold alone once waited for the whole call.
+func (p *Gateway) Stop() int {
 	p.mu.Lock()
 	if p.closing {
+		n := p.doorCalls
 		p.mu.Unlock()
-		return
+		return n
 	}
 	p.closing = true
 	srv := p.srv
 	sessions := p.sessions
 	sockPath := p.sockPath
 	logger := p.stepLogger
+	cancel := p.stepCancel
 	p.srv = nil
 	p.sessions = nil
 	p.sockPath = ""
+	p.stepCancel = nil
 	p.mu.Unlock()
 
+	// End the step's upstream tool calls first, so a call in flight fails,
+	// records and releases its hold; then cut connections. The order matters:
+	// closing the sessions first would remove the only cancel path and make
+	// the SDK's close timeout the rule rather than the bound (see above).
+	if cancel != nil {
+		cancel()
+	}
 	if srv != nil {
-		_ = srv.Close() // cut connections now; forward()'s own bookkeeping (not this) is what Stop waits on
+		_ = srv.Close() // cut connections now: an admitted call's r.Context() ends, its work is cancelled, it records and releases its hold
 	}
 	if sockPath != "" {
 		_ = os.Remove(sockPath)
@@ -456,6 +477,10 @@ func (p *Gateway) Stop() {
 	if srv != nil {
 		logger.Info("gateway listener stopped")
 	}
+	p.mu.Lock()
+	n := p.doorCalls
+	p.mu.Unlock()
+	return n
 }
 
 // forward returns the ToolHandler mirrored onto the inbound server for one
@@ -467,22 +492,21 @@ func (p *Gateway) Stop() {
 // never the call body or any credential. When the resource declares a
 // trusted runtime, the runtime's attestation is taken from the result's
 // _meta and recorded with the event; see attestation.go.
-func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID string, allow allowedTools, upstream *mcp.ClientSession, appendEvent func(engine.Event), logger *slog.Logger) mcp.ToolHandler {
+func (p *Gateway) forward(stepCtx context.Context, bind engine.Binding, agent config.AgentDef, resourceID string, allow allowedTools, upstream *mcp.ClientSession, appendEvent func(engine.Event), logger *slog.Logger) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		p.mu.Lock()
-		if p.closing {
-			p.mu.Unlock()
-			return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{&mcp.TextContent{Text: "tool proxy is shutting down"}},
-			}, nil
-		}
-		p.inflight.Add(1)
-		p.mu.Unlock()
-		defer p.inflight.Done()
+		// The admission hold is toolsCallMiddleware's and spans this handler.
+		// The upstream call ends when the agent gives up (ctx, the session's)
+		// or when the step is over (stepCtx — Stop cancels it), so a call in
+		// flight across Stop fails, records, and releases its hold at once;
+		// Stop's return is then gated only by the upstream session close,
+		// which the SDK bounds at its own close timeout (see Stop).
+		callCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		stopAfter := context.AfterFunc(stepCtx, cancel)
+		defer stopAfter()
 
 		// Defense-in-depth: only allowlisted tools are ever mirrored, so the
-		// receiving middleware (refusedTraceMiddleware) is the real denial
+		// receiving middleware (toolsCallMiddleware) is the real denial
 		// path and this branch is unreachable in normal operation. It stays
 		// as a per-tool second gate independent of the mirroring logic.
 		if !allow.allows(resourceID, req.Params.Name) {
@@ -506,7 +530,7 @@ func (p *Gateway) forward(bind engine.Binding, agent config.AgentDef, resourceID
 		}
 
 		logger.Debug("tool call routed", "resource", resourceID, "tool", req.Params.Name)
-		result, callErr := upstream.CallTool(ctx, &mcp.CallToolParams{
+		result, callErr := upstream.CallTool(callCtx, &mcp.CallToolParams{
 			Name:      req.Params.Name,
 			Arguments: req.Params.Arguments, // raw passthrough — never the run token
 		})
@@ -707,6 +731,66 @@ func mintToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// admit takes the gateway's admission hold for one door call: the one
+// place closing is consulted and inflight is incremented. A request that
+// gets ok=false was answered before it could act and is neither counted
+// nor recorded; a request that gets ok=true is a door call — counted here,
+// and it MUST append exactly one event before calling release. Stop waits
+// on exactly these holds.
+func (p *Gateway) admit() (release func(), ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closing {
+		return nil, false
+	}
+	p.inflight.Add(1)
+	p.doorCalls++
+	return p.inflight.Done, true
+}
+
+// maxDoorBody bounds a route door's request body. The bound predates the
+// hold: an oversized body is answered 400 before it is a door call.
+const maxDoorBody = 1 << 20
+
+// doorHandler is a route door's body, run under the admission hold with the
+// request's bounded body, already checked to be one JSON object. Everything
+// it does — the door-specific decode included — is a door call's work, so a
+// field of the wrong type is a RECORDED refusal, never a silent 400.
+type doorHandler func(w http.ResponseWriter, r *http.Request, body []byte)
+
+// registerDoor is the one way a route door joins the mux. Before the hold:
+// the method, a bounded read to EOF (only then does the server watch the
+// connection, so Stop cutting it — or the agent hanging up — cancels
+// r.Context()), and a syntactic JSON-object check. Then admit: on closing
+// the request is answered 503 and is not a door call; otherwise it is
+// counted and the door runs under the hold until it returns.
+func (p *Gateway) registerDoor(mux *http.ServeMux, pattern string, door doorHandler) {
+	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxDoorBody))
+		if err != nil || !isJSONObject(body) {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		release, ok := p.admit()
+		if !ok {
+			http.Error(w, "gateway is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		defer release()
+		door(w, r, body)
+	})
+}
+
+// isJSONObject reports whether b is one syntactically valid JSON object.
+func isJSONObject(b []byte) bool {
+	t := bytes.TrimLeft(b, " \t\r\n")
+	return len(t) > 0 && t[0] == '{' && json.Valid(b)
+}
+
 // capRunes truncates s to at most n runes. It is the one place the ledger
 // caps agent- or upstream-controlled text before it enters an event, so
 // hashResult's preview, resultErrorText's failure text, a tool call's error
@@ -741,48 +825,47 @@ func hashResult(result *mcp.CallToolResult, callErr error) (sha, preview string)
 // mcpMethodToolsCall is the MCP method name for a tool invocation.
 const mcpMethodToolsCall = "tools/call"
 
-// refusedTraceMiddleware records a tool_call the proxy does not expose as a
-// refused event. Off-allowlist tools are never mirrored onto the inbound
-// server, so the server would reject them as "unknown tool" with no ledger
-// trace; this middleware runs before dispatch, names the attempted tool, and
-// records it — turning a previously-invisible denial into first-hand evidence.
-// It only ADDS a refused event for unexposed tools; exposed tools pass through
-// untouched (forward emits their event), so there is no double emit.
-//
-// It is a method on *Gateway (not a free function) so its appendEvent call can
-// share forward's closing/inflight bookkeeping: without that, an in-flight
-// appendEvent here could run after Stop() returns and race the run's
-// log.Close(), violating Stop()'s documented invariant.
-func (p *Gateway) refusedTraceMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) mcp.Middleware {
+// The model door's ledger reasons for the branches it reaches after
+// admission and before an upstream answers: fixed strings, never an error's
+// text (Article III).
+const (
+	reasonModelRequestMalformed   = "model request malformed"
+	reasonModelRequestUnbuildable = "model request could not be rebuilt"
+	reasonModelRouteMalformed     = "model route endpoint malformed"
+)
+
+// toolsCallMiddleware is the tool door's admission: every tools/call —
+// exposed tool or not — takes the gateway's hold here, before dispatch, and
+// releases it after the handler returns, so one hold covers the mirrored
+// handler and its append (the SDK dispatches on this call stack). An
+// unexposed tool is recorded refused here, since the server would otherwise
+// reject it as "unknown tool" with no ledger trace; an exposed one is
+// recorded by forward — one event per admitted call either way. On closing
+// the call is refused without reaching the handler: neither counted nor
+// recorded. Every other MCP method (initialize, tools/list, ping) passes
+// through untouched — not a door call.
+func (p *Gateway) toolsCallMiddleware(mirrored map[string]string, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			if method == mcpMethodToolsCall {
-				if params, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok {
-					if _, exposed := mirrored[params.Name]; !exposed {
-						// Bracket the ledger append with the same closing/inflight
-						// bookkeeping forward uses, so Stop() waits for it and no
-						// append races the run's log.Close() after teardown. If the
-						// proxy is already closing, skip the emit and still delegate.
-						p.mu.Lock()
-						if p.closing {
-							p.mu.Unlock()
-						} else {
-							p.inflight.Add(1)
-							p.mu.Unlock()
-							logger.Warn("tool call refused", "tool", capRunes(params.Name, 200), "reason", "tool is not available to this run")
-							appendEvent(engine.Event{
-								Type:    "tool_call",
-								Agent:   agent.Name,
-								Status:  "refused",
-								Reason:  "tool is not available to this run",
-								Tool:    params.Name,
-								ArgsSHA: argsSHA(params.Arguments),
-								Binding: bind,
-							})
-							p.inflight.Done()
-						}
-					}
-				}
+			if method != mcpMethodToolsCall {
+				return next(ctx, method, req)
+			}
+			release, ok := p.admit()
+			if !ok {
+				return nil, errors.New("tool proxy is shutting down")
+			}
+			defer release()
+			var name string
+			var args json.RawMessage
+			if params, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok {
+				name, args = params.Name, params.Arguments
+			}
+			if _, exposed := mirrored[name]; !exposed {
+				logger.Warn("tool call refused", "tool", capRunes(name, 200), "reason", "tool is not available to this run")
+				appendEvent(engine.Event{
+					Type: "tool_call", Agent: agent.Name, Status: "refused",
+					Reason: "tool is not available to this run", Tool: name, ArgsSHA: argsSHA(args), Binding: bind,
+				})
 			}
 			return next(ctx, method, req)
 		}
@@ -837,17 +920,20 @@ func resultErrorText(result *mcp.CallToolResult) string {
 // modelHandler is the OpenAI-compatible door on the per-run listener. The
 // agent authenticates with the run token; the proxy authorizes the logical
 // model, injects the per-role provider key, and never forwards the run token
-// or any X-Agenthof-* header.
-func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+// or any X-Agenthof-* header. The whole call runs under the admission hold
+// registerDoor took; every admitted call appends exactly one event, including
+// one still in flight when Stop runs (Stop cuts the connection, which cancels
+// the outbound request and lands in ErrorHandler).
+func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) doorHandler {
+	return func(w http.ResponseWriter, r *http.Request, body []byte) {
+		var logical string
+		refuse := func(reason string, code int) {
+			appendEvent(engine.Event{Type: "model_call", Agent: agent.Name, Status: "refused", Reason: reason, Model: logical, Binding: bind})
+			http.Error(w, reason, code)
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
+		fail := func(reason string, code int) {
+			appendEvent(engine.Event{Type: "model_call", Agent: agent.Name, Status: "failed", Reason: reason, Model: logical, Binding: bind})
+			http.Error(w, reason, code)
 		}
 		// Decode into json.RawMessage per field rather than map[string]any: an
 		// any-decode + re-marshal round-trips every JSON number through
@@ -856,10 +942,10 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 		// "model" is parsed and later replaced.
 		var req map[string]json.RawMessage
 		if err := json.Unmarshal(body, &req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			logger.Warn("model call refused", "reason", reasonModelRequestMalformed)
+			refuse(reasonModelRequestMalformed, http.StatusBadRequest)
 			return
 		}
-		var logical string
 		if raw, ok := req["model"]; ok {
 			_ = json.Unmarshal(raw, &logical) // non-string "model" leaves logical "", matching the old .(string) assertion
 		}
@@ -875,7 +961,8 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 			// event.
 			echoed := capRunes(logical, 200)
 			logger.Warn("model call refused", "model", echoed)
-			p.guardedAppend(appendEvent, engine.Event{
+			logical = echoed
+			appendEvent(engine.Event{
 				Type: "model_call", Agent: agent.Name, Status: "refused",
 				Reason: fmt.Sprintf("model %q is not allowed for this agent", echoed),
 				Model:  echoed, Binding: bind,
@@ -893,7 +980,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 			// Resolve's error names an env VARIABLE, never a value, but the
 			// message stays fixed anyway: one rule for the whole door.
 			logger.Error("model route not resolved", "model", logical)
-			p.guardedAppend(appendEvent, engine.Event{
+			appendEvent(engine.Event{
 				Type: "model_call", Agent: agent.Name, Status: "failed",
 				Reason: "model route not resolved", Model: logical, Binding: bind,
 			})
@@ -903,19 +990,20 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 
 		modelRaw, err := json.Marshal(route.Model)
 		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			fail(reasonModelRequestUnbuildable, http.StatusBadRequest)
 			return
 		}
 		req["model"] = modelRaw
 		newBody, err := json.Marshal(req)
 		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			fail(reasonModelRequestUnbuildable, http.StatusBadRequest)
 			return
 		}
 
 		target, err := url.Parse(route.Endpoint)
 		if err != nil || target.Scheme == "" || target.Host == "" {
-			http.Error(w, "bad route", http.StatusBadGateway)
+			logger.Error("model route endpoint malformed", "model", logical)
+			fail(reasonModelRouteMalformed, http.StatusBadGateway)
 			return
 		}
 
@@ -943,7 +1031,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 		var recorded bool
 		record := func(e engine.Event) {
 			recorded = true
-			p.guardedAppend(appendEvent, e)
+			appendEvent(e)
 		}
 
 		rp := &httputil.ReverseProxy{
@@ -1045,7 +1133,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				// reason the ledger reason is fixed.
 				if !recorded {
 					logger.Error("model call did not complete", "model", logical, "class", errClass(err))
-					p.guardedAppend(appendEvent, engine.Event{
+					appendEvent(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "failed",
 						Reason: "model call did not complete", Model: logical, Binding: bind,
 					})

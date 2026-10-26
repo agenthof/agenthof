@@ -3,6 +3,7 @@ package investigate
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -449,5 +450,55 @@ func TestTimelineUnstattableControlLogStillEnumeratesRuns(t *testing.T) {
 	}
 	if len(res.Sources) != 1 || res.Sources[0].Kind != "run" {
 		t.Fatalf("want exactly the run source, got %+v", res.Sources)
+	}
+}
+
+// TestSourcesCarryCompleteness: a verified run source carries the
+// completeness verdict beside its integrity — "complete" when the ledger
+// accounts for itself, "gap" when the gateway admitted a door call the
+// ledger does not record. The verdict rides on the text source line and
+// the JSON sources[].completeness field; ExitCode is unchanged — the
+// column is reportage only, reserved for a later contract change.
+func TestSourcesCarryCompleteness(t *testing.T) {
+	dir := t.TempDir()
+	build := func(id string, doorCalls int) []engine.Event {
+		n := doorCalls
+		b := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "r", Workflow: "w", RunID: id}
+		events := []engine.Event{
+			{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission},
+			{Type: "step_started", Step: "a"},
+			{Type: "step_succeeded", Step: "a", DoorCalls: &n},
+			{Type: "workflow_finished", Status: "succeeded"},
+		}
+		for i := range events {
+			events[i].Time = time.Unix(int64(i), 0).UTC()
+			events[i].Binding = b
+		}
+		return events
+	}
+	writeRun(t, dir, "r-complete", build("r-complete", 0))
+	writeRun(t, dir, "r-gap", build("r-gap", 1))
+
+	res, err := Timeline(dir, filepath.Join(dir, "control.jsonl"), Filter{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, s := range res.Sources {
+		got[filepath.Base(s.Path)] = s.Completeness
+	}
+	if got["r-complete.jsonl"] != "complete" || got["r-gap.jsonl"] != "gap" {
+		t.Fatalf("%v", got)
+	}
+	if ExitCode(res) != 0 {
+		t.Fatalf("a completeness gap never changes investigate's exit (reserved): %d", ExitCode(res))
+	}
+	text := RenderText(res)
+	if !strings.Contains(text, "integrity=verified completeness=gap count=4") {
+		t.Fatalf("%s", text)
+	}
+	doc, _ := RenderJSON(res, Filter{})
+	if !strings.Contains(doc, `"completeness": "gap"`) || !strings.Contains(doc, `"ok": true`) {
+		t.Fatalf("%s", doc)
 	}
 }

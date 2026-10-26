@@ -29,6 +29,7 @@ import (
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/identity/oidctest"
 	"github.com/agenthof/agenthof/internal/ledger"
 )
@@ -418,7 +419,7 @@ func TestRunAndAuditEndToEnd(t *testing.T) {
 	if code := cmdAudit([]string{m[1], "--log-dir", logs}, &out); code != 0 {
 		t.Fatalf("audit: %s", out.String())
 	}
-	for _, want := range []string{"invoked by dana@example.com (asserted", "status: succeeded", "step plan succeeded", "ledger integrity: verified"} {
+	for _, want := range []string{"invoked by dana@example.com (asserted", "status: succeeded", "step plan succeeded", "ledger integrity: verified", "ledger completeness: complete (0 door call(s) accounted)"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("audit missing %q:\n%s", want, out.String())
 		}
@@ -547,7 +548,7 @@ func TestAuditTornExitsOne(t *testing.T) {
 	}
 }
 
-func TestAuditDeletedTailPassesButExpectHeadFails(t *testing.T) {
+func TestAuditVerifyDeletedTailCaughtByCompleteness(t *testing.T) {
 	root := writeSample(t)
 	logs := t.TempDir()
 	var out bytes.Buffer
@@ -568,9 +569,9 @@ func TestAuditDeletedTailPassesButExpectHeadFails(t *testing.T) {
 	oldHead := m[1]
 
 	// Truncate the last line and its trailing newline — an honest deletion
-	// leaves the remaining chain internally consistent (documented
-	// limitation: ReadVerify cannot detect a deleted tail on its own), so
-	// verify without --expect-head must still pass.
+	// leaves the remaining chain internally consistent, so the integrity
+	// axis alone cannot detect it; the completeness axis does, because the
+	// deleted record was the terminal and its absence reads as unterminated.
 	path := filepath.Join(logs, id+".jsonl")
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -586,13 +587,18 @@ func TestAuditDeletedTailPassesButExpectHeadFails(t *testing.T) {
 	}
 
 	out.Reset()
-	if code := cmdAudit([]string{"verify", id, "--log-dir", logs}, &out); code != 0 {
-		t.Fatalf("verify on a deleted tail must still pass (documented limitation): %d %s", code, out.String())
+	if code := cmdAudit([]string{"verify", id, "--log-dir", logs}, &out); code != exitUnterminated {
+		t.Fatalf("completeness must catch the deleted terminal: %d %s", code, out.String())
 	}
 
+	// --expect-head mismatch would exit 4, but 12 outranks 4 — the same
+	// precedence TestAuditVerifyPrecedenceUnterminatedOverExpectHead pins.
 	out.Reset()
-	if code := cmdAudit([]string{"verify", id, "--log-dir", logs, "--expect-head", oldHead}, &out); code != 4 {
-		t.Fatalf("expect-head against the pre-deletion head must catch the truncation, got %d\n%s", code, out.String())
+	if code := cmdAudit([]string{"verify", id, "--log-dir", logs, "--expect-head", oldHead}, &out); code != exitUnterminated {
+		t.Fatalf("the deleted terminal outranks expect-head, got %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "expect-head mismatch") {
+		t.Fatalf("the mismatch line still prints alongside the 12 exit:\n%s", out.String())
 	}
 }
 
@@ -2681,4 +2687,198 @@ func stubCallSpawn(proxyURL, token, spec string) (string, error) {
 		detail = out.Reason
 	}
 	return strings.TrimSpace(fmt.Sprintf("spawn %s %s %s", out.Status, id, detail)), nil
+}
+
+// linkedRun writes a real one-event run ledger under dir, linked under
+// parent when given, and ages it when old.
+func linkedRun(t *testing.T, dir, id string, parent string, old bool) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log, err := engine.OpenLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "r", Workflow: "w", RunID: id}
+	if parent != "" {
+		b.ParentRunID, b.Depth = parent, 1
+	}
+	if err := log.Append(engine.Event{Time: time.Now().UTC(), Type: "workflow_started", Binding: b}); err != nil {
+		t.Fatal(err)
+	}
+	_ = log.Close()
+	p := filepath.Join(dir, id+".jsonl")
+	if old {
+		past := time.Now().Add(-200 * 24 * time.Hour)
+		if err := os.Chtimes(p, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return p
+}
+
+func TestRunsPruneKeepsChildOfLiveRoot(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	root := linkedRun(t, dir, "r-root", "", false)
+	child := linkedRun(t, dir, "r-child", "r-root", true) // older than the cutoff, but its root is not
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out); code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 0 run(s)") {
+		t.Fatalf("out: %s", out.String())
+	}
+	for _, p := range []string{root, child} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive: a child is never pruned on its own: %v", p, err)
+		}
+	}
+}
+
+func TestRunsPruneRemovesRootWithDescendants(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	root := linkedRun(t, dir, "r-root", "", true)
+	child := linkedRun(t, dir, "r-child", "r-root", false) // newer mtime: the tree rule, not the file's own age, decides
+	grandchild := linkedRun(t, dir, "r-grand", "r-child", false)
+	other := linkedRun(t, dir, "r-other", "", false)
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out); code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 3 run(s)") {
+		t.Fatalf("out: %s", out.String())
+	}
+	for _, p := range []string{root, child, grandchild} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s should be gone with its root: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("an unrelated live root must remain: %v", err)
+	}
+}
+
+func TestRunsPruneOrphanIsItsOwnRoot(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	orphan := linkedRun(t, dir, "r-orphan", "r-vanished", true)
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out); code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("a child whose parent ledger is gone is the root of its own subtree and is pruned past the cutoff: %v", err)
+	}
+}
+
+// writeRunLedger writes events as run id under dir with a fixed binding.
+func writeRunLedger(t *testing.T, dir, id string, events ...engine.Event) {
+	t.Helper()
+	log, err := engine.OpenLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "r", Workflow: "w", RunID: id}
+	for i, e := range events {
+		e.Time, e.Binding = time.Unix(int64(i), 0).UTC(), b
+		if err := log.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = log.Close()
+}
+
+func stamped(typ, step string, n int) engine.Event {
+	return engine.Event{Type: typ, Step: step, DoorCalls: &n}
+}
+
+func TestAuditCompletenessVerdictsAndExits(t *testing.T) {
+	marker := engine.Event{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}
+	cases := map[string]struct {
+		events []engine.Event
+		line   string
+		code   int
+	}{
+		"complete": {[]engine.Event{marker, {Type: "step_started", Step: "a"}, {Type: "tool_call"}, stamped("step_succeeded", "a", 1), {Type: "workflow_finished", Status: "succeeded"}},
+			"ledger completeness: complete (1 door call(s) accounted)", 0},
+		"gap": {[]engine.Event{marker, {Type: "step_started", Step: "a"}, {Type: "tool_call"}, stamped("step_succeeded", "a", 2), {Type: "workflow_finished", Status: "succeeded"}},
+			"ledger completeness: GAP — step a: 2 door call(s) admitted, 1 recorded", exitGap},
+		"unterminated": {[]engine.Event{marker, {Type: "step_started", Step: "a"}},
+			"ledger completeness: UNTERMINATED — no final event", exitUnterminated},
+	}
+	for name, c := range cases {
+		dir := t.TempDir()
+		writeRunLedger(t, dir, "r-"+name, c.events...)
+		var out bytes.Buffer
+		if code := cmdAudit([]string{"r-" + name, "--log-dir", dir}, &out); code != c.code || !strings.Contains(out.String(), c.line) {
+			t.Fatalf("audit %s: code %d\n%s", name, code, out.String())
+		}
+		out.Reset()
+		if code := cmdAudit([]string{"verify", "r-" + name, "--log-dir", dir}, &out); code != c.code || !strings.Contains(out.String(), c.line) || !strings.Contains(out.String(), "head: ") {
+			t.Fatalf("audit verify %s: code %d\n%s", name, code, out.String())
+		}
+		if strings.Contains(strings.ToLower(out.String()), "ledger completeness: incomplete") {
+			t.Fatal("the completeness line never uses the run-status word")
+		}
+	}
+}
+
+func TestAuditVerifyPrecedenceUnterminatedOverExpectHead(t *testing.T) {
+	dir := t.TempDir()
+	writeRunLedger(t, dir, "r-live", engine.Event{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, engine.Event{Type: "step_started", Step: "a"})
+	var out bytes.Buffer
+	code := cmdAudit([]string{"verify", "r-live", "--log-dir", dir, "--expect-head", strings.Repeat("0", 64)}, &out)
+	if code != exitUnterminated || !strings.Contains(out.String(), "expect-head mismatch") {
+		t.Fatalf("12 outranks 4 and every line still prints: code %d\n%s", code, out.String())
+	}
+}
+
+func TestAuditPreMigrationLedgerReadsNoClaim(t *testing.T) {
+	dir := t.TempDir()
+	src, err := os.ReadFile(filepath.Join("..", "..", "internal", "engine", "testdata", "pre-migration.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pre-migration.jsonl"), src, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := cmdAudit([]string{"pre-migration", "--log-dir", dir}, &out); code != 0 || !strings.Contains(out.String(), "ledger completeness: no claim (recorded before door accounting)") {
+		t.Fatalf("code %d\n%s", code, out.String())
+	}
+}
+
+func TestAuditSubtreeLinesAndWorstExit(t *testing.T) {
+	dir := t.TempDir()
+	rootBind := engine.Binding{RunID: "r-root"}
+	child := []engine.Event{{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, {Type: "step_started", Step: "c"}, stamped("step_succeeded", "c", 4), {Type: "workflow_finished", Status: "succeeded"}}
+	log, err := engine.OpenLog(dir, "r-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range child {
+		e.Time = time.Unix(int64(i), 0).UTC()
+		e.Binding = engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "r", Workflow: "w", RunID: "r-child", ParentRunID: rootBind.RunID, Depth: 1}
+		if err := log.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = log.Close()
+	writeRunLedger(t, dir, "r-root",
+		engine.Event{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission},
+		engine.Event{Type: "step_started", Step: "a"},
+		engine.Event{Type: "spawn", Status: "succeeded", ChildRunID: "r-child", Depth: 1},
+		stamped("step_succeeded", "a", 1),
+		engine.Event{Type: "workflow_finished", Status: "succeeded"})
+	var out bytes.Buffer
+	code := cmdAudit([]string{"r-root", "--log-dir", dir}, &out)
+	if code != exitGap || !strings.Contains(out.String(), "ledger completeness: complete (1 door call(s) accounted)") || !strings.Contains(out.String(), "subtree: run r-child — integrity verified, completeness gap") {
+		t.Fatalf("the parent keeps its own verdict, the exit is the tree's worst: code %d\n%s", code, out.String())
+	}
 }

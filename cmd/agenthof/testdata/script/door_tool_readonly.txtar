@@ -12,6 +12,7 @@ lastrun logs
 exec agenthof audit $RUNID --log-dir logs
 stdout 'tool echo — args [0-9a-f]{8} \(static_env\)'
 stdout 'tool other refused — tool is not available to this run'
+stdout 'ledger completeness: complete \(2 door call\(s\) accounted\)'
 
 ! grep 'tool-secret' logs/${RUNID}.jsonl
 

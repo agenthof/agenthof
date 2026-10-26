@@ -27,6 +27,33 @@ PY
 }
 # count FILE TYPE [STATUS]: how many such events.
 count() { field "$1" "$2" type "${3:-}" | wc -l | tr -d ' '; }
+# accounted FILE: the ledger carries the door-accounting marker on
+# workflow_started and door_calls on every step terminal, and each step's
+# recorded door events equal its door_calls — the completeness claim the
+# audit line summarizes, checked from the raw ledger.
+accounted() {
+	python3 - "$1" <<'PY' || fail "$1: the ledger does not account for its door calls"
+import json, sys
+path = sys.argv[1]
+events = [json.loads(l) for l in open(path) if l.strip()]
+assert events and events[0]["type"] == "workflow_started", "first event is not workflow_started"
+assert events[0].get("door_accounting") == "admission", "no door_accounting marker on workflow_started"
+doors = {"tool_call", "model_call", "exec", "spawn"}
+window = None
+for e in events[1:]:
+    t = e["type"]
+    if t == "step_started":
+        window = [e["step"], 0]
+    elif t in doors:
+        assert window, f"{t} outside a step window"
+        window[1] += 1
+    elif t in ("step_succeeded", "step_failed"):
+        assert window and window[0] == e["step"], f"{t} for {e.get('step')} without its step_started"
+        assert "door_calls" in e, f"step {e['step']} terminal lacks door_calls"
+        assert e["door_calls"] == window[1], f"step {e['step']}: {e['door_calls']} admitted, {window[1]} recorded"
+        window = None
+PY
+}
 # tool_field FILE TOOL KEY: KEY of every tool_call event for TOOL.
 tool_field() {
 	python3 - "$1" "$2" "$3" <<'PY'
@@ -102,6 +129,7 @@ verify_run() {
 	OUTS+=("$v")
 	echo "$v"
 	grep -Eq "^head: [0-9a-f]{64} \([0-9]+ events\)$" <<<"$v" || fail "$2 ($1): audit verify reported no head"
+	grep -q "^ledger completeness: complete (" <<<"$v" || fail "$2 ($1): audit verify did not report a complete ledger"
 }
 # no_leak VALUE WHAT...: VALUE must appear in no ledger, artifact, control
 # log, process log, agenthof operational log, or captured output. Never

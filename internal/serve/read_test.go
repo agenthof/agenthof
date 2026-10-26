@@ -16,6 +16,7 @@ import (
 	"github.com/agenthof/agenthof/internal/anchor/anchortest"
 	"github.com/agenthof/agenthof/internal/apiclient"
 	"github.com/agenthof/agenthof/internal/audit"
+	"github.com/agenthof/agenthof/internal/completeness"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
@@ -113,10 +114,108 @@ func TestAuditEndpointRendersConfigJoin(t *testing.T) {
 	}
 	events, head, verr := engine.ReadLog(ts.logDir, acc.RunID)
 	cev, verdict, _ := investigate.LoadControl(ctl)
-	want := audit.Render(events, head, verr) + investigate.ConfigJoin(cev, verdict, "cafe0001", events[0].Time) + "\n"
+	want := audit.Render(events, head, verr, completeness.Check(events)) + completeness.VerifyTree(ts.logDir, acc.RunID, events, verr).SubtreeLines() + investigate.ConfigJoin(cev, verdict, "cafe0001", events[0].Time) + "\n"
 	if string(text) != want {
 		t.Fatalf("audit text differs from the local render:\n%s\n--- want ---\n%s", text, want)
 	}
+}
+
+func TestEventsAndAuditCarryCompleteness(t *testing.T) {
+	host := &fakeHost{}
+	ts := newTestServer(t, host, fakeAuth{}, 1)
+	release := make(chan struct{})
+	host.run = engineRun(t, ts.logDir, gateExec{release: release})
+	_, body := ts.do(t, http.MethodPost, "/v1/runs", goodToken, runReq)
+	acc := decode[apiclient.RunAccepted](t, body)
+	path := filepath.Join(ts.logDir, acc.RunID+".jsonl")
+	waitFor(t, func() bool { b, _ := os.ReadFile(path); return strings.Count(string(b), "\n") >= 2 })
+
+	// Still running here: the file alone says unterminated; the server knows better.
+	_, body = ts.do(t, http.MethodGet, "/v1/runs/"+acc.RunID+"/events", goodToken, nil)
+	if ev := decode[apiclient.RunEvents](t, body); ev.Completeness != apiclient.CompletenessInFlight {
+		t.Fatalf("%+v, want in_flight while the run is hosted and running", ev)
+	}
+	resp, text := ts.do(t, http.MethodGet, "/v1/runs/"+acc.RunID+"/audit", goodToken, nil)
+	if resp.Header.Get(apiclient.CompletenessHeader) != apiclient.CompletenessInFlight || !strings.Contains(string(text), "ledger completeness: UNTERMINATED") {
+		t.Fatalf("header %q text:\n%s", resp.Header.Get(apiclient.CompletenessHeader), text)
+	}
+
+	close(release)
+	ts.waitStatus(t, acc.RunID)
+	_, body = ts.do(t, http.MethodGet, "/v1/runs/"+acc.RunID+"/events", goodToken, nil)
+	if ev := decode[apiclient.RunEvents](t, body); ev.Completeness != apiclient.CompletenessComplete || ev.CompletenessDetail != "" {
+		t.Fatalf("%+v", ev)
+	}
+	resp, text = ts.do(t, http.MethodGet, "/v1/runs/"+acc.RunID+"/audit", goodToken, nil)
+	if resp.Header.Get(apiclient.CompletenessHeader) != apiclient.CompletenessComplete || !strings.Contains(string(text), "ledger completeness: complete (") {
+		t.Fatalf("header %q text:\n%s", resp.Header.Get(apiclient.CompletenessHeader), text)
+	}
+}
+
+func TestAuditHeadersCarryTheTreeWorst(t *testing.T) {
+	ts := newTestServer(t, &fakeHost{}, fakeAuth{}, 1)
+	n1, n4 := 1, 4
+	// Run ids are "r-" plus hex (see runIDPattern); the suffixes stand in for
+	// root and child without lifting the hex-only constraint.
+	const root, child = "r-aa", "r-cc"
+	ce := []engine.Event{{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, {Type: "step_started", Step: "c"}, {Type: "step_succeeded", Step: "c", DoorCalls: &n4}, {Type: "workflow_finished", Status: "succeeded"}}
+	writeLinked(t, ts.logDir, child, root, ce...)
+	re := []engine.Event{{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, {Type: "step_started", Step: "a"}, {Type: "spawn", Status: "succeeded", ChildRunID: child, Depth: 1}, {Type: "step_succeeded", Step: "a", DoorCalls: &n1}, {Type: "workflow_finished", Status: "succeeded"}}
+	writeLinked(t, ts.logDir, root, "", re...)
+	resp, text := ts.do(t, http.MethodGet, "/v1/runs/"+root+"/audit", goodToken, nil)
+	if resp.Header.Get(apiclient.CompletenessHeader) != apiclient.CompletenessGap || !strings.Contains(string(text), "subtree: run "+child+" — integrity verified, completeness gap") {
+		t.Fatalf("header %q text:\n%s", resp.Header.Get(apiclient.CompletenessHeader), text)
+	}
+	// The text is byte-identical to the local render + subtree lines.
+	events, head, verr := engine.ReadLog(ts.logDir, root)
+	tree := completeness.VerifyTree(ts.logDir, root, events, verr)
+	if want := audit.Render(events, head, verr, tree.Root.Report) + tree.SubtreeLines(); string(text) != want {
+		t.Fatalf("server text differs from the local render:\n%s\n--- want ---\n%s", text, want)
+	}
+}
+
+// TestAuditHeaderMapsUnreadableChildToBroken: a child ledger that cannot be
+// read at all (here: a directory where the file should be — an open/IO
+// failure, neither torn nor broken) is reported as `error` in the subtree
+// text, but the Agenthof-Integrity header keeps its closed enum and reads
+// `broken`, the way integrityOf already maps the run's own unreadable
+// chain; the client exits 1 on it as the local command does.
+func TestAuditHeaderMapsUnreadableChildToBroken(t *testing.T) {
+	ts := newTestServer(t, &fakeHost{}, fakeAuth{}, 1)
+	n1 := 1
+	const root, child = "r-aa", "r-cc"
+	if err := os.MkdirAll(filepath.Join(ts.logDir, child+".jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	re := []engine.Event{{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, {Type: "step_started", Step: "a"}, {Type: "spawn", Status: "succeeded", ChildRunID: child, Depth: 1}, {Type: "step_succeeded", Step: "a", DoorCalls: &n1}, {Type: "workflow_finished", Status: "succeeded"}}
+	writeLinked(t, ts.logDir, root, "", re...)
+	resp, text := ts.do(t, http.MethodGet, "/v1/runs/"+root+"/audit", goodToken, nil)
+	if got := resp.Header.Get(apiclient.IntegrityHeader); got != apiclient.IntegrityBroken {
+		t.Fatalf("%s = %q, want %q (the header's enum is closed)\n%s", apiclient.IntegrityHeader, got, apiclient.IntegrityBroken, text)
+	}
+	if !strings.Contains(string(text), "subtree: run "+child+" — integrity error, completeness not judged") {
+		t.Fatalf("text:\n%s", text)
+	}
+}
+
+// writeLinked writes events as a run ledger, linked under parent when given.
+func writeLinked(t *testing.T, dir, id, parent string, events ...engine.Event) {
+	t.Helper()
+	log, err := engine.OpenLog(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := engine.Binding{Invoker: testInvoker, Role: "se", Workflow: "fix-bug", RunID: id}
+	if parent != "" {
+		b.ParentRunID, b.Depth = parent, 1
+	}
+	for i, e := range events {
+		e.Time, e.Binding = time.Unix(int64(i), 0).UTC(), b
+		if err := log.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = log.Close()
 }
 
 func TestInvestigateEndpointIsInvestigate1(t *testing.T) {

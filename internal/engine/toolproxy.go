@@ -18,7 +18,13 @@ import (
 // ledger (Article III).
 type ToolProxy interface {
 	Start(ctx context.Context, bind Binding, agent config.AgentDef, appendEvent func(Event)) (url, token string, err error)
-	Stop()
+	// Stop tears the listener down and returns, synchronously, once every
+	// admitted door call has returned and appended its event. Its result is
+	// the number of door calls the gateway admitted during this step — the
+	// value the engine stamps on the step's terminal. It is read only after
+	// Stop returns, on the engine goroutine, so it needs no further
+	// synchronization.
+	Stop() int
 }
 
 type proxyCoordKey struct{}

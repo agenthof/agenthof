@@ -461,6 +461,7 @@ run() { # $1 = config dir, $2 = role, $3 = workflow, $4 = input; sets OUT, RUNID
 	OUTS+=("$AUDIT")
 	echo "$AUDIT"
 	echo "$AUDIT" | grep -q "ledger integrity: verified" || fail "$3: ledger not verified"
+	echo "$AUDIT" | grep -q "ledger completeness: complete (" || fail "$3: ledger does not account for itself"
 }
 ledger() { echo "$WORK/logs/$1.jsonl"; }
 parent_artifact() { # $1 = run id: the full step artifact body
@@ -524,6 +525,7 @@ grep -q "compartment started.*child=$CHILD.*compartment=agenthof-spawn-$CHILD-ch
 echo "$AUDIT" | grep -q "spawn worker/child-wf → run $CHILD succeeded (depth 1) — artifact ${CHILD_SHA:0:8}" || fail "audit did not render the spawn line"
 CHILD_AUDIT="$(out_of "$WORK/agenthof" audit "$CHILD" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
 echo "$CHILD_AUDIT" | grep -q "ledger integrity: verified" || fail "the child's ledger does not verify"
+echo "$CHILD_AUDIT" | grep -q "ledger completeness: complete (" || fail "the child's ledger does not account for itself"
 TREE="$("$WORK/agenthof" investigate --run "$PARENT" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
 echo "$TREE" | grep -q "^[0-9].* run workflow_started — dana@example.com" || fail "investigate --run does not show the parent"
 echo "$TREE" | grep -q "^  [0-9].* run workflow_started — dana@example.com .*parent=$PARENT" || fail "investigate --run does not show the child indented under its parent"

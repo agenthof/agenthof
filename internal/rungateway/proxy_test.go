@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -358,7 +359,7 @@ func TestProxyForwardDeniesNonAllowlistedResource(t *testing.T) {
 	agent := testAgentDef("github")
 	allow := allowedTools{} // "github" deliberately absent
 
-	handler := p.forward(bind, agent, "github", allow, nil, appendEvent, obs.Discard())
+	handler := p.forward(context.Background(), bind, agent, "github", allow, nil, appendEvent, obs.Discard())
 	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}
 
 	result, err := handler(context.Background(), req)
@@ -388,106 +389,6 @@ func TestProxyForwardDeniesNonAllowlistedResource(t *testing.T) {
 	if ev.Reason == "" {
 		t.Fatal("event.Reason must be set on a refused tool_call")
 	}
-}
-
-// TestProxyStopWaitsForInFlightForward confirms Stop() does not return until
-// a forward call already in flight (and its appendEvent) has completed, and
-// that it then tears down the listener and upstream session — no lingering
-// appendEvent call can race the engine's log.Close() right after Stop()
-// returns.
-//
-// It invokes the same forward handler Start wires onto the inbound server,
-// but calls it directly against an upstream tool that blocks on a
-// test-controlled channel, so the assertion does not depend on how (or
-// whether) closing the inbound HTTP listener propagates cancellation to an
-// in-flight request's context — Stop's own bookkeeping is what's under test.
-func TestProxyStopWaitsForInFlightForward(t *testing.T) {
-	const upstreamToken = "upstream-secret-xyz"
-	t.Setenv("GITHUB_TOKEN", upstreamToken)
-
-	entered := make(chan struct{})
-	release := make(chan struct{})
-
-	blocking := mcp.NewServer(&mcp.Implementation{Name: "upstream-blocking-stub", Version: "v0.1.0"}, nil)
-	mcp.AddTool(blocking, &mcp.Tool{Name: "block", Description: "blocks until released"}, func(ctx context.Context, req *mcp.CallToolRequest, args EchoArgs) (*mcp.CallToolResult, any, error) {
-		close(entered)
-		<-release
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: args.Text}}}, nil, nil
-	})
-	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return blocking }, nil))
-	defer ts.Close()
-
-	tools := map[string]config.ToolResource{
-		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
-	}
-	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
-
-	var mu sync.Mutex
-	appendCount := 0
-	appendEvent := func(engine.Event) {
-		mu.Lock()
-		appendCount++
-		mu.Unlock()
-	}
-
-	bind := testBinding()
-	agent := testAgentDef("github")
-	if _, _, err := p.Start(context.Background(), bind, agent, appendEvent); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	p.mu.Lock()
-	sess := p.sessions[0].sess
-	p.mu.Unlock()
-	handler := p.forward(bind, agent, "github", allowedTools{"github": nil}, sess, appendEvent, obs.Discard())
-
-	callDone := make(chan struct{})
-	go func() {
-		defer close(callDone)
-		req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "block", Arguments: json.RawMessage(`{"text":"x"}`)}}
-		// A ctx independent of any HTTP request, so nothing outside this test
-		// can cancel it — the block below is the only thing releasing it.
-		_, _ = handler(context.Background(), req)
-	}()
-
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("forward call never reached the upstream handler")
-	}
-
-	stopDone := make(chan struct{})
-	go func() {
-		p.Stop()
-		close(stopDone)
-	}()
-
-	select {
-	case <-stopDone:
-		t.Fatal("Stop() returned while a forward call was still in flight")
-	case <-time.After(200 * time.Millisecond):
-		// Expected: Stop is blocked on the in-flight call.
-	}
-
-	close(release)
-
-	select {
-	case <-stopDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Stop() did not return after the in-flight call finished")
-	}
-	<-callDone
-
-	mu.Lock()
-	got := appendCount
-	mu.Unlock()
-	if got != 1 {
-		t.Fatalf("appendEvent called %d times by the time Stop() returned, want exactly 1", got)
-	}
-
-	// A second Stop() (the engine never issues one, but defense in depth)
-	// must not panic or hang.
-	p.Stop()
 }
 
 // TestProxyForwardSetsReasonOnUpstreamFailure exercises forward's "failed"
@@ -521,7 +422,7 @@ func TestProxyForwardSetsReasonOnUpstreamFailure(t *testing.T) {
 	agent := testAgentDef("github")
 	allow := allowedTools{"github": nil}
 
-	handler := p.forward(bind, agent, "github", allow, upstream, appendEvent, obs.Discard())
+	handler := p.forward(context.Background(), bind, agent, "github", allow, upstream, appendEvent, obs.Discard())
 	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}
 
 	result, err := handler(context.Background(), req)
@@ -574,7 +475,7 @@ func TestProxyForwardCapsReasonOnCallError(t *testing.T) {
 	}
 	p := New(config.GatewayConfig{Tools: tools}, "", broker.StaticEnv{}, nil, "")
 	var events []engine.Event
-	handler := p.forward(testBinding(), testAgentDef("github"), "github", allowedTools{"github": nil}, upstream,
+	handler := p.forward(context.Background(), testBinding(), testAgentDef("github"), "github", allowedTools{"github": nil}, upstream,
 		func(e engine.Event) { events = append(events, e) }, obs.Discard())
 	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "echo", Arguments: json.RawMessage(`{"text":"x"}`)}}
 	if _, err := handler(context.Background(), req); err == nil {
@@ -1447,7 +1348,7 @@ func TestProxyForwardDeniesToolOffAllowlist(t *testing.T) {
 	agent := testAgentDef("github")
 	allow := allowedTools{"github": {"echo": {}}} // "other" deliberately absent
 
-	handler := p.forward(bind, agent, "github", allow, nil, appendEvent, obs.Discard())
+	handler := p.forward(context.Background(), bind, agent, "github", allow, nil, appendEvent, obs.Discard())
 	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "other", Arguments: json.RawMessage(`{"text":"x"}`)}}
 
 	result, err := handler(context.Background(), req)
@@ -1599,6 +1500,8 @@ func (u *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = gz.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`))
 		_ = gz.Close()
 		_, _ = w.Write(buf.Bytes())
+	case "hang":
+		<-r.Context().Done()
 	default:
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":0}}`))
@@ -1632,7 +1535,7 @@ func startModelGateway(t *testing.T, up *modelUpstream, agent config.AgentDef, k
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { p.Stop() })
 	return p, base, token, &events
 }
 
@@ -2400,5 +2303,316 @@ func TestProxyTokenExchangeStartFailureNoLeak(t *testing.T) {
 		if strings.Contains(logBuf.String(), forbidden) {
 			t.Fatalf("operational log echoed %q", forbidden)
 		}
+	}
+}
+
+// TestModelCallAcrossStopIsRecordedOnce: a model call in flight when Stop
+// runs is counted (it was admitted), so it must be recorded — Stop cuts the
+// agent's connection, which cancels r.Context(), which cancels the outbound
+// request and drives ReverseProxy into ErrorHandler, which records failed;
+// Stop returns only then, with the count.
+func TestModelCallAcrossStopIsRecordedOnce(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{mode: "hang"}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	p, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	callDone := make(chan struct{})
+	go func() {
+		defer close(callDone)
+		// Stop cuts this connection, so the client is expected to see an
+		// error: the request is built here rather than through postModel,
+		// which fails the test on one.
+		req, err := http.NewRequest(http.MethodPost, base+"v1/chat/completions", strings.NewReader(`{"model":"planner-model","messages":[]}`))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	waitFor(t, "the model call to reach the upstream", func() bool { c, _, _, _, _ := up.snapshot(); return c == 1 })
+
+	stopped := make(chan int, 1)
+	go func() { stopped <- p.Stop() }()
+	var n int
+	select {
+	case n = <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return: the in-flight model call was not cancelled by the connection cut")
+	}
+	<-callDone
+	var failed int
+	for _, e := range *events {
+		if e.Type == "model_call" && e.Status == "failed" && e.Reason == "model call did not complete" {
+			failed++
+		}
+	}
+	if failed != 1 || len(*events) != 1 {
+		t.Fatalf("events = %+v, want exactly one failed model_call", *events)
+	}
+	if n != 1 {
+		t.Fatalf("Stop() = %d, want 1", n)
+	}
+}
+
+// TestModelBadRouteIsRecordedFailed: a route whose endpoint is not a URL
+// was authorized and admitted, so the 502 it earns is a recorded failure.
+func TestModelBadRouteIsRecordedFailed(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	gw := config.GatewayConfig{Models: map[string]config.ModelRoute{
+		"planner-model": {Endpoint: "nourl", Model: "gpt-4o", APIKeyEnv: "MODEL_KEY"},
+	}}
+	gw.Defaults.Model = "planner-model"
+	p := New(gw, t.TempDir(), broker.StaticEnv{}, nil, "")
+	rec := &eventRecorder{}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	base, token, err := p.Start(context.Background(), testBinding(), agent, rec.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := postModel(t, base, token, `{"model":"planner-model","messages":[]}`, nil)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+	if n := p.Stop(); n != 1 {
+		t.Fatalf("Stop() = %d, want 1", n)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.ev) != 1 || rec.ev[0].Type != "model_call" || rec.ev[0].Status != "failed" || rec.ev[0].Reason != reasonModelRouteMalformed {
+		t.Fatalf("events = %+v, want one failed model_call with the fixed reason", rec.ev)
+	}
+}
+
+// TestModelPreAdmissionAnswersAreNotDoorCalls: 405, a non-object body and a
+// bad token are answered before the hold — nothing recorded, Stop() == 0.
+func TestModelPreAdmissionAnswersAreNotDoorCalls(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+	p, base, token, events := startModelGateway(t, &modelUpstream{}, agent, t.TempDir())
+	get, _ := http.NewRequest(http.MethodGet, base+"v1/chat/completions", nil)
+	get.Header.Set("Authorization", "Bearer "+token)
+	if resp, err := http.DefaultClient.Do(get); err != nil || resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET: %v %v", resp, err)
+	}
+	if resp := postModel(t, base, token, `[1]`, nil); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("array body: %d, want 400", resp.StatusCode)
+	}
+	if resp := postModel(t, base, "nope", `{"model":"planner-model"}`, nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad token: %d, want 401", resp.StatusCode)
+	}
+	if n := p.Stop(); n != 0 || len(*events) != 0 {
+		t.Fatalf("Stop() = %d, events = %+v; want 0 and none", n, *events)
+	}
+}
+
+// TestToolCallHoldSpansTheHandler: the tools/call middleware's hold spans
+// the mirrored tool handler and its append — the SDK dispatches
+// synchronously on the middleware's call stack — so Stop does not return
+// while an admitted tool call's append is still running, and the call is
+// counted once. The append blocks on a test channel; nothing else holds.
+func TestToolCallHoldSpansTheHandler(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "upstream-secret-xyz")
+	ts, _ := newStubUpstream(t, "upstream-secret-xyz")
+	defer ts.Close()
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
+	}}, "", broker.StaticEnv{}, nil, "")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var appends atomic.Int32
+	proxyURL, token, err := p.Start(context.Background(), testBinding(), testAgentDef("github"), func(engine.Event) {
+		appends.Add(1)
+		close(entered)
+		<-release
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := stubAgentSession(context.Background(), proxyURL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callDone := make(chan struct{})
+	go func() {
+		defer close(callDone)
+		_, _ = sess.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "x"}})
+	}()
+	<-entered
+	stopped := make(chan int, 1)
+	go func() { stopped <- p.Stop() }()
+	select {
+	case <-stopped:
+		t.Fatal("Stop() returned while a tool call's append was in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case n := <-stopped:
+		if n != 1 || appends.Load() != 1 {
+			t.Fatalf("Stop() = %d, appends = %d; want 1 and 1", n, appends.Load())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return after the append finished")
+	}
+	<-callDone
+}
+
+// TestToolCallAcrossStopIsCancelledAndRecorded: the SDK hands the handler
+// the session's context, not the request's, so cutting the connection does
+// not end an upstream call. Stop cancels the gateway's step context before
+// it waits, so an upstream call in flight ends, is recorded failed, and
+// Stop returns with the count.
+//
+// Two waits, each pinned to one fact. First: the cancel ends the upstream
+// call and the gateway records it — the tool_call lands while the stub is
+// still blocked, so nothing but the step-context cancel can have ended the
+// call. Then the stub is released and Stop must return. The release is not
+// optional: Stop closes the upstream session after its hold wait, and the
+// SDK's session close holds the connection's in-flight mutex through a
+// synchronous DELETE that the upstream serves only once its handler
+// returns — which waits for the cancel notification, which is queued
+// behind that same mutex. The SDK bounds the cycle at its own 5 s close
+// timeout (see Stop's comment); releasing the stub once the record has
+// landed takes it off the path, so the second wait is a hang guard, not a
+// race against that bound.
+func TestToolCallAcrossStopIsCancelledAndRecorded(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "upstream-secret-xyz")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	blocking := mcp.NewServer(&mcp.Implementation{Name: "upstream-blocking-stub", Version: "v0.1.0"}, nil)
+	mcp.AddTool(blocking, &mcp.Tool{Name: "block", Description: "blocks until cancelled"}, func(ctx context.Context, req *mcp.CallToolRequest, args EchoArgs) (*mcp.CallToolResult, any, error) {
+		close(entered)
+		// Two exits: the cancellation under test, and the test's own release —
+		// httptest.Server.Close waits for outstanding handlers, so a stub that
+		// could only end on ctx would turn a failed assertion into a hang if
+		// the SDK did not propagate the client's cancel to this handler.
+		select {
+		case <-ctx.Done():
+		case <-release:
+		}
+		return nil, nil, ctx.Err()
+	})
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return blocking }, nil))
+	defer ts.Close()
+	defer unblock() // deferred after ts.Close, so it runs first
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
+	}}, "", broker.StaticEnv{}, nil, "")
+	rec := &eventRecorder{}
+	recorded := make(chan struct{})
+	var recordedOnce sync.Once
+	proxyURL, token, err := p.Start(context.Background(), testBinding(), testAgentDef("github"), func(e engine.Event) {
+		rec.record(e)
+		recordedOnce.Do(func() { close(recorded) })
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := stubAgentSession(context.Background(), proxyURL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callDone := make(chan struct{})
+	go func() {
+		defer close(callDone)
+		_, _ = sess.CallTool(context.Background(), &mcp.CallToolParams{Name: "block", Arguments: map[string]any{"text": "x"}})
+	}()
+	<-entered
+	stopped := make(chan int, 1)
+	go func() { stopped <- p.Stop() }()
+	select {
+	case <-recorded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the step-context cancel did not end the upstream call: no tool_call was recorded while the stub was still blocked")
+	}
+	unblock()
+	select {
+	case n := <-stopped:
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		if n != 1 || len(rec.ev) != 1 || rec.ev[0].Type != "tool_call" || rec.ev[0].Status != "failed" {
+			t.Fatalf("Stop() = %d, events = %+v; want 1 and exactly one failed tool_call", n, rec.ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return after the cancelled call was recorded and the upstream handler had returned")
+	}
+	<-callDone
+}
+
+// TestToolsListAndPingAreNotDoorCalls: MCP housekeeping on the same route
+// is not a door call — Stop reports only tools/call.
+func TestToolsListAndPingAreNotDoorCalls(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "upstream-secret-xyz")
+	ts, _ := newStubUpstream(t, "upstream-secret-xyz")
+	defer ts.Close()
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
+	}}, "", broker.StaticEnv{}, nil, "")
+	rec := &eventRecorder{}
+	proxyURL, token, err := p.Start(context.Background(), testBinding(), testAgentDef("github"), rec.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := stubAgentSession(context.Background(), proxyURL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.ListTools(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Ping(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.CallTool(context.Background(), &mcp.CallToolParams{Name: "not-mirrored", Arguments: map[string]any{}}); err == nil {
+		t.Fatal("an unmirrored tool must fail")
+	}
+	if _, err := sess.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := p.Stop(); n != 2 {
+		t.Fatalf("Stop() = %d, want 2 (one refused, one succeeded tools/call; initialize, tools/list and ping are not door calls)", n)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.ev) != 2 || rec.ev[0].Status != "refused" || rec.ev[1].Status != "succeeded" {
+		t.Fatalf("events = %+v", rec.ev)
+	}
+}
+
+// TestToolsCallOnClosingIsNeitherCountedNorRecorded: a tools/call arriving
+// once the proxy is closing is refused at admission without reaching the
+// handler.
+func TestToolsCallOnClosingIsNeitherCountedNorRecorded(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "upstream-secret-xyz")
+	ts, _ := newStubUpstream(t, "upstream-secret-xyz")
+	defer ts.Close()
+	p := New(config.GatewayConfig{Tools: map[string]config.ToolResource{
+		"github": {Kind: "mcp", URL: ts.URL, CredentialSource: "static_env", TokenEnv: "GITHUB_TOKEN"},
+	}}, "", broker.StaticEnv{}, nil, "")
+	rec := &eventRecorder{}
+	proxyURL, token, err := p.Start(context.Background(), testBinding(), testAgentDef("github"), rec.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := stubAgentSession(context.Background(), proxyURL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	p.closing = true
+	p.mu.Unlock()
+	if _, err := sess.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "x"}}); err == nil {
+		t.Fatal("a tools/call after closing must be refused")
+	}
+	p.mu.Lock()
+	p.closing = false
+	p.mu.Unlock()
+	if n := p.Stop(); n != 0 || len(rec.ev) != 0 {
+		t.Fatalf("Stop() = %d, events = %+v; want 0 and none", n, rec.ev)
 	}
 }
