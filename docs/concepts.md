@@ -220,7 +220,9 @@ re-forges a new, internally consistent chain from that point; checking for
 that requires a chain head recorded somewhere off the machine, which
 Agenthof does not store. `audit verify --expect-head` performs exactly
 that check when handed a previously recorded head — the limitation is that
-Agenthof itself keeps no such record, not that the check is unavailable.
+Agenthof itself keeps no such record, not that the check is unavailable (an
+operator can have a finished run's head pinned into a transparency log
+instead, below).
 Once an attacker has write access to the ledger file, nothing recorded
 after the point of compromise can be trusted on the strength of the chain
 alone. No Agenthof document may describe the ledger as tamper-proof.
@@ -251,6 +253,27 @@ mis-records; an action that never reached a door is containment's concern,
 not the ledger's; nothing here makes the ledger tamper-proof; and
 completeness says nothing about whether a door *can* refuse — only that
 what it did is on record.
+
+A finished run's receipt may also be **anchored**. Where the control root's
+`integrity.yaml` declares `anchor_runs: on-demand`, an operator — or a cron —
+runs `agenthof audit anchor --run <run-id>`, or `--pending` for every run not
+yet anchored, and the run's final head is entered into a transparency log the
+operator names. The proof is written beside the run's ledger as
+`<run-id>.anchor`, never inside it: a run's ledger has one writer, and nothing
+follows its final event. Ship the two files together; a `.jsonl` alone reads
+`not anchored`. `audit <run-id>` and `audit verify <run-id>` then report one of
+five states — not anchored, anchored but verified only under the key the log
+served, independently verified, a mismatch, or unverifiable — and the run
+commands exit `6` or `7` on the last two. The honest condition is the same one
+the control ledger carries: the anchor is independently verifiable only when
+the verifier holds the log's key from somewhere other than the log or the
+receipt (`anchor.pub` or `--anchor-key`), and a log the same party runs is only
+as independent as its trust domain. Only a SHA-256 fingerprint leaves the
+machine, but on a public log every anchored run is one permanent public entry,
+so which runs to anchor, and when, is the operator's choice. A key the
+verifier cannot reach or does not trust reads `unverifiable`, never tampering.
+See [`reference/config.md`](reference/config.md#anchoring-a-runs-receipt) and
+[`lifecycle.md`](lifecycle.md#5a-anchor-it--on-demand-or-by-the-sweep).
 
 Refusals and failures are different things, and the distinction is visible
 in the ledger:

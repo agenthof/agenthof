@@ -872,11 +872,13 @@ authorized against no role, permitted for any identity the host resolves (see
 | `agenthof config sign [--control-log <path>]` | `--control-log` |
 | `agenthof config vouch [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--as`, `--groups`, `--token` |
 | `agenthof registry enable\|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | same |
+| `agenthof audit <run-id> [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>] [--server <url>] [--token <jwt>]` | `--log-dir`, `--control-log`, `--anchor-key`, `--server`, `--token` |
+| `agenthof audit verify <run-id> [--expect-head <hex>\|<count>:<hex>] [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>] [--offline] [--anchor-timeout <dur>]` | `--expect-head`, `--log-dir`, `--control-log`, `--anchor-key`, `--offline`, `--anchor-timeout` |
 | `agenthof audit control [--control-log <path>]` | `--control-log` |
 | `agenthof audit verify control [--control-log <path>] [--expect-head <hex>\|<seq>:<hex>] [--anchor-key <path>] [--integrity <path>] [--offline] [--anchor-timeout <dur>] [--sink-timeout <dur>]` | `--control-log`, `--expect-head`, `--anchor-key`, `--integrity`, `--offline`, `--anchor-timeout`, `--sink-timeout` |
 | `agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--control-log`, `--config`, `--as`, `--groups`, `--token` |
 | `agenthof audit restore control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--segment N]... [--integrity <path>] [--sink-timeout <dur>] [--rebuild --log-id <id>]` | `--control-log`, `--config`, `--as`, `--groups`, `--token`, `--segment`, `--integrity`, `--sink-timeout`, `--rebuild`, `--log-id` |
-| `agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout <dur>]` | `--control-log`, `--as`, `--groups`, `--token`, `--timeout` |
+| `agenthof audit anchor [--control-log <path>] [--run <run-id> \| --pending [--limit <n>]] [--log-dir <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout <dur>]` | `--control-log`, `--run`, `--pending`, `--limit`, `--log-dir`, `--as`, `--groups`, `--token`, `--timeout` |
 | `agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>] [--sink-timeout <dur>]` | `--control-log`, `--as`, `--groups`, `--token`, `--if-larger-than`, `--sink-timeout` |
 | `agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]` | `--control-log`, `--as`, `--groups`, `--token`, `--admin-base` |
 | `agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--older-than`, `--log-dir`, `--artifact-dir`, `--control-log`, `--as`, `--groups`, `--token` |
@@ -1070,15 +1072,19 @@ Between anchors the chain is evidenced by its hash links alone. The
 `credential` block is shape-checked only; a `client_credentials` grant
 missing its endpoint or environment names fails when `audit anchor` runs,
 recorded as an `anchor` `error`, never silently. The readers — `audit
-control`, `audit verify control`, `investigate` — never read this file:
-`audit verify control` verifies anchors from the records themselves.
+control`, `audit verify control`, `audit <run-id>`, `audit verify <run-id>`,
+`investigate` — never read this file: `audit verify control` verifies anchors
+from the records themselves, and the run commands from the `.anchor` file beside
+the run. Anchoring a run's receipt, enabled by `anchor_runs: on-demand`, is
+described under [Anchoring a run's receipt](#anchoring-a-runs-receipt).
 
 The **pinned log key**, when present, lives beside the ledger too:
 `<dir>/anchor.pub` — the transparency log's checkpoint-signing public key
 (PEM, ECDSA P-256 only; `verify.pub` is a different key for a different
 purpose and is never read here), operator-written, obtained from the log's
 own trust root or out of band — or passed as `--anchor-key <path>` to `audit
-verify control` or `investigate` for a verifier on another machine. With a key
+verify control`, `audit verify <run-id>`, `audit <run-id>` or `investigate` for a
+verifier on another machine. With a key
 pinned, anchors verify **offline from the proof stored on the record**, and
 `audit anchor` refuses a log presenting any other key. Without one, the key the
 log serves is used and recorded (`backend_key_id`), and every line says `as
@@ -1285,7 +1291,7 @@ summary; `apply --bundle` accepts it as is. `--control-log` is ignored with
 
 ### `--expect-head`
 
-`agenthof audit verify control` only. The control-ledger head hash (hex) to
+`agenthof audit verify control` and `agenthof audit verify <run-id>`. The control-ledger head hash (hex) to
 check the freshly verified chain against — a hash Agenthof printed to
 stdout after some earlier append, saved somewhere off this machine (see
 [`docs/concepts.md`](../concepts.md#control-plane-audit)). Only the hash is
@@ -1298,6 +1304,15 @@ a head saved off this machine checks a copy of the chain from anywhere, with or
 without the log. Either form failing is exit 4 (`expect-head mismatch: want <hex> at seq
 <seq>, got <hex>` / `… but the chain has <N> records`); a value that is not
 64 lowercase hex, optionally prefixed `<seq>:`, is a usage error.
+
+On `audit verify <run-id>` the same two forms check the run's own chain. A run
+ledger has no sequence numbers, so `<count>` is the number of events: the
+chain must still reproduce `<hex>` at event `<count>` — the `events=N
+sha256=H` line `audit anchor --run` prints, handed back as `N:H`. The bare
+`<hex>` form (the run's current head) keeps working after the run is
+anchored, because a run's head is final at its last event and anchoring never
+changes it. A mismatch is exit 4, ranked below an anchor mismatch (`6`), a
+completeness gap (`11`) and an unterminated run (`12`).
 
 ### `--since`, `--until`
 
@@ -1348,15 +1363,19 @@ rendering — never the exit code.
 
 ### `--log-dir`
 
-`agenthof investigate` only, in this section (`agenthof run` also takes it,
-documented alongside the engine). Default `.agenthof/runs`. `investigate`
-reads every `<log-dir>/r-*.jsonl` run log it finds there, in addition to
-`--control-log`. Not to be confused with `--log-level` / `--log-format`, which
+`agenthof investigate`, `agenthof audit <run-id>`, `agenthof audit verify
+<run-id>` and `agenthof audit anchor --run|--pending`, in this section
+(`agenthof run` also takes it, documented alongside the engine). Default
+`.agenthof/runs`. `investigate` reads every `<log-dir>/r-*.jsonl` run log it
+finds there, in addition to `--control-log`; the two run readers read
+`<run-id>.jsonl` and its `<run-id>.anchor` there; `audit anchor` scans and
+reads run ledgers there and writes each proof beside its run. Not to be confused with `--log-level` / `--log-format`, which
 configure the operational log on stderr — see [`logging.md`](logging.md).
 
 ### `--anchor-key`
 
-`audit verify control` and `investigate`. The transparency log's
+`audit verify control`, `audit verify <run-id>`, `audit <run-id>` and
+`investigate`. The transparency log's
 checkpoint key to verify anchors under (PEM, ECDSA P-256), instead of
 `anchor.pub` beside the control ledger; given, it is the pin whether or not
 the file exists. For `audit verify control` an absent or unreadable key makes
@@ -1364,7 +1383,12 @@ every anchor unverifiable (exit 7). For `investigate` it is the same
 per-anchor verdict and never a usage error — the exit stays what the chains
 say — and the flag is local-only: with `--server` (or `AGENTHOF_SERVER`)
 `investigate` exits 2, because the server pins `anchor.pub` beside its own ledger
-and a pin you named would otherwise be silently ignored.
+and a pin you named would otherwise be silently ignored; `audit <run-id>
+--server` with `--anchor-key` exits 2 for the same reason. On the run commands
+an absent or unreadable key makes an anchored run `unverifiable` (exit 7),
+never a mismatch. For a receipt verified off the box, `--anchor-key` is the
+pin: the run's `.anchor` file travels with its `.jsonl`, and the control
+ledger need not.
 
 ### `--if-larger-than`
 
@@ -1390,15 +1414,17 @@ default is `2m` for `audit seal` and `audit restore control` and `60s` for
 
 ### Exit codes
 
-`agenthof audit <run-id>` and `agenthof audit verify <run-id>` compute every verdict, print every line, then exit by precedence **1, 11, 12, 4, 0** — from the run's ledgers alone (the control log's health never changes these codes):
+`agenthof audit <run-id>` and `agenthof audit verify <run-id>` compute every verdict, print every line, then exit by precedence **1, 6, 11, 12, 4, 7, 0** — from the run's ledgers, their `.anchor` files and the pinned log key alone (the control log's health never changes these codes; neither command reads `integrity.yaml`):
 
 | Exit | Meaning |
 |---|---|
 | `1` | The run's ledger is torn or broken, cannot be opened or read — or a child run's ledger (one a `spawn` event names) is |
+| `6` | **Anchor mismatch** — a definitive content disagreement for the run's `.anchor` proof, anywhere in the run's delegation tree: the sidecar names another run; its count is not the ledger's final event; the ledger no longer reproduces the anchored head at that position (a truncated or re-forged receipt under a real proof); or, under the trusted log key, the stored entry names another hash, the inclusion proof fails, or the checkpoint's signature is invalid. A definitive anchor verdict outranks a completeness gap — the anchor is a verdict on the whole chain, a gap one inside it — and every other line still prints |
 | `11` | **Completeness gap** — the chain is intact but the ledger does not account for itself: a step whose recorded door events differ from the `door_calls` its gateway admitted (the line names the step and both numbers); a step with no final event; a door event outside a step; a `spawn` naming a child whose ledger is not under `--log-dir`, or whose first event does not link back; a child ledger naming this finished run as its parent that no `spawn` event names; `door_calls` missing where the run's `door_accounting` marker promised it. Anywhere in the run's delegation tree |
 | `12` | **Unterminated** — a run with no final event, in this run or a child: still running, or its tail was lost; the file cannot tell which, so re-check once the run should be over. Outranks `4`: a live run's head legitimately differs from any recorded one |
 | `4` | (`audit verify` only) `--expect-head` did not match |
-| `0` | Integrity verified and completeness `complete` — or `no claim`, a ledger recorded before door accounting, verified on integrity alone |
+| `7` | **Anchor unverifiable** — no verdict could be reached for a run's `.anchor` proof anywhere in the tree and none mismatched: no key to verify under (`audit <run-id>` is offline and reads the pin only, so an anchored run with no pinned key reads this way — pin the log's key or run `audit verify <run-id>`), a log key other than the pinned one (a rotated key), a log that does not answer the presence check, a sidecar that cannot be read or holds no records, a proof format or backend this build does not read. Never tamper detected: the line names the fix. Ranked last because it is the one transient verdict |
+| `0` | Integrity verified and completeness `complete` — or `no claim`, a ledger recorded before door accounting, verified on integrity alone — and the run is `not anchored`, or its anchor is verified (independently under a pinned key, or as served and said not to be independent) |
 | `2` | Usage |
 
 `agenthof apply` / `agenthof registry enable|disable`:
@@ -1498,7 +1524,8 @@ each call to the sink (default 60s). `--offline` skips the pass entirely —
 it is network by nature — and prints `protected copies: not checked (--offline)`;
 the exit code is unaffected.
 
-`agenthof audit anchor`:
+`agenthof audit anchor` (the control-ledger form; with `--run` or `--pending`
+see [Anchoring a run's receipt](#anchoring-a-runs-receipt)):
 
 | Exit | Meaning |
 |---|---|
@@ -1572,6 +1599,167 @@ An anchor's verdict is shown on its event and never changes the exit code or `in
 `integrity.ok` is about the chains this reader verified from their bytes; it
 stays `true` on a root whose anchors prove a rewrite. Read the `anchors:`
 trailer, or select `.events[].anchor.verdict`, for that.
+
+### Anchoring a run's receipt
+
+`audit anchor` with no run flag pins the control ledger's head (above). With
+`--run` or `--pending` it pins a **finished run's** receipt the same way,
+into the same transparency log, and puts the proof beside the run. It is off
+unless the control root's `integrity.yaml` says `anchor_runs: on-demand`
+(which requires `anchor: tlog` and the same `anchor_backend`); under `none`,
+absent, or no `integrity.yaml` at all, both forms print `audit anchor: run
+anchoring is not configured in <path> (anchor_runs: none); set anchor_runs:
+on-demand to anchor runs`, contact nothing and exit 1, recording nothing. A
+build older than this one refuses an `integrity.yaml` that names
+`anchor_runs`, like any key it does not know. `agenthof run` neither reads the
+key nor waits on any of this, and `serve` never anchors.
+
+```
+agenthof audit anchor --run <run-id> [--log-dir .agenthof/runs] [--control-log <path>] [--token <jwt>] [--timeout 30s]
+agenthof audit anchor --pending      [--log-dir .agenthof/runs] [--control-log <path>] [--token <jwt>] [--timeout 30s] [--limit 50]
+```
+
+**The command is the trigger; cron is the cadence.** Nothing anchors a run
+until someone runs one of these. `--run` anchors the one run you name;
+`--pending` anchors every run under `--log-dir` that has no `<run-id>.anchor`
+yet. A production cron presents `--token` (or `AGENTHOF_TOKEN`); `--as` and
+`--groups` are self-asserted and for development only, as everywhere. The
+caller needs the same `anchor` grant the control form needs — there is no new
+operation — and is the invoker on the record.
+
+What `--run <run-id>` does, in order: the run id must be `r-` followed by 16
+lowercase hex (anything else exits 1 before a file is touched); the caller is
+authenticated and authorized; the run's ledger is read — never written — and
+must be a whole chain that ends at its final event (`workflow_finished`, or
+`run_refused` for a refused run); its final head (the event count and the
+SHA-256 of the last record) is submitted to the log; the log's answer is
+verified before anything is recorded; the proof is written beside the run as
+`<run-id>.anchor` (written atomically — a crash leaves the old file or none,
+never half of one); and one `anchor` record naming the run is appended to the
+control ledger, with no proof on it (the proof is in the `.anchor` file). Only
+the SHA-256 and a one-time public key leave the machine — never an event, a
+prompt, an artifact or an identity. It prints what to ship off the box:
+
+```
+anchored run r-<16 hex>: events=<N> sha256=<64 hex>
+  log: <url>  entry: <80 hex>  log key: <64 hex> (pinned|as served)
+  index: <n>  integrated: <time>  (as reported by the log)
+control head: seq=<K> sha256=<64 hex>
+```
+
+`--run` on a run that is already anchored **re-pins** it: a second entry in
+the log, a second line in the `.anchor` file, a second control record — a
+deliberate act. `--pending` never does: a run that already has a `.anchor`
+file is skipped without being opened, so each run is filed once and log
+traffic follows the rate at which runs finish, not the rate at which the cron
+fires; an empty pass reads the directory and makes no request and no record.
+Every run ledger under `--log-dir` is a candidate in name order, child runs
+and refused-only runs included; the control log and non-ledger files are
+skipped. A candidate that cannot be anchored (no final event, torn or broken,
+gone since the scan) is reported, counted as skipped, and does not use up
+`--limit`; `--limit` (default 50, must be positive) bounds the **submissions**
+in one pass, and `--timeout` (default 30s) bounds each submission. `--pending`
+prints a line per run it files, then a summary and the control head:
+
+```
+anchored run r-<16 hex>: events=<N> sha256=<64 hex>
+  log: …
+pending: <A> anchored, <S> skipped (not anchorable), <R> remaining
+control head: seq=<K> sha256=<64 hex>
+```
+
+Both forms take a host-level lock, `<log-dir>/.anchor.lock`, for the whole
+pass, so two passes (or a pass and a `--run`) never file the same run twice: the
+second prints `audit anchor: another agenthof process is anchoring runs under
+<log-dir>; retry`, exits 1 and records nothing. Choose a cron interval longer
+than a typical pass, so ticks do not spend themselves exiting busy.
+
+`agenthof audit anchor --run` and `--pending`:
+
+| Exit | Meaning |
+|---|---|
+| `0` | `--run`: anchored — the proof is beside the run and a run-scoped `anchor` `success` record is on the control ledger. `--pending`: every submission attempted landed — including a pass that found nothing to do (`pending: 0 anchored, 0 skipped (not anchorable), 0 remaining`) and a pass that stopped at `--limit` with runs `remaining` (the next pass continues; a backlog never turns a cron red) |
+| `1` | Not recorded: run anchoring not configured (above); the lock is held by another pass; `--run` names something that is not a run id, a run that is not there (`no run <id> under <log-dir>`), a ledger that is torn or broken (a run ledger has no repair — not anchorable), or one with no final event (still running, or its tail was lost — not anchorable); the control ledger is busy, damaged or mid-rotation. Recorded: a `refused` (no role grants `anchor`; a failed token) — which names no run, because a refusal tried nothing, and for `--pending` is one record for the whole pass and scans nothing — or an `error` (reason `anchor_failed`: the log did not answer, answered anything but created, returned a proof that does not verify, or presented a key other than the pinned one) naming the run it tried to cover, with no `.anchor` file written. `--pending` exits 1 when any submission failed. A log that does not answer stops the pass after that one attempt — one error record, not one per run — and leaves the rest for the next pass; a log that refuses one head (a rate limit, a rejection) costs that run an error and the pass goes on. Also: the log took the entry but the proof could not be written beside the run (`anchored at <ref> but the run's proof could NOT be written beside it`, recorded as an `error` with reason `io_error`); or the proof was written but the control record could not be appended (`anchored run <id> and its proof is beside the receipt, but the control ledger did NOT record it`) |
+| `2` | Usage: `--run` with `--pending`, a non-positive `--limit`, `--token` without `AGENTHOF_OIDC_ISSUER`, an `integrity.yaml` that cannot be read or does not validate, an `anchor.pub` that is not an ECDSA P-256 public key |
+
+When the posture names a well-known public log, or no `anchor.pub` sits beside
+the control ledger, the command logs one warning each to stderr (never to
+stdout, which stays the lines above): that every anchored run becomes one
+public, permanent entry, and that anchored receipts read `unverifiable` from
+`audit <run-id>` until the log's key is pinned.
+
+**The receipt is two files.** A run's receipt is `<run-id>.jsonl` **and**
+`<run-id>.anchor`, beside each other under `--log-dir`. Ship them together.
+A `.jsonl` without its `.anchor` reads `not anchored` — which is also what a
+run that was never anchored reads, and what a run whose `.anchor` was removed
+reads. The `.anchor` file is JSON Lines, one line per filing, each carrying the
+run id, the anchored head (`seq` is the final event's position), the log, the
+entry, the stored proof and the log key's id, and `anchored_by` — the
+invoker's subject, issuer and method, and nothing more. `runs prune` removes a
+run's `.anchor` with its ledger and cleans up one whose ledger is gone.
+
+**Reading it back.** `audit verify <run-id>` and `audit <run-id>` print one
+`ledger anchor:` line per `.anchor` record (and a summary when there are
+several) — one of five states, never worded stronger than the evidence:
+
+```
+ledger anchor: not anchored
+ledger anchor: anchored — verified under the log key as served (not independent; pin the log key in anchor.pub or --anchor-key to verify independently)
+ledger anchor: independently verified (log key pinned; events <N> <hash> → <log> entry <ref>)
+ledger anchor: MISMATCH — <cause>
+ledger anchor: unverifiable — <cause>
+```
+
+Neither command reads `integrity.yaml`: they judge the `.anchor` file beside
+the ledger, under the pin — `anchor.pub` beside `--control-log`, or
+`--anchor-key`. `audit verify <run-id>` verifies the stored proof offline
+and also asks the log whether the entry is still there (`--offline` skips
+that, prints `offline: presence not checked` and needs a pinned key;
+`--anchor-timeout`, default 30s, bounds each such call); with no pin it fetches the key the log serves
+and says plainly that the result is not independent. `audit <run-id>` is
+**offline under the pin, always**: it never asks the log, so on an anchored
+run with no pin it reads `unverifiable — no key to verify under (unpinned,
+offline)` and exits 7, naming the two fixes. A child run's `.anchor` is judged
+the same way and reported on its `subtree:` line; exit 6 or 7 is the worst in
+the tree. Exits are in the table above (`1, 6, 11, 12, 4, 7, 0`).
+
+**What this does and does not establish.**
+
+- **Independence has a condition.** A verifier that takes the log's key from
+  the log, and the log's address from the receipt it is checking, is checking
+  the writer's story against a witness the writer named. A run's anchor is
+  tamper-evident and independently verifiable only when the verifier pins the
+  log's key itself — from the log's own trust root or out of band — with
+  `anchor.pub` or `--anchor-key`, ideally on a machine the operator does not
+  control, with the `events=N sha256=H` line kept off the box as
+  `--expect-head N:H`. The output names its mode every time.
+- **A self-run log is only as independent as its trust domain.** A log the
+  same party runs beside the ledger can be rewritten by whoever can rewrite
+  both.
+- **The window is the operator's.** A run reads `not anchored` from its end
+  until someone files it; a reader cannot tell that from a run that was never
+  meant to be anchored. A cron shortens the window to its interval and never
+  closes it, and no cadence makes a rewrite *before* the filing detectable. A
+  run that never reached its final event is never anchored.
+- **What the anchor covers.** One anchor covers the run's whole recorded
+  chain. It prevents nothing — the file can still be rewritten; what changes
+  is that the rewrite is provable to whoever holds the reference — and the
+  log's time is as the log reports it.
+- **The proof's presence is not protected.** A truncated or re-forged ledger
+  under a real proof is a `MISMATCH`; a deleted `.anchor` reads `not
+  anchored`.
+- **Only a fingerprint leaves the machine, but each anchored run is one
+  public entry.** On a public log, anchoring every run publishes the
+  existence, timing and rate of every run as permanent public metadata —
+  refused runs included, since a sweep files them too. The operator chooses
+  which runs and when, and may point `anchor_backend.url` at a log of their
+  own, which buys confidentiality and independence only across a trust domain.
+- **Unreachable, rotated or absent keys are `unverifiable`, never
+  tampering.** Exit 7 with the fix on the line. A `--pending` pass is bounded
+  by `--limit`; if the log persistently rejects every head — a pinned key that
+  does not match the log's, an authorization failure — each attempted run
+  records its own `anchor` `error` and the pass exits 1, so the fault announces
+  itself on every tick.
 
 ### Anchors in the timeline
 
@@ -1740,8 +1928,9 @@ that put that exact config on record, drawn from `--control-log` (default
 A run recorded before `config_hash` existed omits the join line entirely.
 
 **Guarantee:** `audit <run-id>`'s own exit code (`0` clean, `1`
-torn/broken/IO error, `11` completeness gap, `12` unterminated — the same
-codes `audit verify <run-id>` uses) is computed from the run ledgers
+torn/broken/IO error, `6` anchor mismatch, `11` completeness gap, `12`
+unterminated, `7` anchor unverifiable — the same codes `audit verify
+<run-id>` uses) is computed from the run ledgers and their `.anchor` files
 alone: this run's, and its children's where `spawn` events name them. The
 control log's health — missing, torn, broken, or fine — never changes
 `audit <run-id>`'s exit code; at worst it changes the join line's wording

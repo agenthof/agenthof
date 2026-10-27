@@ -877,6 +877,14 @@ the head advanced), the proof must fit the cap — so a malformed anchor
 appends nothing. `audit control` renders it as `head anchored: seq K <hash>
 (tlog)`; a failed attempt renders as `anchor error`.
 
+Where the root also declares `anchor_runs: on-demand`, `audit anchor --run
+<run-id>` (or each run `--pending` files) anchors a finished run's final head
+instead of the control ledger's, and records the same `anchor` action once per
+run — the payload names the run (`run_id`) and carries no `proof`, which sits
+beside the run's own ledger as `<run-id>.anchor`; `audit verify control` skips
+such a record, since it vouches for nothing in the control chain. `audit
+control` renders it as `run r-… anchored: events N <hash> (tlog)`.
+
 One gap is named rather than hidden, as in §4 above: if the log took the entry
 but the record could not be appended, the command prints `anchored at <ref>
 but NOT recorded` and exits 1. That entry is harmless — a public digest with

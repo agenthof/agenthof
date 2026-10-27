@@ -61,6 +61,9 @@ That one line sets five things in motion:
       ▼
   5. Finish             workflow_finished { succeeded | failed }
       │
+      ▼  (optional — when the operator or their cron asks)
+  5a. Anchor it         workflow_finished ─► audit anchor --run | --pending ─► fingerprint ─► log ─► <run-id>.anchor beside the receipt
+      │
       ▼
   6. Read it back       agenthof audit <run-id>  ──►  who asked → what ran → integrity
 ```
@@ -416,7 +419,8 @@ error, a botched edit) and **lazy tampering** — any edit, deletion, or
 reordering that doesn't recompute every later hash. It does **not**, by itself,
 catch a careful attacker who truncates the tail and re-forges a consistent chain
 from that point; catching that needs a chain head recorded off the machine
-(`audit verify --expect-head`), which Agenthof does not store for you. The
+(`audit verify --expect-head`), which Agenthof does not store for you — or an
+anchor in a transparency log (step 5a). The
 ledger is honestly tamper-**evident**, not tamper-**proof**, and no Agenthof
 document should call it otherwise.
 
@@ -428,6 +432,59 @@ guarantees that window — the gateway for a step is started after
 record, before the step's final event is written. The final event carries
 `door_calls`, the number of calls the gateway admitted; `audit` compares
 it with the door events inside the window.
+
+## 5a. Anchor it — on demand or by the sweep
+
+The ledger above is as independent as the machine it sits on. A finished run's
+receipt can be checked against something off that machine too, if the
+operator has asked for it: the control root's `integrity.yaml` says
+`anchor: tlog` (naming a transparency log) and `anchor_runs: on-demand`. Nothing
+anchors a run by itself — the command is the trigger, and cron, if any, is the
+cadence. (Without that posture the commands below refuse, and nothing in this
+step happens. `agenthof run` neither reads the posture nor waits.)
+
+```
+  workflow_finished ─► audit anchor --run | --pending ─► fingerprint ─► log ─► <run-id>.anchor beside the receipt
+```
+
+- **Who asks.** An operator at a terminal, or a cron presenting `--token`
+  (`--as`/`--groups` are self-asserted and for development only). They need
+  the control-plane `anchor` grant — the same one that anchors the control
+  ledger — and they are the invoker on the record. There is no
+  automatic actor.
+- **What is anchored.** The run's **final head**: the number of events and
+  the SHA-256 of the last record, once the run has ended (`workflow_finished`,
+  or the single `run_refused` of a refused run). A run still running, or whose
+  tail was lost, has no final event and is not anchored. `--run <run-id>`
+  anchors one run (again, if it already was — a deliberate re-pin);
+  `--pending` anchors every run under `--log-dir` that has no proof yet, each
+  exactly once, up to `--limit` submissions a pass, children and refused runs
+  included.
+- **What leaves the machine.** One SHA-256 and a one-time public key — never
+  an event, a prompt, an artifact or an identity. The log hands back a proof
+  that the fingerprint was entered, and Agenthof checks that proof before it
+  records anything. On a public log, though, every anchored run is one
+  permanent public entry with the log's time on it, so the operator chooses
+  which runs to anchor and when, and may name a log of their own.
+- **Where the proof goes.** Beside the receipt, as `<run-id>.anchor`, written
+  atomically — never into the run's ledger, which has one writer, the engine,
+  and nothing after its last event. The act is also recorded in the control
+  ledger, once per run, naming the run and the invoker (without the proof; that
+  stays with the receipt). Ship the receipt's two files together: a
+  `.jsonl` alone reads `not anchored`.
+- **Overlap.** One pass at a time per log directory; a second exits busy and
+  records nothing. Each run is filed once, so a frequent cron costs a
+  directory read, not log traffic.
+
+The bounds are stated plainly. The anchor is **tamper-evident and
+independently verifiable only if the verifier supplies the log's key
+themselves** (`anchor.pub` or `--anchor-key`) rather than taking it from the
+log or the receipt; a log the same party runs is only as independent as its
+trust domain. A run reads `not anchored` from its end until it is filed, and
+nothing detects a rewrite made before then. The anchor covers the whole
+recorded chain at that head, prevents nothing, and reports the log's time, not
+a verified one. See [`reference/config.md`](reference/config.md#anchoring-a-runs-receipt)
+for the flags, the output and the exit codes.
 
 ## 6. Reading it back
 
@@ -446,11 +503,21 @@ and exactly that many door events sit inside the step; `GAP — step <name>:
 N door call(s) admitted, M recorded` (or the structural violation) when it
 does not; `UNTERMINATED` when there is no final event — still running or
 tail lost, which the file alone cannot tell; `no claim` for a ledger
-recorded before door accounting. A parent run's audit adds one `subtree:`
+recorded before door accounting. Beside them, a **ledger anchor** line says
+which of five things is true of the run's `.anchor` proof — `not anchored`;
+`anchored — verified under the log key as served (not independent)`;
+`independently verified` (the log's key was pinned by the reader); `MISMATCH`
+(the ledger no longer reproduces the anchored head); or `unverifiable` (no key
+to verify under, a log that does not answer, a rotated key — never
+tampering, and the line names the fix). `audit <run-id>` is offline: it checks
+the stored proof under the pinned key and never asks the log, so an anchored
+run with no pinned key reads `unverifiable` there until the key is pinned;
+`audit verify <run-id>` may ask the log. A parent run's audit adds one `subtree:`
 line per child it spawned, and its exit code is the worst verdict in the
-tree (`1` a damaged chain, `11` a gap, `12` unterminated, else `0`;
-`audit verify` adds `4` for an `--expect-head` mismatch, ranked below
-those). Then it lists the timeline: workflow started, each
+tree (`1` a damaged chain, `6` an anchor mismatch, `11` a gap, `12`
+unterminated, `7` an anchor that cannot be decided, else `0`;
+`audit verify` adds `4` for an `--expect-head` mismatch, ranked after `12`
+and before `7`). Then it lists the timeline: workflow started, each
 step started/succeeded/failed, any bounces, and how the run finished. That is
 the full loop — *who asked → what ran → what it touched → whether the record can
 be trusted* — with no cross-referencing required. When the run's
@@ -486,7 +553,7 @@ flag and exit-code reference.
 | inbound MCP proxy for an agent's declared tools — allowlisted, credential-injecting, ledgered, able to mint its own upstream token via the `client_credentials` grant, and able to call a per-user upstream on behalf of the invoking human via RFC 8693 token exchange (`grant_type: token_exchange`) | delegation with an actor token; re-authentication when the invoker's token expires mid-run |
 | exec, first-hand: the allowlist check, then `refexec` runs the command in a no-network compartment and Agenthof records its account as `exec` with `runtime_attestation`; the retired agent-asserted routes answer a recorded refusal. Agenthof itself never runs the command | Agenthof running a command itself; an agent-reported exec (retired — historical `mode: attested` events still verify and render) |
 | spawn: an agent asks its gateway for a governed child run of a `may_spawn`-listed role/workflow; the child is a full run under the same invoker, with its own ledger linked to the parent, run in compartments of its own — one workspace volume shared by that child's agents, one refbox compartment per agent, one `refexec` — provisioned by the operator's supervisor (`deploy/refspawn`) and torn down with the parent step; bounded by `max_depth`, `max_parallel`, `max_total_spawns`; `investigate --run` shows the tree | a shared or persistent child workspace; an asynchronous submit-and-await spawn; a separate acting-agent identity |
-| hash-chained ledger + `audit` / `audit verify` | enforced capabilities beyond the tool allowlist (the proxy allowlists which tools an agent may reach; it does not otherwise constrain what the agent's own code does) |
+| hash-chained ledger + `audit` / `audit verify`; a finished run's receipt anchored into a transparency log on demand or by a sweep, its proof beside the ledger (`audit anchor --run` / `--pending`) | enforced capabilities beyond the tool allowlist (the proxy allowlists which tools an agent may reach; it does not otherwise constrain what the agent's own code does) |
 | RBAC by group; linear workflow + fail-back | multi-resource / cross-repo scope |
 | cross-run + control incident timeline (`investigate`) + config-join on `audit <run-id>` | DAG workflows |
 | `agenthof serve`: runs over an authenticated API, every call attributed to the token's human; `origin` provenance on the run ledger; `/events`, server-rendered `/audit`, `investigate` over the API; `run`/`audit`/`investigate --server` | config changes over the API; streaming events; a finer read permission; token refresh for long runs; a client-certificate corroborator for `origin` |

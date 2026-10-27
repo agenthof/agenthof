@@ -221,6 +221,25 @@ The governed core is real and runnable today:
   copy of each sealed segment; a non-erasable storage sink for the whole
   ledger (`sink: external`) and `anchor: signed` remain reserved.
 
+- **Anchoring a run's audit, not only the control ledger** — with
+  `anchor_runs: on-demand` beside `anchor: tlog`, `agenthof audit anchor --run
+  <run-id>` pins a finished run's final head into the same transparency log,
+  and `--pending` does so for every run not yet anchored, each once. The proof
+  is written beside the run's ledger as `<run-id>.anchor` — never inside it — and
+  the act is recorded, with the run named, on the control ledger under the same
+  `anchor` grant. `audit <run-id>` and `audit verify <run-id>` report one of five
+  states (not anchored, verified under the key the log served, independently
+  verified, mismatch, unverifiable) and exit `6` or `7` on the last two; `serve`
+  reports the same on its read routes and never anchors. A run's receipt is now
+  checkable against something off the machine, not only as an unedited local
+  chain. The guarantee is bounded and stated plainly: it is independently
+  verifiable only when the verifier pins the log's key themselves, and a log the
+  same party runs is only as independent as its trust domain; a run is
+  unanchored until someone files it; the proof is a second file to keep with the
+  receipt; only a fingerprint leaves the machine, but on a public log each
+  anchored run is one permanent public entry; and an unreachable log or a
+  rotated key reads *unverifiable*, never as tampering.
+
 - **Sealing and rotating the control ledger** — `agenthof audit seal` closes the
   active log into a sealed segment and opens a fresh one, so a long-running
   control ledger becomes an ordered set of sealed segments plus a live active
@@ -277,12 +296,6 @@ The governed core is real and runnable today:
   macOS Seatbelt, Linux Landlock), chosen per host with a fail-closed default
   and the applied tier named in the ledger — an honest contract, since a
   shared-kernel sandbox is not a container is not a VM.
-- **Anchoring a run's audit, not only the control ledger** — external anchoring
-  (`anchor: tlog`) today pins the *control* ledger's head to a transparency log
-  the operator does not control; the same corroboration for each **run's** audit
-  would make a run's receipt checkable against something off the machine, not
-  only as an unedited local chain. A run of all-`succeeded` events is only as
-  independent as the box it was written on until its head is anchored.
 
 ## Later
 
