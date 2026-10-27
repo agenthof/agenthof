@@ -213,6 +213,7 @@ func TestVerdictState(t *testing.T) {
 	}{
 		{"not found", sidecar.Verdict{}, sidecar.StateNotAnchored},
 		{"read error", sidecar.Verdict{Found: true, Err: errors.New("x")}, sidecar.StateUnverifiable},
+		{"found but no evidence", sidecar.Verdict{Found: true}, sidecar.StateUnverifiable},
 		{"all verified", sidecar.Verdict{Found: true, Results: res(V, V)}, sidecar.StateVerified},
 		{"one unverifiable", sidecar.Verdict{Found: true, Results: res(V, U)}, sidecar.StateUnverifiable},
 		{"mismatch beats unverifiable", sidecar.Verdict{Found: true, Results: res(U, M, V)}, sidecar.StateMismatch},

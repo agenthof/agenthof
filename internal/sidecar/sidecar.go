@@ -43,7 +43,8 @@ const (
 )
 
 // MaxLineLen is the bufio.Scanner buffer: a hostile sidecar is read bounded,
-// never with the 64 KB default. It is the field caps' sum plus slack for the
+// never with the 64 KB default. A line is readable only if it is shorter than
+// this (the newline needs room), so the content bound is MaxLineLen-1 bytes. It is the field caps' sum plus slack for the
 // fixed keys, the time and the anchored_by object.
 const MaxLineLen = anchor.MaxProofLen + control.MaxAnchorRefLen + control.MaxAnchorBackendLen + control.MaxAnchorBackendKindLen + control.MaxAnchorBackendKeyIDLen + 1024
 
@@ -117,7 +118,10 @@ func Read(path string) (recs []Record, found bool, err error) {
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, !errors.Is(err, fs.ErrNotExist), err
+		if errors.Is(err, fs.ErrNotExist) { // removed between Lstat and Open
+			return nil, false, nil
+		}
+		return nil, true, err
 	}
 	defer func() { _ = f.Close() }()
 	// The initial capacity equals the cap: bufio.Scanner enforces the larger of
@@ -170,6 +174,12 @@ func Append(path, runID string, r Record) error {
 		b, err := json.Marshal(x)
 		if err != nil {
 			return err
+		}
+		// >=, not >: the scanner needs room for the newline, so a line is
+		// readable only below MaxLineLen. json.Marshal escapes <, > and & to
+		// six bytes each, so the encoded line can exceed the decoded fields.
+		if len(b) >= MaxLineLen {
+			return fmt.Errorf("sidecar record for run %s serializes to %d bytes; a line must be under %d", runID, len(b), MaxLineLen)
 		}
 		data = append(append(data, b...), '\n')
 	}

@@ -26,6 +26,9 @@ var hashRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 //   - sha256 of the ledger's event at seq must equal the hash;
 //   - that event must be the run's final event.
 //
+// chain must be the hash-verified output of ledger.ReadVerify: Check trusts
+// its records' bytes as the ledger and verifies nothing about the chain itself.
+//
 // The Anchor each check carries is copied from the record, so Decide verifies
 // the stored proof the way it verifies a control record's.
 func Check(runID string, chain []ledger.Record, recs []Record) []control.AnchorCheck {
@@ -67,7 +70,8 @@ type Verdict struct {
 }
 
 // Verify reads runID's sidecar under logDir and, when it is there and
-// readable, decides every record through the one ladder.
+// readable, decides every record through the one ladder. chain must be
+// ledger.ReadVerify's hash-verified output.
 func Verify(logDir, runID string, chain []ledger.Record, o anchorverify.Options) Verdict {
 	recs, found, err := Read(Path(logDir, runID))
 	if err != nil || !found {
@@ -85,13 +89,14 @@ const (
 )
 
 // State folds the verdict to one word: no sidecar is not-anchored; an
-// unreadable one is unverifiable; any mismatch wins over any unverifiable,
+// unreadable one, or one with no results, is unverifiable; any mismatch wins over any unverifiable,
 // which wins over verified.
 func (v Verdict) State() string {
 	switch {
 	case !v.Found:
 		return StateNotAnchored
-	case v.Err != nil:
+	case v.Err != nil, len(v.Results) == 0:
+		// No evidence is never "verified": a gate defaults to unverifiable.
 		return StateUnverifiable
 	}
 	worst := StateVerified

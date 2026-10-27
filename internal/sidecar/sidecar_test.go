@@ -226,13 +226,14 @@ func TestAnchoredByCarriesSubjectIssuerMethodOnly(t *testing.T) {
 }
 
 func TestTwoWritersLeaveOneWholeSidecar(t *testing.T) {
+	const perWriter = 16 // 2 x 16 == MaxRecords: never trips the cap, even fully serialized
 	p := sidecar.Path(t.TempDir(), testRun)
 	var wg sync.WaitGroup
 	for w := 0; w < 2; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < 20; i++ {
+			for i := 0; i < perWriter; i++ {
 				// Concurrent appends without a lock may lose a record to the
 				// other writer's read-modify-write; the file must stay whole.
 				if err := sidecar.Append(p, testRun, rec(3)); err != nil {
@@ -244,12 +245,42 @@ func TestTwoWritersLeaveOneWholeSidecar(t *testing.T) {
 	}
 	wg.Wait()
 	got, found, err := sidecar.Read(p)
-	if err != nil || !found || len(got) == 0 {
-		t.Fatalf("sidecar not whole: %d records found=%v err=%v", len(got), found, err)
+	if err != nil || !found || len(got) < perWriter || len(got) > 2*perWriter {
+		t.Fatalf("sidecar not whole: %d records (want %d..%d) found=%v err=%v", len(got), perWriter, 2*perWriter, found, err)
 	}
 	ents, _ := os.ReadDir(filepath.Dir(p))
 	if len(ents) != 1 {
 		t.Fatalf("temp left behind: %v", ents)
+	}
+}
+
+func TestAppendRefusesALineReadWouldRefuse(t *testing.T) {
+	dir := t.TempDir()
+	p := sidecar.Path(dir, testRun)
+	r := rec(3)
+	r.AnchoredBy.Subject = strings.Repeat("a", 2*sidecar.MaxLineLen)
+	err := sidecar.Append(p, testRun, r)
+	if err == nil || !strings.Contains(err.Error(), testRun) || !strings.Contains(err.Error(), fmt.Sprint(sidecar.MaxLineLen)) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, serr := os.Stat(p); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("a refused Append wrote the sidecar: %v", serr)
+	}
+	// escaping inflates the encoded line: '&' marshals to six bytes, so a
+	// Backend within its decoded cap can still be over the line bound.
+	r = rec(3)
+	r.Backend = strings.Repeat("&", control.MaxAnchorBackendLen)
+	r.Ref = strings.Repeat("&", control.MaxAnchorRefLen)
+	r.AnchoredBy.Subject = strings.Repeat("&", 800)
+	if err := sidecar.Append(p, testRun, r); err == nil {
+		t.Fatal("an escape-inflated line over MaxLineLen was written")
+	}
+	// a normal record still appends and reads back.
+	if err := sidecar.Append(p, testRun, rec(3)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sidecar.Read(p); err != nil {
+		t.Fatal(err)
 	}
 }
 
