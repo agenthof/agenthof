@@ -83,6 +83,11 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 	case "run":
 		return cmdRun(argv[1:], stdout, stderr)
 	case "audit":
+		// audit anchor alone speaks on the operational channel (its run form
+		// warns on stderr); every other audit form is stdout only.
+		if len(argv) > 1 && argv[1] == "anchor" {
+			return cmdAuditAnchor(argv[2:], stdout, stderr)
+		}
 		return cmdAudit(argv[1:], stdout)
 	case "runs":
 		return cmdRuns(argv[1:], stdout)
@@ -1267,7 +1272,7 @@ func cmdAudit(args []string, out io.Writer) int {
 	// "anchor" is disambiguated the same way: a run id is always "r-<hex>"
 	// (engine.NewRunID), which "anchor" can never match.
 	if args[0] == "anchor" {
-		return cmdAuditAnchor(args[1:], out)
+		return cmdAuditAnchor(args[1:], out, io.Discard)
 	}
 	// "seal" is disambiguated the same way: a run id is always "r-<hex>"
 	// (engine.NewRunID), which "seal" can never match.

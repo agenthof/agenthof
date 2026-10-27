@@ -260,7 +260,7 @@ func TestAllWritersRefuseAWormMisconfigure(t *testing.T) {
 			return cmdAuditSeal(append([]string{"--control-log", ctl}, who...), out)
 		}},
 		{"audit anchor", "audit anchor", func(out *bytes.Buffer) int {
-			return cmdAuditAnchor(append([]string{"--control-log", ctl}, who...), out)
+			return cmdAuditAnchor(append([]string{"--control-log", ctl}, who...), out, io.Discard)
 		}},
 	} {
 		var out bytes.Buffer
