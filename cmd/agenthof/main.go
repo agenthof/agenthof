@@ -51,7 +51,7 @@ Usage:
   agenthof audit <run-id> [--log-dir <dir>] [--server <url>] [--token <jwt>]
   agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>|<seq>:<hex>] [--anchor-key <path>] [--integrity <path>] [--offline] [--anchor-timeout 30s] [--sink-timeout 60s]
-  agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout 30s]  (pins the control-ledger head into the transparency log integrity.yaml names; an authorized control action, recorded whether it succeeded or failed; prints the anchored head and entry to ship off the box)
+  agenthof audit anchor [--control-log <path>] [--run <run-id> | --pending [--limit 50]] [--log-dir <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout 30s]  (pins the control-ledger head into the transparency log integrity.yaml names; with --run, a finished run's ledger head, the proof written beside it as <run-id>.anchor; an authorized control action, recorded whether it succeeded or failed; prints the anchored head and entry to ship off the box)
   agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>] [--sink-timeout 2m]  (closes the control ledger's active segment into a sealed file and opens the next; the chain and seq continue unbroken; on a sink: worm root the sealed segment's protected copy is written and confirmed before the rotation completes; an authorized control action, recorded whether it succeeded or failed)
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]

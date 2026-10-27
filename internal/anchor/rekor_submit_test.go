@@ -10,9 +10,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -312,3 +314,47 @@ func TestRekorSubmitDoesNotLeakServerControlledEntryID(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// TestSubmitReturnsTransportWhenTheLogDoesNotAnswer: a refused dial and a
+// dropped connection are a *anchor.Transport — the log did not answer — whose
+// text is today's "<host>: <cause>", never a path.
+func TestSubmitReturnsTransportWhenTheLogDoesNotAnswer(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+	rk, err := anchor.NewRekor(closedURL, anchor.RekorOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = rk.Submit(context.Background(), head41)
+	var tr *anchor.Transport
+	if !errors.As(err, &tr) || !strings.HasPrefix(err.Error(), strings.TrimPrefix(closedURL, "http://")+": ") {
+		t.Fatalf("closed server: %T %v", err, err)
+	}
+	if tr.Unwrap() == nil || tr.Host != strings.TrimPrefix(closedURL, "http://") {
+		t.Fatalf("transport fields: %+v", tr)
+	}
+
+	f := anchortest.NewRekorV1()
+	t.Cleanup(f.Close)
+	rk = newRekor(t, f, anchor.RekorOptions{})
+	f.Drop()
+	_, err = rk.Submit(context.Background(), head41)
+	if !errors.As(err, &tr) || !strings.HasPrefix(err.Error(), strings.TrimPrefix(f.URL, "http://")+": ") {
+		t.Fatalf("dropped: %T %v", err, err)
+	}
+}
+
+// TestSubmitNon201IsNotTransport: a log that answered and said no is a
+// per-entry rejection, not a transport fault.
+func TestSubmitNon201IsNotTransport(t *testing.T) {
+	f := anchortest.NewRekorV1()
+	t.Cleanup(f.Close)
+	rk := newRekor(t, f, anchor.RekorOptions{})
+	f.Fail(501)
+	_, err := rk.Submit(context.Background(), head41)
+	var tr *anchor.Transport
+	if err == nil || errors.As(err, &tr) || err.Error() != "status 501 from "+strings.TrimPrefix(f.URL, "http://") {
+		t.Fatalf("501: %T %v", err, err)
+	}
+}

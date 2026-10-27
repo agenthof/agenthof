@@ -68,3 +68,20 @@ func (m *Mismatch) Error() string { return "anchor mismatch: " + m.Cause }
 type Unavailable struct{ Cause string }
 
 func (u *Unavailable) Error() string { return "anchor unverifiable: " + u.Cause }
+
+// Transport is the absence of an answer from the witness: the dial, the TLS
+// handshake, the connection or the response body failed, or the caller's
+// deadline passed. It is distinct from a witness that answered and said no (a
+// non-success status, a proof that does not verify), which is a plain error:
+// a caller sweeping many heads stops at the first Transport, because the next
+// head would meet the same silence. Error is "<host>: <cause>" — fixed
+// phrases and the host, never a path or a response body.
+type Transport struct {
+	Host string
+	Err  error
+}
+
+func (t *Transport) Error() string { return t.Host + ": " + t.Err.Error() }
+
+// Unwrap exposes the underlying cause (a net error, a context error).
+func (t *Transport) Unwrap() error { return t.Err }

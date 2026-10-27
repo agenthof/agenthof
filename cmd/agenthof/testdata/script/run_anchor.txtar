@@ -1,0 +1,167 @@
+# audit anchor --run <id> pins one finished run's final head into the
+# transparency log, writes the proof BESIDE the run (<run-id>.anchor, outside
+# the run's hash chain), and records a run-scoped anchor in the control ledger
+# — no proof on it, the run's id on it. It is the same `anchor` control
+# grant as the control form, needs anchor_runs: on-demand, refuses a run that
+# is missing, torn or unterminated, refuses an argument that is not a run id
+# before it touches a file, and serializes with other anchoring writers on
+# <log-dir>/.anchor.lock.
+
+exec agenthof apply --config config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 4 roles'
+exec agenthof run se plan-only --input hello --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+stdout 'finished: succeeded'
+lastrun logs
+cp logs/$RUNID.jsonl before-run.jsonl
+cp control.jsonl before.jsonl
+
+# 1. Floor root (no integrity.yaml): anchor_runs is none — nothing to do, exit
+# 1, nothing recorded, nothing written, zero network. --pending is refused the
+# same way.
+! exec agenthof audit anchor --control-log control.jsonl --run $RUNID --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'audit anchor: run anchoring is not configured in .*integrity.yaml \(anchor_runs: none\); set anchor_runs: on-demand to anchor runs'
+! stdout 'control head:'
+! exists logs/$RUNID.anchor
+cmp control.jsonl before.jsonl
+rekor requests 0
+! exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'run anchoring is not configured'
+cmp control.jsonl before.jsonl
+rekor requests 0
+
+# A malformed integrity.yaml does not stop a run — only the commands that read
+# the posture refuse it.
+exec sh -c 'printf "anchor: [\n" > integrity.yaml'
+exec agenthof run se plan-only --input hello --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+stdout 'finished: succeeded'
+exec sh -c 'rm integrity.yaml'
+
+# The control form is unchanged: a tlog posture without anchor_runs still
+# anchors the control ledger exactly as before.
+rekor posture integrity.yaml
+exec agenthof audit anchor --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'anchored: seq=1 sha256=[0-9a-f]{64}'
+stdout '  log: http://127\.0\.0\.1:[0-9]+  entry: [0-9a-f]{80}  log key: [0-9a-f]{64} \(as served\)'
+stdout 'control head: seq=2 sha256=[0-9a-f]{64}'
+# ...and the run form still refuses under it (anchor_runs: none).
+! exec agenthof audit anchor --control-log control.jsonl --run $RUNID --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'run anchoring is not configured'
+! exists logs/$RUNID.anchor
+rekor reset
+
+# 2. anchor_runs: on-demand. The run's final head goes to the log (the submit
+# and the served key: two requests), the proof lands beside the run, and the
+# governance record names the run and carries no proof.
+rekor posture integrity.yaml runs
+cp control.jsonl pre-pin.jsonl
+exec agenthof audit anchor --control-log control.jsonl --run $RUNID --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'anchored run r-[0-9a-f]{16}: events=[0-9]+ sha256=[0-9a-f]{64}'
+stdout '  log: http://127\.0\.0\.1:[0-9]+  entry: [0-9a-f]{80}  log key: [0-9a-f]{64} \(as served\)'
+stdout '  index: [0-9]+  integrated: 20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z  \(as reported by the log\)'
+stdout 'control head: seq=3 sha256=[0-9a-f]{64}'
+exists logs/$RUNID.anchor
+grep '"run_id":"'$RUNID'"' logs/$RUNID.anchor
+grep '"anchored_by":\{"subject":"dana@example.com","issuer":"[^"]*","method":"asserted"\}\}$' logs/$RUNID.anchor
+! grep '"groups"' logs/$RUNID.anchor
+! grep '"witness"' logs/$RUNID.anchor
+grep '"action":"anchor","outcome":"success".*"anchor":\{"run_id":"'$RUNID'"' control.jsonl
+! grep '"run_id":"'$RUNID'".*"proof"' control.jsonl
+rekor requests 2
+cmp logs/$RUNID.jsonl before-run.jsonl
+
+# 3. A caller no role grants anchor to is refused and recorded WITHOUT a run
+# id; the log sees nothing and the sidecar gains nothing.
+cp logs/$RUNID.anchor pre-mallory.anchor
+! exec agenthof audit anchor --control-log control.jsonl --run $RUNID --as mallory@example.com --groups finance --log-dir logs
+stdout 'audit anchor: not authorized: no role grants anchor to the invoker'
+stdout 'control head: seq=4'
+grep '"action":"anchor","outcome":"refused","reason":\{"code":"not_authorized"' control.jsonl
+! grep '"outcome":"refused".*"anchor":\{' control.jsonl
+rekor requests 2
+cmp logs/$RUNID.anchor pre-mallory.anchor
+
+# 4. Anchoring the same head again is a re-pin: a second line, a second record.
+exec agenthof audit anchor --control-log control.jsonl --run $RUNID --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'anchored run '$RUNID': events='
+exec sh -c 'test "$(wc -l < logs/$RUNID.anchor | tr -d " ")" = 2'
+exec sh -c 'test "$(grep -c "\"outcome\":\"success\".*\"run_id\"" control.jsonl)" = 2'
+rekor requests 4
+
+# 5. Runs that cannot be anchored: unterminated (the final event cut off),
+# torn (the tail cut mid-record) and missing. Exit 1, nothing recorded,
+# nothing written, the log sees nothing. Arguments that are not run ids are
+# refused before any file is touched.
+exec sh -c 'sed "\$d" logs/$RUNID.jsonl > logs/r-0000000000000001.jsonl'
+exec sh -c 'n=$(wc -c < logs/$RUNID.jsonl); head -c $((n-5)) logs/$RUNID.jsonl > logs/r-0000000000000003.jsonl'
+cp control.jsonl pre-bad.jsonl
+! exec agenthof audit anchor --control-log control.jsonl --run r-0000000000000001 --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'audit anchor: run r-0000000000000001 has no final event; still running or tail lost — not anchorable'
+! exec agenthof audit anchor --control-log control.jsonl --run r-0000000000000003 --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'audit anchor: run r-0000000000000003: .*; a run ledger has no repair — not anchorable'
+! exec agenthof audit anchor --control-log control.jsonl --run r-0000000000000002 --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'audit anchor: no run r-0000000000000002 under logs'
+! exec agenthof audit anchor --control-log control.jsonl --run ../control.jsonl --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'audit anchor: --run "\.\./control\.jsonl" is not a run id \(want r- followed by 16 lowercase hex\)'
+! exec agenthof audit anchor --control-log control.jsonl --run R-0123456789ABCDEF --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'is not a run id'
+! stdout 'control head:'
+! exists logs/r-0000000000000001.anchor
+! exists logs/r-0000000000000002.anchor
+! exists logs/r-0000000000000003.anchor
+cmp control.jsonl pre-bad.jsonl
+rekor requests 4
+
+# 6. A refused run is a whole run in one event, and it anchors.
+! exec agenthof run locked plan-only --input hi --as dana@example.com --config config --control-log control.jsonl --log-dir logs --artifact-dir artifacts
+lastrun logs
+exec agenthof audit anchor --control-log control.jsonl --run $RUNID --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'anchored run '$RUNID': events=1 sha256=[0-9a-f]{64}'
+exists logs/$RUNID.anchor
+rekor requests 6
+
+# 7. --run and --pending are two forms, not one.
+! exec agenthof audit anchor --control-log control.jsonl --run x --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'audit anchor: --run and --pending are mutually exclusive'
+
+# 8. A second anchoring writer on the same directory exits busy — unrecorded,
+# before any request — rather than piling up behind the first.
+cp control.jsonl pre-busy.jsonl
+holdfile logs/.anchor.lock 9000
+! exec agenthof audit anchor --control-log control.jsonl --run $RUNID --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'audit anchor: another agenthof process is anchoring runs under logs; retry'
+! stdout 'control head:'
+cmp control.jsonl pre-busy.jsonl
+rekor requests 6
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- config/roles/locked.yaml --
+name: locked
+workflows: [plan-only]
+allowed_groups: [nobody-is-in-this-group]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, anchor]
+-- config/roles/auditor.yaml --
+name: auditor
+allowed_groups: [finance]
+control: [prune]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

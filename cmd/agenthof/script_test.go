@@ -340,12 +340,32 @@ func TestScript(t *testing.T) {
 					ts.Fatalf("lock holder never reported held: %q %v", line[:], err)
 				}
 			},
+			// holdfile <path> <ms>: holdlock for any lock file — a helper
+			// process takes the exclusive flock on <path> itself (no
+			// installed.lock derivation) and holds it for <ms> milliseconds,
+			// so the next command that needs it waits out lockTimeout and
+			// answers busy. The holder is killed when the script ends.
+			"holdfile": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 2 {
+					ts.Fatalf("usage: holdfile <path> <ms>")
+				}
+				cmd := exec.Command(os.Args[0], "-test.run=TestNothing")
+				cmd.Env = append(os.Environ(), "AGENTHOF_TEST_HOLD_LOCK="+ts.MkAbs(args[0]), "AGENTHOF_TEST_HOLD_KIND=file", "AGENTHOF_TEST_HOLD_MS="+args[1])
+				stdout, err := cmd.StdoutPipe()
+				ts.Check(err)
+				ts.Check(cmd.Start())
+				ts.Defer(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+				var line [5]byte
+				if _, err := io.ReadFull(stdout, line[:]); err != nil || string(line[:]) != "held\n" {
+					ts.Fatalf("lock holder never reported held: %q %v", line[:], err)
+				}
+			},
 			// rekor <switch> [arg]: drives this script's Rekor fake.
 			//   fail <status> | corruptnext | drop | stop | start | rotate |
 			//   corrupt <ref> | forget <ref> | cosign | hostname <s> | reset |
 			//   requests <n> (asserts the fake saw exactly n requests) |
 			//   pubkey <path> (writes the current key PEM for pinning) |
-			//   posture <path> [clientcreds] (writes a tlog integrity.yaml naming the fake)
+			//   posture <path> [clientcreds|runs] (writes a tlog integrity.yaml naming the fake; runs adds anchor_runs: on-demand)
 			"rekor": func(ts *testscript.TestScript, neg bool, args []string) {
 				fake, _ := ts.Value(rekorKey{}).(*anchortest.RekorV1)
 				if fake == nil || len(args) == 0 {
@@ -392,6 +412,9 @@ func TestScript(t *testing.T) {
 					ts.Check(os.WriteFile(ts.MkAbs(arg()), fake.PublicKeyPEM(), 0o600))
 				case "posture":
 					body := "anchor: tlog\nanchor_backend:\n  url: " + fake.URL + "\n"
+					if len(args) == 3 && args[2] == "runs" {
+						body += "anchor_runs: on-demand\n"
+					}
 					if len(args) == 3 && args[2] == "clientcreds" {
 						body += "  credential:\n    grant_type: client_credentials\n    client_auth: client_secret_basic\n    token_endpoint: " + fake.URL + "/token\n    client_id_env: ANCHOR_CLIENT_ID\n    client_secret_env: ANCHOR_CLIENT_SECRET\n"
 					}

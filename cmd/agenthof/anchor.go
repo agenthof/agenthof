@@ -31,6 +31,7 @@ import (
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/obs"
 	"github.com/agenthof/agenthof/internal/origin"
+	"github.com/agenthof/agenthof/internal/sidecar"
 )
 
 // audit verify control's exit codes beside exitInstalledMismatch (installed.go),
@@ -123,6 +124,15 @@ func anchorCredentialRef(c config.BackendCredential) broker.CredentialRef {
 	}
 }
 
+// anchorCredentialError marks a failure to resolve the anchor backend's
+// credential. Its text is the broker's own, unchanged; the type lets a sweep
+// tell a fault that recurs identically for every run from a log refusing one
+// head.
+type anchorCredentialError struct{ err error }
+
+func (e *anchorCredentialError) Error() string { return e.err.Error() }
+func (e *anchorCredentialError) Unwrap() error { return e.err }
+
 // anchorBearer is the bearer resolver audit anchor hands the backend: nil for
 // no credential (the public good is anonymous); otherwise the broker resolves
 // the direct-bearer or client_credentials grant at call time and the value
@@ -136,11 +146,17 @@ func anchorBearer(c config.BackendCredential, client *http.Client) func(context.
 	ref := anchorCredentialRef(c)
 	if ref.Grant == "token_exchange" {
 		return func(context.Context) (string, error) {
-			return "", errors.New("broker: token_exchange is not supported for an anchor backend")
+			return "", &anchorCredentialError{errors.New("broker: token_exchange is not supported for an anchor backend")}
 		}
 	}
 	d := broker.Dispatch{StaticEnv: broker.StaticEnv{}, ClientCredentials: broker.NewClientCredentials(client)}
-	return func(ctx context.Context) (string, error) { return d.Resolve(ctx, ref) }
+	return func(ctx context.Context) (string, error) {
+		tok, err := d.Resolve(ctx, ref)
+		if err != nil {
+			return "", &anchorCredentialError{err}
+		}
+		return tok, nil
+	}
 }
 
 // backendSpec is what anchorBackendFor dispatches on: on the write path the
@@ -400,6 +416,11 @@ func (s *anchorSession) recordFinish(outcome string, reason *control.Reason, cod
 //     verifier input (audit verify control --expect-head seq:hash).
 //
 // No record ever carries a config_hash: an anchor installs nothing.
+//
+// With --run <run-id> (or --pending) the same preamble serves the run form
+// instead: the id is shape-checked right after flag parsing, before the
+// posture or any path is read, and anchorRuns takes the run-anchoring lock and
+// anchors a finished run's final head, writing the proof beside the run.
 func cmdAuditAnchor(args []string, out, stderr io.Writer) int {
 	fs := flag.NewFlagSet("audit anchor", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; integrity.yaml and anchor.pub are read from beside it")
@@ -407,15 +428,61 @@ func cmdAuditAnchor(args []string, out, stderr io.Writer) int {
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
 	token := fs.String("token", "", "raw OIDC token to authenticate the invoker (env AGENTHOF_TOKEN fallback); a production cron presents this, not --as/--groups")
 	timeout := fs.Duration("timeout", 30*time.Second, "bound on the whole exchange with the log")
+	runID := fs.String("run", "", "anchor this finished run's ledger (needs anchor_runs: on-demand); the proof is written beside it as <run-id>.anchor")
+	pending := fs.Bool("pending", false, "anchor every finished run not yet anchored, up to --limit (needs anchor_runs: on-demand)")
+	limit := fs.Int("limit", 50, "with --pending: the most runs to anchor in one pass")
+	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory (--run and --pending)")
 	fs.SetOutput(out)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	s, code := openAnchorSession(anchorControl, *controlLog, *as, *groups, *token, *timeout, out, stderr)
+	runSet := false // --run "" is a bad id, not an absent flag
+	fs.Visit(func(f *flag.Flag) { runSet = runSet || f.Name == "run" })
+	if runSet && *pending {
+		_, _ = fmt.Fprintln(out, "audit anchor: --run and --pending are mutually exclusive")
+		return 2
+	}
+	if *limit <= 0 {
+		_, _ = fmt.Fprintln(out, "audit anchor: --limit must be positive")
+		return 2
+	}
+	// The shape check precedes the posture, the lock and every path: a value
+	// that is not a run id never reaches a file name.
+	if runSet && !sidecar.RunIDRE.MatchString(*runID) {
+		_, _ = fmt.Fprintf(out, "audit anchor: --run %q is not a run id (want r- followed by 16 lowercase hex)\n", *runID)
+		return 1
+	}
+	mode := anchorControl
+	if runSet || *pending {
+		mode = anchorRuns
+	}
+	s, code := openAnchorSession(mode, *controlLog, *as, *groups, *token, *timeout, out, stderr)
 	if s == nil {
 		return code
 	}
+	if mode == anchorRuns {
+		return s.anchorRuns(runAnchorOpts{logDir: *logDir, runID: *runID, pending: *pending, limit: *limit})
+	}
 	return s.anchorControlHead()
+}
+
+// receiptLines are the two lines every anchoring form ships after its
+// "anchored…" line: where the entry is and which log key signed for it (named
+// pinned or as served), then what the log reported about it — all of it as
+// reported by the log, none of it a verdict.
+func receiptLines(rcpt anchor.Receipt, keyMode string) (logLine, indexLine string) {
+	keyID, index, integrated := rcpt.BackendKeyID, strconv.FormatInt(rcpt.LogIndex, 10), "-"
+	if keyID == "" {
+		keyID = "none"
+	}
+	if rcpt.LogIndex < 0 {
+		index = "-"
+	}
+	if !rcpt.IntegratedTime.IsZero() {
+		integrated = rcpt.IntegratedTime.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("  log: %s  entry: %s  log key: %s (%s)", rcpt.Backend, rcpt.Ref, keyID, keyMode),
+		fmt.Sprintf("  index: %s  integrated: %s  (as reported by the log)", index, integrated)
 }
 
 // anchorControlHead is the control form's body: the head, the submit, the
@@ -460,23 +527,14 @@ func (s *anchorSession) anchorControlHead() int {
 	}
 
 	payload := &control.Anchor{Seq: covered.Seq, Hash: covered.Hash, Kind: "tlog", BackendKind: be.Kind(), Backend: rcpt.Backend, Ref: rcpt.Ref, Proof: rcpt.Proof, BackendKeyID: rcpt.BackendKeyID}
-	keyID, index, integrated := rcpt.BackendKeyID, strconv.FormatInt(rcpt.LogIndex, 10), "-"
-	if keyID == "" {
-		keyID = "none"
-	}
-	if rcpt.LogIndex < 0 {
-		index = "-"
-	}
-	if !rcpt.IntegratedTime.IsZero() {
-		integrated = rcpt.IntegratedTime.UTC().Format(time.RFC3339)
-	}
+	logLine, indexLine := receiptLines(rcpt, s.keyMode)
 	// Record first: the printed lines are the artifact the cron ships, and a
 	// head line for a record that did not land would be a lie. finish prints
 	// shipped, then the head — the spec's order.
 	shipped := []string{
 		fmt.Sprintf("anchored: seq=%d sha256=%s", covered.Seq, covered.Hash),
-		fmt.Sprintf("  log: %s  entry: %s  log key: %s (%s)", rcpt.Backend, rcpt.Ref, keyID, s.keyMode),
-		fmt.Sprintf("  index: %s  integrated: %s  (as reported by the log)", index, integrated),
+		logLine,
+		indexLine,
 	}
 	recorded, appendErr := s.record("success", nil, payload)
 	if appendErr != nil {

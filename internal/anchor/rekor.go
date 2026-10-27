@@ -94,8 +94,9 @@ func (r *Rekor) Kind() string { return "transparency-log" }
 
 // do performs one request. It sends Accept: application/json, a JSON body on
 // POST, and the bearer only when auth is set; it reads at most maxBody bytes
-// and reports an oversized body as an error. A transport error is "<host>:
-// <err>"; a status is returned for the caller to classify.
+// and reports an oversized body as an error. A transport error is a
+// *Transport ("<host>: <err>"); a status is returned for the caller to
+// classify.
 func (r *Rekor) do(ctx context.Context, method, path, accept string, body []byte, auth bool) (int, []byte, error) {
 	var rd io.Reader
 	if body != nil {
@@ -125,12 +126,12 @@ func (r *Rekor) do(ctx context.Context, method, path, accept string, body []byte
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return 0, nil, fmt.Errorf("%s: %w", r.host, err)
+		return 0, nil, &Transport{Host: r.host, Err: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
-		return 0, nil, fmt.Errorf("%s: %w", r.host, err)
+		return 0, nil, &Transport{Host: r.host, Err: err}
 	}
 	if len(raw) > maxBody {
 		return 0, nil, fmt.Errorf("response body from %s exceeds 1 MiB", r.host)
