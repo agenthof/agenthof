@@ -102,7 +102,7 @@ func TestLoadIntegrityNamesTheFileOnce(t *testing.T) {
 
 	writeIntegrity(t, ctl, "ancher: tlog\n")
 	_, err = loadIntegrity(ctl)
-	if want := "integrity " + p + `: line 1: unknown key "ancher" (allowed keys: sink, anchor, duplicate, sink_backend, anchor_backend)`; err == nil || err.Error() != want {
+	if want := "integrity " + p + `: line 1: unknown key "ancher" (allowed keys: sink, anchor, anchor_runs, duplicate, sink_backend, anchor_backend)`; err == nil || err.Error() != want {
 		t.Fatalf("malformed: err = %v\nwant %q", err, want)
 	}
 
