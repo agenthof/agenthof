@@ -3,12 +3,15 @@ package serve
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -497,5 +500,190 @@ func TestAuditTextCarriesTheAnchorLine(t *testing.T) {
 	if !strings.Contains(text, "ledger anchor: unverifiable — stub: unavailable; pin the log key in anchor.pub beside the control ledger or pass --anchor-key, or run audit verify "+root+" to check under the key the log serves\n") ||
 		!strings.Contains(text, ", anchor unverifiable\n") || strings.Contains(text, "MISMATCH") {
 		t.Fatalf("unverifiable:\n%s", text)
+	}
+}
+
+// submitCounter wraps a stub and counts Submit: a read route must never submit
+// (serve does not anchor), so the count stays zero across every read below.
+type submitCounter struct {
+	*anchortest.Stub
+	submits *int
+}
+
+func (c submitCounter) Submit(ctx context.Context, h anchor.Head) (anchor.Receipt, error) {
+	*c.submits++
+	return c.Stub.Submit(ctx, h)
+}
+
+func simpleRunEvents(status string) []engine.Event {
+	n0 := 0
+	return []engine.Event{{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, {Type: "step_started", Step: "c"}, {Type: "step_succeeded", Step: "c", DoorCalls: &n0}, {Type: "workflow_finished", Status: status}}
+}
+
+// TestEventsAndAuditCarryAnchorState: both read routes report the run's anchor
+// state in the closed four-word enum, offline under the server's own pin, and
+// agree. A read never submits — the backend is only ever asked to verify, from
+// the stored proof — and as-served (a networked state) is never a value.
+func TestEventsAndAuditCarryAnchorState(t *testing.T) {
+	stub := anchortest.NewStub([]byte("s"))
+	var submits int
+	backend := submitCounter{Stub: stub, submits: &submits}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pinned atomic.Bool
+	opts := investigate.Options{
+		AnchorBackend: func(string, string, *ecdsa.PublicKey, bool) (anchor.Backend, error) { return backend, nil },
+		AnchorKey: func() (*ecdsa.PublicKey, error) {
+			if pinned.Load() {
+				return &key.PublicKey, nil
+			}
+			return nil, nil
+		},
+	}
+	ts := newTestServerWith(t, &fakeHost{}, fakeAuth{}, 1, opts)
+	const id = "r-00000000000000aa"
+	writeLinked(t, ts.logDir, id, "", simpleRunEvents("succeeded")...)
+
+	read := func(want, wantDetail string) {
+		t.Helper()
+		resp, body := ts.do(t, http.MethodGet, "/v1/runs/"+id+"/events", goodToken, nil)
+		ev := decode[apiclient.RunEvents](t, body)
+		if resp.StatusCode != 200 || ev.Anchor != want {
+			t.Fatalf("events anchor = %q (%d), want %q\n%s", ev.Anchor, resp.StatusCode, want, body)
+		}
+		if wantDetail == "" && ev.AnchorDetail != "" || wantDetail != "" && !strings.Contains(ev.AnchorDetail, wantDetail) {
+			t.Fatalf("anchor_detail = %q, want it to contain %q", ev.AnchorDetail, wantDetail)
+		}
+		resp, text := ts.do(t, http.MethodGet, "/v1/runs/"+id+"/audit", goodToken, nil)
+		if got := resp.Header.Get(apiclient.AnchorHeader); got != want {
+			t.Fatalf("%s = %q, want %q\n%s", apiclient.AnchorHeader, got, want, text)
+		}
+		switch want {
+		case apiclient.AnchorNotAnchored, apiclient.AnchorVerified, apiclient.AnchorMismatch, apiclient.AnchorUnverifiable:
+		default:
+			t.Fatalf("%q is not one of the four words", want)
+		}
+	}
+
+	// No sidecar: not anchored, no detail — and the pin is never resolved for it.
+	read(apiclient.AnchorNotAnchored, "")
+	// The raw JSON key is `anchor`, omitted when empty.
+	_, body := ts.do(t, http.MethodGet, "/v1/runs/"+id+"/events", goodToken, nil)
+	if !strings.Contains(string(body), `"anchor":"not-anchored"`) || strings.Contains(string(body), "anchor_detail") {
+		t.Fatalf("wire: %s", body)
+	}
+
+	anchorRun(t, ts.logDir, id, stub)
+	read(apiclient.AnchorVerified, "")
+	pinned.Store(true)
+	read(apiclient.AnchorVerified, "")
+	pinned.Store(false)
+
+	// A backend that cannot decide: unverifiable, with the cause — never
+	// mismatch, never as-served.
+	stub.Fail()
+	read(apiclient.AnchorUnverifiable, "stub: unavailable")
+
+	// A reforged ledger: valid chain, but it no longer reproduces the anchored
+	// head — mismatch.
+	if err := os.Remove(filepath.Join(ts.logDir, id+".jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	writeLinked(t, ts.logDir, id, "", simpleRunEvents("failed")...)
+	read(apiclient.AnchorMismatch, "does not reproduce the anchored head")
+
+	if submits != 0 {
+		t.Fatalf("serve submitted %d time(s); a read route never anchors", submits)
+	}
+}
+
+// TestEventsOmitsAnchorWhenTheChainFailed: a torn or broken ledger has nothing
+// a sidecar can be checked against, so neither route reports an anchor.
+func TestEventsOmitsAnchorWhenTheChainFailed(t *testing.T) {
+	ts := newTestServer(t, &fakeHost{}, fakeAuth{}, 1)
+	const id = "r-00000000000000aa"
+	writeLinked(t, ts.logDir, id, "", simpleRunEvents("succeeded")...)
+	f, err := os.OpenFile(filepath.Join(ts.logDir, id+".jsonl"), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"torn":`); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	_, body := ts.do(t, http.MethodGet, "/v1/runs/"+id+"/events", goodToken, nil)
+	if ev := decode[apiclient.RunEvents](t, body); ev.Integrity == apiclient.IntegrityVerified || ev.Anchor != "" || ev.AnchorDetail != "" {
+		t.Fatalf("%+v", ev)
+	}
+	resp, _ := ts.do(t, http.MethodGet, "/v1/runs/"+id+"/audit", goodToken, nil)
+	if got := resp.Header.Get(apiclient.AnchorHeader); got != "" {
+		t.Fatalf("%s = %q on a failed chain", apiclient.AnchorHeader, got)
+	}
+}
+
+// TestAuditHeaderCarriesTheChildAnchorWorst: the header is the tree's worst —
+// a verified child's mismatch outranks the root's verified, an unverifiable
+// child lifts a verified root to unverifiable, and a root mismatch is not
+// lowered by a child's unverifiable.
+func TestAuditHeaderCarriesTheChildAnchorWorst(t *testing.T) {
+	good := anchortest.NewStub([]byte("s"))
+	opts := investigate.Options{AnchorBackend: func(string, string, *ecdsa.PublicKey, bool) (anchor.Backend, error) { return good, nil }}
+	ts := newTestServerWith(t, &fakeHost{}, fakeAuth{}, 1, opts)
+	n1, n0 := 1, 0
+	const root, child = "r-00000000000000aa", "r-00000000000000cc"
+	childEvents := func(status string) []engine.Event {
+		return []engine.Event{{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, {Type: "step_started", Step: "c"}, {Type: "step_succeeded", Step: "c", DoorCalls: &n0}, {Type: "workflow_finished", Status: status}}
+	}
+	rootEvents := []engine.Event{{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, {Type: "step_started", Step: "a"}, {Type: "spawn", Status: "succeeded", ChildRunID: child, Depth: 1}, {Type: "step_succeeded", Step: "a", DoorCalls: &n1}, {Type: "workflow_finished", Status: "succeeded"}}
+	writeLinked(t, ts.logDir, child, root, childEvents("succeeded")...)
+	writeLinked(t, ts.logDir, root, "", rootEvents...)
+	header := func() string {
+		t.Helper()
+		resp, text := ts.do(t, http.MethodGet, "/v1/runs/"+root+"/audit", goodToken, nil)
+		if resp.StatusCode != 200 {
+			t.Fatalf("%d %s", resp.StatusCode, text)
+		}
+		return resp.Header.Get(apiclient.AnchorHeader)
+	}
+	if got := header(); got != apiclient.AnchorNotAnchored {
+		t.Fatalf("nothing anchored: %q", got)
+	}
+	// Only the child anchored and verified: the root's own word stands.
+	anchorRun(t, ts.logDir, child, good)
+	if got := header(); got != apiclient.AnchorNotAnchored {
+		t.Fatalf("child verified, root not anchored: %q", got)
+	}
+	anchorRun(t, ts.logDir, root, good)
+	if got := header(); got != apiclient.AnchorVerified {
+		t.Fatalf("both verified: %q", got)
+	}
+	// The child's ledger reforged: its mismatch outranks the root's verified.
+	if err := os.Remove(filepath.Join(ts.logDir, child+".jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	writeLinked(t, ts.logDir, child, root, childEvents("failed")...)
+	if got := header(); got != apiclient.AnchorMismatch {
+		t.Fatalf("child mismatch: %q", got)
+	}
+	// Restore the child; a backend that cannot decide lifts both to unverifiable.
+	if err := os.Remove(filepath.Join(ts.logDir, child+".jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	writeLinked(t, ts.logDir, child, root, childEvents("succeeded")...)
+	good.Fail()
+	if got := header(); got != apiclient.AnchorUnverifiable {
+		t.Fatalf("unverifiable: %q", got)
+	}
+	// A root mismatch is not lowered by a child's unverifiable.
+	if err := os.Remove(filepath.Join(ts.logDir, root+".jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	reforged := append([]engine.Event(nil), rootEvents...)
+	reforged[len(reforged)-1].Status = "failed"
+	writeLinked(t, ts.logDir, root, "", reforged...)
+	if got := header(); got != apiclient.AnchorMismatch {
+		t.Fatalf("root mismatch + child unverifiable: %q", got)
 	}
 }

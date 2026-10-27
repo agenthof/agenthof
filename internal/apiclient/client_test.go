@@ -234,3 +234,42 @@ func TestClientStartRunBusy503IsAStatusError(t *testing.T) {
 		t.Fatalf("printed form: %q", err.Error())
 	}
 }
+
+// TestAuditReadsAnchorHeader: the client carries the Agenthof-Anchor header
+// verbatim and reads an absent one as "" — which callers treat as not
+// anchored, never as a verdict.
+func TestAuditReadsAnchorHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(IntegrityHeader, IntegrityVerified)
+		if r.URL.Path == "/v1/runs/r-1/audit" {
+			w.Header().Set(AnchorHeader, AnchorMismatch)
+		}
+		_, _ = w.Write([]byte("run\n"))
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "tok", srv.Client())
+	res, err := c.Audit(context.Background(), "r-1")
+	if err != nil || res.Anchor != AnchorMismatch || res.Integrity != IntegrityVerified {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	res, err = c.Audit(context.Background(), "r-2")
+	if err != nil || res.Anchor != "" {
+		t.Fatalf("an older server sends no header: res=%+v err=%v", res, err)
+	}
+	if AnchorHeader != "Agenthof-Anchor" {
+		t.Fatalf("header name %q", AnchorHeader)
+	}
+}
+
+// TestRunEventsAnchorKeysAreAdditive: anchor and anchor_detail are omitted when
+// empty, so a pre-anchoring document is byte-identical.
+func TestRunEventsAnchorKeysAreAdditive(t *testing.T) {
+	b, err := json.Marshal(RunEvents{Integrity: IntegrityVerified})
+	if err != nil || strings.Contains(string(b), "anchor") {
+		t.Fatalf("%s %v", b, err)
+	}
+	b, err = json.Marshal(RunEvents{Anchor: AnchorUnverifiable, AnchorDetail: "why"})
+	if err != nil || !strings.Contains(string(b), `"anchor":"unverifiable","anchor_detail":"why"`) {
+		t.Fatalf("%s %v", b, err)
+	}
+}
