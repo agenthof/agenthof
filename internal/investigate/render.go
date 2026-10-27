@@ -124,6 +124,9 @@ func RenderText(r Result) string {
 		// whole — it is the value an operator compares with the anchored:
 		// line shipped off the box.
 		if a := e.Anchor; a != nil {
+			if a.RunID != "" {
+				tags = append(tags, "run="+a.RunID)
+			}
 			if a.Seq != 0 || a.Hash != "" {
 				tags = append(tags, fmt.Sprintf("anchor=%d:%s", a.Seq, a.Hash))
 			}

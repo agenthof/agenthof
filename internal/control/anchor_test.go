@@ -152,24 +152,29 @@ func TestAppendRefusesMalformedAnchors(t *testing.T) {
 		e    control.Event
 		want string
 	}{
-		"payload on apply":        {control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc", Anchor: &control.Anchor{}}, `control: anchor payload on a "apply" record`},
-		"success without payload": {ok, "control: a successful anchor must say what it covers"},
-		"refused with payload":    {control.Event{Action: "anchor", Outcome: "refused", Reason: control.NotAuthorized("anchor"), Invoker: inv, Witness: w, Anchor: goodAnchor()}, "control: a refused anchor tried nothing and covers nothing"},
-		"config_hash":             {func() control.Event { e := with(func(*control.Anchor) {}); e.ConfigHash = "sha256:abc"; return e }(), "control: an anchor installs nothing and carries no config_hash"},
-		"bad hex":                 {with(func(a *control.Anchor) { a.Hash = "ABCD" }), `control: anchor hash "ABCD" is not a lowercase hex sha256`},
-		"proof over cap":          {with(func(a *control.Anchor) { a.Proof = strings.Repeat("A", control.MaxAnchorProofLen+1) }), "control: anchor proof is 8193 bytes; the cap is 8192"},
-		"ref over cap":            {with(func(a *control.Anchor) { a.Ref = strings.Repeat("0", control.MaxAnchorRefLen+1) }), "control: anchor ref is 257 bytes; the cap is 256"},
-		"backend over cap":        {with(func(a *control.Anchor) { a.Backend = "https://" + strings.Repeat("x", control.MaxAnchorBackendLen) }), "control: anchor backend is 2056 bytes; the cap is 2048"},
-		"backend_kind over cap":   {with(func(a *control.Anchor) { a.BackendKind = strings.Repeat("k", control.MaxAnchorBackendKindLen+1) }), "control: anchor backend_kind is 65 bytes; the cap is 64"},
-		"backend_key_id over cap": {with(func(a *control.Anchor) { a.BackendKeyID = strings.Repeat("c", control.MaxAnchorBackendKeyIDLen+1) }), "control: anchor backend_key_id is 129 bytes; the cap is 128"},
-		"seq 0":                   {with(func(a *control.Anchor) { a.Seq = 0 }), "control: anchor covers seq 0 but the chain has 1 records"},
-		"seq count+1":             {with(func(a *control.Anchor) { a.Seq = 2 }), "control: anchor covers seq 2 but the chain has 1 records"},
-		"kind missing":            {with(func(a *control.Anchor) { a.Kind = "" }), "control: successful anchor record is incomplete (kind)"},
-		"kind unknown":            {with(func(a *control.Anchor) { a.Kind = "tsa" }), `control: anchor kind "tsa" is not tlog or signed`},
-		"backend_kind missing":    {with(func(a *control.Anchor) { a.BackendKind = "" }), "control: successful anchor record is incomplete (backend_kind)"},
-		"backend missing":         {with(func(a *control.Anchor) { a.Backend = "" }), "control: successful anchor record is incomplete (backend)"},
-		"ref missing":             {with(func(a *control.Anchor) { a.Ref = "" }), "control: successful anchor record is incomplete (ref)"},
-		"proof missing":           {with(func(a *control.Anchor) { a.Proof = "" }), "control: successful anchor record is incomplete (proof)"},
+		"payload on apply":                     {control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc", Anchor: &control.Anchor{}}, `control: anchor payload on a "apply" record`},
+		"success without payload":              {ok, "control: a successful anchor must say what it covers"},
+		"refused with payload":                 {control.Event{Action: "anchor", Outcome: "refused", Reason: control.NotAuthorized("anchor"), Invoker: inv, Witness: w, Anchor: goodAnchor()}, "control: a refused anchor tried nothing and covers nothing"},
+		"config_hash":                          {func() control.Event { e := with(func(*control.Anchor) {}); e.ConfigHash = "sha256:abc"; return e }(), "control: an anchor installs nothing and carries no config_hash"},
+		"bad hex":                              {with(func(a *control.Anchor) { a.Hash = "ABCD" }), `control: anchor hash "ABCD" is not a lowercase hex sha256`},
+		"proof over cap":                       {with(func(a *control.Anchor) { a.Proof = strings.Repeat("A", control.MaxAnchorProofLen+1) }), "control: anchor proof is 8193 bytes; the cap is 8192"},
+		"ref over cap":                         {with(func(a *control.Anchor) { a.Ref = strings.Repeat("0", control.MaxAnchorRefLen+1) }), "control: anchor ref is 257 bytes; the cap is 256"},
+		"backend over cap":                     {with(func(a *control.Anchor) { a.Backend = "https://" + strings.Repeat("x", control.MaxAnchorBackendLen) }), "control: anchor backend is 2056 bytes; the cap is 2048"},
+		"backend_kind over cap":                {with(func(a *control.Anchor) { a.BackendKind = strings.Repeat("k", control.MaxAnchorBackendKindLen+1) }), "control: anchor backend_kind is 65 bytes; the cap is 64"},
+		"backend_key_id over cap":              {with(func(a *control.Anchor) { a.BackendKeyID = strings.Repeat("c", control.MaxAnchorBackendKeyIDLen+1) }), "control: anchor backend_key_id is 129 bytes; the cap is 128"},
+		"seq 0":                                {with(func(a *control.Anchor) { a.Seq = 0 }), "control: anchor covers seq 0 but the chain has 1 records"},
+		"seq count+1":                          {with(func(a *control.Anchor) { a.Seq = 2 }), "control: anchor covers seq 2 but the chain has 1 records"},
+		"kind missing":                         {with(func(a *control.Anchor) { a.Kind = "" }), "control: successful anchor record is incomplete (kind)"},
+		"kind unknown":                         {with(func(a *control.Anchor) { a.Kind = "tsa" }), `control: anchor kind "tsa" is not tlog or signed`},
+		"backend_kind missing":                 {with(func(a *control.Anchor) { a.BackendKind = "" }), "control: successful anchor record is incomplete (backend_kind)"},
+		"backend missing":                      {with(func(a *control.Anchor) { a.Backend = "" }), "control: successful anchor record is incomplete (backend)"},
+		"ref missing":                          {with(func(a *control.Anchor) { a.Ref = "" }), "control: successful anchor record is incomplete (ref)"},
+		"proof missing":                        {with(func(a *control.Anchor) { a.Proof = "" }), "control: successful anchor record is incomplete (proof)"},
+		"run-scoped success without ref":       {with(func(a *control.Anchor) { a.RunID = "r-0123456789abcdef"; a.Proof = ""; a.Ref = "" }), "control: successful anchor record is incomplete (ref)"},
+		"run_id path-like":                     {with(func(a *control.Anchor) { a.RunID = "../x" }), `control: anchor run_id "../x" is not a run id`},
+		"run_id upper-case":                    {with(func(a *control.Anchor) { a.RunID = "R-0123456789ABCDEF" }), `control: anchor run_id "R-0123456789ABCDEF" is not a run id`},
+		"run_id too short":                     {with(func(a *control.Anchor) { a.RunID = "r-0123" }), `control: anchor run_id "r-0123" is not a run id`},
+		"run-scoped payload on a prune record": {control.Event{Action: "prune", Outcome: "success", Invoker: inv, Witness: w, Detail: "pruned 0 run(s) and 0 artifact(s) older than 180d", Anchor: &control.Anchor{RunID: "r-0123456789abcdef", Seq: 3, Hash: coveredHash}}, `control: anchor payload on a "prune" record`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -181,6 +186,17 @@ func TestAppendRefusesMalformedAnchors(t *testing.T) {
 				t.Fatal("a refused append must leave the ledger byte-identical")
 			}
 		})
+	}
+	// A run-scoped success needs no proof (the proof lives beside the run's
+	// ledger) and its seq is a run position, not a control-chain one.
+	runScoped := func(mut func(a *control.Anchor)) control.Event {
+		return with(func(a *control.Anchor) { a.RunID = "r-0123456789abcdef"; a.Proof = ""; mut(a) })
+	}
+	if _, err := control.Append(p, runScoped(func(*control.Anchor) {})); err != nil {
+		t.Fatalf("run-scoped success without proof: %v", err)
+	}
+	if _, err := control.Append(p, runScoped(func(a *control.Anchor) { a.Seq = 99 })); err != nil {
+		t.Fatalf("run-scoped seq past the control count: %v", err)
 	}
 	// seq = Count is accepted (the head itself).
 	if _, err := control.Append(p, with(func(a *control.Anchor) { a.Seq = 1 })); err != nil {
@@ -259,5 +275,19 @@ func TestLastInstallingSkipsAnchorRecords(t *testing.T) {
 	}
 	if _, ok := control.LastInstalling([]ledger.Record{recAnchor(1, "success", "sha256:aaa", "")}); ok {
 		t.Fatal("an anchor alone installs nothing")
+	}
+}
+
+// TestDecodeAnchorRunID: run_id round-trips through Decode, and a control
+// anchor written before the field existed decodes with it empty.
+func TestDecodeAnchorRunID(t *testing.T) {
+	r := recAnchor(2, "success", "", `{"run_id":"r-0123456789abcdef","seq":7,"hash":"`+coveredHash+`","kind":"tlog","ref":"1"}`)
+	d, err := control.Decode(r.Raw)
+	if err != nil || d.Anchor == nil || d.Anchor.RunID != "r-0123456789abcdef" || d.Anchor.Seq != 7 {
+		t.Fatalf("%+v %v", d.Anchor, err)
+	}
+	old := recAnchor(2, "success", "", `{"seq":1,"hash":"`+coveredHash+`","kind":"tlog","ref":"1"}`)
+	if d, err := control.Decode(old.Raw); err != nil || d.Anchor == nil || d.Anchor.RunID != "" {
+		t.Fatalf("%+v %v", d.Anchor, err)
 	}
 }

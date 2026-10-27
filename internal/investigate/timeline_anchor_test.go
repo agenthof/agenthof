@@ -332,3 +332,132 @@ func TestTimelineAnchorVerdictsAcrossASeal(t *testing.T) {
 		t.Fatalf("%+v", got.Sources)
 	}
 }
+
+// appendRunScopedAnchor appends a run-scoped success anchor (no proof; its seq
+// is a run position, well past the control count) and returns its payload.
+func appendRunScopedAnchor(t *testing.T, ctl string) *control.Anchor {
+	t.Helper()
+	a := &control.Anchor{RunID: "r-0123456789abcdef", Seq: 7, Hash: strings.Repeat("ab", 32), Kind: "tlog", BackendKind: "rfc3161", Backend: anchortest.StubBackend, Ref: "run-ref"}
+	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
+	if _, err := control.Append(ctl, control.Event{Action: "anchor", Outcome: "success", Invoker: inv, Witness: w, Anchor: a}); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// TestInvestigateViewCarriesRunIDAndNoVerdictForARunScopedAnchor: a run-scoped
+// anchor record shows the run, the run position, hash and ref, but is never
+// judged against the control chain — no verdict, no cause — and the anchors:
+// trailer counts only the control-scoped verdicts.
+func TestInvestigateViewCarriesRunIDAndNoVerdictForARunScopedAnchor(t *testing.T) {
+	stub := anchortest.NewStub([]byte("s"))
+	ctl, _, _ := anchoredLedger(t, stub)
+	a := appendRunScopedAnchor(t, ctl)
+
+	res, err := Timeline(t.TempDir(), ctl, Filter{}, stubOptions(stub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var run *Record
+	for i := range res.Events {
+		if e := res.Events[i]; e.Anchor != nil && e.Anchor.RunID != "" {
+			run = &res.Events[i]
+		}
+	}
+	if run == nil || run.Anchor.RunID != a.RunID || run.Anchor.Seq != 7 || run.Anchor.Hash != a.Hash || run.Anchor.Ref != "run-ref" || run.Anchor.Verdict != "" || run.Anchor.Cause != "" {
+		t.Fatalf("run-scoped view: %+v", run)
+	}
+	if ExitCode(res) != 0 {
+		t.Fatalf("exit %d", ExitCode(res))
+	}
+
+	js, err := RenderJSON(res, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Events []struct {
+			Anchor map[string]any `json:"anchor"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(js), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var found map[string]any
+	for _, e := range doc.Events {
+		if e.Anchor != nil && e.Anchor["run_id"] == a.RunID {
+			found = e.Anchor
+		}
+	}
+	if found == nil {
+		t.Fatalf("no run_id in the JSON: %s", js)
+	}
+	for _, k := range []string{"run_id", "seq", "hash", "ref"} {
+		if _, ok := found[k]; !ok {
+			t.Fatalf("anchor object lacks %q: %v", k, found)
+		}
+	}
+	for _, k := range []string{"verdict", "cause"} {
+		if _, ok := found[k]; ok {
+			t.Fatalf("a run-scoped anchor must carry no %q: %v", k, found)
+		}
+	}
+
+	txt := RenderText(res)
+	var line string
+	for _, l := range strings.Split(txt, "\n") {
+		if strings.Contains(l, "run="+a.RunID) {
+			line = l
+		}
+	}
+	if line == "" || !strings.Contains(line, "run="+a.RunID+" anchor=7:"+a.Hash) || strings.Contains(line, "verdict=") {
+		t.Fatalf("text line %q in:\n%s", line, txt)
+	}
+	if !strings.Contains(txt, "anchors: 1 (1 verified, 0 mismatch, 0 unverifiable)\n") {
+		t.Fatalf("the trailer counts only control-scoped verdicts:\n%s", txt)
+	}
+}
+
+// TestTimelineSkipsRunScopedAnchorsOnATornChain: on a torn chain the
+// non-valid-chain enumerator would hand every success anchor record a
+// control-chain cause; a run-scoped one is not about the control chain and
+// gets no verdict, while the control anchor still gets the torn cause.
+func TestTimelineSkipsRunScopedAnchorsOnATornChain(t *testing.T) {
+	stub := anchortest.NewStub([]byte("s"))
+	ctl, _, _ := anchoredLedger(t, stub)
+	a := appendRunScopedAnchor(t, ctl)
+	f, err := os.OpenFile(ctl, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"v":"control/1","seq":4,"partial`); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	res, err := Timeline(t.TempDir(), ctl, Filter{}, stubOptions(stub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Sources) != 1 || res.Sources[0].Integrity != "torn" {
+		t.Fatalf("%+v", res.Sources)
+	}
+	var ctlN, runN int
+	for _, e := range res.Events {
+		switch {
+		case e.Anchor == nil:
+		case e.Anchor.RunID == a.RunID:
+			runN++
+			if e.Anchor.Verdict != "" || e.Anchor.Cause != "" {
+				t.Fatalf("a run-scoped anchor got a control-chain verdict: %+v", e.Anchor)
+			}
+		default:
+			ctlN++
+			if e.Anchor.Verdict != "unverifiable" || e.Anchor.Cause != causeTorn {
+				t.Fatalf("control anchor: %+v", e.Anchor)
+			}
+		}
+	}
+	if runN != 1 || ctlN != 1 {
+		t.Fatalf("run=%d control=%d", runN, ctlN)
+	}
+}

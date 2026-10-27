@@ -80,6 +80,11 @@ const (
 
 var anchorHashRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// runIDRE is the shape of a run id an anchor record may name. It is kept in
+// step with sidecar.RunIDRE (this package cannot import sidecar); a test in
+// the external package pins the two equal.
+var runIDRE = regexp.MustCompile(`^r-[0-9a-f]{16}$`)
+
 // checkAnchorShape is Append's permit for an anchor record — the structural
 // rules decidable before the ledger is opened, so a malformed anchor appends
 // nothing and, on a fresh root, creates no file. There is no caller-identity
@@ -111,6 +116,9 @@ func checkAnchorShape(e Event) error {
 	if !anchorHashRE.MatchString(a.Hash) {
 		return fmt.Errorf("control: anchor hash %q is not a lowercase hex sha256", a.Hash)
 	}
+	if a.RunID != "" && !runIDRE.MatchString(a.RunID) {
+		return fmt.Errorf("control: anchor run_id %q is not a run id", a.RunID)
+	}
 	if len(a.Proof) > MaxAnchorProofLen {
 		return fmt.Errorf("control: anchor proof is %d bytes; the cap is %d", len(a.Proof), MaxAnchorProofLen)
 	}
@@ -141,7 +149,9 @@ func checkAnchorShape(e Event) error {
 		return errors.New("control: successful anchor record is incomplete (backend)")
 	case a.Ref == "":
 		return errors.New("control: successful anchor record is incomplete (ref)")
-	case a.Proof == "":
+	case a.Proof == "" && a.RunID == "":
+		// A run-scoped anchor's proof lives beside the run's ledger, not in
+		// the control record; an ordinary control anchor still needs it.
 		return errors.New("control: successful anchor record is incomplete (proof)")
 	}
 	return nil
@@ -151,9 +161,11 @@ func checkAnchorShape(e Event) error {
 // covered seq must exist, 1 ≤ Seq ≤ Count, read under the exclusive flock so
 // it holds across any head advance since the caller read the head. A refusal
 // here appends nothing — on a fresh root the file now exists and is empty,
-// which is "no record appended", the honest statement of unchanged.
+// which is "no record appended", the honest statement of unchanged. A
+// run-scoped anchor (RunID set) is exempt: its Seq is a position in the run's
+// ledger, not in this chain.
 func checkAnchorCoverage(a *Anchor, count int) error {
-	if a != nil && (a.Seq < 1 || a.Seq > count) {
+	if a != nil && a.RunID == "" && (a.Seq < 1 || a.Seq > count) {
 		return fmt.Errorf("control: anchor covers seq %d but the chain has %d records", a.Seq, count)
 	}
 	return nil
