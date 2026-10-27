@@ -25,7 +25,7 @@ func TestRenderFullRun(t *testing.T) {
 		{Time: ts(6), Type: "bounced_back", Step: "code", Status: "plan", Binding: bind},
 		{Time: ts(7), Type: "workflow_finished", Status: "succeeded", Binding: bind},
 	}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	for _, want := range []string{
 		"run r-1a2b3c4d — fix-bug (role software-engineer)",
 		"invoked by dana@example.com (asserted, issuer local)",
@@ -50,7 +50,7 @@ func TestRenderExecAttested(t *testing.T) {
 		{Type: "exec", Status: "succeeded", Command: []string{"true"}, ExitCode: &exit, Mode: "attested",
 			Time: time.Unix(0, 0).UTC(), Binding: bind},
 	}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, "exec true — exit 0 (attested)") {
 		t.Fatalf("exec not rendered:\n%s", out)
 	}
@@ -62,7 +62,7 @@ func TestRenderExecRefused(t *testing.T) {
 		{Type: "exec", Status: "refused", Command: []string{"rm", "-rf", "/"},
 			Reason: "command is not on the exec allowlist", Time: time.Unix(0, 0).UTC(), Binding: bind},
 	}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, "exec rm -rf / refused — command is not on the exec allowlist") {
 		t.Fatalf("refused exec not rendered:\n%s", out)
 	}
@@ -74,7 +74,7 @@ func TestRenderModelCallSucceeded(t *testing.T) {
 		Type: "model_call", Status: "succeeded", Model: "fast",
 		PromptTokens: &pt, CompletionTokens: &ct, Time: time.Unix(0, 0).UTC(),
 	}}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, "model fast — 11 prompt / 5 completion tokens") {
 		t.Fatalf("model_call not rendered:\n%s", out)
 	}
@@ -85,7 +85,7 @@ func TestRenderModelCallRefused(t *testing.T) {
 		Type: "model_call", Status: "refused", Model: "gpt-9",
 		Reason: `model "gpt-9" is not allowed for this agent`, Time: time.Unix(0, 0).UTC(),
 	}}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, `model gpt-9 refused — model "gpt-9" is not allowed for this agent`) {
 		t.Fatalf("refused model_call not rendered:\n%s", out)
 	}
@@ -95,7 +95,7 @@ func TestRenderModelCallStarted(t *testing.T) {
 	events := []engine.Event{{
 		Type: "model_call", Status: "started", Model: "fast", Time: time.Unix(0, 0).UTC(),
 	}}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, "model fast — streaming (usage not captured)") {
 		t.Fatalf("started model_call not rendered:\n%s", out)
 	}
@@ -106,7 +106,7 @@ func TestRenderModelCallFailed(t *testing.T) {
 		Type: "model_call", Status: "failed", Model: "fast",
 		Reason: "upstream timeout", Time: time.Unix(0, 0).UTC(),
 	}}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, "model fast failed — upstream timeout") {
 		t.Fatalf("failed model_call not rendered:\n%s", out)
 	}
@@ -117,7 +117,7 @@ func TestRenderToolCallSucceeded(t *testing.T) {
 		Type: "tool_call", Status: "succeeded", Tool: "echo",
 		ArgsSHA: "abcdef1234567890", AuthMode: "static_env", Time: time.Unix(0, 0).UTC(),
 	}}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, "tool echo — args abcdef12 (static_env)") {
 		t.Fatalf("tool_call not rendered:\n%s", out)
 	}
@@ -128,7 +128,7 @@ func TestRenderToolCallFailed(t *testing.T) {
 		Type: "tool_call", Status: "failed", Tool: "echo",
 		Reason: "upstream unreachable", Time: time.Unix(0, 0).UTC(),
 	}}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, "tool echo failed — upstream unreachable") {
 		t.Fatalf("failed tool_call not rendered:\n%s", out)
 	}
@@ -139,7 +139,7 @@ func TestRenderToolCallRefused(t *testing.T) {
 		Type: "tool_call", Status: "refused", Tool: "danger",
 		Reason: "tool not allowed", Time: time.Unix(0, 0).UTC(),
 	}}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, "tool danger refused — tool not allowed") {
 		t.Fatalf("refused tool_call not rendered:\n%s", out)
 	}
@@ -148,11 +148,11 @@ func TestRenderToolCallRefused(t *testing.T) {
 func TestRenderRefusedAndEmpty(t *testing.T) {
 	bind := engine.Binding{Invoker: identity.Static("dev@x"), Role: "se", Workflow: "fix-bug", RunID: "r-ffffffff"}
 	events := []engine.Event{{Time: ts(5), Type: "run_refused", Reason: "role \"se\" is not in the registry", Binding: bind}}
-	out := Render(events, ledger.Head{Count: 1}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: 1}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, "status: refused") || !strings.Contains(out, "not in the registry") {
 		t.Fatalf("refusal render:\n%s", out)
 	}
-	if Render(nil, ledger.Head{}, nil, completeness.Check(nil)) != "no events for this run\nledger completeness: UNTERMINATED — no final event; still running or tail lost (this reader cannot tell which)\n" {
+	if Render(nil, ledger.Head{}, nil, completeness.Check(nil), "") != "no events for this run\nledger completeness: UNTERMINATED — no final event; still running or tail lost (this reader cannot tell which)\n" {
 		t.Fatal("empty render contract")
 	}
 }
@@ -182,7 +182,7 @@ func TestRenderLedgerIntegrityVerified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := Render(got, head, err, completeness.Check(got))
+	out := Render(got, head, err, completeness.Check(got), "")
 	if !strings.Contains(out, "ledger integrity: verified (3 events)") {
 		t.Fatalf("missing verified integrity line in:\n%s", out)
 	}
@@ -202,7 +202,7 @@ func TestRenderRefuseHelper(t *testing.T) {
 	if len(events) != 1 || events[0].Type != "run_refused" {
 		t.Fatalf("Refuse must write exactly one run_refused event: %+v", events)
 	}
-	out := Render(events, head, err, completeness.Check(events))
+	out := Render(events, head, err, completeness.Check(events), "")
 	if !strings.Contains(out, "status: refused") {
 		t.Fatalf("missing refused status in:\n%s", out)
 	}
@@ -247,7 +247,7 @@ func TestRenderLedgerIntegrityTorn(t *testing.T) {
 	}
 
 	got, head, rerr := engine.ReadLog(dir, id)
-	out := Render(got, head, rerr, completeness.Report{})
+	out := Render(got, head, rerr, completeness.Report{}, "")
 	if !strings.Contains(out, "ledger integrity: TORN — last record incomplete") {
 		t.Fatalf("missing torn integrity line in:\n%s", out)
 	}
@@ -299,7 +299,7 @@ func TestRenderLedgerIntegrityBroken(t *testing.T) {
 	}
 
 	events, head, rerr := engine.ReadLog(dir, id)
-	out := Render(events, head, rerr, completeness.Report{})
+	out := Render(events, head, rerr, completeness.Report{}, "")
 	if !strings.Contains(out, "ledger integrity: BROKEN at event") {
 		t.Fatalf("missing broken integrity line in:\n%s", out)
 	}
@@ -313,7 +313,7 @@ func TestRenderToolCallRuntimeAttested(t *testing.T) {
 			RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()},
 		{Type: "tool_call", Status: "failed", Tool: "echo", Reason: "boom", RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()},
 	}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	want := "[runtime-attested: refbridge /stdio-tool -credential-env DEMO_TOKEN pid 4242 spawn 2]"
 	if !strings.Contains(out, "tool echo — args abcdef12 (static_env) "+want) {
 		t.Fatalf("succeeded tool_call not rendered with its attestation:\n%s", out)
@@ -331,7 +331,7 @@ func TestRenderExecRuntimeAttested(t *testing.T) {
 		{Type: "exec", Status: "failed", Command: []string{"cat", "/work/agent-note.txt"}, ExitCode: &one, Mode: "runtime", RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()},
 		{Type: "exec", Status: "failed", Command: []string{"cat", "/work/agent-note.txt"}, Reason: "exec runtime unreachable", Mode: "runtime", Time: time.Unix(0, 0).UTC()},
 	}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	want := "[runtime-attested: refexec cat /work/agent-note.txt pid 4242 spawn 1]"
 	for _, line := range []string{
 		"exec cat /work/agent-note.txt — exit 0 (runtime) " + want,
@@ -352,7 +352,7 @@ func TestRenderToolCallTokenExchangeMode(t *testing.T) {
 		Type: "tool_call", Status: "succeeded", Tool: "whoami",
 		ArgsSHA: "abcdef1234567890", AuthMode: "token_exchange", Time: time.Unix(0, 0).UTC(),
 	}}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if !strings.Contains(out, "tool whoami — args abcdef12 (token_exchange)") {
 		t.Fatalf("token_exchange mode not rendered:\n%s", out)
 	}
@@ -380,7 +380,7 @@ func TestRenderSpawn(t *testing.T) {
 	for _, c := range cases {
 		c.e.Time = time.Unix(0, 0).UTC()
 		c.e.Binding = bind
-		out := Render([]engine.Event{c.e}, ledger.Head{Count: 1}, nil, completeness.Check([]engine.Event{c.e}))
+		out := Render([]engine.Event{c.e}, ledger.Head{Count: 1}, nil, completeness.Check([]engine.Event{c.e}), "")
 		if !strings.Contains(out, c.want) {
 			t.Errorf("status %q: missing %q in:\n%s", c.e.Status, c.want, out)
 		}
@@ -396,16 +396,16 @@ func TestRenderPrintsCompletenessAfterIntegrity(t *testing.T) {
 		{Time: ts(6), Type: "step_succeeded", Step: "plan", Agent: "planner", DoorCalls: &n, Binding: bind},
 		{Time: ts(7), Type: "workflow_finished", Status: "succeeded", Binding: bind},
 	}
-	out := Render(events, ledger.Head{Count: 4}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: 4}, nil, completeness.Check(events), "")
 	want := "ledger integrity: verified (4 events)\nledger completeness: complete (0 door call(s) accounted)\n\n"
 	if !strings.Contains(out, want) {
 		t.Fatalf("the completeness line follows the integrity line directly:\n%s", out)
 	}
-	torn := Render(events, ledger.Head{Count: 4}, &ledger.TornError{}, completeness.Report{})
+	torn := Render(events, ledger.Head{Count: 4}, &ledger.TornError{}, completeness.Report{}, "")
 	if strings.Contains(torn, "ledger completeness") {
 		t.Fatalf("completeness is not judged on a torn chain:\n%s", torn)
 	}
-	empty := Render(nil, ledger.Head{}, nil, completeness.Check(nil))
+	empty := Render(nil, ledger.Head{}, nil, completeness.Check(nil), "")
 	if empty != "no events for this run\nledger completeness: UNTERMINATED — no final event; still running or tail lost (this reader cannot tell which)\n" {
 		t.Fatalf("%q", empty)
 	}
@@ -414,7 +414,7 @@ func TestRenderPrintsCompletenessAfterIntegrity(t *testing.T) {
 func TestRenderRefusalHeadlineFullyRefusedRun(t *testing.T) {
 	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "se", Workflow: "fix-bug", RunID: "r-refhead1"}
 	events := []engine.Event{{Time: ts(5), Type: "run_refused", Reason: "role \"se\" is not in the registry", Binding: bind}}
-	out := Render(events, ledger.Head{Count: 1}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: 1}, nil, completeness.Check(events), "")
 	for _, want := range []string{
 		"status: refused\n",
 		"refused: 1 refusal in this run\n",
@@ -436,7 +436,7 @@ func TestRenderRefusalHeadlineSurfacesBuriedDoorRefusal(t *testing.T) {
 		{Time: ts(6), Type: "spawn", Status: "refused", ChildRole: "reviewer", ChildWorkflow: "review", Reason: "depth limit", Binding: bind},
 		{Time: ts(7), Type: "workflow_finished", Status: "succeeded", Binding: bind},
 	}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	for _, want := range []string{
 		"status: succeeded\n", // a blocked door call does not change the workflow outcome
 		"refused: 4 refusals in this run\n",
@@ -457,7 +457,7 @@ func TestRenderRefusalHeadlineSurfacesBuriedDoorRefusal(t *testing.T) {
 		{Time: ts(5), Type: "tool_call", Status: "failed", Tool: "echo", Reason: "upstream unreachable", Binding: bind},
 		{Time: ts(6), Type: "workflow_finished", Status: "succeeded", Binding: bind},
 	}
-	if strings.Contains(Render(failed, ledger.Head{Count: 2}, nil, completeness.Check(failed)), "refused:") {
+	if strings.Contains(Render(failed, ledger.Head{Count: 2}, nil, completeness.Check(failed), ""), "refused:") {
 		t.Fatal("a failed door call must not produce a refusal headline")
 	}
 }
@@ -471,8 +471,36 @@ func TestRenderNoRefusalHeadlineOnCleanRun(t *testing.T) {
 		{Time: ts(6), Type: "tool_call", Status: "succeeded", Tool: "echo", ArgsSHA: "abcdef1234", AuthMode: "static_env", Binding: bind},
 		{Time: ts(7), Type: "workflow_finished", Status: "succeeded", Binding: bind},
 	}
-	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events))
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
 	if strings.Contains(out, "refusal") || strings.Contains(out, "refused:") {
 		t.Fatalf("clean run must print no refusal headline:\n%s", out)
+	}
+}
+
+// TestRenderPrintsTheAnchorLineAfterCompleteness: a run's anchor line, already
+// rendered by the caller, follows the completeness line; an empty one prints
+// nothing, so the output is what it was before the parameter existed.
+func TestRenderPrintsTheAnchorLineAfterCompleteness(t *testing.T) {
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "r", Workflow: "w", RunID: "r-1a2b3c4d"}
+	events := []engine.Event{
+		{Time: ts(5), Type: "workflow_started", Binding: bind},
+		{Time: ts(7), Type: "workflow_finished", Status: "succeeded", Binding: bind},
+	}
+	comp := completeness.Check(events)
+	bare := Render(events, ledger.Head{Count: 2}, nil, comp, "")
+	withLine := Render(events, ledger.Head{Count: 2}, nil, comp, "ledger anchor: not anchored\n")
+	if !strings.Contains(withLine, comp.Line()+"ledger anchor: not anchored\n\n") {
+		t.Fatalf("the anchor line follows ledger completeness:\n%s", withLine)
+	}
+	if got := strings.Replace(withLine, "ledger anchor: not anchored\n", "", 1); got != bare {
+		t.Fatalf("an empty anchor line prints nothing:\nbare:\n%s\nwith it removed:\n%s", bare, got)
+	}
+	if strings.Contains(bare, "ledger anchor") {
+		t.Fatalf("no anchor line was given:\n%s", bare)
+	}
+	// A torn chain judges nothing else: no anchor line even if one is passed.
+	torn := Render(events, ledger.Head{Count: 2}, &ledger.TornError{}, completeness.Report{}, "ledger anchor: not anchored\n")
+	if !strings.Contains(torn, "ledger integrity: TORN") {
+		t.Fatalf("torn output lost:\n%s", torn)
 	}
 }

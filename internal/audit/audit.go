@@ -40,17 +40,23 @@ func integrityLine(head ledger.Head, verr error) string {
 // (completeness.Check, or the zero Report when verr != nil — completeness
 // is not judged on a torn or broken chain and prints no line).
 //
+// anchorLine is the run's anchor state, already rendered by the caller
+// (sidecar.Lines): it is written right after the completeness line, and ""
+// prints nothing. A caller passes it only for a chain that verified — a torn
+// or broken one is judged on nothing else — so the no-events-with-an-error
+// path below drops it.
+//
 // A torn/broken ledger can leave zero decodable events (e.g. the ledger
 // crashed right after its very first, now-incomplete, write) — that must
 // still surface the integrity failure rather than being mistaken for a
 // genuinely empty run, so the verr check runs before the empty-events
 // short-circuit.
-func Render(events []engine.Event, head ledger.Head, verr error, comp completeness.Report) string {
+func Render(events []engine.Event, head ledger.Head, verr error, comp completeness.Report, anchorLine string) string {
 	if len(events) == 0 {
 		if verr != nil {
 			return integrityLine(head, verr)
 		}
-		return "no events for this run\n" + comp.Line()
+		return "no events for this run\n" + comp.Line() + anchorLine
 	}
 	b := events[0].Binding
 	status := "incomplete"
@@ -69,6 +75,7 @@ func Render(events []engine.Event, head ledger.Head, verr error, comp completene
 	sb.WriteString(refusalHeadline(events))
 	sb.WriteString(integrityLine(head, verr))
 	sb.WriteString(comp.Line())
+	sb.WriteString(anchorLine)
 	fmt.Fprint(&sb, "\n")
 	for _, e := range events {
 		t := e.Time.UTC().Format("15:04:05")

@@ -589,6 +589,12 @@ func verifyAnchors(controlLog string, records []ledger.Record, anchorKey string,
 	key := sync.OnceValues(func() (*ecdsa.PublicKey, error) { return pinnedLogKey(controlLog, anchorKey) })
 	results := anchorverify.Verify(records, anchorverify.Options{ResolveKey: key, Factory: verifyBackendFactory, Offline: offline, Timeout: timeout})
 	if len(results) == 0 {
+		if hasRunScopedAnchor(records) {
+			// The chain carries anchors, but they are the runs': each is
+			// verified from its sidecar on that run's audit, never here.
+			_, _ = fmt.Fprintln(out, "anchors: none for the control ledger (run anchors are reported on each run's audit; if this root is meant to be anchored — integrity.yaml anchor: tlog — run: agenthof audit anchor)")
+			return anchorVerdicts{}
+		}
 		_, _ = fmt.Fprintln(out, "anchors: none (if this root is meant to be anchored — integrity.yaml anchor: tlog — run: agenthof audit anchor)")
 		return anchorVerdicts{}
 	}
@@ -628,6 +634,20 @@ func verifyAnchors(controlLog string, records []ledger.Record, anchorKey string,
 	}
 	_, _ = fmt.Fprintf(out, "anchors: %d (%d verified, %d mismatch, %d unverifiable)\n", len(results), v.verified, v.mismatch, v.unverifiable)
 	return v
+}
+
+// hasRunScopedAnchor reports whether the chain holds at least one successful
+// anchor record that names a run (Anchor.RunID set): the record
+// control.CheckAnchors skips, because it vouches for a run's ledger and not
+// for this chain.
+func hasRunScopedAnchor(records []ledger.Record) bool {
+	for _, r := range records {
+		d, err := control.Decode(r.Raw)
+		if err == nil && d.Action == "anchor" && d.Outcome == "success" && d.Anchor != nil && d.Anchor.RunID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // investigateOptions is the anchor-verdict wiring investigate and serve hand

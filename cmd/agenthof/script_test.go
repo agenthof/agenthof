@@ -455,6 +455,50 @@ func TestScript(t *testing.T) {
 				}
 				ts.Check(os.WriteFile(path, out.Bytes(), 0o600))
 			},
+			// dropevent <src> <dst> <type>: writes src to dst without its records of
+			// the given event type, re-linking the chain (prev recomputed) so the
+			// copy still verifies — an event removed and the chain made whole,
+			// which a completeness check can catch and a hash chain cannot.
+			"dropevent": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 3 {
+					ts.Fatalf("usage: dropevent <src> <dst> <type>")
+				}
+				recs, _, err := ledger.ReadVerify(ts.MkAbs(args[0]), ledger.Unlocked)
+				ts.Check(err)
+				var out bytes.Buffer
+				prev, dropped := "", 0
+				for _, r := range recs {
+					var m map[string]any
+					ts.Check(json.Unmarshal(r.Raw, &m))
+					if m["type"] == args[2] {
+						dropped++
+						continue
+					}
+					m["prev"] = prev
+					raw, err := json.Marshal(m)
+					ts.Check(err)
+					out.Write(raw)
+					out.WriteByte('\n')
+					sum := sha256.Sum256(raw)
+					prev = hex.EncodeToString(sum[:])
+				}
+				if dropped == 0 {
+					ts.Fatalf("no %q event in %s", args[2], args[0])
+				}
+				ts.Check(os.WriteFile(ts.MkAbs(args[1]), out.Bytes(), 0o600))
+			},
+			// runhead <run-ledger>: exports a run ledger's event count and head
+			// hash as $RUNN and $RUNHEAD — the "events=N sha256=H" pair audit
+			// anchor --run prints, and what --expect-head <count>:<hex> takes.
+			"runhead": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 1 {
+					ts.Fatalf("usage: runhead <run-ledger>")
+				}
+				recs, head, err := ledger.ReadVerify(ts.MkAbs(args[0]), ledger.Unlocked)
+				ts.Check(err)
+				ts.Setenv("RUNN", strconv.Itoa(len(recs)))
+				ts.Setenv("RUNHEAD", head.Hash)
+			},
 			// anchorref <control-log>: exports the last successful anchor's ref,
 			// covered seq and hash as $REF, $ASEQ, $AHASH.
 			"anchorref": func(ts *testscript.TestScript, neg bool, args []string) {

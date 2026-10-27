@@ -22,6 +22,7 @@ import (
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/sidecar"
 )
 
 func TestEventsVerifiedAndInFlightAndBroken(t *testing.T) {
@@ -114,7 +115,7 @@ func TestAuditEndpointRendersConfigJoin(t *testing.T) {
 	}
 	events, head, verr := engine.ReadLog(ts.logDir, acc.RunID)
 	cev, verdict, _ := investigate.LoadControl(ctl)
-	want := audit.Render(events, head, verr, completeness.Check(events)) + completeness.VerifyTree(ts.logDir, acc.RunID, events, verr).SubtreeLines() + investigate.ConfigJoin(cev, verdict, "cafe0001", events[0].Time) + "\n"
+	want := audit.Render(events, head, verr, completeness.Check(events), "ledger anchor: not anchored\n") + completeness.VerifyTree(ts.logDir, acc.RunID, events, verr).SubtreeLines() + investigate.ConfigJoin(cev, verdict, "cafe0001", events[0].Time) + "\n"
 	if string(text) != want {
 		t.Fatalf("audit text differs from the local render:\n%s\n--- want ---\n%s", text, want)
 	}
@@ -169,7 +170,10 @@ func TestAuditHeadersCarryTheTreeWorst(t *testing.T) {
 	// The text is byte-identical to the local render + subtree lines.
 	events, head, verr := engine.ReadLog(ts.logDir, root)
 	tree := completeness.VerifyTree(ts.logDir, root, events, verr)
-	if want := audit.Render(events, head, verr, tree.Root.Report) + tree.SubtreeLines(); string(text) != want {
+	// No sidecar anywhere: the root reads not anchored, and a verified child's
+	// subtree line says so too.
+	notAnchored := func(completeness.Node) string { return ", anchor not-anchored" }
+	if want := audit.Render(events, head, verr, tree.Root.Report, "ledger anchor: not anchored\n") + tree.SubtreeLinesWith(notAnchored); string(text) != want {
 		t.Fatalf("server text differs from the local render:\n%s\n--- want ---\n%s", text, want)
 	}
 }
@@ -421,5 +425,77 @@ func TestInvestigateEndpointOverAFaultedSealedRoot(t *testing.T) {
 				t.Fatalf("%+v", d)
 			}
 		})
+	}
+}
+
+// anchorRun writes a sidecar beside run id's ledger, minted by stub over the
+// run's final head.
+func anchorRun(t *testing.T, logDir, id string, stub *anchortest.Stub) {
+	t.Helper()
+	chain, head, err := ledger.ReadVerify(filepath.Join(logDir, id+".jsonl"), ledger.Unlocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcpt, err := stub.Submit(context.Background(), anchor.Head{Seq: head.Count, Hash: head.Hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sidecar.FinalEvent(chain) {
+		t.Fatalf("run %s has no final event", id)
+	}
+	rec := sidecar.Record{Time: time.Now().UTC(), RunID: id, Seq: head.Count, Hash: head.Hash, Kind: "tlog", BackendKind: stub.Kind(), Backend: rcpt.Backend, Ref: rcpt.Ref, Proof: rcpt.Proof}
+	if err := sidecar.Append(sidecar.Path(logDir, id), id, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAuditTextCarriesTheAnchorLine: the audit text prints the run's anchor
+// line after the completeness line and ", anchor <state>" on each verified
+// child's subtree line — the same text the local command renders, read offline
+// under the server's own pin (here: none) and never asking the log.
+func TestAuditTextCarriesTheAnchorLine(t *testing.T) {
+	stub := anchortest.NewStub([]byte("s"))
+	opts := investigate.Options{AnchorBackend: func(string, string, *ecdsa.PublicKey, bool) (anchor.Backend, error) { return stub, nil }}
+	ts := newTestServerWith(t, &fakeHost{}, fakeAuth{}, 1, opts)
+	n1, n0 := 1, 0
+	const root, child = "r-00000000000000aa", "r-00000000000000cc"
+	ce := []engine.Event{{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, {Type: "step_started", Step: "c"}, {Type: "step_succeeded", Step: "c", DoorCalls: &n0}, {Type: "workflow_finished", Status: "succeeded"}}
+	writeLinked(t, ts.logDir, child, root, ce...)
+	re := []engine.Event{{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission}, {Type: "step_started", Step: "a"}, {Type: "spawn", Status: "succeeded", ChildRunID: child, Depth: 1}, {Type: "step_succeeded", Step: "a", DoorCalls: &n1}, {Type: "workflow_finished", Status: "succeeded"}}
+	writeLinked(t, ts.logDir, root, "", re...)
+
+	getAudit := func() string {
+		t.Helper()
+		resp, text := ts.do(t, http.MethodGet, "/v1/runs/"+root+"/audit", goodToken, nil)
+		if resp.StatusCode != 200 {
+			t.Fatalf("%d %s", resp.StatusCode, text)
+		}
+		return string(text)
+	}
+
+	// Nothing anchored: the root says so, and so does the child's line.
+	text := getAudit()
+	if !strings.Contains(text, "ledger completeness: complete (1 door call(s) accounted)\nledger anchor: not anchored\n") ||
+		!strings.Contains(text, "subtree: run "+child+" — integrity verified, completeness complete, anchor not-anchored\n") {
+		t.Fatalf("unanchored:\n%s", text)
+	}
+
+	// Both anchored: offline, no pin, a backend that needs none → verified under
+	// the key as served; never "independent".
+	anchorRun(t, ts.logDir, child, stub)
+	anchorRun(t, ts.logDir, root, stub)
+	text = getAudit()
+	if !strings.Contains(text, "ledger anchor: anchored — verified under the log key as served (not independent; ") || strings.Contains(text, "independently verified") ||
+		!strings.Contains(text, ", anchor verified\n") {
+		t.Fatalf("anchored:\n%s", text)
+	}
+
+	// A backend that cannot decide is unverifiable on both lines — never
+	// tampering — and the root line names the way to a networked check.
+	stub.Fail()
+	text = getAudit()
+	if !strings.Contains(text, "ledger anchor: unverifiable — stub: unavailable; pin the log key in anchor.pub beside the control ledger or pass --anchor-key, or run audit verify "+root+" to check under the key the log serves\n") ||
+		!strings.Contains(text, ", anchor unverifiable\n") || strings.Contains(text, "MISMATCH") {
+		t.Fatalf("unverifiable:\n%s", text)
 	}
 }

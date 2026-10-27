@@ -1,10 +1,17 @@
 package sidecar
 
 import (
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
+	"sync"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/anchorverify"
 	"github.com/agenthof/agenthof/internal/control"
@@ -78,6 +85,47 @@ func Verify(logDir, runID string, chain []ledger.Record, o anchorverify.Options)
 		return Verdict{Found: found, Err: err}
 	}
 	return Verdict{Found: true, Results: anchorverify.Decide(Check(runID, chain, recs), o)}
+}
+
+// VerifyRun is Verify for a caller that has not read the run's ledger: the one
+// path every reader of a run's anchor takes (the audit commands and serve). It
+// touches nothing when the run has no sidecar — no ledger read and no pin
+// resolved, so an unanchored run never reads anchor.pub — and otherwise reads
+// the ledger once (hash-verified, unlocked) and decides every record through
+// Verify. A run id that is not a run id's shape has no sidecar by
+// construction (every writer refuses one), so it is not anchored and is never
+// joined into a path. An unreadable ledger or a sidecar path that cannot be
+// statted is a found-but-unreadable verdict (unverifiable), never "not anchored".
+//
+// key resolves the pinned log key (nil func or nil key = unpinned) and factory
+// builds the verify-side backend (nil = anchorverify.Default). pinned reports
+// whether the resolved key was non-nil; it is false when no record was
+// decided, because then no key was resolved. key is called at most once here;
+// a caller verifying several runs shares one memoized func across them.
+func VerifyRun(logDir, runID string, key func() (*ecdsa.PublicKey, error), factory anchorverify.Factory, offline bool, timeout time.Duration) (v Verdict, pinned bool) {
+	if !RunIDRE.MatchString(runID) {
+		return Verdict{}, false
+	}
+	if _, err := os.Lstat(Path(logDir, runID)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Verdict{}, false
+		}
+		return Verdict{Found: true, Err: err}, false
+	}
+	chain, _, err := ledger.ReadVerify(filepath.Join(logDir, runID+".jsonl"), ledger.Unlocked)
+	if err != nil {
+		return Verdict{Found: true, Err: fmt.Errorf("the run ledger cannot be read to check its anchor: %w", err)}, false
+	}
+	resolve := func() (*ecdsa.PublicKey, error) { return nil, nil }
+	if key != nil {
+		resolve = sync.OnceValues(key)
+	}
+	v = Verify(logDir, runID, chain, anchorverify.Options{ResolveKey: resolve, Factory: factory, Offline: offline, Timeout: timeout})
+	if len(v.Results) > 0 {
+		k, _ := resolve() // memoized: resolved inside Decide, never a second read
+		pinned = k != nil
+	}
+	return v, pinned
 }
 
 // The folded states of a Verdict.

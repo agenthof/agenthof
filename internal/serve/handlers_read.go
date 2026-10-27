@@ -13,6 +13,7 @@ import (
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/sidecar"
 )
 
 // completenessOf refines a run's own completeness verdict for the API: an
@@ -107,8 +108,17 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, _ identity.Inv
 	}
 	tree := completeness.VerifyTree(s.cfg.LogDir, id, events, verr)
 	var sb strings.Builder
-	sb.WriteString(audit.Render(events, head, verr, tree.Root.Report))
-	sb.WriteString(tree.SubtreeLines())
+	// The anchor is read exactly as `audit <run-id>` reads it: offline under
+	// the server's own pin (the anchor.pub beside its ledger, resolved per
+	// request) — the log is never asked — and by the same renderer, so the
+	// text here is the text the local command prints.
+	anchors := sidecar.VerifyTree(s.cfg.LogDir, id, tree, verr == nil, s.cfg.Investigate.AnchorKey, s.cfg.Investigate.AnchorBackend, true, 0)
+	anchorLine := ""
+	if verr == nil {
+		anchorLine = sidecar.Lines(anchors.Root, sidecar.RenderOptions{Pinned: anchors.Pinned, Offline: true, OfflineOnly: true, RunID: id})
+	}
+	sb.WriteString(audit.Render(events, head, verr, tree.Root.Report, anchorLine))
+	sb.WriteString(tree.SubtreeLinesWith(anchors.Suffix))
 	for _, e := range events {
 		if e.Type == "workflow_started" && e.ConfigHash != "" {
 			cev, verdict, _ := investigate.LoadControl(s.cfg.ControlLog)
