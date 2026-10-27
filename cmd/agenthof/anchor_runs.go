@@ -25,7 +25,7 @@ type runAnchorOpts struct {
 }
 
 // runAnchorOutcome is what anchoring one run came to. The first and the last
-// four say what reached disk; the middle two say whether a sweep may go on.
+// four say what reached disk; the three marked PASS-FATAL say a sweep must stop.
 type runAnchorOutcome int
 
 const (
@@ -35,7 +35,7 @@ const (
 	runTransportFailed                         // PASS-FATAL: the log did not answer; anchor error recorded; the sweep stops here
 	runBackendFailed                           // PASS-FATAL: the backend could not be built or its credential not resolved — it recurs identically for every run; anchor error recorded; the sweep stops here
 	runProofNotWritten                         // anchored at the log, sidecar write failed: error recorded
-	runNotRecorded                             // anchored, sidecar written, control Append failed
+	runNotRecorded                             // PASS-FATAL: anchored, sidecar written, control Append failed — the run is never a candidate again, and a ledger that cannot take one record cannot take the next; the sweep stops here
 )
 
 // classifySubmitFault says whether a Submit failure is the log refusing this
@@ -174,11 +174,16 @@ func (s *anchorSession) anchorRuns(o runAnchorOpts) int {
 //   - runNotAnchorable (unterminated, torn, gone) is reported by the body,
 //     counted as skipped and does NOT count against limit: a run that is still
 //     running must not eat the pass's budget;
-//   - runSubmitFailed, runProofNotWritten and runNotRecorded are failures that
-//     count against limit; the pass goes on to the next run;
-//   - runTransportFailed and runBackendFailed are failures every later run
-//     would meet identically, so the pass stops there and leaves the rest for
-//     the next one: an outage costs one error record, not one per run.
+//   - runSubmitFailed and runProofNotWritten are failures that count against
+//     limit; the pass goes on to the next run (neither lands a sidecar, so the
+//     run is retried next pass);
+//   - runTransportFailed, runBackendFailed and runNotRecorded are failures
+//     every later run would meet identically — a log that does not answer, a
+//     backend that cannot be built, a control ledger that cannot take a
+//     record — so the pass stops there and leaves the rest for the next one:
+//     an outage costs one error record, not one per run. A run that was
+//     anchored but not recorded already has its sidecar and is not retried;
+//     the unattempted ones have none, and are picked up once the fault heals.
 //
 // remaining is the candidates not attempted. Exit 0 iff nothing failed, which
 // includes an empty pass and a pass cut short by limit (the next tick
@@ -216,7 +221,7 @@ func (s *anchorSession) anchorPending(logDir string, limit int) int {
 			failed++
 			attempts++
 		}
-		if outcome == runTransportFailed || outcome == runBackendFailed {
+		if outcome == runTransportFailed || outcome == runBackendFailed || outcome == runNotRecorded {
 			break
 		}
 	}

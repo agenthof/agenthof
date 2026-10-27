@@ -85,3 +85,25 @@ func TestCandidatesAbsentDirIsEmpty(t *testing.T) {
 		t.Fatalf("got %v, %v", got, err)
 	}
 }
+
+// TestCandidatesReturnsRealStatErrors: only a vanished entry is skipped. An
+// entry whose stat fails for another reason (here a symlink loop) is an error
+// the pass must surface, not a run silently dropped.
+func TestCandidatesReturnsRealStatErrors(t *testing.T) {
+	dir := t.TempDir()
+	name := "r-00000000000000a1.jsonl"
+	if err := os.Symlink(name, filepath.Join(dir, name)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Candidates(dir, nil); err == nil {
+		t.Fatalf("got %v, nil error", got)
+	}
+	// A dangling link, by contrast, is simply not a run log.
+	dir = t.TempDir()
+	if err := os.Symlink("gone", filepath.Join(dir, name)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Candidates(dir, nil); err != nil || len(got) != 0 {
+		t.Fatalf("dangling link: %v, %v", got, err)
+	}
+}

@@ -16,8 +16,9 @@ import (
 // (.torn- in the name), directories and anything else are not. controlLog is
 // the stat of the control ledger: an entry that is the same file (a symlink or
 // hard link under another name) is never a run. A nil controlLog compares
-// nothing. An entry that cannot be stat'd (vanished, or a dangling link) is not
-// a resolvable run log and is skipped.
+// nothing. An entry that has vanished or is a dangling link is not a
+// resolvable run log and is skipped; any other stat error is returned, never
+// a silently dropped run.
 //
 // Whether a candidate is anchorable (a whole chain ending at its final event)
 // is not decided here: reading each ledger is the anchoring body's job. A
@@ -41,11 +42,21 @@ func Candidates(logDir string, controlLog os.FileInfo) ([]string, error) {
 			continue
 		}
 		info, err := os.Stat(filepath.Join(logDir, name))
-		if err != nil || info.IsDir() || (controlLog != nil && os.SameFile(info, controlLog)) {
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // vanished, or a dangling link: not a resolvable run log
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() || (controlLog != nil && os.SameFile(info, controlLog)) {
 			continue
 		}
-		if _, err := os.Lstat(Path(logDir, id)); !errors.Is(err, fs.ErrNotExist) {
-			continue // anchored already — or a sidecar slot we cannot judge: not ours to refile
+		_, err = os.Lstat(Path(logDir, id))
+		if err == nil {
+			continue // anchored already
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err // a sidecar slot we cannot judge is a fault, not a skip
 		}
 		ids = append(ids, id)
 	}

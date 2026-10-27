@@ -836,3 +836,47 @@ func TestPendingRefusedRecordsOnceAndScansNothing(t *testing.T) {
 		t.Fatalf("record %+v", d)
 	}
 }
+
+// TestPendingStopsWhenTheControlLedgerCannotRecord: a run anchored at the log
+// whose record the control ledger cannot take already has its sidecar, so it is
+// never retried, and every later run would meet the same ledger. The pass makes
+// one Submit, keeps that run's sidecar, leaves the rest unattempted and exits 1.
+func TestPendingStopsWhenTheControlLedgerCannotRecord(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: file permissions are not enforced")
+	}
+	f := newRunsFixture(t)
+	b := useRunsBackend(t)
+	b.onSubmit = func() {
+		if err := os.Chmod(f.ctl, 0o400); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.ctl, 0o600) })
+	first := "r-00000000000000a1"
+	f.finishedRun(t, first)
+	f.finishedRun(t, "r-00000000000000a2")
+	f.finishedRun(t, "r-00000000000000a3") // and the fixture's own run behind them
+	before := len(controlRecords(t, f.ctl))
+
+	code, out, _ := anchorCmd(f.args("--pending"))
+	if code != 1 || b.count() != 1 {
+		t.Fatalf("exit %d submits %d\n%s", code, b.count(), out)
+	}
+	if !strings.Contains(out, "audit anchor: anchored run "+first+" and its proof is beside the receipt, but the control ledger did NOT record it: ") ||
+		!strings.Contains(out, "\npending: 0 anchored, 0 skipped (not anchorable), 3 remaining\n") {
+		t.Fatalf("stdout:\n%s", out)
+	}
+	if !hasSidecar(f, first) {
+		t.Fatal("the anchored run has no sidecar")
+	}
+	for _, id := range []string{"r-00000000000000a2", "r-00000000000000a3", f.id} {
+		if hasSidecar(f, id) {
+			t.Fatalf("%s was attempted", id)
+		}
+	}
+	_ = os.Chmod(f.ctl, 0o600)
+	if got := len(controlRecords(t, f.ctl)); got != before {
+		t.Fatalf("control records %d -> %d", before, got)
+	}
+}
