@@ -18,10 +18,11 @@ type RenderOptions struct {
 }
 
 // Process exit codes for an anchor verdict on a run, the control verifier's
-// numbers: a definitive content disagreement and an absent verdict.
+// numbers: a definitive content disagreement and an absent verdict. The one
+// definition: cmd/agenthof's exit constants are these.
 const (
-	exitMismatch     = 6
-	exitUnverifiable = 7
+	ExitMismatch     = 6
+	ExitUnverifiable = 7
 )
 
 // Exit is the exit code a Verdict contributes: 6 for a mismatch, 7 for an
@@ -30,11 +31,29 @@ const (
 func Exit(v Verdict) int {
 	switch v.State() {
 	case StateMismatch:
-		return exitMismatch
+		return ExitMismatch
 	case StateUnverifiable:
-		return exitUnverifiable
+		return ExitUnverifiable
 	}
 	return 0
+}
+
+// TreeExit is the worst anchor verdict across a run and its verified
+// descendants, ranked 6 > 7 > 0: a mismatch anywhere is 6 whatever else the
+// tree holds, and no later node can lower what an earlier one raised.
+func TreeExit(root Verdict, children []Verdict) int {
+	worst := Exit(root)
+	for _, c := range children {
+		switch Exit(c) {
+		case ExitMismatch:
+			return ExitMismatch
+		case ExitUnverifiable:
+			if worst != ExitMismatch {
+				worst = ExitUnverifiable
+			}
+		}
+	}
+	return worst
 }
 
 // Lines renders a Verdict as the run's anchor line(s), each "\n"-terminated:

@@ -18,20 +18,12 @@ func verifyRunAnchor(logDir, runID string, key func() (*ecdsa.PublicKey, error),
 	return sidecar.VerifyRun(logDir, runID, key, verifyBackendFactory, offline, timeout)
 }
 
-// runAnchorExit is the worst anchor verdict in a tree: 6 if any is a
-// mismatch, else 7 if any is unverifiable, else 0 (verified, and not
-// anchored, are 0).
+// runAnchorExit is the worst anchor verdict in a tree, ranked 6 > 7 > 0 by
+// sidecar.TreeExit (one definition for the codes and the ranking): a mismatch
+// anywhere is 6, else an unverifiable anywhere is 7, else 0 — verified and not
+// anchored are 0.
 func runAnchorExit(root sidecar.Verdict, children []sidecar.Verdict) int {
-	worst := sidecar.Exit(root)
-	for _, c := range children {
-		switch sidecar.Exit(c) {
-		case exitAnchorMismatch:
-			return exitAnchorMismatch
-		case exitAnchorUnverifiable:
-			worst = exitAnchorUnverifiable
-		}
-	}
-	return worst
+	return sidecar.TreeExit(root, children)
 }
 
 // runExitCode folds a run's verdicts into one exit by the audit commands'

@@ -54,8 +54,8 @@ import (
 // never hidden behind it, and a cron that watches the exit code does not
 // see green while every writer is blocked.
 const (
-	exitAnchorMismatch     = 6
-	exitAnchorUnverifiable = 7
+	exitAnchorMismatch     = sidecar.ExitMismatch     // 6
+	exitAnchorUnverifiable = sidecar.ExitUnverifiable // 7
 	exitRotationIncomplete = 8
 	exitSinkMismatch       = 9
 	exitSinkUnverifiable   = 10

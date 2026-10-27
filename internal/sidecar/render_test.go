@@ -118,3 +118,28 @@ func TestExitMapsStates(t *testing.T) {
 		}
 	}
 }
+
+// TestTreeExitRanksMismatchOverUnverifiable: 6 > 7 > 0 across the root and its
+// descendants, whatever the order — a later node never lowers an earlier one.
+func TestTreeExitRanksMismatchOverUnverifiable(t *testing.T) {
+	mm := verdict(result(anchorverify.StateMismatch, "x"))
+	un := verdict(result(anchorverify.StateUnverifiable, "y"))
+	ok := verdict(result(anchorverify.StateVerified, ""))
+	for _, c := range []struct {
+		name     string
+		root     Verdict
+		children []Verdict
+		want     int
+	}{
+		{"root mismatch, child unverifiable", mm, []Verdict{un}, ExitMismatch},
+		{"root unverifiable, child mismatch", un, []Verdict{mm}, ExitMismatch},
+		{"mismatch then unverifiable siblings", ok, []Verdict{mm, un}, ExitMismatch},
+		{"unverifiable then mismatch siblings", ok, []Verdict{un, mm}, ExitMismatch},
+		{"unverifiable only", ok, []Verdict{un, ok}, ExitUnverifiable},
+		{"nothing", Verdict{}, nil, 0},
+	} {
+		if got := TreeExit(c.root, c.children); got != c.want {
+			t.Errorf("%s: %d, want %d", c.name, got, c.want)
+		}
+	}
+}

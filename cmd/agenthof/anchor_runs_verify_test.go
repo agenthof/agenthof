@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/agenthof/agenthof/internal/anchor/anchortest"
+	"github.com/agenthof/agenthof/internal/anchorverify"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/ledger"
@@ -483,17 +484,35 @@ func TestVerifyRunAnchorReadsNothingWithoutASidecar(t *testing.T) {
 	}
 }
 
-// TestRunAnchorExit: the worst verdict in the tree; a found sidecar that
+// TestRunAnchorExit: the worst verdict in the tree, ranked 6 > 7 > 0 — no
+// node, root or child, lowers what another raised; a found sidecar that
 // yielded no verdict is unverifiable (7), never verified.
 func TestRunAnchorExit(t *testing.T) {
 	undecided := sidecar.Verdict{Found: true}
-	if got := runAnchorExit(undecided, nil); got != 7 {
-		t.Fatalf("found, no results = %d", got)
+	mismatch := sidecar.Verdict{Found: true, Results: []anchorverify.Result{{State: anchorverify.StateMismatch, Cause: "x"}}}
+	verified := sidecar.Verdict{Found: true, Results: []anchorverify.Result{{State: anchorverify.StateVerified}}}
+	for _, c := range []struct {
+		name     string
+		root     sidecar.Verdict
+		children []sidecar.Verdict
+		want     int
+	}{
+		{"found, no results", undecided, nil, 7},
+		{"child unverifiable", sidecar.Verdict{}, []sidecar.Verdict{undecided}, 7},
+		{"nothing anchored", sidecar.Verdict{}, nil, 0},
+		{"verified everywhere", verified, []sidecar.Verdict{verified}, 0},
+		{"root mismatch, child unverifiable", mismatch, []sidecar.Verdict{undecided}, 6},
+		{"root unverifiable, child mismatch", undecided, []sidecar.Verdict{mismatch}, 6},
+		{"root mismatch, child verified", mismatch, []sidecar.Verdict{verified}, 6},
+		{"child mismatch after an unverifiable sibling", verified, []sidecar.Verdict{undecided, mismatch}, 6},
+		{"child mismatch before an unverifiable sibling", verified, []sidecar.Verdict{mismatch, undecided}, 6},
+	} {
+		if got := runAnchorExit(c.root, c.children); got != c.want {
+			t.Errorf("%s: %d, want %d", c.name, got, c.want)
+		}
 	}
-	if got := runAnchorExit(sidecar.Verdict{}, []sidecar.Verdict{undecided}); got != 7 {
-		t.Fatalf("child unverifiable = %d", got)
-	}
-	if got := runAnchorExit(sidecar.Verdict{}, nil); got != 0 {
-		t.Fatalf("nothing anchored = %d", got)
+	// One definition of the codes.
+	if exitAnchorMismatch != sidecar.ExitMismatch || exitAnchorUnverifiable != sidecar.ExitUnverifiable || sidecar.ExitMismatch != 6 || sidecar.ExitUnverifiable != 7 {
+		t.Errorf("anchor exit codes drifted: %d %d / %d %d", exitAnchorMismatch, exitAnchorUnverifiable, sidecar.ExitMismatch, sidecar.ExitUnverifiable)
 	}
 }
