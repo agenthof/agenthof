@@ -18,6 +18,7 @@ import (
 	"github.com/agenthof/agenthof/internal/anchor/anchortest"
 	"github.com/agenthof/agenthof/internal/control"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/sidecar"
 )
@@ -518,5 +519,320 @@ func TestAnchorRunClassifiesFaultsForTheSweep(t *testing.T) {
 			}
 			noSidecar(t, f)
 		})
+	}
+}
+
+// finishedRun writes a three-event finished run under f.logDir.
+func (f runsFixture) finishedRun(t *testing.T, id string) {
+	t.Helper()
+	writeRunLedger(t, f.logDir, id,
+		engine.Event{Type: "workflow_started"},
+		engine.Event{Type: "step_started", Step: "a"},
+		engine.Event{Type: "workflow_finished", Status: "succeeded"})
+}
+
+// anchorRecords counts the control ledger's run-scoped anchor records with the
+// given outcome.
+func anchorRecords(t *testing.T, ctl, outcome string) (ids []string) {
+	t.Helper()
+	for _, r := range controlRecords(t, ctl) {
+		d, err := control.Decode(r.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Action == "anchor" && d.Outcome == outcome && d.Anchor != nil && d.Anchor.RunID != "" {
+			ids = append(ids, d.Anchor.RunID)
+		}
+	}
+	return ids
+}
+
+func hasSidecar(f runsFixture, id string) bool {
+	_, err := os.Lstat(sidecar.Path(f.logDir, id))
+	return err == nil
+}
+
+func sidecarLines(t *testing.T, f runsFixture, id string) int {
+	t.Helper()
+	recs, found, err := sidecar.Read(sidecar.Path(f.logDir, id))
+	if err != nil || !found {
+		t.Fatalf("sidecar %s: %v %v", id, err, found)
+	}
+	return len(recs)
+}
+
+func controlHeadLine(t *testing.T, ctl string) string {
+	t.Helper()
+	head := ledgerHeadOf(t, ctl)
+	return fmt.Sprintf("control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+}
+
+// TestPendingFilesEachRunOnce: a pass files every run without a sidecar —
+// three submits, three sidecars, three run-scoped records — leaves the
+// already-anchored run alone, and a second pass is silent but for its summary
+// and the control head.
+func TestPendingFilesEachRunOnce(t *testing.T) {
+	f := newRunsFixture(t) // testRunID, finished
+	b := useRunsBackend(t)
+	if code, out, _ := anchorCmd(f.args("--run", f.id)); code != 0 { // the one already anchored
+		t.Fatalf("seed: exit %d\n%s", code, out)
+	}
+	ids := []string{"r-00000000000000a1", "r-00000000000000a2", "r-00000000000000a3"}
+	for _, id := range ids {
+		f.finishedRun(t, id)
+	}
+	b.mu.Lock()
+	b.submits = 0
+	b.mu.Unlock()
+	before := len(anchorRecords(t, f.ctl, "success"))
+
+	code, out, _ := anchorCmd(f.args("--pending"))
+	if code != 0 || b.count() != 3 {
+		t.Fatalf("exit %d submits %d\n%s", code, b.count(), out)
+	}
+	for _, id := range ids {
+		if sidecarLines(t, f, id) != 1 || !strings.Contains(out, "anchored run "+id+": events=3 sha256=") {
+			t.Fatalf("%s not filed once\n%s", id, out)
+		}
+	}
+	if sidecarLines(t, f, f.id) != 1 {
+		t.Fatal("the already-anchored run was refiled")
+	}
+	if got := anchorRecords(t, f.ctl, "success"); len(got) != before+3 {
+		t.Fatalf("success records %d, want %d", len(got), before+3)
+	}
+	if !strings.Contains(out, "\npending: 3 anchored, 0 skipped (not anchorable), 0 remaining\n") || !strings.HasSuffix(out, controlHeadLine(t, f.ctl)) {
+		t.Fatalf("stdout:\n%s", out)
+	}
+
+	again := len(controlRecords(t, f.ctl))
+	code, out, _ = anchorCmd(f.args("--pending"))
+	if code != 0 || b.count() != 3 || len(controlRecords(t, f.ctl)) != again {
+		t.Fatalf("second pass: exit %d submits %d\n%s", code, b.count(), out)
+	}
+	if want := "pending: 0 anchored, 0 skipped (not anchorable), 0 remaining\n" + controlHeadLine(t, f.ctl); out != want {
+		t.Fatalf("second pass stdout:\n%q\nwant\n%q", out, want)
+	}
+}
+
+// TestPendingSkipsUnanchorableWithoutBurningTheLimit: a torn run and an
+// unterminated one sort first, are reported and skipped, and do not count
+// against --limit: with --limit 1 the first good run behind them is filed and
+// the other is left remaining.
+func TestPendingSkipsUnanchorableWithoutBurningTheLimit(t *testing.T) {
+	f := newRunsFixture(t)
+	b := useRunsBackend(t)
+	unterminated, torn := "r-00000000000000a1", "r-00000000000000a2"
+	writeRunLedger(t, f.logDir, unterminated, engine.Event{Type: "workflow_started"}, engine.Event{Type: "step_started", Step: "a"})
+	f.finishedRun(t, torn)
+	tornPath := filepath.Join(f.logDir, torn+".jsonl")
+	st, err := os.Stat(tornPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(tornPath, st.Size()-5); err != nil {
+		t.Fatal(err)
+	}
+	good1, good2 := "r-00000000000000b1", "r-00000000000000b2"
+	f.finishedRun(t, good1)
+	f.finishedRun(t, good2)
+	if err := os.Remove(filepath.Join(f.logDir, f.id+".jsonl")); err != nil { // keep the fixture's own run out of the way
+		t.Fatal(err)
+	}
+
+	code, out, _ := anchorCmd(f.args("--pending", "--limit", "1"))
+	if code != 0 || b.count() != 1 {
+		t.Fatalf("exit %d submits %d\n%s", code, b.count(), out)
+	}
+	if !hasSidecar(f, good1) || hasSidecar(f, good2) || hasSidecar(f, torn) || hasSidecar(f, unterminated) {
+		t.Fatalf("sidecars: good1 %v good2 %v torn %v unterminated %v", hasSidecar(f, good1), hasSidecar(f, good2), hasSidecar(f, torn), hasSidecar(f, unterminated))
+	}
+	for _, want := range []string{
+		"audit anchor: run " + unterminated + " has no final event; still running or tail lost — not anchorable\n",
+		"audit anchor: run " + torn + ": ",
+		"\npending: 1 anchored, 2 skipped (not anchorable), 1 remaining\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout lacks %q:\n%s", want, out)
+		}
+	}
+	if !strings.HasSuffix(out, controlHeadLine(t, f.ctl)) {
+		t.Fatalf("stdout:\n%s", out)
+	}
+	if got := anchorRecords(t, f.ctl, "success"); len(got) != 1 || got[0] != good1 {
+		t.Fatalf("success records %v", got)
+	}
+}
+
+// TestPendingChildIsACandidate: a spawned child's ledger sits beside its
+// parent's in the log directory and is anchored like any run (the pruner's
+// root-only rule does not apply to anchoring).
+func TestPendingChildIsACandidate(t *testing.T) {
+	f := newRunsFixture(t)
+	b := useRunsBackend(t)
+	child := "r-00000000000000c1"
+	log, err := engine.OpenLog(f.logDir, child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "r", Workflow: "w", RunID: child, ParentRunID: f.id, Depth: 1}
+	for i, e := range []engine.Event{{Type: "workflow_started"}, {Type: "workflow_finished", Status: "succeeded"}} {
+		e.Time, e.Binding = time.Unix(int64(i), 0).UTC(), bind
+		if err := log.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = log.Close()
+
+	code, out, _ := anchorCmd(f.args("--pending"))
+	if code != 0 || b.count() != 2 || !hasSidecar(f, child) || !hasSidecar(f, f.id) {
+		t.Fatalf("exit %d submits %d child %v parent %v\n%s", code, b.count(), hasSidecar(f, child), hasSidecar(f, f.id), out)
+	}
+	if !strings.Contains(out, "pending: 2 anchored, 0 skipped (not anchorable), 0 remaining\n") {
+		t.Fatalf("stdout:\n%s", out)
+	}
+}
+
+// TestPendingStopsOnTransportFailure: a log that does not answer is learned
+// once. The first run gets its error record, no sidecar and no temp file, the
+// pass stops, exits 1, and counts the rest as remaining.
+func TestPendingStopsOnTransportFailure(t *testing.T) {
+	f := newRunsFixture(t)
+	b := useRunsBackend(t)
+	b.submitErr = &anchor.Transport{Host: "rekor.test", Err: errors.New("connection refused")}
+	f.finishedRun(t, "r-00000000000000a1")
+	f.finishedRun(t, "r-00000000000000a2")
+
+	code, out, _ := anchorCmd(f.args("--pending"))
+	if code != 1 || b.count() != 1 {
+		t.Fatalf("exit %d submits %d\n%s", code, b.count(), out)
+	}
+	if got := anchorRecords(t, f.ctl, "error"); len(got) != 1 || got[0] != "r-00000000000000a1" {
+		t.Fatalf("error records %v", got)
+	}
+	for _, id := range []string{"r-00000000000000a1", "r-00000000000000a2", f.id} {
+		if hasSidecar(f, id) {
+			t.Fatalf("sidecar for %s", id)
+		}
+	}
+	if tmp, _ := filepath.Glob(filepath.Join(f.logDir, "*.tmp-*")); len(tmp) != 0 {
+		t.Fatalf("temp files: %v", tmp)
+	}
+	if !strings.Contains(out, "\npending: 0 anchored, 0 skipped (not anchorable), 2 remaining\n") || !strings.HasSuffix(out, controlHeadLine(t, f.ctl)) {
+		t.Fatalf("stdout:\n%s", out)
+	}
+}
+
+// TestPendingStopsOnBackendFailure: a backend that cannot be built (or a
+// credential that cannot be resolved) is as pass-fatal as a silent log: one
+// error record, the pass stops.
+func TestPendingStopsOnBackendFailure(t *testing.T) {
+	f := newRunsFixture(t)
+	prev := newAnchorBackend
+	built := 0
+	newAnchorBackend = func(backendSpec) (anchor.Backend, error) {
+		built++
+		return nil, errors.New("anchor backend kind \"x\" is not implemented")
+	}
+	t.Cleanup(func() { newAnchorBackend = prev })
+	f.finishedRun(t, "r-00000000000000a1")
+	f.finishedRun(t, "r-00000000000000a2")
+
+	code, out, _ := anchorCmd(f.args("--pending"))
+	if code != 1 || built != 1 {
+		t.Fatalf("exit %d builds %d\n%s", code, built, out)
+	}
+	if got := anchorRecords(t, f.ctl, "error"); len(got) != 1 {
+		t.Fatalf("error records %v", got)
+	}
+	if !strings.Contains(out, "\npending: 0 anchored, 0 skipped (not anchorable), 2 remaining\n") {
+		t.Fatalf("stdout:\n%s", out)
+	}
+}
+
+// TestPendingAdvancesOnPerEntryRejection: a log that answered no to one head
+// costs that run an error record and the pass goes on to file the next.
+func TestPendingAdvancesOnPerEntryRejection(t *testing.T) {
+	f := newRunsFixture(t)
+	b := useRunsBackend(t)
+	first, second := "r-00000000000000a1", "r-00000000000000a2"
+	f.finishedRun(t, first)
+	f.finishedRun(t, second)
+	if err := os.Remove(filepath.Join(f.logDir, f.id+".jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	// The first Submit reads submitErr, then this hook clears it: only the
+	// first head is refused.
+	b.submitErr = errors.New("status 429 from rekor.test")
+	b.onSubmit = func() {
+		b.mu.Lock()
+		b.submitErr = nil
+		b.mu.Unlock()
+	}
+
+	code, out, _ := anchorCmd(f.args("--pending"))
+	if code != 1 || b.count() != 2 {
+		t.Fatalf("exit %d submits %d\n%s", code, b.count(), out)
+	}
+	if hasSidecar(f, first) || !hasSidecar(f, second) {
+		t.Fatalf("first %v second %v", hasSidecar(f, first), hasSidecar(f, second))
+	}
+	if got := anchorRecords(t, f.ctl, "error"); len(got) != 1 || got[0] != first {
+		t.Fatalf("error records %v", got)
+	}
+	if got := anchorRecords(t, f.ctl, "success"); len(got) != 1 || got[0] != second {
+		t.Fatalf("success records %v", got)
+	}
+	if !strings.Contains(out, "audit anchor: run "+first+": status 429 from rekor.test\n") ||
+		!strings.Contains(out, "\npending: 1 anchored, 0 skipped (not anchorable), 0 remaining\n") {
+		t.Fatalf("stdout:\n%s", out)
+	}
+}
+
+func TestPendingRejectsNonPositiveLimit(t *testing.T) {
+	f := newRunsFixture(t)
+	b := useRunsBackend(t)
+	before := len(controlRecords(t, f.ctl))
+	for _, l := range []string{"0", "-1"} {
+		code, out, _ := anchorCmd(f.args("--pending", "--limit", l))
+		if code != 2 || !strings.Contains(out, "audit anchor: --limit must be positive") {
+			t.Fatalf("--limit %s: exit %d\n%s", l, code, out)
+		}
+	}
+	if len(controlRecords(t, f.ctl)) != before || b.count() != 0 {
+		t.Fatal("something happened")
+	}
+}
+
+// TestPendingOnAbsentLogDirIsEmptyPass: nothing has run yet. The lock creates
+// the directory, the pass is empty and succeeds.
+func TestPendingOnAbsentLogDirIsEmptyPass(t *testing.T) {
+	f := newRunsFixture(t)
+	b := useRunsBackend(t)
+	f.logDir = filepath.Join(t.TempDir(), "never", "ran")
+	code, out, _ := anchorCmd(f.args("--pending"))
+	if code != 0 || b.count() != 0 || !strings.Contains(out, "pending: 0 anchored, 0 skipped (not anchorable), 0 remaining\n") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if st, err := os.Stat(f.logDir); err != nil || !st.IsDir() {
+		t.Fatalf("log dir: %v", err)
+	}
+}
+
+// TestPendingRefusedRecordsOnceAndScansNothing: an invoker no role grants
+// anchor to is refused and recorded once, before the lock and the scan.
+func TestPendingRefusedRecordsOnceAndScansNothing(t *testing.T) {
+	f := newRunsFixture(t)
+	b := useRunsBackend(t)
+	before := len(controlRecords(t, f.ctl))
+	code, out, _ := anchorCmd([]string{"--control-log", f.ctl, "--as", "mallory@example.com", "--groups", "finance", "--log-dir", f.logDir, "--pending"})
+	if code != 1 || !strings.Contains(out, "audit anchor: not authorized: no role grants anchor to the invoker") || strings.Contains(out, "pending:") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if got := len(controlRecords(t, f.ctl)); got != before+1 || b.count() != 0 || hasSidecar(f, f.id) {
+		t.Fatalf("records %d -> %d, submits %d", before, got, b.count())
+	}
+	if d := lastControl(t, f.ctl); d.Outcome != "refused" || d.Anchor != nil {
+		t.Fatalf("record %+v", d)
 	}
 }

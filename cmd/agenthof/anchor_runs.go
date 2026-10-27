@@ -138,12 +138,6 @@ func (s *anchorSession) anchorRun(logDir, id string) (outcome runAnchorOutcome, 
 // anchorRuns is the run-anchoring forms after the shared preamble: the
 // run-anchoring lock (step 6), then the body, then the shipped lines.
 func (s *anchorSession) anchorRuns(o runAnchorOpts) int {
-	if o.pending {
-		// The sweep is the next increment; the flag, its exclusivity with --run
-		// and its posture refusal are already in force.
-		_, _ = fmt.Fprintln(s.out, "audit anchor: --pending is not available yet; anchor one run with --run <run-id>")
-		return 2
-	}
 	// Both forms serialize on one host-level lock, taken after the
 	// authorization read (installed.lock is released by now) and held through
 	// the last control Append, so overlapping passes cannot file one head twice.
@@ -158,6 +152,9 @@ func (s *anchorSession) anchorRuns(o runAnchorOpts) int {
 	}
 	defer unlock()
 
+	if o.pending {
+		return s.anchorPending(o.logDir, o.limit)
+	}
 	outcome, shipped, head := s.anchorRun(o.logDir, o.runID)
 	if outcome == runAnchored {
 		return s.finish(shipped, head, 0)
@@ -166,4 +163,76 @@ func (s *anchorSession) anchorRuns(o runAnchorOpts) int {
 		return s.finish(nil, head, 1)
 	}
 	return 1
+}
+
+// anchorPending is the sweep, run under the run-anchoring lock: every run
+// under logDir that has no sidecar yet is a candidate, taken in name order
+// and filed through anchorRun, so each run is filed once — a run with a
+// sidecar is never a candidate again, whatever the cron's interval.
+//
+//   - runAnchored is counted and its lines are printed as they land;
+//   - runNotAnchorable (unterminated, torn, gone) is reported by the body,
+//     counted as skipped and does NOT count against limit: a run that is still
+//     running must not eat the pass's budget;
+//   - runSubmitFailed, runProofNotWritten and runNotRecorded are failures that
+//     count against limit; the pass goes on to the next run;
+//   - runTransportFailed and runBackendFailed are failures every later run
+//     would meet identically, so the pass stops there and leaves the rest for
+//     the next one: an outage costs one error record, not one per run.
+//
+// remaining is the candidates not attempted. Exit 0 iff nothing failed, which
+// includes an empty pass and a pass cut short by limit (the next tick
+// continues); a pass stopped by a pass-fatal fault exits 1.
+func (s *anchorSession) anchorPending(logDir string, limit int) int {
+	out := s.out
+	ctlInfo, err := statControlLog(s.controlLog)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "audit anchor: control log %s: %v\n", s.controlLog, err)
+		return 1
+	}
+	candidates, err := sidecar.Candidates(logDir, ctlInfo)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "audit anchor: %v\n", err)
+		return 1
+	}
+
+	anchored, skipped, failed, attempts, handled := 0, 0, 0, 0, 0
+	for _, id := range candidates {
+		if attempts >= limit {
+			break
+		}
+		handled++
+		outcome, shipped, _ := s.anchorRun(logDir, id)
+		switch outcome {
+		case runAnchored:
+			anchored++
+			attempts++
+			for _, l := range shipped {
+				_, _ = fmt.Fprintln(out, l)
+			}
+		case runNotAnchorable:
+			skipped++
+		default:
+			failed++
+			attempts++
+		}
+		if outcome == runTransportFailed || outcome == runBackendFailed {
+			break
+		}
+	}
+	remaining := len(candidates) - handled
+	_, _ = fmt.Fprintf(out, "pending: %d anchored, %d skipped (not anchorable), %d remaining\n", anchored, skipped, remaining)
+
+	// The head is read once, after the last append, even when this pass
+	// appended nothing: the line every control writer ends on.
+	v, err := control.Read(s.controlLog, ledger.Locked)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "audit anchor: %v\n", err)
+		return 1
+	}
+	code := 0
+	if failed > 0 {
+		code = 1
+	}
+	return s.finish(nil, v.Head, code)
 }

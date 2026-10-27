@@ -1,0 +1,203 @@
+# audit anchor --pending sweeps the log directory and files every run that has
+# no <run-id>.anchor yet, each exactly once: the sidecar IS the "done" mark, so
+# a second pass (or a cron every thirty seconds) sends nothing. A run that is
+# unterminated or torn is reported and skipped without spending --limit. A log
+# that does not answer stops the pass after one attempt (one error record, not
+# one per run); a log that answers no to one head costs that run an error and
+# the pass goes on. Overlapping passes serialize on <log-dir>/.anchor.lock.
+#
+# A spawned child run's ledger is a candidate like any other; that is covered by
+# TestPendingChildIsACandidate, because no hermetic spawn journey exists under
+# this directory to produce one.
+
+exec agenthof apply --config config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 4 roles'
+rekor pubkey anchor.pub
+rekor posture integrity.yaml runs
+exec agenthof run se plan-only --input one --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN1=$RUNID
+exec agenthof run se plan-only --input two --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN2=$RUNID
+exec agenthof run se plan-only --input three --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN3=$RUNID
+exec agenthof run se plan-only --input four --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN4=$RUNID
+
+# 1. One run is anchored by --run; --pending then files exactly the other
+# three. Under a pinned key each submit is one request.
+exec agenthof audit anchor --control-log control.jsonl --run $RUN1 --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'anchored run '$RUN1': events='
+rekor requests 1
+exec sh -c 'test "$(wc -l < logs/$RUN1.anchor | tr -d " ")" = 1'
+exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'anchored run '$RUN2': events=[0-9]+ sha256=[0-9a-f]{64}'
+stdout 'anchored run '$RUN3': events='
+stdout 'anchored run '$RUN4': events='
+stdout '  log: http://127\.0\.0\.1:[0-9]+  entry: [0-9a-f]{80}  log key: [0-9a-f]{64} \(pinned\)'
+stdout '^pending: 3 anchored, 0 skipped \(not anchorable\), 0 remaining$'
+stdout 'control head: seq=[0-9]+ sha256=[0-9a-f]{64}'
+! stdout 'anchored run '$RUN1
+exists logs/$RUN2.anchor
+exists logs/$RUN3.anchor
+exists logs/$RUN4.anchor
+exec sh -c 'test "$(wc -l < logs/$RUN1.anchor | tr -d " ")" = 1'
+exec sh -c 'test "$(grep -c "\"outcome\":\"success\".*\"run_id\"" control.jsonl)" = 4'
+! grep '"run_id".*"proof"' control.jsonl
+rekor requests 4
+
+# 2. Each run is filed once: a second pass sends nothing, records nothing, and
+# still ends on the control head.
+cp control.jsonl pre-second.jsonl
+exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout '^pending: 0 anchored, 0 skipped \(not anchorable\), 0 remaining$'
+stdout 'control head: seq='
+! stdout 'anchored run'
+cmp control.jsonl pre-second.jsonl
+rekor requests 4
+
+# 3. A run that is unterminated and one that is torn sort ahead of two good
+# runs. They are reported and skipped, and do NOT spend --limit 1: the first
+# good run is filed, the other is left for the next pass.
+exec agenthof run se plan-only --input five --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN5=$RUNID
+exec agenthof run se plan-only --input six --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN6=$RUNID
+exec sh -c 'sed "\$d" logs/$RUN1.jsonl > logs/r-0000000000000001.jsonl'
+exec sh -c 'n=$(wc -c < logs/$RUN1.jsonl); head -c $((n-5)) logs/$RUN1.jsonl > logs/r-0000000000000003.jsonl'
+exec agenthof audit anchor --control-log control.jsonl --pending --limit 1 --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'audit anchor: run r-0000000000000001 has no final event; still running or tail lost — not anchorable'
+stdout 'audit anchor: run r-0000000000000003: .*; a run ledger has no repair — not anchorable'
+stdout '^pending: 1 anchored, 2 skipped \(not anchorable\), 1 remaining$'
+! exists logs/r-0000000000000001.anchor
+! exists logs/r-0000000000000003.anchor
+rekor requests 5
+exec sh -c 'test "$(grep -c "\"outcome\":\"success\".*\"run_id\"" control.jsonl)" = 5'
+exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout '^pending: 1 anchored, 2 skipped \(not anchorable\), 0 remaining$'
+exists logs/$RUN5.anchor
+exists logs/$RUN6.anchor
+rekor requests 6
+rm logs/r-0000000000000001.jsonl
+rm logs/r-0000000000000003.jsonl
+
+# 4. A caller no role grants anchor to is refused and recorded once, before the
+# lock and the scan: a pending run stays unanchored and the log sees nothing.
+exec agenthof run se plan-only --input seven --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN7=$RUNID
+cp control.jsonl pre-refused.jsonl
+! exec agenthof audit anchor --control-log control.jsonl --pending --as mallory@example.com --groups finance --log-dir logs
+stdout 'audit anchor: not authorized: no role grants anchor to the invoker'
+stdout 'control head: seq='
+! stdout 'pending:'
+grep '"action":"anchor","outcome":"refused","reason":\{"code":"not_authorized"' control.jsonl
+! exists logs/$RUN7.anchor
+rekor requests 6
+
+# 5. A second anchoring writer on the same directory exits busy, unrecorded and
+# before any request, for --pending and for --run; once the holder lets go the
+# next pass proceeds.
+cp control.jsonl pre-busy.jsonl
+holdfile logs/.anchor.lock 7000
+! exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'audit anchor: another agenthof process is anchoring runs under logs; retry'
+! stdout 'control head:'
+holdfile logs/.anchor.lock 7000
+! exec agenthof audit anchor --control-log control.jsonl --run $RUN7 --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'audit anchor: another agenthof process is anchoring runs under logs; retry'
+! stdout 'control head:'
+cmp control.jsonl pre-busy.jsonl
+! exists logs/$RUN7.anchor
+rekor requests 6
+exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'anchored run '$RUN7': events='
+stdout '^pending: 1 anchored, 0 skipped \(not anchorable\), 0 remaining$'
+rekor requests 7
+
+# 6. The log is down. The pass makes ONE attempt, records ONE error naming that
+# run, leaves no sidecar and no temp file, touches no run ledger, and reports
+# the rest as remaining. Once the log is back the next pass files them all.
+exec agenthof run se plan-only --input eight --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN8=$RUNID
+exec agenthof run se plan-only --input nine --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN9=$RUNID
+exec agenthof run se plan-only --input ten --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN10=$RUNID
+cp logs/$RUN8.jsonl pre8.jsonl
+cp logs/$RUN9.jsonl pre9.jsonl
+cp logs/$RUN10.jsonl pre10.jsonl
+rekor stop
+! exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout '^audit anchor: run r-[0-9a-f]{16}: '
+stdout '^pending: 0 anchored, 0 skipped \(not anchorable\), 2 remaining$'
+stdout 'control head: seq='
+rekor requests 8
+exec sh -c 'test "$(grep -c "\"outcome\":\"error\".*\"anchor\":{\"run_id\"" control.jsonl)" = 1'
+exec sh -c 'test "$(ls logs/*.anchor | wc -l | tr -d " ")" = 7'
+exec sh -c '! ls logs/*.tmp-* 2>/dev/null'
+cmp logs/$RUN8.jsonl pre8.jsonl
+cmp logs/$RUN9.jsonl pre9.jsonl
+cmp logs/$RUN10.jsonl pre10.jsonl
+rekor start
+exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout '^pending: 3 anchored, 0 skipped \(not anchorable\), 0 remaining$'
+exec sh -c 'test "$(ls logs/*.anchor | wc -l | tr -d " ")" = 10'
+rekor requests 11
+
+# 7. The log answers no to ONE head (a 429): that run alone gets an error record,
+# the pass advances and files the next, the summary counts what landed, exit 1.
+exec agenthof run se plan-only --input eleven --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+exec agenthof run se plan-only --input twelve --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+rekor fail 429
+! exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout '^audit anchor: run r-[0-9a-f]{16}: '
+stdout '^anchored run r-[0-9a-f]{16}: events='
+stdout '^pending: 1 anchored, 0 skipped \(not anchorable\), 0 remaining$'
+exec sh -c 'test "$(grep -c "\"outcome\":\"error\".*\"anchor\":{\"run_id\"" control.jsonl)" = 2'
+exec sh -c 'test "$(ls logs/*.anchor | wc -l | tr -d " ")" = 11'
+rekor requests 13
+exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout '^pending: 1 anchored, 0 skipped \(not anchorable\), 0 remaining$'
+exec sh -c 'test "$(ls logs/*.anchor | wc -l | tr -d " ")" = 12'
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- config/roles/locked.yaml --
+name: locked
+workflows: [plan-only]
+allowed_groups: [nobody-is-in-this-group]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, anchor]
+-- config/roles/auditor.yaml --
+name: auditor
+allowed_groups: [finance]
+control: [prune]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

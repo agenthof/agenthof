@@ -420,7 +420,8 @@ func (s *anchorSession) recordFinish(outcome string, reason *control.Reason, cod
 // With --run <run-id> (or --pending) the same preamble serves the run form
 // instead: the id is shape-checked right after flag parsing, before the
 // posture or any path is read, and anchorRuns takes the run-anchoring lock and
-// anchors a finished run's final head, writing the proof beside the run.
+// anchors a finished run's final head (--run) or sweeps every run not yet
+// anchored (--pending), writing each proof beside its run.
 func cmdAuditAnchor(args []string, out, stderr io.Writer) int {
 	fs := flag.NewFlagSet("audit anchor", flag.ContinueOnError)
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path; integrity.yaml and anchor.pub are read from beside it")
