@@ -2763,6 +2763,71 @@ func TestRunsPruneRemovesRootWithDescendants(t *testing.T) {
 	}
 }
 
+// touchFile writes a small file at dir/name and returns its path.
+func touchFile(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestPruneRemovesSidecarTempAndOrphan: a pruned run's anchor proof and any
+// transient temp go with its ledger; a child's sidecar goes with the child;
+// an orphan proof (its ledger already gone) is cleaned in the same sweep. The
+// pruned count stays the count of .jsonl files removed.
+func TestPruneRemovesSidecarTempAndOrphan(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	const root, child, orphan = "r-00000000000000a1", "r-00000000000000a2", "r-00000000000000a3"
+	rootLog := linkedRun(t, dir, root, "", true)
+	childLog := linkedRun(t, dir, child, root, false)
+	rootProof := touchFile(t, dir, root+".anchor")
+	rootTemp := touchFile(t, dir, root+".anchor.tmp-x")
+	childProof := touchFile(t, dir, child+".anchor")
+	orphanProof := touchFile(t, dir, orphan+".anchor")
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out); code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 2 run(s) and 0 artifact(s)") {
+		t.Fatalf("only the two .jsonl files count as pruned runs: %s", out.String())
+	}
+	for _, p := range []string{rootLog, childLog, rootProof, rootTemp, childProof, orphanProof} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s should be gone: %v", p, err)
+		}
+	}
+}
+
+// TestPruneLeavesTheLockAlone: the anchor lock never fits the proof shape, and
+// a transient temp beside a LIVE ledger belongs to that live run: both
+// survive, as does the live run's proof.
+func TestPruneLeavesTheLockAlone(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	ctl := applied(t, writeSample(t))
+	dir := t.TempDir()
+	const live = "r-00000000000000b1"
+	liveLog := linkedRun(t, dir, live, "", false)
+	lock := touchFile(t, dir, ".anchor.lock")
+	liveTemp := touchFile(t, dir, live+".anchor.tmp-y")
+	liveProof := touchFile(t, dir, live+".anchor")
+	var out bytes.Buffer
+	if code := cmdRuns(pruneArgs(ctl, "--older-than", "180d", "--log-dir", dir), &out); code != 0 {
+		t.Fatalf("prune: %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "pruned 0 run(s)") {
+		t.Fatalf("out: %s", out.String())
+	}
+	for _, p := range []string{liveLog, lock, liveTemp, liveProof} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must survive: %v", p, err)
+		}
+	}
+}
+
 func TestRunsPruneOrphanIsItsOwnRoot(t *testing.T) {
 	t.Setenv("AGENTHOF_TOKEN", "")
 	ctl := applied(t, writeSample(t))

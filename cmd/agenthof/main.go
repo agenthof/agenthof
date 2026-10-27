@@ -2047,6 +2047,12 @@ var statControlLog = os.Stat
 // parent stands; a root (no parent, or a parent not under logDir) past the
 // cutoff is removed together with every descendant, whatever their own
 // ages. Discovery is completeness.Parents' one-line read.
+//
+// A run's anchor proof (<run-id>.anchor) and any transient
+// <run-id>.anchor.tmp-* go with its ledger, and a proof whose ledger is
+// already gone is cleaned in one pass at the end. The anchor lock never fits
+// the proof's name and survives. The count is of ledgers removed: proofs,
+// temps and orphans are not runs.
 func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error) {
 	ctlInfo, err := statControlLog(controlLog)
 	if err != nil {
@@ -2088,11 +2094,33 @@ func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error)
 		}
 		path := filepath.Join(logDir, id+".jsonl")
 		target, serr := os.Stat(path)
-		if serr != nil || os.SameFile(target, ctlInfo) {
+		switch {
+		case serr == nil:
+			if os.SameFile(target, ctlInfo) {
+				return
+			}
+			if err := os.Remove(path); err == nil {
+				pruned++
+			} else if !os.IsNotExist(err) {
+				return
+			}
+		case os.IsNotExist(serr):
+			// A dangling link is not "gone": the entry is still there.
+			if _, lerr := os.Lstat(path); !os.IsNotExist(lerr) {
+				return
+			}
+		default:
 			return
 		}
-		if err := os.Remove(path); err == nil {
-			pruned++
+		// The ledger is gone (removed here or found already gone): its anchor
+		// proof and any transient temp go with it. Temps match by prefix on
+		// the directory listing, never by glob.
+		_ = os.Remove(sidecar.Path(logDir, id))
+		tmpPrefix := id + sidecar.Suffix + ".tmp-"
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasPrefix(e.Name(), tmpPrefix) {
+				_ = os.Remove(filepath.Join(logDir, e.Name()))
+			}
 		}
 	}
 	for _, entry := range entries {
@@ -2113,6 +2141,19 @@ func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error)
 		if info.ModTime().Before(cutoff) {
 			remove(id)
 		}
+	}
+	// Orphan pass: a proof whose run ledger is already gone is cleaned. Only
+	// the exact <run-id>.anchor shape matches — .anchor.lock and the temps of
+	// a live run do not — and a run with a ledger present is never an orphan.
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), sidecar.Suffix)
+		if !ok || entry.IsDir() || !sidecar.RunIDRE.MatchString(id) {
+			continue
+		}
+		if _, live := parents[id]; live {
+			continue
+		}
+		_ = os.Remove(sidecar.Path(logDir, id))
 	}
 	return pruned, nil
 }
