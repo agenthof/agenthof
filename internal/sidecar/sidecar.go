@@ -106,22 +106,23 @@ func fieldFault(r Record) string {
 // over MaxLineLen or one that does not decode, has a record over a field cap,
 // or cannot be read.
 func Read(path string) (recs []Record, found bool, err error) {
+	name := filepath.Base(path) // errors name the file, never the log directory it sits in
 	st, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, true, err
+		return nil, true, pathFault(name, err)
 	}
 	if !st.Mode().IsRegular() {
-		return nil, true, fmt.Errorf("sidecar %s is not a regular file", path)
+		return nil, true, fmt.Errorf("sidecar %s is not a regular file", name)
 	}
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) { // removed between Lstat and Open
 			return nil, false, nil
 		}
-		return nil, true, err
+		return nil, true, pathFault(name, err)
 	}
 	defer func() { _ = f.Close() }()
 	// The initial capacity equals the cap: bufio.Scanner enforces the larger of
@@ -130,7 +131,7 @@ func Read(path string) (recs []Record, found bool, err error) {
 	sc.Buffer(make([]byte, 0, MaxLineLen), MaxLineLen)
 	for n := 1; sc.Scan(); n++ {
 		if n > MaxRecords {
-			return nil, true, fmt.Errorf("sidecar %s has more than %d records", path, MaxRecords)
+			return nil, true, fmt.Errorf("sidecar %s has more than %d records", name, MaxRecords)
 		}
 		var r Record
 		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
@@ -142,12 +143,26 @@ func Read(path string) (recs []Record, found bool, err error) {
 		recs = append(recs, r)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, true, fmt.Errorf("sidecar %s: %w", path, err)
+		return nil, true, fmt.Errorf("sidecar %s: %w", name, pathUnwrap(err))
 	}
 	if len(recs) == 0 {
-		return nil, true, fmt.Errorf("sidecar %s is empty", path)
+		return nil, true, fmt.Errorf("sidecar %s is empty", name)
 	}
 	return recs, true, nil
+}
+
+// pathUnwrap drops the *fs.PathError wrapper, whose text carries the full path.
+func pathUnwrap(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
+}
+
+// pathFault is an OS error on the sidecar, worded with the file's base name.
+func pathFault(name string, err error) error {
+	return fmt.Errorf("sidecar %s: %w", name, pathUnwrap(err))
 }
 
 // Append adds r after the records already at path and writes the whole file

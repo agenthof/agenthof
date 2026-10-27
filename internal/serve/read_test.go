@@ -489,7 +489,7 @@ func TestAuditTextCarriesTheAnchorLine(t *testing.T) {
 	anchorRun(t, ts.logDir, root, stub)
 	text = getAudit()
 	if !strings.Contains(text, "ledger anchor: anchored — verified under the log key as served (not independent; ") || strings.Contains(text, "independently verified") ||
-		!strings.Contains(text, ", anchor verified\n") {
+		!strings.Contains(text, ", anchor verified (as served)\n") {
 		t.Fatalf("anchored:\n%s", text)
 	}
 

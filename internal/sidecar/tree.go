@@ -15,9 +15,16 @@ import (
 // subtree line already says so).
 type TreeVerdicts struct {
 	Root     Verdict
-	Pinned   bool               // the resolved key was non-nil
-	Children []Verdict          // verified descendants, in tree order
-	byRun    map[string]Verdict // the same, by run id
+	Pinned   bool                 // the resolved key was non-nil
+	Children []Verdict            // verified descendants, in tree order
+	byRun    map[string]treeChild // the same, by run id
+}
+
+// treeChild is a descendant's verdict with whether it was judged under a
+// pinned key, which decides how its subtree line words a verified anchor.
+type treeChild struct {
+	v      Verdict
+	pinned bool
 }
 
 // VerifyTree decides the anchor of tree's root (runID) and of every verified
@@ -37,22 +44,28 @@ func VerifyTree(logDir, runID string, tree completeness.Tree, rootChainOK bool, 
 		if c.Integrity != "verified" {
 			continue
 		}
-		v, _ := VerifyRun(logDir, c.RunID, key, factory, offline, timeout)
+		v, pinned := VerifyRun(logDir, c.RunID, key, factory, offline, timeout)
 		t.Children = append(t.Children, v)
 		if t.byRun == nil {
-			t.byRun = map[string]Verdict{}
+			t.byRun = map[string]treeChild{}
 		}
-		t.byRun[c.RunID] = v
+		t.byRun[c.RunID] = treeChild{v: v, pinned: pinned}
 	}
 	return t
 }
 
 // Suffix is the word a descendant's subtree line gains: ", anchor <state>",
-// or nothing for a descendant whose chain did not verify.
+// or nothing for a descendant whose chain did not verify. A verified anchor
+// judged without a pinned key is worded "(as served)", as the root's line
+// words it: the log vouched for itself.
 func (t TreeVerdicts) Suffix(n completeness.Node) string {
-	v, ok := t.byRun[n.RunID]
+	c, ok := t.byRun[n.RunID]
 	if !ok {
 		return ""
 	}
-	return ", anchor " + v.State()
+	state := c.v.State()
+	if state == StateVerified && !c.pinned {
+		return ", anchor " + state + " (as served)"
+	}
+	return ", anchor " + state
 }

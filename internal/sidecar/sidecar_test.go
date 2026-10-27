@@ -138,6 +138,28 @@ func TestReadRefusesEmptyOverCapAndUndecodable(t *testing.T) {
 	}
 }
 
+// TestReadErrorsNameTheFileNotTheDirectory: serve surfaces Read's error to API
+// callers, and the log directory is the server's business.
+func TestReadErrorsNameTheFileNotTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{"empty.anchor": "", "over.anchor": strings.Repeat(line(t, rec(3)), sidecar.MaxRecords+1)} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := sidecar.Read(path)
+		if err == nil || strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), "sidecar "+name) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "dir.anchor"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sidecar.Read(filepath.Join(dir, "dir.anchor")); err == nil || strings.Contains(err.Error(), dir) {
+		t.Fatalf("not a regular file: %v", err)
+	}
+}
+
 func TestReadBoundsEveryField(t *testing.T) {
 	over := func(mut func(*sidecar.Record), want string) {
 		t.Helper()

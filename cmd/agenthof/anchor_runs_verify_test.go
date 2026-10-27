@@ -431,7 +431,7 @@ func TestAuditVerifyRunShowsChildAnchorOnSubtreeLine(t *testing.T) {
 	}
 	for name, run := range map[string]func(runsFixture, string, ...string) (int, string){"audit verify": auditVerifyRun, "audit": auditRun} {
 		code, out = run(f, root)
-		if code != 0 || !strings.Contains(out, "ledger anchor: not anchored\n") || !strings.Contains(out, "completeness complete, anchor verified\n") {
+		if code != 0 || !strings.Contains(out, "ledger anchor: not anchored\n") || !strings.Contains(out, "completeness complete, anchor verified (as served)\n") {
 			t.Fatalf("%s, child anchored: exit %d\n%s", name, code, out)
 		}
 	}
