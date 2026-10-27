@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/atomicfile"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/origin"
 )
@@ -542,18 +543,18 @@ func moveAsideReplaced(path, what string) (string, error) {
 			_ = os.Remove(candidate)
 			return "", err
 		}
-		fsyncDir(dir)
+		atomicfile.SyncDir(dir)
 		return candidate, nil
 	}
 	return "", fmt.Errorf("control: could not claim a fresh replaced-file name for %s after %d attempts", path, maxTornFragmentAttempts)
 }
 
-// writeRestored writes data to dest by replaceFile's recipe — a 0600 temp
+// writeRestored writes data to dest by atomicfile.Replace's recipe — a 0600 temp
 // ".<base>.restore-*" beside it (the active's base, dot-prefixed like the
 // swap's temp; sweepTemps knows the prefix), fsync, rename, directory
 // fsync. Never ".<base>.seg-NNNNNN.restore-*": that would be a sibling.
 func writeRestored(resolved, dest string, data []byte) error {
-	return replaceFile(dest, "."+filepath.Base(resolved)+".restore-*", data)
+	return atomicfile.Replace(dest, "."+filepath.Base(resolved)+".restore-*", data)
 }
 
 // sameBytes reports whether the entry under path is a regular file (never

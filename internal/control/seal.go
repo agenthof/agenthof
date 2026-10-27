@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/atomicfile"
 	"github.com/agenthof/agenthof/internal/ledger"
 	"github.com/agenthof/agenthof/internal/origin"
 )
@@ -404,7 +405,7 @@ func linkSegment(resolved string, n int) error {
 	seg := SegmentPath(resolved, n)
 	err := linkFile(resolved, seg)
 	if err == nil {
-		fsyncDir(filepath.Dir(resolved))
+		atomicfile.SyncDir(filepath.Dir(resolved))
 		return nil
 	}
 	if errors.Is(err, os.ErrExist) {

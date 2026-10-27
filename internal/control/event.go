@@ -138,9 +138,13 @@ type Seal struct {
 // "audit anchor". One head per record: Hash is a single head hash; a
 // batch over several heads would add a root field, never change Hash.
 type Anchor struct {
-	Seq  int    `json:"seq"`  // the covered head: seq of the last record the proof covers (1 ≤ Seq < this record's seq)
-	Hash string `json:"hash"` // the covered head's hash: lowercase hex SHA-256 of record Seq's bytes (ledger.Head.Hash at Seq)
-	Kind string `json:"kind"` // which knob produced it: "tlog" | "signed" (the integrity.yaml anchor value)
+	// RunID is the run this anchor covers; empty on a control-ledger anchor.
+	// Additive and omitempty (Article VI): a control record's bytes are
+	// unchanged.
+	RunID string `json:"run_id,omitempty"`
+	Seq   int    `json:"seq"`  // the covered head: seq of the last record the proof covers (1 ≤ Seq < this record's seq)
+	Hash  string `json:"hash"` // the covered head's hash: lowercase hex SHA-256 of record Seq's bytes (ledger.Head.Hash at Seq)
+	Kind  string `json:"kind"` // which knob produced it: "tlog" | "signed" (the integrity.yaml anchor value)
 	// BackendKind is the proof FORMAT — the integrity backend kind vocabulary
 	// ("transparency-log", "rfc3161", "kms", …) — so a verifier knows from
 	// the record alone whether Ref is a log index or a content hash, without
