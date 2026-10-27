@@ -355,7 +355,8 @@ func TestAuditAnchorRunProofNotWritten(t *testing.T) {
 		t.Fatalf("exit %d submits %d\n%s", code, b.count(), out)
 	}
 	d := lastControl(t, f.ctl)
-	if d.Outcome != "error" || d.Reason == nil || d.Reason.Code != control.CodeIOError || d.Anchor == nil || d.Anchor.RunID != f.id || d.Anchor.Seq != 3 {
+	// The log's entry exists whatever became of the local copy: the record points at it.
+	if d.Outcome != "error" || d.Reason == nil || d.Reason.Code != control.CodeIOError || d.Anchor == nil || d.Anchor.RunID != f.id || d.Anchor.Seq != 3 || d.Anchor.Ref == "" {
 		t.Fatalf("record %+v / %+v", d, d.Anchor)
 	}
 }
@@ -878,5 +879,49 @@ func TestPendingStopsWhenTheControlLedgerCannotRecord(t *testing.T) {
 	_ = os.Chmod(f.ctl, 0o600)
 	if got := len(controlRecords(t, f.ctl)); got != before {
 		t.Fatalf("control records %d -> %d", before, got)
+	}
+}
+
+// TestPendingStopsWhenTheProofCannotBeWritten: a log directory that cannot take
+// a sidecar (a full disk, a lost write permission) fails the same way for every
+// run, and each attempt has already made a permanent Submit at the log. The
+// pass makes one Submit, records one error naming the entry that now exists,
+// leaves the rest unattempted and exits 1.
+func TestPendingStopsWhenTheProofCannotBeWritten(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: file permissions are not enforced")
+	}
+	f := newRunsFixture(t)
+	b := useRunsBackend(t)
+	f.finishedRun(t, "r-00000000000000a1")
+	f.finishedRun(t, "r-00000000000000a2")
+	// The lock file already exists, so taking the lock still works; the sidecar's
+	// temp file cannot be created.
+	if err := os.WriteFile(sidecar.LockPath(f.logDir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(f.logDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.logDir, 0o700) })
+
+	code, out, _ := anchorCmd(f.args("--pending"))
+	if code != 1 || b.count() != 1 {
+		t.Fatalf("exit %d submits %d\n%s", code, b.count(), out)
+	}
+	if !strings.Contains(out, " but the run's proof could NOT be written beside it: ") ||
+		!strings.Contains(out, "\npending: 0 anchored, 0 skipped (not anchorable), 2 remaining\n") {
+		t.Fatalf("stdout:\n%s", out)
+	}
+	if got := anchorRecords(t, f.ctl, "error"); len(got) != 1 {
+		t.Fatalf("error records %v", got)
+	}
+	if d := lastControl(t, f.ctl); d.Reason == nil || d.Reason.Code != control.CodeIOError || d.Anchor == nil || d.Anchor.Ref == "" {
+		t.Fatalf("record %+v / %+v", d, d.Anchor)
+	}
+	for _, id := range []string{"r-00000000000000a1", "r-00000000000000a2", f.id} {
+		if hasSidecar(f, id) {
+			t.Fatalf("sidecar for %s", id)
+		}
 	}
 }

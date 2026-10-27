@@ -25,7 +25,7 @@ type runAnchorOpts struct {
 }
 
 // runAnchorOutcome is what anchoring one run came to. The first and the last
-// four say what reached disk; the three marked PASS-FATAL say a sweep must stop.
+// four say what reached disk; the four marked PASS-FATAL say a sweep must stop.
 type runAnchorOutcome int
 
 const (
@@ -34,7 +34,7 @@ const (
 	runSubmitFailed                            // per-entry rejection: the log ANSWERED and refused THIS head; anchor error recorded; the sweep goes on
 	runTransportFailed                         // PASS-FATAL: the log did not answer; anchor error recorded; the sweep stops here
 	runBackendFailed                           // PASS-FATAL: the backend could not be built or its credential not resolved — it recurs identically for every run; anchor error recorded; the sweep stops here
-	runProofNotWritten                         // anchored at the log, sidecar write failed: error recorded
+	runProofNotWritten                         // PASS-FATAL: anchored at the log, sidecar write failed — a directory-level fault that recurs for every run, each attempt after the log's permanent Submit; error recorded; the sweep stops here
 	runNotRecorded                             // PASS-FATAL: anchored, sidecar written, control Append failed — the run is never a candidate again, and a ledger that cannot take one record cannot take the next; the sweep stops here
 )
 
@@ -116,6 +116,7 @@ func (s *anchorSession) anchorRun(logDir, id string) (outcome runAnchorOutcome, 
 	}
 	if err := sidecar.Append(sidecar.Path(logDir, id), id, rec); err != nil {
 		_, _ = fmt.Fprintf(out, "audit anchor: run %s: anchored at %s but the run's proof could NOT be written beside it: %v\n", id, rcpt.Ref, err)
+		tried.Ref = rcpt.Ref // the log's entry exists whatever became of the local copy
 		return runProofNotWritten, nil, s.recordFault(control.CodeIOError, err, tried)
 	}
 
@@ -174,16 +175,17 @@ func (s *anchorSession) anchorRuns(o runAnchorOpts) int {
 //   - runNotAnchorable (unterminated, torn, gone) is reported by the body,
 //     counted as skipped and does NOT count against limit: a run that is still
 //     running must not eat the pass's budget;
-//   - runSubmitFailed and runProofNotWritten are failures that count against
-//     limit; the pass goes on to the next run (neither lands a sidecar, so the
-//     run is retried next pass);
-//   - runTransportFailed, runBackendFailed and runNotRecorded are failures
-//     every later run would meet identically — a log that does not answer, a
-//     backend that cannot be built, a control ledger that cannot take a
-//     record — so the pass stops there and leaves the rest for the next one:
-//     an outage costs one error record, not one per run. A run that was
-//     anchored but not recorded already has its sidecar and is not retried;
-//     the unattempted ones have none, and are picked up once the fault heals.
+//   - runSubmitFailed is a failure that counts against limit; the pass goes on
+//     to the next run (it lands no sidecar, so the run is retried next pass);
+//   - runTransportFailed, runBackendFailed, runProofNotWritten and
+//     runNotRecorded are failures every later run would meet identically — a
+//     log that does not answer, a backend that cannot be built, a log
+//     directory that cannot take a sidecar, a control ledger that cannot take
+//     a record — so the pass stops there and leaves the rest for the next one:
+//     an outage costs one error record, not one per run, and a full disk does
+//     not cost one permanent public log entry per run. A run that was anchored
+//     but not recorded already has its sidecar and is not retried; the
+//     unattempted ones have none, and are picked up once the fault heals;
 //
 // remaining is the candidates not attempted. Exit 0 iff nothing failed, which
 // includes an empty pass and a pass cut short by limit (the next tick
@@ -221,7 +223,7 @@ func (s *anchorSession) anchorPending(logDir string, limit int) int {
 			failed++
 			attempts++
 		}
-		if outcome == runTransportFailed || outcome == runBackendFailed || outcome == runNotRecorded {
+		if outcome == runTransportFailed || outcome == runBackendFailed || outcome == runProofNotWritten || outcome == runNotRecorded {
 			break
 		}
 	}

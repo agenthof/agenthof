@@ -304,7 +304,7 @@ func isBackendURL(s string) bool {
 }
 
 // The allowed-key lists, in the order the error texts name them. A future
-// sibling key (cadence, runs) is added here: the text is not a wire contract.
+// sibling key (cadence) is added here: the text is not a wire contract.
 const (
 	integrityKeys  = "sink, anchor, anchor_runs, duplicate, sink_backend, anchor_backend"
 	backendKeys    = "kind, url, region, mode, retention, credential"
