@@ -52,6 +52,7 @@ type RekorV1 struct {
 	requests    []string
 	lastPosted  []byte
 	failNext    int
+	failing     int // FailAll: answer this status to EVERY request until cleared
 	corruptNext bool
 	garbageNext bool
 	dropping    bool // Drop/Stop: close every connection until Start
@@ -81,6 +82,10 @@ func (f *RekorV1) Close() { f.server.Close() }
 
 // Fail makes the NEXT request answer status, with Sentinel in the body and Location.
 func (f *RekorV1) Fail(status int) { f.mu.Lock(); f.failNext = status; f.mu.Unlock() }
+
+// FailAll makes EVERY request answer status until FailAll(0) or Reset — the
+// log refusing every head the same way, unlike Fail's one-shot.
+func (f *RekorV1) FailAll(status int) { f.mu.Lock(); f.failing = status; f.mu.Unlock() }
 
 // CorruptNext makes the next 201 serve a body whose hash differs from its entry id.
 func (f *RekorV1) CorruptNext() { f.mu.Lock(); f.corruptNext = true; f.mu.Unlock() }
@@ -133,7 +138,7 @@ func (f *RekorV1) RotateKey() {
 func (f *RekorV1) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.failNext, f.corruptNext, f.garbageNext, f.dropping, f.delay, f.cosign, f.pad = 0, false, false, false, 0, false, 0
+	f.failNext, f.failing, f.corruptNext, f.garbageNext, f.dropping, f.delay, f.cosign, f.pad = 0, 0, false, false, false, 0, false, 0
 	f.corrupt, f.forgotten, f.requests = map[string]bool{}, map[string]bool{}, nil
 }
 
@@ -359,6 +364,9 @@ func (f *RekorV1) handle(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 	drop, fail, delay, garbage := f.dropping, f.failNext, f.delay, f.garbageNext
 	f.failNext, f.garbageNext = 0, false
+	if fail == 0 {
+		fail = f.failing // persistent: not cleared per request
+	}
 	f.mu.Unlock()
 
 	if delay > 0 {

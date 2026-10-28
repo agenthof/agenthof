@@ -4,7 +4,9 @@
 # unterminated or torn is reported and skipped without spending --limit. A log
 # that does not answer stops the pass after one attempt (one error record, not
 # one per run); a log that answers no to one head costs that run an error and
-# the pass goes on. Overlapping passes serialize on <log-dir>/.anchor.lock.
+# the pass goes on; a log that answers the same refusal to every head is
+# refusing systemically, so the pass stops after two. Overlapping passes
+# serialize on <log-dir>/.anchor.lock.
 #
 # A spawned child run's ledger is a candidate like any other; that is covered by
 # TestPendingChildIsACandidate, because no hermetic spawn journey exists under
@@ -168,6 +170,29 @@ rekor requests 13
 exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
 stdout '^pending: 1 anchored, 0 skipped \(not anchorable\), 0 remaining$'
 exec sh -c 'test "$(ls logs/*.anchor | wc -l | tr -d " ")" = 12'
+
+# 8. The log answers the SAME refusal (a 403) to every head: that is systemic,
+# not per-head. The pass records the fault for two runs, prints the stop line
+# and halts, leaving the rest unattempted — two error records, not one per run.
+# Once the log recovers the next pass files every one of them: the stop costs
+# nothing permanent.
+exec agenthof run se plan-only --input thirteen --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+exec agenthof run se plan-only --input fourteen --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+exec agenthof run se plan-only --input fifteen --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+rekor failall 403
+! exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout '^audit anchor: run r-[0-9a-f]{16}: '
+stdout '^audit anchor: same refusal twice running \(status 403 from '
+stdout '^pending: 0 anchored, 0 skipped \(not anchorable\), 1 remaining$'
+exec sh -c 'test "$(grep -c "\"outcome\":\"error\".*\"anchor\":{\"run_id\"" control.jsonl)" = 4'
+exec sh -c 'test "$(ls logs/*.anchor | wc -l | tr -d " ")" = 12'
+exec sh -c '! ls logs/*.tmp-* 2>/dev/null'
+rekor requests 16
+rekor failall 0
+exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout '^pending: 3 anchored, 0 skipped \(not anchorable\), 0 remaining$'
+exec sh -c 'test "$(ls logs/*.anchor | wc -l | tr -d " ")" = 15'
+rekor requests 19
 
 -- config/agents/planner.yaml --
 name: planner

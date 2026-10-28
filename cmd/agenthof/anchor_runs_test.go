@@ -504,7 +504,7 @@ func TestAnchorRunClassifiesFaultsForTheSweep(t *testing.T) {
 				t.Fatalf("session: exit %d\n%s", code, out.String())
 			}
 			out.Reset()
-			outcome, shipped, head := s.anchorRun(f.logDir, f.id)
+			outcome, shipped, head, _ := s.anchorRun(f.logDir, f.id)
 			if outcome != c.want || shipped != nil || head.Count == 0 {
 				t.Fatalf("outcome %d (want %d), shipped %v, head %+v\n%s", outcome, c.want, shipped, head, out.String())
 			}
@@ -786,6 +786,40 @@ func TestPendingAdvancesOnPerEntryRejection(t *testing.T) {
 	}
 	if !strings.Contains(out, "audit anchor: run "+first+": status 429 from rekor.test\n") ||
 		!strings.Contains(out, "\npending: 1 anchored, 0 skipped (not anchorable), 0 remaining\n") {
+		t.Fatalf("stdout:\n%s", out)
+	}
+}
+
+// TestPendingStopsOnRepeatedIdenticalRejection: a log that answers the same
+// refusal to every head is refusing systemically, not per-run. The sweep
+// records it twice, stops, and leaves the rest for the next pass rather than
+// writing one error record per candidate.
+func TestPendingStopsOnRepeatedIdenticalRejection(t *testing.T) {
+	f := newRunsFixture(t)
+	b := useRunsBackend(t)
+	b.submitErr = errors.New("status 403 from rekor.test") // never cleared: every head refused identically
+	f.finishedRun(t, "r-00000000000000a1")
+	f.finishedRun(t, "r-00000000000000a2")
+	// Candidates in name order: a1, a2, then f.id (r-0123…) — three runs.
+
+	code, out, _ := anchorCmd(f.args("--pending"))
+	if code != 1 || b.count() != 2 {
+		t.Fatalf("exit %d submits %d\n%s", code, b.count(), out)
+	}
+	if got := anchorRecords(t, f.ctl, "error"); len(got) != 2 || got[0] != "r-00000000000000a1" || got[1] != "r-00000000000000a2" {
+		t.Fatalf("error records %v", got)
+	}
+	for _, id := range []string{"r-00000000000000a1", "r-00000000000000a2", f.id} {
+		if hasSidecar(f, id) {
+			t.Fatalf("sidecar for %s", id)
+		}
+	}
+	if tmp, _ := filepath.Glob(filepath.Join(f.logDir, "*.tmp-*")); len(tmp) != 0 {
+		t.Fatalf("temp files: %v", tmp)
+	}
+	if !strings.Contains(out, "audit anchor: same refusal twice running (status 403 from rekor.test); stopping the sweep\n") ||
+		!strings.Contains(out, "\npending: 0 anchored, 0 skipped (not anchorable), 1 remaining\n") ||
+		!strings.HasSuffix(out, controlHeadLine(t, f.ctl)) {
 		t.Fatalf("stdout:\n%s", out)
 	}
 }
