@@ -219,6 +219,7 @@ func (c *Client) Audit(ctx context.Context, id string) (AuditResult, error) {
 		Text:         string(body),
 		Integrity:    resp.Header.Get(IntegrityHeader),
 		Completeness: resp.Header.Get(CompletenessHeader),
+		Anchor:       resp.Header.Get(AnchorHeader),
 	}, nil
 }
 

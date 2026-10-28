@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agenthof/agenthof/internal/atomicfile"
 	"github.com/agenthof/agenthof/internal/ledger"
 )
 
@@ -180,51 +181,14 @@ func writeManifest(resolved string, m Manifest) error {
 	if _, err := ParseManifest(data, resolved); err != nil {
 		return err
 	}
-	return replaceFile(ManifestPath(resolved), filepath.Base(resolved)+".segments-*", data)
+	return atomicfile.Replace(ManifestPath(resolved), filepath.Base(resolved)+".segments-*", data)
 }
 
 // swapActive puts a fresh, empty active under resolved's name: an empty 0600
 // temp (.<base>.next-*), fsync, rename over the name, fsync the directory.
 // The old inode lives on only under its segment link.
 func swapActive(resolved string) error {
-	return replaceFile(resolved, "."+filepath.Base(resolved)+".next-*", nil)
-}
-
-// replaceFile is the one atomic-replace recipe both writers share: a 0600
-// temp beside dest (named by pattern, which sweepTemps knows) holding data,
-// fsynced and closed, renamed over dest, the directory fsynced. On any
-// failure before the rename the temp is removed.
-func replaceFile(dest, pattern string, data []byte) error {
-	dir := filepath.Dir(dest)
-	tmp, err := os.CreateTemp(dir, pattern)
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	fail := func(err error) error {
-		_ = tmp.Close()
-		_ = os.Remove(name)
-		return err
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		return fail(err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	if err := os.Rename(name, dest); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	fsyncDir(dir)
-	return nil
+	return atomicfile.Replace(resolved, "."+filepath.Base(resolved)+".next-*", nil)
 }
 
 // sweepTemps removes manifest, swap and restore temps an earlier crash left
@@ -249,13 +213,5 @@ func sweepTemps(resolved string) {
 		if strings.HasPrefix(name, base+".segments-") || strings.HasPrefix(name, "."+base+".next-") || strings.HasPrefix(name, "."+base+".restore-") {
 			_ = os.Remove(filepath.Join(dir, name))
 		}
-	}
-}
-
-// fsyncDir makes a rename or link in dir durable; best effort, as ledger.Open's.
-func fsyncDir(dir string) {
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
 	}
 }

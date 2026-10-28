@@ -131,6 +131,15 @@ verify_run() {
 	grep -Eq "^head: [0-9a-f]{64} \([0-9]+ events\)$" <<<"$v" || fail "$2 ($1): audit verify reported no head"
 	grep -q "^ledger completeness: complete (" <<<"$v" || fail "$2 ($1): audit verify did not report a complete ledger"
 }
+# anchor_state RUN_ID: the "ledger anchor:" line of `audit verify RUN_ID`, read
+# against the sourcing script's $WORK/logs and $WORK/control.jsonl. The exit
+# status is not judged here (a run whose anchor is not independently verified
+# exits non-zero); the caller judges the line.
+anchor_state() {
+	local v
+	v="$(out_of "$WORK/agenthof" audit verify "$1" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
+	grep '^ledger anchor:' <<<"$v" || true
+}
 # no_leak VALUE WHAT...: VALUE must appear in no ledger, artifact, control
 # log, process log, agenthof operational log, or captured output. Never
 # prints VALUE. (The upstream's "acting as: u-dana" and the step input are
@@ -248,7 +257,7 @@ name: acceptance-operator
 description: Runs the acceptance workflows
 workflows: [acceptance, acceptance-noexec, acceptance-nospawn]
 allowed_groups: ["acceptance-users"]
-control: [apply]
+control: [apply, anchor, prune]
 EOF
 	cat >"$dir/roles/acceptance-worker.yaml" <<EOF
 name: acceptance-worker

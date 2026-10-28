@@ -340,12 +340,32 @@ func TestScript(t *testing.T) {
 					ts.Fatalf("lock holder never reported held: %q %v", line[:], err)
 				}
 			},
+			// holdfile <path> <ms>: holdlock for any lock file — a helper
+			// process takes the exclusive flock on <path> itself (no
+			// installed.lock derivation) and holds it for <ms> milliseconds,
+			// so the next command that needs it waits out lockTimeout and
+			// answers busy. The holder is killed when the script ends.
+			"holdfile": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 2 {
+					ts.Fatalf("usage: holdfile <path> <ms>")
+				}
+				cmd := exec.Command(os.Args[0], "-test.run=TestNothing")
+				cmd.Env = append(os.Environ(), "AGENTHOF_TEST_HOLD_LOCK="+ts.MkAbs(args[0]), "AGENTHOF_TEST_HOLD_KIND=file", "AGENTHOF_TEST_HOLD_MS="+args[1])
+				stdout, err := cmd.StdoutPipe()
+				ts.Check(err)
+				ts.Check(cmd.Start())
+				ts.Defer(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+				var line [5]byte
+				if _, err := io.ReadFull(stdout, line[:]); err != nil || string(line[:]) != "held\n" {
+					ts.Fatalf("lock holder never reported held: %q %v", line[:], err)
+				}
+			},
 			// rekor <switch> [arg]: drives this script's Rekor fake.
 			//   fail <status> | corruptnext | drop | stop | start | rotate |
 			//   corrupt <ref> | forget <ref> | cosign | hostname <s> | reset |
 			//   requests <n> (asserts the fake saw exactly n requests) |
 			//   pubkey <path> (writes the current key PEM for pinning) |
-			//   posture <path> [clientcreds] (writes a tlog integrity.yaml naming the fake)
+			//   posture <path> [clientcreds|runs] (writes a tlog integrity.yaml naming the fake; runs adds anchor_runs: on-demand)
 			"rekor": func(ts *testscript.TestScript, neg bool, args []string) {
 				fake, _ := ts.Value(rekorKey{}).(*anchortest.RekorV1)
 				if fake == nil || len(args) == 0 {
@@ -392,6 +412,9 @@ func TestScript(t *testing.T) {
 					ts.Check(os.WriteFile(ts.MkAbs(arg()), fake.PublicKeyPEM(), 0o600))
 				case "posture":
 					body := "anchor: tlog\nanchor_backend:\n  url: " + fake.URL + "\n"
+					if len(args) == 3 && args[2] == "runs" {
+						body += "anchor_runs: on-demand\n"
+					}
 					if len(args) == 3 && args[2] == "clientcreds" {
 						body += "  credential:\n    grant_type: client_credentials\n    client_auth: client_secret_basic\n    token_endpoint: " + fake.URL + "/token\n    client_id_env: ANCHOR_CLIENT_ID\n    client_secret_env: ANCHOR_CLIENT_SECRET\n"
 					}
@@ -431,6 +454,50 @@ func TestScript(t *testing.T) {
 					prev = hex.EncodeToString(sum[:])
 				}
 				ts.Check(os.WriteFile(path, out.Bytes(), 0o600))
+			},
+			// dropevent <src> <dst> <type>: writes src to dst without its records of
+			// the given event type, re-linking the chain (prev recomputed) so the
+			// copy still verifies — an event removed and the chain made whole,
+			// which a completeness check can catch and a hash chain cannot.
+			"dropevent": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 3 {
+					ts.Fatalf("usage: dropevent <src> <dst> <type>")
+				}
+				recs, _, err := ledger.ReadVerify(ts.MkAbs(args[0]), ledger.Unlocked)
+				ts.Check(err)
+				var out bytes.Buffer
+				prev, dropped := "", 0
+				for _, r := range recs {
+					var m map[string]any
+					ts.Check(json.Unmarshal(r.Raw, &m))
+					if m["type"] == args[2] {
+						dropped++
+						continue
+					}
+					m["prev"] = prev
+					raw, err := json.Marshal(m)
+					ts.Check(err)
+					out.Write(raw)
+					out.WriteByte('\n')
+					sum := sha256.Sum256(raw)
+					prev = hex.EncodeToString(sum[:])
+				}
+				if dropped == 0 {
+					ts.Fatalf("no %q event in %s", args[2], args[0])
+				}
+				ts.Check(os.WriteFile(ts.MkAbs(args[1]), out.Bytes(), 0o600))
+			},
+			// runhead <run-ledger>: exports a run ledger's event count and head
+			// hash as $RUNN and $RUNHEAD — the "events=N sha256=H" pair audit
+			// anchor --run prints, and what --expect-head <count>:<hex> takes.
+			"runhead": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 1 {
+					ts.Fatalf("usage: runhead <run-ledger>")
+				}
+				recs, head, err := ledger.ReadVerify(ts.MkAbs(args[0]), ledger.Unlocked)
+				ts.Check(err)
+				ts.Setenv("RUNN", strconv.Itoa(len(recs)))
+				ts.Setenv("RUNHEAD", head.Hash)
 			},
 			// anchorref <control-log>: exports the last successful anchor's ref,
 			// covered seq and hash as $REF, $ASEQ, $AHASH.

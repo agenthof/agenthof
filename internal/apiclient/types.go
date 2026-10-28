@@ -88,6 +88,13 @@ type RunEvents struct {
 	BrokenLine         int            `json:"broken_line,omitempty"`
 	Completeness       string         `json:"completeness,omitempty"`
 	CompletenessDetail string         `json:"completeness_detail,omitempty"`
+	// Anchor is the run's anchor state as the server reads it, offline under
+	// its own pin — one of the four Anchor* words; AnchorDetail is the first
+	// cause it is not verified, when it is not. Both absent when integrity
+	// failed (nothing to check a sidecar against). The server never anchors
+	// and never asks the log, so as-served (a networked state) is not a value.
+	Anchor       string `json:"anchor,omitempty"`
+	AnchorDetail string `json:"anchor_detail,omitempty"`
 }
 
 // IntegrityHeader carries GET /v1/runs/{id}/audit's verdict beside its
@@ -113,10 +120,26 @@ const (
 // refined to in_flight while the server runs it.
 const CompletenessHeader = "Agenthof-Completeness"
 
-// AuditResult is GET /v1/runs/{id}/audit: the rendered text and the two
-// header verdicts a client exits on.
+// AnchorHeader carries GET /v1/runs/{id}/audit's anchor state beside the other
+// two: the worst across the run and its verified descendants (mismatch, then
+// unverifiable, then the run's own word). A header an older server does not
+// send reads as not anchored — absence is never a mismatch.
+const AnchorHeader = "Agenthof-Anchor"
+
+// Anchor states for a run as the API reads them: a closed enum of four. The
+// server reads offline under its own pin, so an anchored run it cannot decide
+// is unverifiable — never tampering. as-served belongs to `audit verify`.
+const (
+	AnchorNotAnchored  = "not-anchored"
+	AnchorVerified     = "verified"
+	AnchorMismatch     = "mismatch"
+	AnchorUnverifiable = "unverifiable"
+)
+
+// AuditResult is GET /v1/runs/{id}/audit: the rendered text and the three
+// header verdicts a client exits on. Anchor is "" when the server sent none.
 type AuditResult struct {
-	Text, Integrity, Completeness string
+	Text, Integrity, Completeness, Anchor string
 }
 
 // InvestigateQuery is GET /v1/investigate's query string. Since and Until

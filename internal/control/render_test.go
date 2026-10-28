@@ -484,3 +484,25 @@ func TestRenderHeaderOmitsAMissingLogID(t *testing.T) {
 		t.Fatalf("header unchanged for a pre-log_id root:\n%s", out)
 	}
 }
+
+// TestRenderLabelsARunScopedAnchor: a run-scoped anchor names the run and the
+// number of run events it covers, not a control-chain head; a hostile run_id
+// or hash renders cleaned (origin.Clean), never raw.
+func TestRenderLabelsARunScopedAnchor(t *testing.T) {
+	h := strings.Repeat("ab", 32)
+	recs := []ledger.Record{
+		rec(1, "apply", "", "success", "dana@example.com", "asserted"),
+		recAnchor(2, "success", "", `{"run_id":"r-0123456789abcdef","seq":7,"hash":"`+h+`","kind":"tlog","backend_kind":"transparency-log","backend":"https://log.example","ref":"12345"}`),
+		recAnchor(3, "success", "", `{"run_id":"r-\u001b[31mevil\u0007","seq":7,"hash":"\u001b[31m`+h+`","kind":"tlog"}`),
+	}
+	out := control.Render(recs, ledger.Head{Hash: "z", Count: 3}, nil)
+	if want := "seq 2  2026-10-13 10:02:00  run r-0123456789abcdef anchored: events 7 " + h + " (tlog) — dana@example.com (asserted)\n"; !strings.Contains(out, want) {
+		t.Fatalf("missing %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "head anchored") {
+		t.Fatalf("a run-scoped anchor must not read as a control head pin:\n%s", out)
+	}
+	if strings.ContainsAny(out, "\x1b\x07") {
+		t.Fatalf("control characters must not reach the terminal:\n%q", out)
+	}
+}

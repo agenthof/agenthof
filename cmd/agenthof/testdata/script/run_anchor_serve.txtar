@@ -1,0 +1,93 @@
+# serve reports a run's anchor state on its read routes and NEVER anchors: no
+# worker, no submit, no .anchor of its own. It reads offline under the server's
+# own pin (the anchor.pub beside its ledger, resolved per request), so every
+# read makes zero requests to the log. The client exits on the Agenthof-Anchor
+# header: 0 for not anchored or verified, 7 when the server cannot decide
+# (unpinned, offline), 6 for a mismatch (the in-process serve tests pin the raw
+# header, the /events field and the mismatch; there is no HTTP-GET helper here).
+
+env AGENTHOF_OIDC_ISSUER=$OIDC_ISSUER
+env AGENTHOF_OIDC_CLIENT_ID=agenthof
+
+rekor posture integrity.yaml runs
+exec agenthof serve --addr 127.0.0.1:0 --addr-file addr.txt --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl --max-concurrent-runs 2 &
+waitaddr addr.txt
+exec agenthof apply --config config --as tester --control-log control.jsonl --groups platform-eng
+
+# Two runs over the API: one will be anchored from the host, one never.
+exec agenthof run se plan-only --input hello --server $SERVER --token $OIDC_TOKEN
+stdout 'run r-[0-9a-f]{16} finished: succeeded'
+lastrun logs
+env ANCHORED=$RUNID
+exec agenthof run se plan-only --input again --server $SERVER --token $OIDC_TOKEN
+stdout 'run r-[0-9a-f]{16} finished: succeeded'
+lastrun logs
+env PLAIN=$RUNID
+! exists logs/$ANCHORED.anchor
+! exists logs/$PLAIN.anchor
+
+# Nothing anchored: not anchored, exit 0, and serve made no request.
+exec agenthof audit $ANCHORED --server $SERVER --token $OIDC_TOKEN
+stdout 'ledger anchor: not anchored$'
+rekor requests 0
+
+# Anchoring is the host's command, never serve's: the one --run is the only
+# thing that ever reaches the log (the submit and the served key: 2 requests),
+# and the only .anchor.
+exec agenthof audit anchor --control-log control.jsonl --run $ANCHORED --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'anchored run '$ANCHORED': events='
+rekor requests 2
+exists logs/$ANCHORED.anchor
+! exists logs/$PLAIN.anchor
+
+# Pinned: the server resolves anchor.pub beside its ledger on this request.
+rekor pubkey anchor.pub
+exec agenthof audit $ANCHORED --server $SERVER --token $OIDC_TOKEN
+stdout 'ledger anchor: independently verified \(log key pinned; offline: presence not checked; events [0-9]+ [0-9a-f]{64} → http://127\.0\.0\.1:[0-9]+ entry [0-9a-f]{80}\)'
+! stdout 'MISMATCH'
+cp stdout served-pinned.txt
+exec agenthof audit $ANCHORED --log-dir logs --control-log control.jsonl
+cmp stdout served-pinned.txt
+rekor requests 2
+
+# Unpinned: the server never asks the log for a key, so an anchored run reads
+# unverifiable — exit 7 through --server, never tampering and never as-served.
+rm anchor.pub
+exec sh -c 'agenthof audit $ANCHORED --server $SERVER --token $OIDC_TOKEN; test $? = 7'
+stdout 'ledger anchor: unverifiable — no key to verify under \(unpinned, offline\)'
+! stdout 'MISMATCH'
+! stdout 'independently verified'
+rekor requests 2
+
+# The run that was never anchored stays not anchored: exit 0, no sidecar made.
+exec agenthof audit $PLAIN --server $SERVER --token $OIDC_TOKEN
+stdout 'ledger anchor: not anchored$'
+! exists logs/$PLAIN.anchor
+
+# Across the whole script the log saw exactly the one --run's submits.
+rekor requests 2
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, anchor]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K

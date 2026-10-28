@@ -212,7 +212,7 @@ func TestParseIntegrityRejectsReservedValuesThroughYAML(t *testing.T) {
 // entry can never floor, and a value-looking key is refused as a key.
 func TestParseIntegrityRejectsNonMappingsAndUnknownKeys(t *testing.T) {
 	const (
-		top  = "sink, anchor, duplicate, sink_backend, anchor_backend"
+		top  = "sink, anchor, anchor_runs, duplicate, sink_backend, anchor_backend"
 		be   = "kind, url, region, mode, retention, credential"
 		cred = "credential_source, token_env, grant_type, client_auth, issuer, token_endpoint, client_id_env, client_secret_env, scope, audience"
 	)
@@ -579,5 +579,51 @@ func TestParseIntegrityWormComplete(t *testing.T) {
 	want.AnchorBackend = IntegrityBackend{Kind: "transparency-log", URL: "https://rekor.sigstore.dev"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("decoded\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// TestAnchorRunsValues: anchor_runs absent reads as "", none and on-demand are
+// accepted under anchor: tlog, and every other value, or on-demand without
+// tlog, is refused by name. Matched exactly: no case-folding.
+func TestAnchorRunsValues(t *testing.T) {
+	const tlog = "anchor: tlog\nanchor_backend:\n  url: https://log.example\n"
+	for body, want := range map[string]string{
+		"":                                "",
+		tlog:                              "",
+		tlog + "anchor_runs: none\n":      "none",
+		tlog + "anchor_runs: on-demand\n": "on-demand",
+	} {
+		in, err := ParseIntegrity([]byte(body))
+		if err != nil {
+			t.Errorf("ParseIntegrity(%q) = %v, want nil", body, err)
+			continue
+		}
+		if in.AnchorRuns != want {
+			t.Errorf("ParseIntegrity(%q).AnchorRuns = %q, want %q", body, in.AnchorRuns, want)
+		}
+	}
+	const noTlog = "anchor_runs is set but anchor is none; run anchoring uses the anchor_backend that anchor: tlog names"
+	for body, want := range map[string]string{
+		tlog + "anchor_runs: each\n":             `anchor_runs "each" is not a run-anchoring mode (want none or on-demand)`,
+		tlog + "anchor_runs: On-Demand\n":        `anchor_runs "On-Demand" is not a run-anchoring mode (want none or on-demand)`,
+		"anchor_runs: on-demand\n":               noTlog,
+		"anchor: none\nanchor_runs: on-demand\n": noTlog,
+	} {
+		_, err := ParseIntegrity([]byte(body))
+		if err == nil || !strings.HasSuffix(err.Error(), want) {
+			t.Errorf("ParseIntegrity(%q) = %v, want an error ending %q", body, err, want)
+		}
+	}
+}
+
+// TestAnchorRunsIsAKnownKey: anchor_runs passes the fail-closed key check; a
+// near-miss is refused with the new allowed-keys text.
+func TestAnchorRunsIsAKnownKey(t *testing.T) {
+	if _, err := ParseIntegrity([]byte("anchor_runs: none\n")); err != nil {
+		t.Errorf("anchor_runs: none = %v, want nil", err)
+	}
+	const want = `line 1: unknown key "anchor_run" (allowed keys: sink, anchor, anchor_runs, duplicate, sink_backend, anchor_backend)`
+	if _, err := ParseIntegrity([]byte("anchor_run: none\n")); err == nil || err.Error() != want {
+		t.Errorf("anchor_run: none = %v, want %q", err, want)
 	}
 }

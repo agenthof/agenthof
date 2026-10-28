@@ -85,7 +85,9 @@ func unverifiableCause(verdict string) string {
 // the ruling audit verify control makes with its exit 1 — and every success
 // anchor record in the valid prefix, payload or not, is unverifiable with
 // the state and its remedy as the cause, so a success record never lacks a
-// verdict. Nothing is read but the records and the events.
+// verdict. A run-scoped anchor record (Anchor.RunID set) is the exception on
+// both paths: it vouches for a run's ledger, not this chain, so it gets no
+// verdict at all. Nothing is read but the records and the events.
 func anchorVerdicts(records []ledger.Record, events []control.DecodedEvent, verdict string, o Options) map[int]*anchorverify.Result {
 	out := map[int]*anchorverify.Result{}
 	switch verdict {
@@ -101,6 +103,11 @@ func anchorVerdicts(records []ledger.Record, events []control.DecodedEvent, verd
 		cause := unverifiableCause(verdict)
 		for _, d := range events {
 			if d.Action != "anchor" || d.Outcome != "success" {
+				continue
+			}
+			// A run-scoped anchor is not about the control chain: its seq is a
+			// run position, so no control-chain cause applies to it.
+			if d.Anchor != nil && d.Anchor.RunID != "" {
 				continue
 			}
 			out[d.Seq] = &anchorverify.Result{Check: control.AnchorCheck{RecordSeq: d.Seq, Anchor: d.Anchor}, State: anchorverify.StateUnverifiable, Cause: cause}

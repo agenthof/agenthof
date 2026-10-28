@@ -13,6 +13,8 @@ import (
 	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/origin"
+	"github.com/agenthof/agenthof/internal/sidecar"
 )
 
 // completenessOf refines a run's own completeness verdict for the API: an
@@ -49,6 +51,65 @@ func (s *Server) integrityOf(id string, verr error) (string, int) {
 	return apiclient.IntegrityBroken, 0
 }
 
+// anchorOf is a run's anchor state as the read routes report it, and the
+// first cause it is not verified. Offline under the server's own pin
+// (the anchor.pub beside its ledger, resolved per request): a read route never
+// asks the log and never submits. A run whose own chain failed has nothing a
+// sidecar can be checked against and reports none (""). The unpinned or
+// undecidable case is unverifiable, never tampering, and never as-served —
+// that is a networked state of `audit verify`.
+func (s *Server) anchorOf(id string, verr error) (state, detail string) {
+	if verr != nil {
+		return "", ""
+	}
+	v, _ := sidecar.VerifyRun(s.cfg.LogDir, id, s.cfg.Investigate.AnchorKey, s.cfg.Investigate.AnchorBackend, true, 0)
+	return v.State(), anchorCause(v)
+}
+
+// anchorCause is the cause behind v's folded state: the first record in that
+// state (so a mismatch names its own cause, not an earlier unverifiable
+// one), or the sidecar's own fault. "" for verified and not anchored. Cleaned
+// like every string that came from a sidecar, a ledger or a backend.
+func anchorCause(v sidecar.Verdict) string {
+	switch state := v.State(); state {
+	case sidecar.StateVerified, sidecar.StateNotAnchored:
+		return ""
+	case sidecar.StateUnverifiable:
+		if v.Err != nil {
+			return origin.Clean(v.Err.Error())
+		}
+		if len(v.Results) == 0 {
+			return "the sidecar holds no records"
+		}
+		fallthrough
+	default:
+		for _, r := range v.Results {
+			if string(r.State) == state {
+				return origin.Clean(r.Cause)
+			}
+		}
+	}
+	return ""
+}
+
+// treeAnchor is the worst anchor state across a run and its verified
+// descendants — mismatch, then unverifiable, else the run's own word — the
+// ranking `audit <run-id>` exits on.
+func treeAnchor(t sidecar.TreeVerdicts) string {
+	worst := t.Root.State()
+	for _, c := range t.Children {
+		switch c.State() {
+		case sidecar.StateMismatch:
+			return sidecar.StateMismatch
+		case sidecar.StateUnverifiable:
+			if worst != sidecar.StateMismatch {
+				worst = sidecar.StateUnverifiable
+			}
+		}
+	}
+	return worst
+}
+
 // getEvents is the run ledger as the API reads it: the verified prefix,
 // its head, and the verdict.
 func (s *Server) getEvents(w http.ResponseWriter, r *http.Request, _ identity.Invoker, _ string) {
@@ -74,6 +135,7 @@ func (s *Server) getEvents(w http.ResponseWriter, r *http.Request, _ identity.In
 	if verr == nil {
 		comp = completeness.Check(events)
 	}
+	anchorState, anchorDetail := s.anchorOf(id, verr)
 	writeJSON(w, http.StatusOK, apiclient.RunEvents{
 		Events:             events,
 		Head:               apiclient.Head{Hash: head.Hash, Count: head.Count},
@@ -81,6 +143,8 @@ func (s *Server) getEvents(w http.ResponseWriter, r *http.Request, _ identity.In
 		BrokenLine:         line,
 		Completeness:       s.completenessOf(id, comp),
 		CompletenessDetail: comp.Detail,
+		Anchor:             anchorState,
+		AnchorDetail:       anchorDetail,
 	})
 }
 
@@ -107,8 +171,17 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, _ identity.Inv
 	}
 	tree := completeness.VerifyTree(s.cfg.LogDir, id, events, verr)
 	var sb strings.Builder
-	sb.WriteString(audit.Render(events, head, verr, tree.Root.Report))
-	sb.WriteString(tree.SubtreeLines())
+	// The anchor is read exactly as `audit <run-id>` reads it: offline under
+	// the server's own pin (the anchor.pub beside its ledger, resolved per
+	// request) — the log is never asked — and by the same renderer, so the
+	// text here is the text the local command prints.
+	anchors := sidecar.VerifyTree(s.cfg.LogDir, id, tree, verr == nil, s.cfg.Investigate.AnchorKey, s.cfg.Investigate.AnchorBackend, true, 0)
+	anchorLine := ""
+	if verr == nil {
+		anchorLine = sidecar.Lines(anchors.Root, sidecar.RenderOptions{Pinned: anchors.Pinned, Offline: true, OfflineOnly: true, RunID: id})
+	}
+	sb.WriteString(audit.Render(events, head, verr, tree.Root.Report, anchorLine))
+	sb.WriteString(tree.SubtreeLinesWith(anchors.Suffix))
 	for _, e := range events {
 		if e.Type == "workflow_started" && e.ConfigHash != "" {
 			cev, verdict, _ := investigate.LoadControl(s.cfg.ControlLog)
@@ -142,6 +215,10 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, _ identity.Inv
 	w.Header().Set(apiclient.IntegrityHeader, integrity)
 	if comp != "" {
 		w.Header().Set(apiclient.CompletenessHeader, comp)
+	}
+	if verr == nil {
+		// The tree-worst, from the verdicts the text above was rendered from.
+		w.Header().Set(apiclient.AnchorHeader, treeAnchor(anchors))
 	}
 	_, _ = w.Write([]byte(sb.String()))
 }

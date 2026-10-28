@@ -102,7 +102,7 @@ func TestLoadIntegrityNamesTheFileOnce(t *testing.T) {
 
 	writeIntegrity(t, ctl, "ancher: tlog\n")
 	_, err = loadIntegrity(ctl)
-	if want := "integrity " + p + `: line 1: unknown key "ancher" (allowed keys: sink, anchor, duplicate, sink_backend, anchor_backend)`; err == nil || err.Error() != want {
+	if want := "integrity " + p + `: line 1: unknown key "ancher" (allowed keys: sink, anchor, anchor_runs, duplicate, sink_backend, anchor_backend)`; err == nil || err.Error() != want {
 		t.Fatalf("malformed: err = %v\nwant %q", err, want)
 	}
 
@@ -260,7 +260,7 @@ func TestAllWritersRefuseAWormMisconfigure(t *testing.T) {
 			return cmdAuditSeal(append([]string{"--control-log", ctl}, who...), out)
 		}},
 		{"audit anchor", "audit anchor", func(out *bytes.Buffer) int {
-			return cmdAuditAnchor(append([]string{"--control-log", ctl}, who...), out)
+			return cmdAuditAnchor(append([]string{"--control-log", ctl}, who...), out, io.Discard)
 		}},
 	} {
 		var out bytes.Buffer

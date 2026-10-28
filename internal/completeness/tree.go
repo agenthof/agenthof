@@ -219,14 +219,24 @@ func ExitCode(t Tree) int {
 
 // SubtreeLines renders one line per descendant — its integrity and its
 // completeness — for the parent's audit; nothing for a run with no children.
-func (t Tree) SubtreeLines() string {
+func (t Tree) SubtreeLines() string { return t.SubtreeLinesWith(nil) }
+
+// SubtreeLinesWith is SubtreeLines with suffix(node) appended to each
+// descendant's line before the newline — the hook a caller uses to add a
+// word of its own (a child's anchor state) without this package knowing it.
+// A nil suffix appends nothing.
+func (t Tree) SubtreeLinesWith(suffix func(Node) string) string {
 	var sb strings.Builder
 	for _, c := range t.Children {
 		comp := c.Report.Verdict
 		if comp == "" {
 			comp = "not judged"
 		}
-		fmt.Fprintf(&sb, "subtree: run %s — integrity %s, completeness %s\n", c.RunID, c.Integrity, comp)
+		extra := ""
+		if suffix != nil {
+			extra = suffix(c)
+		}
+		fmt.Fprintf(&sb, "subtree: run %s — integrity %s, completeness %s%s\n", c.RunID, c.Integrity, comp, extra)
 	}
 	return sb.String()
 }

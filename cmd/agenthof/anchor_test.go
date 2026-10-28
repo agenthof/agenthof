@@ -720,3 +720,60 @@ func TestVerifyBackendFactoryAgreesWithDefault(t *testing.T) {
 		t.Fatalf("cmd: %T", b2)
 	}
 }
+
+// TestAuditAnchorControlFormIsUnchangedAfterTheSessionRefactor pins the
+// control form's stdout byte for byte across the extraction of the shared
+// preamble: the three anchored: lines, then control head: — the order every
+// control writer prints last — and, for a refused role, the refusal text then
+// control head:, with a refused record that carries no anchor payload.
+func TestAuditAnchorControlFormIsUnchangedAfterTheSessionRefactor(t *testing.T) {
+	t.Setenv("AGENTHOF_TOKEN", "")
+	useStub(t)
+	ctl := applied(t, anchorSample(t))
+	tlogPostureFor(t, ctl, "http://stub.invalid")
+	var out bytes.Buffer
+	if code := cmdAudit([]string{"anchor", "--control-log", ctl, "--as", "dana@example.com", "--groups", "platform-eng"}, &out); code != 0 {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	recs, head, err := ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil || len(recs) != 2 {
+		t.Fatalf("%v %d", err, len(recs))
+	}
+	d, _ := control.Decode(recs[1].Raw)
+	if d.Anchor == nil {
+		t.Fatalf("no anchor payload: %+v", d)
+	}
+	covered := sha256.Sum256(recs[0].Raw)
+	integrated := ""
+	for _, l := range strings.Split(out.String(), "\n") {
+		if rest, ok := strings.CutPrefix(l, "  index: -  integrated: "); ok {
+			integrated = strings.TrimSuffix(rest, "  (as reported by the log)")
+		}
+	}
+	want := fmt.Sprintf("anchored: seq=1 sha256=%s\n", hex.EncodeToString(covered[:])) +
+		fmt.Sprintf("  log: %s  entry: %s  log key: none (as served)\n", d.Anchor.Backend, d.Anchor.Ref) +
+		fmt.Sprintf("  index: -  integrated: %s  (as reported by the log)\n", integrated) +
+		fmt.Sprintf("control head: seq=%d sha256=%s\n", head.Count, head.Hash)
+	if integrated == "" || out.String() != want {
+		t.Fatalf("stdout changed:\n got: %q\nwant: %q", out.String(), want)
+	}
+
+	// A role that does not grant anchor: refused text, a head line, a refused
+	// record with no payload.
+	var refused bytes.Buffer
+	if code := cmdAudit([]string{"anchor", "--control-log", ctl, "--as", "mallory@example.com", "--groups", "finance"}, &refused); code != 1 {
+		t.Fatalf("refused exit %d\n%s", code, refused.String())
+	}
+	recs, head, err = ledger.ReadVerify(ctl, ledger.Locked)
+	if err != nil || len(recs) != 3 {
+		t.Fatalf("%v %d", err, len(recs))
+	}
+	d, _ = control.Decode(recs[2].Raw)
+	if d.Action != "anchor" || d.Outcome != "refused" || d.Anchor != nil || d.Reason == nil || d.Reason.Code != control.CodeNotAuthorized {
+		t.Fatalf("refused record %+v", d)
+	}
+	wantRefused := fmt.Sprintf("audit anchor: %s\ncontrol head: seq=%d sha256=%s\n", control.NotAuthorized("anchor").Message, head.Count, head.Hash)
+	if refused.String() != wantRefused {
+		t.Fatalf("refused stdout changed:\n got: %q\nwant: %q", refused.String(), wantRefused)
+	}
+}

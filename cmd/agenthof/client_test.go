@@ -178,6 +178,68 @@ func TestAuditServerExitsOnCompletenessHeader(t *testing.T) {
 	}
 }
 
+// TestAuditViaServerAnchorExits pins the client's anchor exits and their
+// precedence: integrity (1) > anchor mismatch (6) > completeness gap (11) >
+// unterminated/in-flight (12) > anchor unverifiable (7) > 0. Not anchored and
+// verified add nothing. The header is the server's whole anchor verdict: the
+// client does not recompute it.
+func TestAuditViaServerAnchorExits(t *testing.T) {
+	for _, tc := range []struct {
+		name                          string
+		integrity, completeness, anch string
+		want                          int
+	}{
+		{"verified", "verified", "complete", apiclient.AnchorVerified, 0},
+		{"not anchored", "verified", "complete", apiclient.AnchorNotAnchored, 0},
+		{"unverifiable", "verified", "complete", apiclient.AnchorUnverifiable, exitAnchorUnverifiable},
+		{"mismatch", "verified", "complete", apiclient.AnchorMismatch, exitAnchorMismatch},
+		{"integrity beats mismatch", "broken", "complete", apiclient.AnchorMismatch, 1},
+		{"mismatch beats gap", "verified", "gap", apiclient.AnchorMismatch, exitAnchorMismatch},
+		{"mismatch beats unterminated", "verified", "unterminated", apiclient.AnchorMismatch, exitAnchorMismatch},
+		{"gap beats unverifiable", "verified", "gap", apiclient.AnchorUnverifiable, exitGap},
+		{"unterminated beats unverifiable", "verified", "unterminated", apiclient.AnchorUnverifiable, exitUnterminated},
+		{"in flight beats unverifiable", "verified", "in_flight", apiclient.AnchorUnverifiable, exitUnterminated},
+		{"gap, anchor verified", "verified", "gap", apiclient.AnchorVerified, exitGap},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set(apiclient.IntegrityHeader, tc.integrity)
+				w.Header().Set(apiclient.CompletenessHeader, tc.completeness)
+				w.Header().Set(apiclient.AnchorHeader, tc.anch)
+				_, _ = w.Write([]byte("run r-x\n"))
+			}))
+			t.Cleanup(srv.Close)
+			var out bytes.Buffer
+			if code := auditViaServer(srv.URL, "tok", "r-x", &out); code != tc.want {
+				t.Fatalf("exit %d, want %d\n%s", code, tc.want, out.String())
+			}
+		})
+	}
+}
+
+// TestAuditViaServerWithoutAnchorHeader: an older server sends no
+// Agenthof-Anchor header. That reads as not anchored — the other two headers
+// decide — and is never a mismatch or an unverifiable.
+func TestAuditViaServerWithoutAnchorHeader(t *testing.T) {
+	for _, tc := range []struct {
+		completeness string
+		want         int
+	}{
+		{"complete", 0}, {"gap", exitGap}, {"unterminated", exitUnterminated}, {"in_flight", exitUnterminated},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(apiclient.IntegrityHeader, apiclient.IntegrityVerified)
+			w.Header().Set(apiclient.CompletenessHeader, tc.completeness)
+			_, _ = w.Write([]byte("run r-x\n"))
+		}))
+		var out bytes.Buffer
+		if code := auditViaServer(srv.URL, "tok", "r-x", &out); code != tc.want {
+			t.Errorf("completeness %s, no anchor header: exit %d, want %d", tc.completeness, code, tc.want)
+		}
+		srv.Close()
+	}
+}
+
 // applyDir writes a minimal config dir whose roles/ops.yaml carries marker.
 func applyDir(t *testing.T, marker string) string {
 	t.Helper()

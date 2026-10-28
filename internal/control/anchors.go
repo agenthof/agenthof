@@ -26,12 +26,18 @@ type AnchorCheck struct {
 // must carry a payload; the recorded hash must be 64 lowercase hex; the
 // covered seq must be before the record; and
 // sha256(records[Seq-1].Raw) must equal the recorded hash. A record that does
-// not decode is skipped, as every reader in this package skips it.
+// not decode is skipped, as every reader in this package skips it. A
+// run-scoped record (Anchor.RunID set) is skipped too: its seq is a position
+// in a run's ledger, so it vouches for nothing in this chain — judging it
+// would be a false mismatch, and counting it a false verified.
 func CheckAnchors(records []ledger.Record) []AnchorCheck {
 	var out []AnchorCheck
 	for _, r := range records {
 		var rec record
 		if err := json.Unmarshal(r.Raw, &rec); err != nil || rec.Action != "anchor" || rec.Outcome != "success" {
+			continue
+		}
+		if rec.Anchor != nil && rec.Anchor.RunID != "" {
 			continue
 		}
 		c := AnchorCheck{RecordSeq: rec.Seq, Anchor: rec.Anchor}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"errors"
 	"flag"
@@ -34,6 +35,7 @@ import (
 	"github.com/agenthof/agenthof/internal/obs"
 	"github.com/agenthof/agenthof/internal/refspawn"
 	"github.com/agenthof/agenthof/internal/registry"
+	"github.com/agenthof/agenthof/internal/sidecar"
 )
 
 const usage = `agenthof — the agents' court
@@ -48,10 +50,10 @@ Usage:
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--control-log <path>] [--verify-key <path>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
   agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--allow-api-bootstrap] [--addr-file <path>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--max-concurrent-runs <n>] [--shutdown-timeout <dur>] [--log-level ...] [--log-format ...]  (AGENTHOF_OIDC_ISSUER required)
-  agenthof audit <run-id> [--log-dir <dir>] [--server <url>] [--token <jwt>]
-  agenthof audit verify <run-id> [--expect-head <hex>] [--log-dir <dir>]
+  agenthof audit <run-id> [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>] [--server <url>] [--token <jwt>]
+  agenthof audit verify <run-id> [--expect-head <hex>|<count>:<hex>] [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>] [--offline] [--anchor-timeout 30s]
   agenthof audit verify control [--control-log <path>] [--expect-head <hex>|<seq>:<hex>] [--anchor-key <path>] [--integrity <path>] [--offline] [--anchor-timeout 30s] [--sink-timeout 60s]
-  agenthof audit anchor [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout 30s]  (pins the control-ledger head into the transparency log integrity.yaml names; an authorized control action, recorded whether it succeeded or failed; prints the anchored head and entry to ship off the box)
+  agenthof audit anchor [--control-log <path>] [--run <run-id> | --pending [--limit 50]] [--log-dir <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout 30s]  (pins the control-ledger head into the transparency log integrity.yaml names; with --run, a finished run's ledger head, the proof written beside it as <run-id>.anchor; an authorized control action, recorded whether it succeeded or failed; prints the anchored head and entry to ship off the box)
   agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>] [--sink-timeout 2m]  (closes the control ledger's active segment into a sealed file and opens the next; the chain and seq continue unbroken; on a sink: worm root the sealed segment's protected copy is written and confirmed before the rotation completes; an authorized control action, recorded whether it succeeded or failed)
   agenthof audit control [--control-log <path>]
   agenthof audit repair control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>]
@@ -83,6 +85,11 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 	case "run":
 		return cmdRun(argv[1:], stdout, stderr)
 	case "audit":
+		// audit anchor alone speaks on the operational channel (its run form
+		// warns on stderr); every other audit form is stdout only.
+		if len(argv) > 1 && argv[1] == "anchor" {
+			return cmdAuditAnchor(argv[2:], stdout, stderr)
+		}
 		return cmdAudit(argv[1:], stdout)
 	case "runs":
 		return cmdRuns(argv[1:], stdout)
@@ -1226,12 +1233,18 @@ const (
 )
 
 // cmdAudit implements `agenthof audit <run-id>`: render the run's ledger
-// (events, integrity, completeness), the control-ledger join line that
-// names the apply that put its config in place, and the subtree lines for
-// every descendant reached through spawn events. Exit: 1 torn/broken/IO
-// (the run's own chain, or a descendant's); 11 a completeness gap anywhere
-// in the tree; 12 an unterminated run anywhere in the tree; 0 otherwise —
-// computed from the run ledgers alone, never from the control log.
+// (events, integrity, completeness, anchor), the control-ledger join line
+// that names the apply that put its config in place, and the subtree lines
+// for every descendant reached through spawn events. The anchor line is
+// offline under the pin, always: the sidecar's proof is verified under
+// anchor.pub beside the control ledger (or --anchor-key) and the log is never
+// asked, so an anchored run with no pin reads unverifiable and exits 7 —
+// audit verify <run-id> is the form that may ask the log. Exit, by precedence
+// 1 > 6 > 11 > 12 > 7 > 0: 1 torn/broken/IO (the run's own chain, or a
+// descendant's); 6 an anchor mismatch anywhere in the tree; 11 a completeness
+// gap anywhere in the tree; 12 an unterminated run anywhere in the tree; 7 an
+// anchor that cannot be decided; 0 otherwise. Computed from the run ledgers,
+// their sidecars and the pin alone — never from integrity.yaml.
 func cmdAudit(args []string, out io.Writer) int {
 	if len(args) < 1 {
 		_, _ = fmt.Fprintln(out, "audit needs a run id")
@@ -1267,7 +1280,7 @@ func cmdAudit(args []string, out io.Writer) int {
 	// "anchor" is disambiguated the same way: a run id is always "r-<hex>"
 	// (engine.NewRunID), which "anchor" can never match.
 	if args[0] == "anchor" {
-		return cmdAuditAnchor(args[1:], out)
+		return cmdAuditAnchor(args[1:], out, io.Discard)
 	}
 	// "seal" is disambiguated the same way: a run id is always "r-<hex>"
 	// (engine.NewRunID), which "seal" can never match.
@@ -1278,6 +1291,7 @@ func cmdAudit(args []string, out io.Writer) int {
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
 	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path")
+	anchorKey := fs.String("anchor-key", "", "pin the transparency log's checkpoint key at this path (PEM, ECDSA P-256) instead of anchor.pub beside the control ledger; absent or unreadable fails closed")
 	server := fs.String("server", "", "read the audit from an agenthof serve API at this base URL (env AGENTHOF_SERVER)")
 	token := fs.String("token", "", "bearer for --server (env AGENTHOF_TOKEN)")
 	fs.SetOutput(out)
@@ -1285,6 +1299,13 @@ func cmdAudit(args []string, out io.Writer) int {
 		return 2
 	}
 	if base := serverBase(*server); base != "" {
+		// A pinned key is a trust input, not a path hint: silently ignoring
+		// the pin the operator named would let them believe a verdict they
+		// did not get.
+		if *anchorKey != "" {
+			_, _ = fmt.Fprintln(out, "audit: --anchor-key is local-only; the server pins anchor.pub beside its own ledger")
+			return 2
+		}
 		return auditViaServer(base, serverToken(*token), runID, out)
 	}
 	events, head, err := engine.ReadLog(*logDir, runID)
@@ -1298,8 +1319,16 @@ func cmdAudit(args []string, out io.Writer) int {
 		}
 	}
 	tree := completeness.VerifyTree(*logDir, runID, events, err)
-	_, _ = fmt.Fprint(out, audit.Render(events, head, err, tree.Root.Report))
-	_, _ = fmt.Fprint(out, tree.SubtreeLines())
+	// A torn or broken chain is judged on nothing else: no anchor is checked.
+	anchors := sidecar.VerifyTree(*logDir, runID, tree, err == nil,
+		func() (*ecdsa.PublicKey, error) { return pinnedLogKey(*controlLog, *anchorKey) },
+		verifyBackendFactory, true, 0)
+	anchorLine := ""
+	if err == nil {
+		anchorLine = sidecar.Lines(anchors.Root, sidecar.RenderOptions{Pinned: anchors.Pinned, Offline: true, OfflineOnly: true, RunID: runID})
+	}
+	_, _ = fmt.Fprint(out, audit.Render(events, head, err, tree.Root.Report, anchorLine))
+	_, _ = fmt.Fprint(out, tree.SubtreeLinesWith(anchors.Suffix))
 	for _, e := range events {
 		if e.Type == "workflow_started" && e.ConfigHash != "" {
 			cev, verdict, _ := investigate.LoadControl(*controlLog)
@@ -1313,23 +1342,31 @@ func cmdAudit(args []string, out io.Writer) int {
 		// but the exit code must not lie about a corrupted ledger.
 		return 1
 	}
-	return completeness.ExitCode(tree)
+	return runExitCode(completeness.ExitCode(tree), runAnchorExit(anchors.Root, anchors.Children), false)
 }
 
 // cmdAuditVerify implements `audit verify <run-id> [--expect-head <hex>]`,
 // dispatching to cmdAuditVerifyControl when the next arg is "control": it
-// reports the verified chain's head hash and event count, and, given
-// --expect-head, compares it against a previously recorded hash. For a
-// run (this function's own path): exit codes follow the precedence
-// 1 > 11 > 12 > 4 > 0 — 0 clean (and, when given, --expect-head matches);
-// 1 torn/broken ledger (the run's own chain or a descendant's) or an
-// open/IO failure; 11 a completeness gap anywhere in the tree; 12 an
-// unterminated run anywhere in the tree; 4 --expect-head mismatch (hash
-// only — count is informational and not compared); 2 usage errors. 12
-// precedes 4 because a live run's head legitimately differs from any
-// recorded expectation. The mismatch line still prints when 12 wins, so a
-// watcher sees both facts. 3 (the taint verdict) is returned only via the
-// "control" dispatch — see cmdAuditVerifyControl.
+// reports the verified chain's head hash and event count, the run's anchor
+// state, and, given --expect-head, compares it against a previously recorded
+// head: <hex> is the current head, <count>:<hex> the head the chain must
+// reproduce at that event (the "events=N sha256=H" line audit anchor --run
+// prints). The anchor is checked from the run's sidecar beside its ledger,
+// never from integrity.yaml: under the pin (anchor.pub beside --control-log,
+// or --anchor-key) when there is one, else under the key the log serves (said
+// to be not independent); --offline verifies from the stored proof alone and
+// needs a pin. For a run (this function's own path): exit codes follow the
+// precedence 1 > 6 > 11 > 12 > 4 > 7 > 0 — 0 clean (and, when given,
+// --expect-head matches); 1 torn/broken ledger (the run's own chain or a
+// descendant's) or an open/IO failure; 6 an anchor MISMATCH anywhere in the
+// tree (a definitive content disagreement); 11 a completeness gap anywhere in
+// the tree; 12 an unterminated run anywhere in the tree; 4 --expect-head
+// mismatch; 7 an anchor that cannot be decided anywhere in the tree (no
+// verdict, never tampering); 2 usage errors. 12 precedes 4 because a live
+// run's head legitimately differs from any recorded expectation; 7 follows 4
+// because it is the one transient verdict. Every line prints before the exit
+// is chosen, so a watcher sees every fact. 3 (the taint verdict) is returned
+// only via the "control" dispatch — see cmdAuditVerifyControl.
 func cmdAuditVerify(args []string, out io.Writer) int {
 	if len(args) < 1 {
 		_, _ = fmt.Fprintln(out, "audit verify needs a run id")
@@ -1344,9 +1381,17 @@ func cmdAuditVerify(args []string, out io.Writer) int {
 	runID := args[0]
 	fs := flag.NewFlagSet("audit verify", flag.ContinueOnError)
 	logDir := fs.String("log-dir", ".agenthof/runs", "run log directory")
-	expectHead := fs.String("expect-head", "", "expected ledger head hash (hex) to verify against")
+	expectHead := fs.String("expect-head", "", "expected ledger head: <hex> (the current head) or <count>:<hex> (the head the chain must reproduce at event <count>)")
+	controlLog := fs.String("control-log", ".agenthof/control.jsonl", "control-plane ledger path (used only to find anchor.pub beside it)")
+	anchorKey := fs.String("anchor-key", "", "pin the transparency log's checkpoint key at this path (PEM, ECDSA P-256) instead of anchor.pub beside the control ledger; absent or unreadable fails closed")
+	offline := fs.Bool("offline", false, "verify the run's anchor from its stored proof only: no served-key fetch, no presence check (needs a pinned key)")
+	anchorTimeout := fs.Duration("anchor-timeout", 30*time.Second, "per-anchor bound on the log calls made while verifying anchors")
 	fs.SetOutput(out)
 	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if *expectHead != "" && !expectHeadRE.MatchString(*expectHead) {
+		_, _ = fmt.Fprintln(out, "audit verify: --expect-head must be <hex> or <count>:<hex> (64 lowercase hex)")
 		return 2
 	}
 	events, head, err := engine.ReadLog(*logDir, runID)
@@ -1365,19 +1410,30 @@ func cmdAuditVerify(args []string, out io.Writer) int {
 		return 1
 	}
 	tree := completeness.VerifyTree(*logDir, runID, events, nil)
+	anchors := sidecar.VerifyTree(*logDir, runID, tree, true,
+		func() (*ecdsa.PublicKey, error) { return pinnedLogKey(*controlLog, *anchorKey) },
+		verifyBackendFactory, *offline, *anchorTimeout)
 	_, _ = fmt.Fprint(out, tree.Root.Report.Line())
-	_, _ = fmt.Fprint(out, tree.SubtreeLines())
-	mismatch := *expectHead != "" && *expectHead != head.Hash
-	if mismatch {
-		_, _ = fmt.Fprintf(out, "expect-head mismatch: want %s, got %s\n", *expectHead, head.Hash)
+	_, _ = fmt.Fprint(out, sidecar.Lines(anchors.Root, sidecar.RenderOptions{Pinned: anchors.Pinned, Offline: *offline, RunID: runID}))
+	_, _ = fmt.Fprint(out, tree.SubtreeLinesWith(anchors.Suffix))
+	expectFailed := false
+	if *expectHead != "" {
+		// Only the <count>:<hex> form needs the chain's records; <hex> is
+		// judged against the head already in hand.
+		var records []ledger.Record
+		if strings.Contains(*expectHead, ":") {
+			var rerr error
+			if records, _, rerr = ledger.ReadVerify(filepath.Join(*logDir, runID+".jsonl"), ledger.Unlocked); rerr != nil {
+				_, _ = fmt.Fprintln(out, rerr)
+				return 1
+			}
+		}
+		if msg := expectHeadMismatch(*expectHead, records, head); msg != "" {
+			_, _ = fmt.Fprintln(out, msg)
+			expectFailed = true
+		}
 	}
-	if code := completeness.ExitCode(tree); code != 0 {
-		return code // 1 (a descendant's chain), 11, 12 — each outranks 4
-	}
-	if mismatch {
-		return 4
-	}
-	return 0
+	return runExitCode(completeness.ExitCode(tree), runAnchorExit(anchors.Root, anchors.Children), expectFailed)
 }
 
 // cmdAuditControl implements `audit control`: it renders the control
@@ -1991,6 +2047,12 @@ var statControlLog = os.Stat
 // parent stands; a root (no parent, or a parent not under logDir) past the
 // cutoff is removed together with every descendant, whatever their own
 // ages. Discovery is completeness.Parents' one-line read.
+//
+// A run's anchor proof (<run-id>.anchor) and any transient
+// <run-id>.anchor.tmp-* go with its ledger, and a proof whose ledger is
+// already gone is cleaned in one pass at the end. The anchor lock never fits
+// the proof's name and survives. The count is of ledgers removed: proofs,
+// temps and orphans are not runs.
 func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error) {
 	ctlInfo, err := statControlLog(controlLog)
 	if err != nil {
@@ -2032,11 +2094,33 @@ func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error)
 		}
 		path := filepath.Join(logDir, id+".jsonl")
 		target, serr := os.Stat(path)
-		if serr != nil || os.SameFile(target, ctlInfo) {
+		switch {
+		case serr == nil:
+			if os.SameFile(target, ctlInfo) {
+				return
+			}
+			if err := os.Remove(path); err == nil {
+				pruned++
+			} else if !os.IsNotExist(err) {
+				return
+			}
+		case os.IsNotExist(serr):
+			// A dangling link is not "gone": the entry is still there.
+			if _, lerr := os.Lstat(path); !os.IsNotExist(lerr) {
+				return
+			}
+		default:
 			return
 		}
-		if err := os.Remove(path); err == nil {
-			pruned++
+		// The ledger is gone (removed here or found already gone): its anchor
+		// proof and any transient temp go with it. Temps match by prefix on
+		// the directory listing, never by glob.
+		_ = os.Remove(sidecar.Path(logDir, id))
+		tmpPrefix := id + sidecar.Suffix + ".tmp-"
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasPrefix(e.Name(), tmpPrefix) {
+				_ = os.Remove(filepath.Join(logDir, e.Name()))
+			}
 		}
 	}
 	for _, entry := range entries {
@@ -2057,6 +2141,19 @@ func pruneRuns(logDir string, dur time.Duration, controlLog string) (int, error)
 		if info.ModTime().Before(cutoff) {
 			remove(id)
 		}
+	}
+	// Orphan pass: a proof whose run ledger is already gone is cleaned. Only
+	// the exact <run-id>.anchor shape matches — .anchor.lock and the temps of
+	// a live run do not — and a run with a ledger present is never an orphan.
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), sidecar.Suffix)
+		if !ok || entry.IsDir() || !sidecar.RunIDRE.MatchString(id) {
+			continue
+		}
+		if _, live := parents[id]; live {
+			continue
+		}
+		_ = os.Remove(sidecar.Path(logDir, id))
 	}
 	return pruned, nil
 }

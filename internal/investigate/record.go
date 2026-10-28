@@ -108,7 +108,8 @@ func normalizeRun(e engine.Event, lineIdx int) Record {
 // would make this view and audit verify control disagree on the one verdict
 // they must share.
 type Anchor struct {
-	Seq          int    `json:"seq,omitempty"`            // the covered head's seq (1 ≤ Seq < the record's own Seq)
+	RunID        string `json:"run_id,omitempty"`         // the run a run-scoped anchor covers; "" for a control-ledger anchor, which is the only kind that carries a verdict
+	Seq          int    `json:"seq,omitempty"`            // the covered head's seq (1 ≤ Seq < the record's own Seq); for a run-scoped anchor, the run-ledger position
 	Hash         string `json:"hash,omitempty"`           // the covered head's hash, as recorded
 	Kind         string `json:"kind,omitempty"`           // "tlog" | "signed"
 	BackendKind  string `json:"backend_kind,omitempty"`   // the proof format: "transparency-log" | "rfc3161" | …
@@ -159,7 +160,7 @@ func anchorView(d control.DecodedEvent, verdict *anchorverify.Result) *Anchor {
 	var v *Anchor
 	if a := d.Anchor; a != nil {
 		v = &Anchor{
-			Seq: a.Seq, Hash: origin.Clean(a.Hash), Kind: origin.Clean(a.Kind), BackendKind: origin.Clean(a.BackendKind),
+			RunID: origin.Clean(a.RunID), Seq: a.Seq, Hash: origin.Clean(a.Hash), Kind: origin.Clean(a.Kind), BackendKind: origin.Clean(a.BackendKind),
 			Backend: origin.Clean(a.Backend), Ref: origin.Clean(a.Ref), BackendKeyID: origin.Clean(a.BackendKeyID),
 		}
 	}

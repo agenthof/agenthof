@@ -101,3 +101,35 @@ func TestCheckAnchorsRefusesANonHexHash(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckAnchorsSkipsRunScopedRecords: a run-scoped success record vouches
+// for nothing in the control chain (its seq is a run position), so it is
+// neither counted nor judged — checking it would be a false mismatch, and a
+// planted one must never yield a false "verified" either.
+func TestCheckAnchorsSkipsRunScopedRecords(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	inv, w := identity.Static("dana@example.com"), control.CaptureWitness()
+	head, err := control.Append(p, control.Event{Action: "apply", Outcome: "success", Invoker: inv, Witness: w, ConfigHash: "sha256:abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := &control.Anchor{Seq: 1, Hash: head.Hash, Kind: "tlog", BackendKind: "transparency-log", Backend: "https://rekor.sigstore.dev", Ref: strings.Repeat("0", 80), Proof: "AQID"}
+	if _, err := control.Append(p, control.Event{Action: "anchor", Outcome: "success", Invoker: inv, Witness: w, Anchor: good}); err != nil {
+		t.Fatal(err)
+	}
+	run := &control.Anchor{RunID: "r-0123456789abcdef", Seq: 99, Hash: strings.Repeat("ff", 32), Kind: "tlog", BackendKind: "transparency-log", Backend: "https://rekor.sigstore.dev", Ref: "12345"}
+	if _, err := control.Append(p, control.Event{Action: "anchor", Outcome: "success", Invoker: inv, Witness: w, Anchor: run}); err != nil {
+		t.Fatal(err)
+	}
+	recs, _, err := ledger.ReadVerify(p, ledger.Locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A planted run-scoped record whose hash happens to be the real head must
+	// not be counted as a verified control anchor either.
+	recs = append(recs, recAnchor(4, "success", "", `{"run_id":"r-0123456789abcdef","seq":1,"hash":"`+head.Hash+`","kind":"tlog"}`))
+	got := control.CheckAnchors(recs)
+	if len(got) != 1 || got[0].RecordSeq != 2 || got[0].Mismatch != "" {
+		t.Fatalf("want exactly one check, for the control anchor at seq 2: %+v", got)
+	}
+}

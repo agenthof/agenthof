@@ -92,8 +92,10 @@ func runViaServer(base, token, role, workflow, input string, out io.Writer) int 
 
 // auditViaServer prints the server-rendered audit — the same text the
 // local command renders, config-join and subtree lines included — and
-// exits as it would: 1 on an integrity failure anywhere in the tree, 11 on
-// a completeness gap, 12 on an unterminated or in-flight run, 0 otherwise.
+// exits as it would: 1 on an integrity failure anywhere in the tree, 6 on an
+// anchor mismatch, 11 on a completeness gap, 12 on an unterminated or
+// in-flight run, 7 when the anchor cannot be decided, 0 otherwise. A server
+// that sends no Agenthof-Anchor header reads as not anchored.
 func auditViaServer(base, token, runID string, out io.Writer) int {
 	warnInsecureServer(base, os.Stderr)
 	res, err := apiclient.New(base, token, nil).Audit(context.Background(), runID)
@@ -105,11 +107,17 @@ func auditViaServer(base, token, runID string, out io.Writer) int {
 	if res.Integrity != apiclient.IntegrityVerified {
 		return 1
 	}
+	if res.Anchor == apiclient.AnchorMismatch {
+		return exitAnchorMismatch
+	}
 	switch res.Completeness {
 	case apiclient.CompletenessGap:
 		return exitGap
 	case apiclient.CompletenessUnterminated, apiclient.CompletenessInFlight:
 		return exitUnterminated // not finished either way: re-check later
+	}
+	if res.Anchor == apiclient.AnchorUnverifiable {
+		return exitAnchorUnverifiable
 	}
 	return 0
 }

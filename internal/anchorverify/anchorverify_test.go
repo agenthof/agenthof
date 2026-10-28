@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -249,5 +250,55 @@ func TestDefaultDispatch(t *testing.T) {
 	}
 	if _, err := anchorverify.Default("transparency-log", "rekor.sigstore.dev", nil, true); err == nil {
 		t.Fatal("a non-absolute URL must be refused at construction")
+	}
+}
+
+// TestDecideIsTheOneLadder: Decide takes hand-built structural checks (the
+// shape a run sidecar's check produces) through the same ladder Verify uses;
+// Verify is exactly Decide over control.CheckAnchors; no checks → nil and no
+// key resolution.
+func TestDecideIsTheOneLadder(t *testing.T) {
+	stub := anchortest.NewStub([]byte("s"))
+	p, head, inv, w := newLedger(t)
+	rcpt := appendAnchor(t, p, inv, w, stub, head)
+	good := &control.Anchor{Seq: head.Count, Hash: head.Hash, Kind: "tlog", BackendKind: stub.Kind(), Backend: rcpt.Backend, Ref: rcpt.Ref, Proof: rcpt.Proof, BackendKeyID: rcpt.BackendKeyID}
+	o := anchorverify.Options{Factory: stubFactory(stub), Offline: true}
+
+	res := anchorverify.Decide([]control.AnchorCheck{
+		{RecordSeq: 1, Anchor: good, Mismatch: "the ledger does not reproduce the anchored head"},
+		{RecordSeq: 2, Anchor: good},
+		{RecordSeq: 3},
+	}, o)
+	if len(res) != 3 {
+		t.Fatalf("want 3 results, got %+v", res)
+	}
+	if res[0].State != anchorverify.StateMismatch || res[0].Cause != "the ledger does not reproduce the anchored head" {
+		t.Fatalf("[0]: %+v", res[0])
+	}
+	if res[1].State != anchorverify.StateVerified || res[1].Cause != "" {
+		t.Fatalf("[1]: %+v", res[1])
+	}
+	if res[2].State != anchorverify.StateMismatch {
+		t.Fatalf("[2] no payload: %+v", res[2])
+	}
+
+	recs := records(t, p)
+	want := anchorverify.Decide(control.CheckAnchors(recs), o)
+	got := anchorverify.Verify(recs, o)
+	if len(want) != 1 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("Verify = %+v, Decide(CheckAnchors) = %+v", got, want)
+	}
+
+	calls := 0
+	count := func() (*ecdsa.PublicKey, error) { calls++; return nil, nil }
+	if r := anchorverify.Decide(nil, anchorverify.Options{ResolveKey: count}); r != nil || calls != 0 {
+		t.Fatalf("Decide(nil) = %v, ResolveKey calls %d", r, calls)
+	}
+	if r := anchorverify.Decide([]control.AnchorCheck{}, anchorverify.Options{ResolveKey: count}); r != nil || calls != 0 {
+		t.Fatalf("Decide(empty) = %v, ResolveKey calls %d", r, calls)
+	}
+	anchorverify.Decide([]control.AnchorCheck{{RecordSeq: 2, Anchor: good}, {RecordSeq: 3, Anchor: good}}, anchorverify.Options{ResolveKey: count, Factory: stubFactory(stub), Offline: true})
+	if calls != 1 {
+		t.Fatalf("ResolveKey calls = %d, want 1", calls)
 	}
 }

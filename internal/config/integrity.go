@@ -28,6 +28,10 @@ import (
 type Integrity struct {
 	Sink   string `yaml:"sink"`   // "" | "local" (the floor) | "worm" | "external" (reserved)
 	Anchor string `yaml:"anchor"` // "" | "none" (the floor) | "tlog" | "signed" (reserved)
+	// AnchorRuns is whether a single run's ledger may be anchored on demand:
+	// "" | "none" (the floor) | "on-demand". Only `audit anchor` reads it;
+	// `run` and every reader stay posture-blind.
+	AnchorRuns string `yaml:"anchor_runs"`
 	// Duplicate is reserved: further sinks written in parallel with Sink
 	// (a separately stored duplicate copy). Must be empty.
 	Duplicate []IntegrityBackend `yaml:"duplicate"`
@@ -82,9 +86,9 @@ type BackendCredential struct {
 }
 
 // Validate is ParseIntegrity's second half, exported for callers that hold an
-// Integrity built in Go: the fixed-order rules below, first fault
-// only — sink, then anchor, then duplicate, then the two backends. A value is
-// matched exactly (case-sensitive, no trimming): config is law, not a guess.
+// Integrity built in Go: the fixed-order rules below, first fault only —
+// sink, then anchor, then anchor_runs, then duplicate, then the two backends.
+// A value is matched exactly (case-sensitive, no trimming): config is law, not a guess.
 // Since every reserved sink and anchor is refused first, the backend rules
 // can only fire at the floor — except sink_backend under sink: worm and
 // anchor_backend under anchor: tlog, which are those postures' own
@@ -116,6 +120,15 @@ func (i Integrity) Validate() error {
 		}
 	default:
 		return fmt.Errorf("anchor %q is not an integrity anchor (want none or tlog; signed is reserved)", i.Anchor)
+	}
+	switch i.AnchorRuns {
+	case "", "none":
+	case "on-demand":
+		if i.Anchor != "tlog" {
+			return errors.New("anchor_runs is set but anchor is none; run anchoring uses the anchor_backend that anchor: tlog names")
+		}
+	default:
+		return fmt.Errorf("anchor_runs %q is not a run-anchoring mode (want none or on-demand)", i.AnchorRuns)
 	}
 	if n := len(i.Duplicate); n > 0 {
 		return fmt.Errorf("duplicate names %d sink(s); duplicate sinks are reserved and not yet supported in this build", n)
@@ -291,9 +304,9 @@ func isBackendURL(s string) bool {
 }
 
 // The allowed-key lists, in the order the error texts name them. A future
-// sibling key (cadence, runs) is added here: the text is not a wire contract.
+// sibling key (cadence) is added here: the text is not a wire contract.
 const (
-	integrityKeys  = "sink, anchor, duplicate, sink_backend, anchor_backend"
+	integrityKeys  = "sink, anchor, anchor_runs, duplicate, sink_backend, anchor_backend"
 	backendKeys    = "kind, url, region, mode, retention, credential"
 	credentialKeys = "credential_source, token_env, grant_type, client_auth, issuer, token_endpoint, client_id_env, client_secret_env, scope, audience"
 )
@@ -329,7 +342,7 @@ func (i *Integrity) UnmarshalYAML(value *yaml.Node) error {
 			return fmt.Errorf("line %d: key must be a plain scalar (allowed keys: %s)", key.Line, integrityKeys)
 		}
 		switch key.Value {
-		case "sink", "anchor":
+		case "sink", "anchor", "anchor_runs":
 		case "duplicate":
 			if isNull(val) {
 				continue

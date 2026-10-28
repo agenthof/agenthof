@@ -113,6 +113,11 @@ func label(rec record) string {
 			if rec.Anchor == nil {
 				return "anchor record without coverage"
 			}
+			if rec.Anchor.RunID != "" {
+				// Run-scoped: Seq is a count of the run's events, not a
+				// control-chain position. Every recorded string is cleaned.
+				return fmt.Sprintf("run %s anchored: events %d %s (%s)", origin.Clean(rec.Anchor.RunID), rec.Anchor.Seq, origin.Clean(rec.Anchor.Hash), origin.Clean(rec.Anchor.Kind))
+			}
 			return fmt.Sprintf("head anchored: seq %d %s (%s)", rec.Anchor.Seq, rec.Anchor.Hash, rec.Anchor.Kind)
 		}
 		return "anchor " + rec.Outcome

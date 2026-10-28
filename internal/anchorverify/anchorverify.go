@@ -46,7 +46,7 @@ type Result struct {
 
 // Factory builds the Backend a record's own backend_kind and backend name —
 // never integrity.yaml — under key (nil = unpinned) and offline. A kind the
-// build does not construct is an error, which Verify reports as
+// build does not construct is an error, which Decide reports as
 // StateUnverifiable.
 type Factory func(kind, url string, key *ecdsa.PublicKey, offline bool) (anchor.Backend, error)
 
@@ -63,7 +63,7 @@ func Default(kind, url string, key *ecdsa.PublicKey, offline bool) (anchor.Backe
 	}
 }
 
-// Options parameterizes Verify. ResolveKey is called at most once, and only
+// Options parameterizes Verify and Decide. ResolveKey is called at most once, and only
 // when there is at least one success anchor record to check — exactly when
 // audit verify control resolves its pin; nil means unpinned. A resolve error
 // does not stop the run: every anchor past the structural check is
@@ -84,9 +84,17 @@ const DefaultTimeout = 30 * time.Second
 // Verify decides every successful anchor record records carry, in chain
 // order, and returns one Result per record — never fewer: a verdict is never
 // dropped. nil when the chain carries no success anchor record (the caller
-// prints its own "none" note).
+// prints its own "none" note). It is Decide over control.CheckAnchors.
 func Verify(records []ledger.Record, o Options) []Result {
-	checks := control.CheckAnchors(records)
+	return Decide(control.CheckAnchors(records), o)
+}
+
+// Decide is the one ladder: it takes the structural checks a caller has
+// already built — control.CheckAnchors for a control ledger, a run
+// sidecar's check for a run — and decides each, in order, one Result per
+// check, never fewer. nil when there is no check, in which case ResolveKey is
+// not called; otherwise it is called exactly once.
+func Decide(checks []control.AnchorCheck, o Options) []Result {
 	if len(checks) == 0 {
 		return nil
 	}

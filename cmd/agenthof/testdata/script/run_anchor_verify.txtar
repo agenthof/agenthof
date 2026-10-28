@@ -1,0 +1,225 @@
+# audit verify <run-id> and audit <run-id> report a run's anchor in one of five
+# states, worded so the line is never stronger than the evidence:
+#   not anchored · anchored, verified under the key the log served (NOT
+#   independent) · independently verified (key pinned) · MISMATCH · unverifiable.
+# MISMATCH is only a decoded record that disagrees with the ledger; a log that
+# does not answer, a rotated key, or no key at all is unverifiable — never
+# tampering. Exits: 6 mismatch, 7 unverifiable, precedence
+# 1 > 6 > 11 > 12 > 4 > 7 > 0. audit <run-id> is offline under the pin, always:
+# it never asks the log, so an anchored run with no pin reads unverifiable (7).
+# Neither command opens integrity.yaml. A child run's mismatch (6) and
+# unverifiable (7) ride the parent's subtree line and exit; that needs a spawn
+# and is pinned by the in-process TestAuditVerifyRunShowsChildAnchorOnSubtreeLine,
+# not here.
+
+env AGENTHOF_GATEWAY_KEY=dummy
+
+exec agenthof apply --config config --control-log control.jsonl --as dana@example.com --groups platform-eng
+rekor posture integrity.yaml runs
+
+# An earlier run, anchored, only to lend its sidecar to the wrong run below.
+exec agenthof run se model-demo --input 'model:fast' --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+stdout 'finished: succeeded'
+lastrun logs
+exec agenthof audit anchor --control-log control.jsonl --run $RUNID --as dana@example.com --groups platform-eng --log-dir logs
+cp logs/$RUNID.anchor other-run.anchor
+
+# The run under test. Its head is recorded BEFORE it is anchored: the head is
+# final at the terminal, so the reference keeps working after the anchor.
+exec agenthof run se model-demo --input 'model:fast' --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+stdout 'finished: succeeded'
+lastrun logs
+runhead logs/$RUNID.jsonl
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl
+stdout 'ledger anchor: not anchored$'
+exec agenthof audit anchor --control-log control.jsonl --run $RUNID --as dana@example.com --groups platform-eng --log-dir logs
+stdout 'anchored run '$RUNID': events='$RUNN' sha256='$RUNHEAD
+cp logs/$RUNID.jsonl good.jsonl
+cp logs/$RUNID.anchor good.anchor
+
+# 1. The key is pinned: independently verified, with the log asked (audit
+# verify) and without (audit <run-id>, offline always).
+rekor pubkey anchor.pub
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl
+stdout 'ledger anchor: independently verified \(log key pinned; events [0-9]+ [0-9a-f]{64} → http://127\.0\.0\.1:[0-9]+ entry [0-9a-f]{80}\)'
+! stdout 'offline'
+! stdout 'MISMATCH'
+cp stdout verify-pinned.txt
+exec agenthof audit $RUNID --log-dir logs --control-log control.jsonl
+stdout 'ledger anchor: independently verified \(log key pinned; offline: presence not checked; events [0-9]+ [0-9a-f]{64} → http://127\.0\.0\.1:[0-9]+ entry [0-9a-f]{80}\)'
+cp stdout audit-pinned.txt
+rekor requests 5
+
+# 2. Off the box: the .jsonl and its .anchor travel; the pin is --anchor-key;
+# the control ledger need not, and the log need not be there.
+mkdir copy
+cp logs/$RUNID.jsonl copy/$RUNID.jsonl
+cp logs/$RUNID.anchor copy/$RUNID.anchor
+rekor stop
+exec agenthof audit verify $RUNID --log-dir copy --anchor-key anchor.pub --offline
+stdout 'ledger anchor: independently verified \(log key pinned; offline: presence not checked; events '$RUNN' '$RUNHEAD' → '
+rekor start
+
+# 3. No pin. audit verify fetches the key the log serves and says so: verified,
+# and NOT independent. audit <run-id> never asks the log, so with no pin there
+# is no key to verify under — unverifiable, the fix named, exit 7.
+rm anchor.pub
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl
+stdout 'ledger anchor: anchored — verified under the log key as served \(not independent; pin the log key in anchor.pub or --anchor-key to verify independently\)'
+! stdout 'independently verified'
+exec sh -c 'agenthof audit $RUNID --log-dir logs --control-log control.jsonl; test $? = 7'
+stdout 'ledger anchor: unverifiable — no key to verify under \(unpinned, offline\); pin the log key in anchor.pub beside the control ledger or pass --anchor-key, or run audit verify '$RUNID' to check under the key the log serves'
+! stdout 'MISMATCH'
+! stdout 'independently verified'
+# --anchor-key is the pin without a file beside the ledger.
+rekor pubkey anchor.pub
+exec agenthof audit $RUNID --log-dir logs --control-log control.jsonl --anchor-key anchor.pub
+stdout 'independently verified \(log key pinned; offline'
+
+# 4. --expect-head: <hex> is the current head, <count>:<hex> the head at that
+# event; both keep working after the anchor.
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl --expect-head $RUNHEAD
+! stdout 'expect-head mismatch'
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl --expect-head $RUNN:$RUNHEAD
+! stdout 'expect-head mismatch'
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl --expect-head 0000000000000000000000000000000000000000000000000000000000000000; test $? = 4'
+stdout 'expect-head mismatch: want 0{64}, got '$RUNHEAD
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl --expect-head deadbeef; test $? = 2'
+stdout 'audit verify: --expect-head must be <hex> or <count>:<hex> \(64 lowercase hex\)'
+
+# 5. The run's ledger rewritten from its last event on: the chain is valid, the
+# sidecar says H_N, the ledger no longer reproduces it — MISMATCH, 6, with
+# --offline too. (The chain verifies, so the sidecar is judged.)
+reforge logs/$RUNID.jsonl $RUNN
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl; test $? = 6'
+stdout 'ledger anchor: MISMATCH — the ledger does not reproduce the anchored head at event '$RUNN
+! stdout 'unverifiable'
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl --offline; test $? = 6'
+stdout 'MISMATCH'
+exec sh -c 'agenthof audit $RUNID --log-dir logs --control-log control.jsonl; test $? = 6'
+stdout 'ledger anchor: MISMATCH'
+# A mismatch outranks a wrong --expect-head.
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl --expect-head $RUNN:$RUNHEAD; test $? = 6'
+stdout 'expect-head mismatch: want '$RUNHEAD' at seq '$RUNN', got '
+# Without the sidecar the reforged ledger is just a ledger that is not the one
+# the reference names: not anchored (0 on that axis), and the count form is the
+# one that catches the rewrite — 4.
+rm logs/$RUNID.anchor
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl
+stdout 'ledger anchor: not anchored$'
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl --expect-head $RUNN:$RUNHEAD; test $? = 4'
+stdout 'ledger anchor: not anchored$'
+stdout 'expect-head mismatch: want '$RUNHEAD' at seq '$RUNN', got '
+cp good.jsonl logs/$RUNID.jsonl
+cp good.anchor logs/$RUNID.anchor
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl
+stdout 'independently verified'
+
+# 6. A sidecar copied from another run is never believed: it names another run.
+cp other-run.anchor logs/$RUNID.anchor
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl; test $? = 6'
+stdout 'ledger anchor: MISMATCH — sidecar record names another run'
+cp good.anchor logs/$RUNID.anchor
+
+# 7. Gap and mismatch together: a door event stripped from a copy (the chain
+# re-linked so it still verifies) is a completeness GAP, and the sidecar no
+# longer reproduces the head — the definitive anchor verdict wins: 6, not 11,
+# and the GAP line still prints.
+mkdir gapdir
+dropevent good.jsonl gapdir/$RUNID.jsonl model_call
+cp good.anchor gapdir/$RUNID.anchor
+exec sh -c 'agenthof audit verify $RUNID --log-dir gapdir --control-log control.jsonl; test $? = 6'
+stdout 'ledger completeness: GAP'
+stdout 'ledger anchor: MISMATCH'
+exec sh -c 'agenthof audit verify $RUNID --log-dir gapdir --control-log control.jsonl --offline; test $? = 6'
+# The same copy with no sidecar is the gap alone: 11.
+rm gapdir/$RUNID.anchor
+exec sh -c 'agenthof audit verify $RUNID --log-dir gapdir --control-log control.jsonl; test $? = 11'
+stdout 'ledger completeness: GAP'
+stdout 'ledger anchor: not anchored$'
+
+# 8. The log does not answer. Pinned: the key is in hand and the proof verifies
+# offline, so only the presence check fails — unverifiable, 7, and the line says
+# so. Unpinned: the served key cannot even be fetched, so nothing was verified
+# and the line does not say it was. --offline needs no log.
+rekor stop
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl; test $? = 7'
+stdout 'ledger anchor: unverifiable — 127\.0\.0\.1:[0-9]+: .* \(proof verified offline; presence not checked\)'
+! stdout 'MISMATCH'
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl --offline
+stdout 'independently verified \(log key pinned; offline: presence not checked'
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl --anchor-key missing.pub; test $? = 7'
+stdout 'ledger anchor: unverifiable — pinned log key .*missing\.pub'
+rm anchor.pub
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl; test $? = 7'
+stdout 'ledger anchor: unverifiable — '
+! stdout 'proof verified offline'
+! stdout 'MISMATCH'
+stdout 'pin the log key in anchor.pub beside the control ledger or pass --anchor-key'
+rekor start
+rekor pubkey anchor.pub
+
+# 9. The sidecar removed: not anchored, and that is all this reader can say.
+rm logs/$RUNID.anchor
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl
+stdout 'ledger anchor: not anchored$'
+exec agenthof audit $RUNID --log-dir logs --control-log control.jsonl
+stdout 'ledger anchor: not anchored$'
+cp good.anchor logs/$RUNID.anchor
+
+# 10. Posture-blind: neither command opens integrity.yaml, so removing it, or
+# replacing it with garbage, changes no byte of either output.
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl
+cp stdout verify-before.txt
+cmp verify-before.txt verify-pinned.txt
+exec agenthof audit $RUNID --log-dir logs --control-log control.jsonl
+cp stdout audit-before.txt
+cmp audit-before.txt audit-pinned.txt
+rm integrity.yaml
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl
+cmp stdout verify-before.txt
+exec agenthof audit $RUNID --log-dir logs --control-log control.jsonl
+cmp stdout audit-before.txt
+exec sh -c 'printf "garbage" > integrity.yaml'
+exec agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl
+cmp stdout verify-before.txt
+exec agenthof audit $RUNID --log-dir logs --control-log control.jsonl
+cmp stdout audit-before.txt
+
+# 11. The log's key rotated and the operator pinned the new one: the stored
+# proof was signed by the old key — no verdict, 7 — never a mismatch.
+rekor rotate
+rekor pubkey anchor.pub
+exec sh -c 'agenthof audit verify $RUNID --log-dir logs --control-log control.jsonl; test $? = 7'
+stdout 'ledger anchor: unverifiable — log key differs from the pinned key'
+! stdout 'MISMATCH'
+exec sh -c 'agenthof audit $RUNID --log-dir logs --control-log control.jsonl; test $? = 7'
+stdout 'ledger anchor: unverifiable — log key differs from the pinned key'
+
+-- config/agents/caller.yaml --
+name: caller
+model: fast
+instruction: call the model
+output: out
+execution: fronted
+-- config/workflows/model-demo.yaml --
+name: model-demo
+steps:
+  - name: call
+    agent: caller
+-- config/roles/se.yaml --
+name: se
+workflows: [model-demo]
+allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair, anchor]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: upstream-model
+    api_key_env: AGENTHOF_GATEWAY_KEY
+defaults:
+  model: fast

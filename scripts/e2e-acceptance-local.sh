@@ -40,6 +40,12 @@
 # bridged tool's credential, the provider key — reaches any ledger, any
 # artifact, the control log, agenthof's operational log, the stand-ins' and
 # the agent's stderr logs, or agenthof's captured output.
+# Last, against a Rekor v1 stand-in (internal/anchor/anchortest, run as its own
+# process) and a root whose integrity.yaml says anchor_runs: on-demand with the
+# log's key pinned: no request reached the log while the runs ran; the parent
+# is anchored by hand, the sweep (audit anchor --pending) files every other
+# run, each run verifies on its own as independently verified, and runs prune
+# takes every proof away with its ledger.
 # Requires go and a python with examples/langchain-agent/
 # requirements.txt installed (PYTHON=... selects it; default python3). Runs
 # on macOS and Linux. Other scripts source this file (ACCEPTANCE_* knobs; see
@@ -133,6 +139,7 @@ go build -o "$WORK/refbridge" ./deploy/refbridge
 go build -o "$WORK/stdio-tool" ./examples/stdio-tool
 go test -c -o "$WORK/refexec-stub" ./deploy/refexec
 go test -c -o "$WORK/refspawn-stub" ./deploy/refspawn
+go test -c -o "$WORK/rekor-fake" ./internal/anchor/anchortest
 
 NONCE="${ACCEPTANCE_NONCE:-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 OUTS=()
@@ -173,6 +180,20 @@ PIDS+=($!)
 wait_port "$IDP_PORT" "obo-idp"
 "$WORK/obo-upstream" -addr "127.0.0.1:$UP_PORT" -jwks-url "$ISSUER/keys" -audience "$UP_AUD" 2>"$WORK/upstream.err" &
 PIDS+=($!)
+
+# The transparency-log stand-in: a Rekor v1 fake in its own process, so the
+# real agenthof binary anchors against a log it reaches over HTTP. It writes
+# its URL and signing key to files and appends one line per request to a log,
+# which section 8 counts to prove nothing is sent unasked.
+REKOR_LOG="$WORK/rekor-requests.log"
+"$WORK/rekor-fake" -rekor-test-stub -url-file "$WORK/rekor.url" -pubkey-file "$WORK/rekor.pub" -request-log "$REKOR_LOG" 2>"$WORK/rekor.err" &
+PIDS+=($!)
+for i in $(seq 1 60); do
+	[ -s "$WORK/rekor.url" ] && break
+	[ "$i" = 60 ] && { cat "$WORK/rekor.err" >&2 || true; fail "the transparency-log stand-in never published its URL"; }
+	sleep 0.2
+done
+REKOR_URL="$(cat "$WORK/rekor.url")"
 
 # refbridge fronts the stdio tool over a Unix socket; the credential it
 # materializes comes from the gateway per session, never from this script's
@@ -282,6 +303,16 @@ AC_BRIDGE_URL="unix://$BRIDGE_DIR/tool.sock"
 AC_EXEC_URL="unix://$EXEC_DIR/exec.sock"
 AC_SUP_URL="unix://$SUP_DIR/refspawn.sock"
 acceptance_config "$WORK/config"
+# The root's integrity posture, beside the control log: the transparency log
+# the stand-in plays, run anchoring on demand, and the log's key pinned in
+# anchor.pub so every verdict below is independent of what the log serves.
+cat >"$WORK/integrity.yaml" <<EOF
+anchor: tlog
+anchor_backend:
+  url: $REKOR_URL
+anchor_runs: on-demand
+EOF
+cp "$WORK/rekor.pub" "$WORK/anchor.pub"
 
 # --- 3. Secrets, only now: everything that could inherit them is running.
 # The provider key is never exported at all: it rides each agenthof command
@@ -593,4 +624,62 @@ for exchanged in $(python3 -c 'import json, sys; [print(json.loads(l)["token"]) 
 done
 [ "$EXCHANGED" -ge 1 ] || fail "the issuer's token log named no exchanged token, so the absence check above proved nothing"
 echo "no leak: subject token, $EXCHANGED exchanged token(s) (each also by its payload and signature), client secret, tool credential, provider key — in no ledger, artifact, log, or output — ok"
+
+# --- 8. Anchoring a run, on demand. The posture (section 2) allows it and the
+# log's key is pinned, but nothing above sent the log a single request: a run
+# is never submitted unasked. Then the invoker anchors the parent by hand, the
+# sweep files every other run, each run verifies independently under the
+# pinned key, and prune takes a run's proof away with its ledger.
+req_count() { wc -l <"$REKOR_LOG" | tr -d ' '; }
+[ -f "$REKOR_LOG" ] || fail "the stand-in's request log is missing, so the zero below would prove nothing"
+[ "$(req_count)" = 0 ] || fail "the transparency log saw $(req_count) request(s) before anything was anchored: $(cat "$REKOR_LOG")"
+RUNS="$(find "$WORK/logs" -name '*.jsonl' | wc -l | tr -d ' ')"
+[ "$RUNS" -ge 5 ] || fail "only $RUNS run ledger(s); the sweep below needs the parent, two children and two refused runs"
+[ -z "$(find "$WORK/logs" -name '*.anchor')" ] || fail "a proof exists although nothing was anchored"
+[ "$(anchor_state "$PARENT")" = "ledger anchor: not anchored" ] || fail "the parent reads as anchored before anything anchored it"
+ANCHOR_ARGS=(--as ci --groups acceptance-users --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")
+
+# 8a. By hand: the parent only.
+A="$(out_of "$WORK/agenthof" audit anchor --run "$PARENT" "${ANCHOR_ARGS[@]}")"
+OUTS+=("$A")
+echo "$A"
+grep -q "^anchored run $PARENT: events=[0-9]* sha256=[0-9a-f]\{64\}$" <<<"$A" || fail "audit anchor --run did not report the anchored parent"
+[ -f "$WORK/logs/$PARENT.anchor" ] || fail "no proof was written beside the parent's ledger"
+AFTER_PARENT="$(req_count)"
+[ "$AFTER_PARENT" = 1 ] || fail "anchoring the parent sent $AFTER_PARENT request(s); with the log's key pinned it is one (the submit, no key fetch)"
+for c in $CHILDREN "$NOEXEC" "$NOSPAWN"; do
+	[ ! -e "$WORK/logs/$c.anchor" ] || fail "run $c was anchored by anchoring the parent"
+done
+LAST="$(tail -n 1 "$WORK/control.jsonl")"
+case "$LAST" in *"\"run_id\":\"$PARENT\""*) ;; *) fail "the control ledger's last record does not name the parent run" ;; esac
+case "$LAST" in *'"proof"'*) fail "the control ledger's record carries the proof; it belongs beside the run" ;; esac
+case "$(anchor_state "$PARENT")" in "ledger anchor: independently verified ("*) ;; *) fail "the parent is not independently verified: $(anchor_state "$PARENT")" ;; esac
+echo "anchor: the parent run, by hand — proof beside its ledger, a run-scoped record with no proof on the chain, one request — ok"
+
+# 8b. By sweep: every run not yet anchored (both children and both refused
+# runs), the parent skipped. One filing per run, so the log's request count
+# grows by exactly N.
+N=$((RUNS - 1))
+BEFORE_SWEEP="$(req_count)"
+S="$(out_of "$WORK/agenthof" audit anchor --pending "${ANCHOR_ARGS[@]}")"
+OUTS+=("$S")
+echo "$S"
+grep -qxF "pending: $N anchored, 0 skipped (not anchorable), 0 remaining" <<<"$S" || fail "the sweep did not anchor exactly the $N other runs"
+[ "$(($(req_count) - BEFORE_SWEEP))" = "$N" ] || fail "the sweep sent $(($(req_count) - BEFORE_SWEEP)) request(s); $N run(s), one each, should send $N"
+[ "$(find "$WORK/logs" -name '*.anchor' | wc -l | tr -d ' ')" = "$RUNS" ] || fail "not every run has a proof beside it"
+
+# 8c. Every run verifies on its own, independently, under the pinned key.
+for r in "$PARENT" $CHILDREN "$NOEXEC" "$NOSPAWN"; do
+	case "$(anchor_state "$r")" in "ledger anchor: independently verified ("*) ;; *) fail "run $r is not independently verified: $(anchor_state "$r")" ;; esac
+done
+
+# 8d. Prune takes a run's ledger and its proof together. (Retention takes a
+# positive duration; 1ns makes every run old enough.) The anchoring lock is
+# not a proof and may remain.
+P="$(out_of "$WORK/agenthof" runs prune --older-than 1ns --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" --control-log "$WORK/control.jsonl" --as ci --groups acceptance-users)"
+OUTS+=("$P")
+echo "$P"
+grep -q "^pruned $RUNS run(s) " <<<"$P" || fail "prune did not report all $RUNS runs"
+[ -z "$(find "$WORK/logs" \( -name '*.jsonl' -o -name '*.anchor' \))" ] || fail "prune left a ledger or a proof behind: $(find "$WORK/logs" \( -name '*.jsonl' -o -name '*.anchor' \))"
+echo "anchor: parent on demand, the rest by the sweep, all independently verified, pruned together — ok"
 echo "e2e-acceptance-local: PASS"

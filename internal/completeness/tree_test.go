@@ -3,6 +3,7 @@ package completeness
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -197,5 +198,67 @@ func TestParents(t *testing.T) {
 	}
 	if len(got) != 3 || got["r-root"] != "" || got["r-child"] != "r-root" || got["r-blank"] != "" {
 		t.Fatalf("%v", got)
+	}
+}
+
+// TestSidecarFilesBesideALedgerChangeNothing pins that an anchor sidecar (and
+// its stray temp and lock) sitting beside run ledgers is invisible to the
+// completeness judgement: only <id>.jsonl files are runs.
+func TestSidecarFilesBesideALedgerChangeNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeLedger(t, dir, "r-child", rootBinding("r-root"), started(), stepStart("c"), stepOK("c", 0), finished("succeeded"))
+	writeLedger(t, dir, "r-root", nil, started(), stepStart("a"), spawn("r-child", "succeeded", 1), stepOK("a", 1), finished("succeeded"))
+
+	snap := func() (Tree, map[string]string, Report) {
+		events, _, verr := engine.ReadLog(dir, "r-root")
+		parents, err := Parents(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return VerifyTree(dir, "r-root", events, verr), parents, Check(events)
+	}
+	tree0, parents0, check0 := snap()
+
+	line := `{"time":"2026-10-27T00:00:00Z","run_id":"r-root","seq":5,"hash":"` + strings.Repeat("ab", 32) + `"}` + "\n"
+	for _, name := range []string{"r-root.anchor", "r-root.anchor.tmp-x", "r-child.anchor", ".anchor.lock"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(line), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tree1, parents1, check1 := snap()
+	if !reflect.DeepEqual(tree0, tree1) || !reflect.DeepEqual(parents0, parents1) || !reflect.DeepEqual(check0, check1) {
+		t.Fatalf("a sidecar beside the ledgers changed the verdict:\ntree %+v -> %+v\nparents %v -> %v\ncheck %+v -> %+v", tree0, tree1, parents0, parents1, check0, check1)
+	}
+	if len(parents1) != 2 || parents1["r-root"] != "" || parents1["r-child"] != "r-root" {
+		t.Fatalf("Parents = %v, want exactly r-root and r-child", parents1)
+	}
+	if tree1.Root.Report.Verdict != Complete {
+		t.Fatalf("%+v", tree1.Root.Report)
+	}
+}
+
+func TestSubtreeLinesWithSuffix(t *testing.T) {
+	dir := t.TempDir()
+	writeLedger(t, dir, "r-c1", rootBinding("r-root"), started(), stepStart("c"), stepOK("c", 0), finished("succeeded"))
+	writeLedger(t, dir, "r-c2", rootBinding("r-root"), started(), stepStart("c"), stepOK("c", 0), finished("succeeded"))
+	writeLedger(t, dir, "r-root", nil, started(), stepStart("a"), spawn("r-c1", "succeeded", 1), spawn("r-c2", "succeeded", 1), stepOK("a", 2), finished("succeeded"))
+	tr := verify(t, dir, "r-root")
+	if len(tr.Children) != 2 {
+		t.Fatalf("%+v", tr)
+	}
+	plain := tr.SubtreeLines()
+	want := "subtree: run r-c1 — integrity verified, completeness complete\nsubtree: run r-c2 — integrity verified, completeness complete\n"
+	if plain != want {
+		t.Fatalf("SubtreeLines = %q", plain)
+	}
+	if got := tr.SubtreeLinesWith(nil); got != plain {
+		t.Fatalf("nil suffix = %q, want SubtreeLines' %q", got, plain)
+	}
+	got := tr.SubtreeLinesWith(func(Node) string { return ", anchor verified" })
+	if strings.Count(got, ", anchor verified\n") != 2 || !strings.HasPrefix(got, "subtree: run r-c1 — integrity verified, completeness complete, anchor verified\n") {
+		t.Fatalf("%q", got)
+	}
+	if empty := (Tree{}).SubtreeLinesWith(func(Node) string { return "x" }); empty != "" {
+		t.Fatalf("no children = %q", empty)
 	}
 }

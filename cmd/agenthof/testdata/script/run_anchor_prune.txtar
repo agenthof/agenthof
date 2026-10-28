@@ -1,0 +1,72 @@
+# runs prune removes a run's anchor proof with its ledger: the <run-id>.anchor
+# and any transient <run-id>.anchor.tmp-* go with the <run-id>.jsonl, and a
+# proof whose ledger is already gone is cleaned in the same sweep. The anchor
+# lock is not a proof and survives. (--older-than takes a positive duration, so
+# 1ns stands in for "everything on disk is old enough".)
+
+exec agenthof apply --config config --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout 'registry ok: 1 agents, 1 workflows, 4 roles'
+rekor pubkey anchor.pub
+rekor posture integrity.yaml runs
+exec agenthof run se plan-only --input one --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN1=$RUNID
+exec agenthof run se plan-only --input two --as tester --config config --log-dir logs --artifact-dir artifacts --control-log control.jsonl
+lastrun logs
+env RUN2=$RUNID
+
+# Both runs are anchored by the sweep, which leaves its lock behind. A stray
+# temp and an orphaned proof (no ledger of that id) sit beside them.
+exec agenthof audit anchor --control-log control.jsonl --pending --as dana@example.com --groups platform-eng --log-dir logs
+stdout '^pending: 2 anchored, 0 skipped \(not anchorable\), 0 remaining$'
+exists logs/$RUN1.anchor
+exists logs/$RUN2.anchor
+exists logs/.anchor.lock
+exec sh -c 'printf stray > logs/$RUN1.anchor.tmp-zzz'
+exec sh -c 'printf orphan > logs/r-0000000000000009.anchor'
+
+# 1. Prune removes both ledgers, both proofs, the stray temp and the orphan;
+# the lock stays. The count is of runs, not of the files that went with them.
+exec agenthof runs prune --older-than 1ns --log-dir logs --control-log control.jsonl --as dana@example.com --groups platform-eng
+stdout '^pruned 2 run\(s\) and 0 artifact\(s\) older than 1ns$'
+! exists logs/$RUN1.jsonl
+! exists logs/$RUN2.jsonl
+! exists logs/$RUN1.anchor
+! exists logs/$RUN2.anchor
+! exists logs/$RUN1.anchor.tmp-zzz
+! exists logs/r-0000000000000009.anchor
+exists logs/.anchor.lock
+exists control.jsonl
+
+-- config/agents/planner.yaml --
+name: planner
+model: fast
+instruction: plan
+output: plan
+-- config/workflows/plan-only.yaml --
+name: plan-only
+steps:
+  - name: plan
+    agent: planner
+-- config/roles/se.yaml --
+name: se
+workflows: [plan-only]
+allowed_groups: ["*"]
+-- config/roles/locked.yaml --
+name: locked
+workflows: [plan-only]
+allowed_groups: [nobody-is-in-this-group]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, anchor, prune]
+-- config/roles/auditor.yaml --
+name: auditor
+allowed_groups: [finance]
+control: [prune]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: m
+    api_key_env: K
