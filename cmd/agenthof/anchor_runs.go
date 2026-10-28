@@ -73,7 +73,10 @@ func (s *anchorSession) recordFault(code string, err error, tried *control.Ancho
 // ship on success; head is the control head of the record it appended (the
 // success or the error), zero when none landed. The caller holds the
 // run-anchoring lock.
-func (s *anchorSession) anchorRun(logDir, id string) (outcome runAnchorOutcome, shipped []string, head ledger.Head) {
+// submitFault is the Submit error's message when outcome is runSubmitFailed,
+// empty otherwise; the sweep compares it across runs to recognize a systemic
+// refusal the log answers identically for every head.
+func (s *anchorSession) anchorRun(logDir, id string) (outcome runAnchorOutcome, shipped []string, head ledger.Head, submitFault string) {
 	out, in := s.out, s.in
 
 	// 7. The run's head. A run ledger has one writer and no repair: only a
@@ -82,13 +85,13 @@ func (s *anchorSession) anchorRun(logDir, id string) (outcome runAnchorOutcome, 
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		_, _ = fmt.Fprintf(out, "audit anchor: no run %s under %s\n", id, logDir)
-		return runNotAnchorable, nil, ledger.Head{}
+		return runNotAnchorable, nil, ledger.Head{}, ""
 	case err != nil:
 		_, _ = fmt.Fprintf(out, "audit anchor: run %s: %v; a run ledger has no repair — not anchorable\n", id, err)
-		return runNotAnchorable, nil, ledger.Head{}
+		return runNotAnchorable, nil, ledger.Head{}, ""
 	case !sidecar.FinalEvent(chain):
 		_, _ = fmt.Fprintf(out, "audit anchor: run %s has no final event; still running or tail lost — not anchorable\n", id)
-		return runNotAnchorable, nil, ledger.Head{}
+		return runNotAnchorable, nil, ledger.Head{}, ""
 	}
 	covered := anchor.Head{Seq: runHead.Count, Hash: runHead.Hash}
 	tried := &control.Anchor{RunID: id, Seq: covered.Seq, Hash: covered.Hash, Kind: "tlog", BackendKind: in.AnchorBackend.Kind, Backend: strings.TrimSuffix(in.AnchorBackend.URL, "/")}
@@ -97,7 +100,7 @@ func (s *anchorSession) anchorRun(logDir, id string) (outcome runAnchorOutcome, 
 	be, err := newAnchorBackend(backendSpec{Kind: in.AnchorBackend.Kind, URL: in.AnchorBackend.URL, Key: s.pub, Credential: in.AnchorBackend.Credential})
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "audit anchor: run %s: %v\n", id, err)
-		return runBackendFailed, nil, s.recordFault(control.CodeAnchorFailed, err, tried)
+		return runBackendFailed, nil, s.recordFault(control.CodeAnchorFailed, err, tried), ""
 	}
 	tried.BackendKind = be.Kind()
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
@@ -105,7 +108,7 @@ func (s *anchorSession) anchorRun(logDir, id string) (outcome runAnchorOutcome, 
 	cancel()
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "audit anchor: run %s: %v\n", id, err)
-		return classifySubmitFault(err), nil, s.recordFault(control.CodeAnchorFailed, err, tried)
+		return classifySubmitFault(err), nil, s.recordFault(control.CodeAnchorFailed, err, tried), err.Error()
 	}
 
 	// 9. The proof beside the run, written atomically.
@@ -117,7 +120,7 @@ func (s *anchorSession) anchorRun(logDir, id string) (outcome runAnchorOutcome, 
 	if err := sidecar.Append(sidecar.Path(logDir, id), id, rec); err != nil {
 		_, _ = fmt.Fprintf(out, "audit anchor: run %s: anchored at %s but the run's proof could NOT be written beside it: %v\n", id, rcpt.Ref, err)
 		tried.Ref = rcpt.Ref // the log's entry exists whatever became of the local copy
-		return runProofNotWritten, nil, s.recordFault(control.CodeIOError, err, tried)
+		return runProofNotWritten, nil, s.recordFault(control.CodeIOError, err, tried), ""
 	}
 
 	// 10. The governance record: run-scoped, and without the proof — that
@@ -126,14 +129,14 @@ func (s *anchorSession) anchorRun(logDir, id string) (outcome runAnchorOutcome, 
 	recorded, err := s.record("success", nil, payload)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "audit anchor: anchored run %s and its proof is beside the receipt, but the control ledger did NOT record it: %v\n", id, err)
-		return runNotRecorded, nil, ledger.Head{}
+		return runNotRecorded, nil, ledger.Head{}, ""
 	}
 	logLine, indexLine := receiptLines(rcpt, s.keyMode)
 	return runAnchored, []string{
 		fmt.Sprintf("anchored run %s: events=%d sha256=%s", id, covered.Seq, covered.Hash),
 		logLine,
 		indexLine,
-	}, recorded
+	}, recorded, ""
 }
 
 // anchorRuns is the run-anchoring forms after the shared preamble: the
@@ -156,7 +159,7 @@ func (s *anchorSession) anchorRuns(o runAnchorOpts) int {
 	if o.pending {
 		return s.anchorPending(o.logDir, o.limit)
 	}
-	outcome, shipped, head := s.anchorRun(o.logDir, o.runID)
+	outcome, shipped, head, _ := s.anchorRun(o.logDir, o.runID)
 	if outcome == runAnchored {
 		return s.finish(shipped, head, 0)
 	}
@@ -176,7 +179,10 @@ func (s *anchorSession) anchorRuns(o runAnchorOpts) int {
 //     counted as skipped and does NOT count against limit: a run that is still
 //     running must not eat the pass's budget;
 //   - runSubmitFailed is a failure that counts against limit; the pass goes on
-//     to the next run (it lands no sidecar, so the run is retried next pass);
+//     to the next run (it lands no sidecar, so the run is retried next pass) —
+//     unless the log answers the same refusal twice running, which means it is
+//     refusing every head, not this one, so the pass stops as a systemic fault
+//     does, costing two error records rather than one per candidate;
 //   - runTransportFailed, runBackendFailed, runProofNotWritten and
 //     runNotRecorded are failures every later run would meet identically — a
 //     log that does not answer, a backend that cannot be built, a log
@@ -204,12 +210,13 @@ func (s *anchorSession) anchorPending(logDir string, limit int) int {
 	}
 
 	anchored, skipped, failed, attempts, handled := 0, 0, 0, 0, 0
+	prevSubmitFault := ""
 	for _, id := range candidates {
 		if attempts >= limit {
 			break
 		}
 		handled++
-		outcome, shipped, _ := s.anchorRun(logDir, id)
+		outcome, shipped, _, submitFault := s.anchorRun(logDir, id)
 		switch outcome {
 		case runAnchored:
 			anchored++
@@ -217,6 +224,7 @@ func (s *anchorSession) anchorPending(logDir string, limit int) int {
 			for _, l := range shipped {
 				_, _ = fmt.Fprintln(out, l)
 			}
+			prevSubmitFault = "" // a success breaks any run of identical refusals
 		case runNotAnchorable:
 			skipped++
 		default:
@@ -225,6 +233,17 @@ func (s *anchorSession) anchorPending(logDir string, limit int) int {
 		}
 		if outcome == runTransportFailed || outcome == runBackendFailed || outcome == runProofNotWritten || outcome == runNotRecorded {
 			break
+		}
+		// A log that answers the same refusal twice running is refusing every
+		// head, not this one; stop so the systemic fault costs two error
+		// records, not one per run. A skip between does not reset the run — no
+		// head was offered — so the comparison still holds across it.
+		if outcome == runSubmitFailed {
+			if submitFault != "" && submitFault == prevSubmitFault {
+				_, _ = fmt.Fprintf(out, "audit anchor: same refusal twice running (%s); stopping the sweep\n", submitFault)
+				break
+			}
+			prevSubmitFault = submitFault
 		}
 	}
 	remaining := len(candidates) - handled
