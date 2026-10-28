@@ -112,7 +112,7 @@ func VerifyRun(logDir, runID string, key func() (*ecdsa.PublicKey, error), facto
 		}
 		// Name the proof by its base name, never the <log-dir> path, so a
 		// found-but-unreadable verdict discloses nothing to the reader.
-		return Verdict{Found: true, Err: fmt.Errorf("sidecar %s%s: %w", runID, Suffix, pathUnwrap(err))}, false
+		return Verdict{Found: true, Err: pathFault(runID+Suffix, err)}, false
 	}
 	chain, _, err := ledger.ReadVerify(filepath.Join(logDir, runID+".jsonl"), ledger.Unlocked)
 	if err != nil {

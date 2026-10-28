@@ -31,7 +31,7 @@ type runAnchorOutcome int
 const (
 	runAnchored        runAnchorOutcome = iota // sidecar written, control record landed
 	runNotAnchorable                           // unterminated / torn / broken / pruned mid-pass: nothing written, nothing recorded
-	runSubmitFailed                            // per-entry rejection: the log ANSWERED and refused THIS head; anchor error recorded; the sweep goes on
+	runSubmitFailed                            // per-entry rejection: the log ANSWERED and refused THIS head; anchor error recorded; the sweep goes on, unless the same refusal repeats (see anchorPending)
 	runTransportFailed                         // PASS-FATAL: the log did not answer; anchor error recorded; the sweep stops here
 	runBackendFailed                           // PASS-FATAL: the backend could not be built or its credential not resolved — it recurs identically for every run; anchor error recorded; the sweep stops here
 	runProofNotWritten                         // PASS-FATAL: anchored at the log, sidecar write failed — a directory-level fault that recurs for every run, each attempt after the log's permanent Submit; error recorded; the sweep stops here
@@ -73,6 +73,7 @@ func (s *anchorSession) recordFault(code string, err error, tried *control.Ancho
 // ship on success; head is the control head of the record it appended (the
 // success or the error), zero when none landed. The caller holds the
 // run-anchoring lock.
+//
 // submitFault is the Submit error's message when outcome is runSubmitFailed,
 // empty otherwise; the sweep compares it across runs to recognize a systemic
 // refusal the log answers identically for every head.
@@ -108,7 +109,12 @@ func (s *anchorSession) anchorRun(logDir, id string) (outcome runAnchorOutcome, 
 	cancel()
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "audit anchor: run %s: %v\n", id, err)
-		return classifySubmitFault(err), nil, s.recordFault(control.CodeAnchorFailed, err, tried), err.Error()
+		outcome := classifySubmitFault(err)
+		fault := ""
+		if outcome == runSubmitFailed {
+			fault = err.Error() // the sweep compares this only for runSubmitFailed
+		}
+		return outcome, nil, s.recordFault(control.CodeAnchorFailed, err, tried), fault
 	}
 
 	// 9. The proof beside the run, written atomically.
