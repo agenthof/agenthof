@@ -382,6 +382,10 @@ func TestScript(t *testing.T) {
 					n, err := strconv.Atoi(arg())
 					ts.Check(err)
 					fake.Fail(n)
+				case "failall":
+					n, err := strconv.Atoi(arg())
+					ts.Check(err)
+					fake.FailAll(n)
 				case "corruptnext":
 					fake.CorruptNext()
 				case "drop":
