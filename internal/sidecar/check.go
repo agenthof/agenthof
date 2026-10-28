@@ -110,11 +110,13 @@ func VerifyRun(logDir, runID string, key func() (*ecdsa.PublicKey, error), facto
 		if errors.Is(err, fs.ErrNotExist) {
 			return Verdict{}, false
 		}
-		return Verdict{Found: true, Err: err}, false
+		// Name the proof by its base name, never the <log-dir> path, so a
+		// found-but-unreadable verdict discloses nothing to the reader.
+		return Verdict{Found: true, Err: fmt.Errorf("sidecar %s%s: %w", runID, Suffix, pathUnwrap(err))}, false
 	}
 	chain, _, err := ledger.ReadVerify(filepath.Join(logDir, runID+".jsonl"), ledger.Unlocked)
 	if err != nil {
-		return Verdict{Found: true, Err: fmt.Errorf("the run ledger cannot be read to check its anchor: %w", err)}, false
+		return Verdict{Found: true, Err: fmt.Errorf("the run ledger %s.jsonl cannot be read to check its anchor: %w", runID, pathUnwrap(err))}, false
 	}
 	resolve := func() (*ecdsa.PublicKey, error) { return nil, nil }
 	if key != nil {

@@ -76,6 +76,42 @@ func TestVerifyRunPinnedFlagFollowsTheResolvedKey(t *testing.T) {
 	}
 }
 
+// TestVerifyRunUnreadableErrorsHideTheLogDirPath: both found-but-unreadable
+// branches — a sidecar that cannot be statted, and a sidecar beside a ledger
+// that cannot be read — name the file by its base name and never leak the
+// absolute <log-dir> path to the (authenticated) reader.
+func TestVerifyRunUnreadableErrorsHideTheLogDirPath(t *testing.T) {
+	// A log dir that is a regular file: Lstat of the sidecar beneath it is a
+	// found-but-unreadable fault (not ErrNotExist), carrying the joined path.
+	notDir := filepath.Join(t.TempDir(), "notadir")
+	if err := os.WriteFile(notDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v, _ := sidecar.VerifyRun(notDir, testRun, nil, nil, true, 0)
+	if !v.Found || v.Err == nil || v.State() != sidecar.StateUnverifiable {
+		t.Fatalf("lstat branch: %+v", v)
+	}
+	if msg := v.Err.Error(); strings.Contains(msg, notDir) || !strings.Contains(msg, testRun+sidecar.Suffix) {
+		t.Errorf("lstat branch leaks path or drops base name: %q", msg)
+	}
+
+	// A sidecar beside a removed ledger: the ledger-read fault must not leak
+	// the path either.
+	stub := anchortest.NewStub([]byte("s"))
+	dir := t.TempDir()
+	anchoredRun(t, dir, stub)
+	if err := os.Remove(filepath.Join(dir, testRun+".jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	v, _ = sidecar.VerifyRun(dir, testRun, nil, stubOpts(stub).Factory, true, 0)
+	if !v.Found || v.Err == nil || v.State() != sidecar.StateUnverifiable {
+		t.Fatalf("ledger branch: %+v", v)
+	}
+	if msg := v.Err.Error(); strings.Contains(msg, dir) || !strings.Contains(msg, testRun) {
+		t.Errorf("ledger branch leaks path or drops base name: %q", msg)
+	}
+}
+
 // TestVerifyRunUnreadableIsUnverifiableNeverNotAnchored: a sidecar beside a
 // ledger that cannot be read, or a sidecar that is not a file, is a found
 // verdict that is unverifiable — absence is the only way to read not anchored.
