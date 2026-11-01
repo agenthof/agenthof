@@ -37,24 +37,46 @@ func (r pidRecord) owner() ownerRef {
 	return ownerRef{pid: r.OwnerPID, start: r.OwnerStartUnixMicro}
 }
 
-// writePIDRecord creates path exclusively (0600): a record for a name that
-// already has one is refused, never replaced, so a live compartment's record
-// cannot be overwritten by a later launch under the same name. A failed write
-// removes the partial file so it does not block the next attempt.
-func writePIDRecord(path string, r pidRecord) error {
+// writeTempRecord writes r, complete, to a fresh temporary file (0600) beside
+// path and returns the temporary's name for the caller to move into place.
+// A record is never written at its own name: a sibling's Reap may list the
+// pid dir at any moment, and a file it found created but not yet written
+// would read as an unreadable record — a leftover, whose scratch dir it would
+// remove from under a live command. The temporary name starts with "." and
+// does not end in ".pid", so no reap prefix matches it and no sweep lists it
+// as a record. A failed write removes it.
+func writeTempRecord(path string, r pidRecord) (string, error) {
 	body, err := json.Marshal(r)
 	if err != nil {
-		return fmt.Errorf("confiner: encode pid record: %w", err)
+		return "", fmt.Errorf("confiner: encode pid record: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
-		return fmt.Errorf("confiner: create pid record: %w", err)
+		return "", fmt.Errorf("confiner: create pid record: %w", err)
 	}
 	_, werr := f.Write(append(body, '\n'))
 	cerr := f.Close()
 	if err := errors.Join(werr, cerr); err != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("confiner: write pid record %s: %w", path, err)
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("confiner: write pid record %s: %w", path, err)
+	}
+	return f.Name(), nil
+}
+
+// writePIDRecord publishes a record at path exclusively: a record for a name
+// that already has one is refused (fs.ErrExist), never replaced, so a live
+// compartment's record cannot be overwritten by a later launch under the same
+// name. The complete body is linked into place from a temporary file, so a
+// reader finds the name only once the whole record is behind it — never an
+// empty or partial file — and the link itself is what refuses a taken name.
+func writePIDRecord(path string, r pidRecord) error {
+	tmp, err := writeTempRecord(path, r)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp) }()
+	if err := os.Link(tmp, path); err != nil {
+		return fmt.Errorf("confiner: create pid record: %w", err)
 	}
 	return nil
 }
@@ -62,12 +84,10 @@ func writePIDRecord(path string, r pidRecord) error {
 // replacePIDRecord atomically replaces the record at path, which the caller
 // wrote with writePIDRecord and so owns: the new body goes to a temporary
 // file beside it and is renamed into place, so a reader sees the old record
-// or the new one, never a partial file. The temporary name starts with ".",
-// which no reap prefix matches and no sweep lists as a record.
+// or the new one, never a partial file.
 func replacePIDRecord(path string, r pidRecord) error {
-	tmp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp")
-	_ = os.Remove(tmp) // a leftover from a crash mid-replace; ours to reuse
-	if err := writePIDRecord(tmp, r); err != nil {
+	tmp, err := writeTempRecord(path, r)
+	if err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {

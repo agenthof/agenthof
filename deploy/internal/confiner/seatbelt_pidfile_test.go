@@ -1,6 +1,7 @@
 package confiner
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -55,6 +56,131 @@ func TestPIDRecordRoundTripAndExclusive(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("pid dir after replace: %v, %v (want only the record)", entries, err)
+	}
+}
+
+// A name that already has a record is refused, never replaced — and the
+// refusal is fs.ErrExist to a caller, whatever path the write takes.
+func TestWritePIDRecordExclusiveClaimPreserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "refexec-01.pid")
+	want := pidRecord{Store: "w", OwnerPID: 77, OwnerStartUnixMicro: 8}
+	if err := writePIDRecord(path, want); err != nil {
+		t.Fatal(err)
+	}
+	err := writePIDRecord(path, pidRecord{PID: 9, StartUnixMicro: 9, Store: "other"})
+	if !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("second write: err = %v, want fs.ErrExist", err)
+	}
+	if got, err := readPIDRecord(path); err != nil || got != want {
+		t.Fatalf("record after a refused write = %+v, %v, want %+v", got, err, want)
+	}
+}
+
+// The claim is published through a temporary file beside the record; after a
+// success and after a refused write alike, only the record itself remains.
+func TestWritePIDRecordLeavesNoTempOnSuccessOrCollision(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "refexec-01.pid")
+	if err := writePIDRecord(path, pidRecord{Store: "w", OwnerPID: 77}); err != nil {
+		t.Fatal(err)
+	}
+	onlyTheRecord := func(when string) {
+		t.Helper()
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			t.Fatalf("%s: pid dir holds %v, want only %s", when, names, filepath.Base(path))
+		}
+	}
+	onlyTheRecord("after the claim")
+	if err := writePIDRecord(path, pidRecord{Store: "other"}); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("second write: err = %v, want fs.ErrExist", err)
+	}
+	onlyTheRecord("after a refused claim")
+}
+
+// What a reader finds at the path is the whole record: the exact fields, the
+// trailing newline, mode 0600.
+func TestWritePIDRecordPublishesCompleteRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "refexec-01.pid")
+	want := pidRecord{PID: 4242, StartUnixMicro: 1761999999123456, Store: "w", OwnerPID: 77, OwnerStartUnixMicro: 1761999990000000}
+	if err := writePIDRecord(path, want); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) == 0 || body[len(body)-1] != '\n' {
+		t.Fatalf("record body %q does not end in a newline", body)
+	}
+	var got pidRecord
+	if err := json.Unmarshal(body, &got); err != nil || got != want {
+		t.Fatalf("published record = %+v, %v, want %+v", got, err, want)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, %v, want 0600", info, err)
+	}
+}
+
+// A concurrent reader never sees the record half-written: the name appears
+// only once the body is complete. The claim exists so a sibling's Reap, which
+// may list the pid dir at any moment, sees a name a running instance owns; a
+// reader that found an empty file would take the record for unreadable and
+// remove the compartment's scratch dir from under it. Best-effort: the reader
+// polls, so a window it never happens to hit passes; a non-empty partial it
+// does hit fails.
+func TestWritePIDRecordNeverObservedPartial(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "refexec-01.pid")
+	rec := pidRecord{Store: "w", OwnerPID: 77, OwnerStartUnixMicro: 1761999990000000}
+	stop := make(chan struct{})
+	partial := make(chan []byte, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			var r pidRecord
+			if json.Unmarshal(body, &r) != nil || r != rec {
+				select {
+				case partial <- body:
+				default:
+				}
+				return
+			}
+		}
+	}()
+	for i := 0; i < 300; i++ {
+		if err := writePIDRecord(path, rec); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case body := <-partial:
+			t.Fatalf("a reader saw a partial record: %q", body)
+		default:
+		}
+	}
+	close(stop)
+	select {
+	case body := <-partial:
+		t.Fatalf("a reader saw a partial record: %q", body)
+	default:
 	}
 }
 
