@@ -104,6 +104,11 @@ func TestParseConfigRejects(t *testing.T) {
 		{"confiner not a token", "linux", func(s string) string { return strings.Replace(s, "confiner: podman", "confiner: Podman", 1) }, "confiner must be a lowercase backend name"},
 		{"store traversal", "linux", func(s string) string { return strings.Replace(s, "store: agenthof-work", "store: ../etc", 1) }, "workspace.store"},
 		{"store is the scratch dir", "linux", func(s string) string { return strings.Replace(s, "store: agenthof-work", "store: .scratch", 1) }, "workspace.store"},
+		// The startup Reap sweeps every compartment AND store under reapPrefix
+		// (podman volumes, Seatbelt store directories); a store named into that
+		// prefix would be deleted on every restart.
+		{"store under the reap prefix", "linux", func(s string) string { return strings.Replace(s, "store: agenthof-work", "store: refexec-foo", 1) }, `workspace.store must not start with "refexec-"`},
+		{"store under the reap prefix on darwin", "darwin", func(s string) string { return strings.Replace(s, "store: agenthof-work", "store: refexec-foo", 1) }, `workspace.store must not start with "refexec-"`},
 		{"no store", "linux", func(s string) string { return strings.Replace(s, "  store: agenthof-work\n", "", 1) }, "workspace.store"},
 		{"retired volume key", "linux", func(s string) string { return strings.Replace(s, "store: agenthof-work", "volume: agenthof-work", 1) }, "field volume not found"},
 		{"socket too long on darwin", "darwin", func(s string) string {
@@ -127,6 +132,26 @@ func TestParseConfigRejects(t *testing.T) {
 	// The same 105-byte socket fits where the limit is 108.
 	if _, err := parseConfigOn([]byte(strings.Replace(validYAML, "/run/agenthof-exec/refexec.sock", longSock, 1)), "linux"); err != nil {
 		t.Fatalf("a 105-byte socket on linux: %v", err)
+	}
+	// The reap-prefix error names the prefix, never the rejected store.
+	_, err := parseConfig([]byte(strings.Replace(validYAML, "store: agenthof-work", "store: refexec-foo", 1)))
+	if err == nil || strings.Contains(err.Error(), "refexec-foo") {
+		t.Fatalf("error %v must not echo the rejected store name", err)
+	}
+}
+
+// Stores off the reap prefix parse: the fixture's agenthof-work, and the store
+// refspawn renders for a child refexec (agenthof-spawn-<id>-work, from its own
+// agenthof-spawn- prefix), which the guard must never refuse. A name that merely
+// contains "refexec-" is fine too; only the prefix is reserved.
+func TestParseConfigAcceptsStoresOffReapPrefix(t *testing.T) {
+	for _, store := range []string{"agenthof-work", "agenthof-spawn-r-1-work", "my-refexec-work", "refexec"} {
+		t.Run(store, func(t *testing.T) {
+			cfg, err := parseConfig([]byte(strings.Replace(validYAML, "store: agenthof-work", "store: "+store, 1)))
+			if err != nil || cfg.Store != store {
+				t.Fatalf("store %q: cfg.Store=%q, err=%v", store, cfg.Store, err)
+			}
+		})
 	}
 }
 

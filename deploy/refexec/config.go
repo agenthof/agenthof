@@ -119,6 +119,11 @@ func parseConfigOn(data []byte, goos string) (execConfig, error) {
 	} else {
 		if !confiner.ValidStoreName(fc.Workspace.Store) {
 			fail("workspace.store is required and must be a workspace store name")
+		} else if strings.HasPrefix(fc.Workspace.Store, reapPrefix) {
+			// Startup reaps every compartment AND store under reapPrefix (podman
+			// volumes, Seatbelt store directories), so a store named into that
+			// prefix would be deleted on every restart. Refused for every backend.
+			fail("workspace.store must not start with %q (reserved for refexec's compartments and startup reap)", reapPrefix)
 		}
 		cfg.Store = fc.Workspace.Store
 		if fc.Workspace.Path != "" && !filepath.IsAbs(fc.Workspace.Path) {

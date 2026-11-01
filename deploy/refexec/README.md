@@ -67,9 +67,11 @@ macOS) there is no default and refexec refuses to start.
 launcher lines without listening: for podman, `socket=<path>` and
 `workspace=<store>:<path>`; for seatbelt, `socket=<path>`,
 `workspace=<store>` and `store_path=<host directory>`. A file that omits a
-required key, sets a key the selected backend does not consume, or uses the
-retired `workspace.volume` fails there. At start refexec probes the backend
-and removes leftover `refexec-` compartments before it opens the socket; if
+required key, sets a key the selected backend does not consume, uses the
+retired `workspace.volume`, or names a `workspace.store` starting with
+`refexec-` fails there. At start refexec probes the backend and removes
+leftover `refexec-` compartments — and any store under that prefix — before
+it opens the socket, which is why a workspace store may not carry it; if
 either fails it exits without listening — there is no fallback to running a
 command unconfined.
 

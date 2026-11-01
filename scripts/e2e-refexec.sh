@@ -21,7 +21,9 @@ IMAGE="${REFBOX_IMAGE:-refbox-echo:test}"
 NAME="${REFBOX_NAME:-refbox-exec}"
 SOCKET="refbox-echo.sock"
 EXEC_IMAGE="${REFEXEC_IMAGE:-docker.io/library/busybox:1.36.1}"
-VOLUME="refexec-e2e-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+# The long-lived workspace store; it must stay off the refexec- prefix that
+# refexec's startup reap removes (refexec -check refuses such a store).
+VOLUME="e2e-work-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 
 SOCK_DIR="$(mktemp -d)"                    # the gateway + agent socket dir, mounted into refbox
 export AGENTHOF_REFBOX_SOCKET_DIR="$SOCK_DIR"
