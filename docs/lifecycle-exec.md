@@ -169,9 +169,9 @@ succeeds — and refuses to start if the probe fails; there is no fallback to
 running a command unconfined. The two backends are not equivalent:
 
 - **`podman` — the container tier.** A rootless-podman container on a shared
-  kernel: the command sees only its image and the workspace volume, with
-  the memory / CPU / pid caps enforced and the container removed on
-  cancel. A shared kernel is still below any VM tier.
+  kernel: the command sees only its image, a tmpfs at `/tmp` and the
+  workspace volume, with the memory / CPU / pid caps enforced and the
+  container removed on cancel. A shared kernel is still below any VM tier.
 - **`seatbelt` — the macOS OS-sandbox tier.** A host process under a
   Seatbelt profile, on the same shared kernel, and weaker than the
   container tier in ways an operator must weigh: it is **host-readable**
@@ -281,8 +281,8 @@ account against it, and recorded it — and did not run the command.*
 - It says what ran and what it printed. The files the command read are the
   agent's, before, during and after; there is no input-integrity claim and
   no serialization of concurrent commands on the workspace.
-- It is offline. Commands that need the network fail inside their
-  compartment, and the failure is recorded first-hand.
+- Direct network access is denied. Commands that need the network fail
+  inside their compartment, and the failure is recorded first-hand.
 - The tier on the line is the tier's limit, not a stronger one. Both
   tiers share the host kernel, and both sit below a VM. Seatbelt is the
   weaker of the two: the command can read most of the host filesystem

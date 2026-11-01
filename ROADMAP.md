@@ -166,7 +166,7 @@ The governed core is real and runnable today:
   on Linux, macOS Seatbelt on macOS. The choice is fail-closed: a runtime
   probes its backend before it serves and refuses to start if the probe
   fails, and a key the chosen backend does not use is refused rather than
-  ignored — a command never runs unconfined. The ledger names the tier each
+  ignored — a command never runs outside the selected backend. The ledger names the tier each
   exec and each spawned child ran under, and `audit` states what that tier
   does and does not guarantee. The tiers are honestly different: both share
   the host kernel and sit below any VM, and Seatbelt is the weaker of the

@@ -136,7 +136,8 @@ Pre-release, and the governed core is real and runnable today:
   and `audit <run-id>` names the exact `apply` that put a run's config on record.
 
 **The reference runtimes (`ref*`)** are operator-side runtimes that run on the
-host and drive rootless podman, so the agent reaches a capability only through
+host and drive the operator's confinement backend — rootless podman, or macOS
+Seatbelt for refexec and refspawn — so the agent reaches a capability only through
 Agenthof and the operator's sandbox contains it — Agenthof itself runs and
 isolates nothing. Each ships as a reference you can run or replace:
 

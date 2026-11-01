@@ -128,8 +128,8 @@ child is never run anywhere else:
 
 - no supervisor is configured, it is unreachable, or its socket sits behind
   a directory that is not private to the user Agenthof runs as;
-- the supervisor has no image for an agent in the child's workflow, or its
-  own compartment cap would be exceeded;
+- the supervisor has no image or executable for an agent in the child's
+  workflow, or its own compartment cap would be exceeded;
 - a compartment fails to start, or never answers within the supervisor's
   readiness window;
 - the answer would place the child's exec socket inside the child's own
