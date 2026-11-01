@@ -242,7 +242,6 @@ func (p *Podman) Launch(_ context.Context, spec Spec) (Compartment, error) {
 		}
 		close(c.done)
 	}()
-	p.cfg.Logger.Info("compartment started", "compartment", spec.Name, "pid", cmd.Process.Pid, "env_names", applied)
 	return c, nil
 }
 

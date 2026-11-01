@@ -553,7 +553,6 @@ func (s *Seatbelt) Launch(ctx context.Context, spec Spec) (Compartment, error) {
 		}
 		close(c.done)
 	}()
-	s.cfg.Logger.Info("compartment started", "compartment", spec.Name, "pid", c.pid, "env_names", applied)
 	return c, nil
 }
 
