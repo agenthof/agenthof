@@ -9,7 +9,7 @@ inside, see [`lifecycle.md`](lifecycle.md). For the YAML, see
 executable proofs, see [`scripts/e2e-refspawn-local.sh`](../scripts/e2e-refspawn-local.sh)
 (the door, the ledger and the supervisor protocol, with no container
 runtime) and [`scripts/e2e-refspawn.sh`](../scripts/e2e-refspawn.sh) (real
-compartments and real isolation, with rootless podman). For the supervisor
+compartments and real confinement, with rootless podman). For the supervisor
 itself, [`deploy/refspawn/README.md`](../deploy/refspawn/README.md).
 
 ```
@@ -20,8 +20,8 @@ itself, [`deploy/refspawn/README.md`](../deploy/refspawn/README.md).
     |                              |-- pre-run gate ------- no ---------------------------------> child: run_refused
     |                              |      | yes                     |                           |
     |                              |-- provision {child id,         |                           |
-    |                              |     the workflow's agents} --->| volume + 1 compartment    |
-    |                              |                                |   per agent, all on /work,|
+    |                              |     the workflow's agents} --->| workspace + 1 compartment |
+    |                              |                                |   per agent, all on it,   |
     |                              | <-- {child dir, agent sockets, |   + 1 refexec on it       |
     |                              |      exec socket}  (held open) |                           |
     |                              |   none? ----------------------------------------------------> parent: spawn refused
@@ -29,7 +29,7 @@ itself, [`deploy/refspawn/README.md`](../deploy/refspawn/README.md).
     |                              |     registry gate ---- no ---------------------------------> child: run_refused
     |                              |     steps, doors, ... (its exec door -> the child's refexec)| child: workflow_started ... workflow_finished
     |                              |-- close the held request ----->| SIGTERM refexec, rm the   |
-    |                              |                                |   compartments, rm volume |
+    |                              |                                |   compartments, workspace |
     | <-- {status, child_run_id,   |-- after the child is over --------------------------------> parent: spawn {child_run_id, status, output_sha}
     |      output_sha, preview}    |                                |                           |
 ```
@@ -84,19 +84,24 @@ already be closed.
 
 A child does not run beside its parent. Before the child's workflow starts,
 Agenthof asks the supervisor named by `spawn_supervisor` — the reference
-one is `refspawn`, a host process like Agenthof that invokes podman — for an
-isolated set, naming the child's run id and the distinct agents its
-workflow's steps use. The supervisor creates:
+one is `refspawn`, a host process like Agenthof that drives the operator's
+confinement backend — for a separate set, naming the child's run id and the
+distinct agents its workflow's steps use. The supervisor creates:
 
-- **one workspace volume** for the child, mounted at `/work`;
-- **one refbox compartment per agent** in the child's workflow, each
-  running the image the supervisor's config maps that agent to — no
-  network, a read-only root, every capability dropped, resource caps — all
-  mounting that one volume, and reaching Agenthof only through the child's
-  own socket directory, which is mounted into those compartments and no
-  others;
-- **one `refexec` process** for the child, bound to the same volume, so the
-  child's first-hand exec runs against the child's files.
+- **one workspace** for the child (under podman, a volume mounted at
+  `/work`; under Seatbelt, a directory under the supervisor's `store_root`);
+- **one compartment per agent** in the child's workflow, each running the
+  program the supervisor's config maps that agent to (under podman, an
+  image) — direct network access denied, writes scoped to the workspace and
+  the child's socket directory — all sharing that one workspace, and
+  reaching Agenthof only through the child's own socket directory, which is
+  made visible to those compartments and no others. Under podman that is a
+  rootless refbox container with a read-only root, every capability dropped
+  and resource caps; under Seatbelt it is a sandboxed host process, with no
+  resource caps and host-readable (see the limits below);
+- **one `refexec` process** for the child, bound to the same workspace, so
+  the child's first-hand exec runs against the child's files and under the
+  same backend.
 
 The supervisor answers only once every socket in the set accepts a
 connection; Agenthof then runs the child's workflow against those sockets.
@@ -106,13 +111,16 @@ YAML names — under spawn, the supervisor's sockets win. The child's own
 per-step gateway listens in the child's socket directory, so a grandchild
 can be asked for only from inside the child.
 
-**Within one child, its agents share the child's `/work` on purpose.** A
+**Within one child, its agents share the child's workspace on purpose.** A
 workflow's steps run one at a time and pass their work along it — the
 writer writes, the reader reads — the same rule a root run follows.
 **Between runs, nothing is shared.** Two children spawned in parallel get
-two volumes; a child and its parent never see each other's files; a
-child's exec socket sits in a directory that is never mounted into any
-compartment, so a child agent reaches exec only through the governed door.
+two workspaces; a child and its parent never see each other's files through
+the workspace; a child's exec socket sits in a directory that no compartment
+is given, so a child agent reaches exec only through the governed door. The
+agent and its commands address the workspace as their working directory —
+the same convention the exec door uses. `/work` is the podman mount point,
+not a contract, and under Seatbelt the workspace is `<store_root>/<store>`.
 
 If any of this cannot be had, the spawn is refused with the fixed reason
 `spawn compartment unavailable`, recorded on the parent's ledger, and the
@@ -167,7 +175,7 @@ choice: it issues several `/spawn` calls at once.
 refusal at the door, a pre-run refusal, and a failed provision start
 nothing and give the reservation back; a provisioned child counts whatever
 happens next — even a registry refusal. The supervisor's own
-`max_compartments` is a separate backstop on how many agent compartments
+`max_compartments` is a separate bound on how many agent compartments
 may be alive across every child at once.
 
 ## Teardown
@@ -175,9 +183,9 @@ may be alive across every child at once.
 The held provision request is the child's lifeline: Agenthof closes it when
 the child is over, and the supervisor then removes the set in order — the
 child's refexec first (it removes any exec compartment it still holds),
-then the agent compartments, then the volume, then the directories. The
-volume is removed without forcing, so the removal succeeding is itself the
-evidence that nothing still mounts the child's workspace. If anything in
+then the agent compartments, then the workspace, then the directories. The
+workspace is removed without forcing, so the removal succeeding is itself
+the evidence that nothing still holds the child's workspace. If anything in
 the set dies first, the supervisor ends the request from its side, and
 Agenthof cancels the child rather than let it wait for a socket that will
 never answer.
@@ -203,12 +211,22 @@ Two nodes, one event each, no double counting:
 
 - On the **parent**, one `spawn` event after the child is over:
   `{type: "spawn", agent, status: succeeded | failed | refused, child_run_id,
-  child_role, child_workflow, depth, output_sha, reason}`. `child_run_id`
+  child_role, child_workflow, depth, output_sha, reason, child_confiner,
+  child_confiner_opts}`. `child_run_id`
   is present whenever a child ledger exists — including a child refused at
   its registry gate or before its engine started — and absent when the
   door or the supervisor refused before one existed. `output_sha` is the
   hash of the child's final artifact; the artifact body never crosses back
   onto the parent's ledger (the agent receives a capped preview).
+  `child_confiner` is the confinement tier the child's supervisor reported
+  applying (`podman` or `seatbelt` today), and `child_confiner_opts` any
+  per-deployment loosening it recorded; both are the supervisor's own
+  statement, recorded verbatim, and absent when no set was provisioned.
+  `audit` renders them as a `[child-confiner: …]` suffix on the spawn line,
+  with the same grade text it gives an exec line (see
+  [`lifecycle-exec.md`](lifecycle-exec.md#the-record)): Seatbelt is a
+  shared-kernel OS-sandbox tier, host-readable, with no resource caps and
+  best-effort teardown, below the container tier.
 - On the **child**, its own full trail, every event carrying
   `parent_run_id` and `depth` on its binding; its `exec` events carry the
   child's refexec's first-hand account.
@@ -231,28 +249,43 @@ is complete, and there is no runtime check.
 
 ## Limits, stated plainly
 
-- **Isolation is per child, through the operator's supervisor.** Agenthof
-  itself still runs nothing and isolates nothing: the compartments and the
-  volume are the supervisor's, and the root run's own containment remains
-  the operator's deployment choice (`deploy/refbox`) — the root's workspace
-  is whatever the operator mounted. What Agenthof guarantees is that a
-  child runs only where the supervisor put it, or not at all.
-- **A child's own agents are not isolated from each other.** They share one
-  workspace and one socket directory by design, so nothing in `/work` — nor in
-  the child's socket directory — is protected between them: one agent can read,
-  overwrite, or follow a symlink another left behind, or reach a sibling
+- **Separation is per child, through the operator's supervisor.** Agenthof
+  itself still runs nothing and confines nothing: the compartments and the
+  workspace are the supervisor's, and how strong the separation is depends
+  on the tier the spawn line names (a shared-kernel container or OS sandbox,
+  never a VM). The root run's own containment remains the operator's
+  deployment choice (`deploy/refbox`) — the root's workspace is whatever the
+  operator mounted. What Agenthof guarantees is that a child runs only where
+  the supervisor put it, or not at all.
+- **Under Seatbelt, a child's compartments are host-readable.** The sandbox
+  denies reads under the supervisor's own store and spawn roots (outside the
+  child's own workspace and socket directory), its pid directory, the
+  operator's home credential stores and any `deny_read` paths the operator
+  adds, and nothing else: any other file the operator's user can read, a
+  child's agent can read. Writes are scoped to the child's workspace and
+  socket directory, direct network access is denied, and there are no
+  resource caps.
+- **A child's own agents are not separated from each other.** They share one
+  workspace and one socket directory by design, so nothing in the workspace —
+  nor in the child's socket directory — is protected between them: one
+  agent can read, overwrite, or follow a symlink another left behind, or reach a sibling
   agent's socket. The boundary spawn draws is between runs, not within one.
 - A child always starts on a fresh, empty workspace and hands back only a
   hash and a preview. Handing a child a shared or persistent workspace is
   not supported.
 - If `agenthof` is killed outright, its held requests close and the
   supervisor tears the children down. If the supervisor is killed outright,
-  the child *compartments* live until podman's timeout trips, and both they
-  and the child *volumes* are reaped by name the next time the supervisor
-  starts. A child's *refexec* process is a host process, not a compartment:
-  on an ungraceful kill of the supervisor it may be left running (idle, with
-  its socket directory removed on the next start) until the host or session
-  ends — it holds no network and governs nothing once its socket is gone.
+  what happens to the child *compartments* depends on the backend. Under
+  podman they live until the container's `--timeout` trips; under Seatbelt
+  teardown is best-effort — the compartments are sandboxed host processes,
+  and the next supervisor start kills the ones it can still match to their
+  recorded process, but a descendant that detached into a session of its own
+  can outlive both teardown and that sweep. On either backend the child
+  *workspaces* and compartments are reaped by name the next time the
+  supervisor starts. A child's *refexec* process is a host process, not a
+  compartment: on an ungraceful kill of the supervisor it may be left
+  running (idle, with its socket directory removed on the next start) until
+  the host or session ends — it governs nothing once its socket is gone.
 - A `/spawn` is synchronous and holds the parent step's connection for the
   child's duration, bounded by the step timeout.
 - The invoker propagates unchanged; there is no separate acting-agent
