@@ -9,6 +9,6 @@ package confiner
 
 func processStart(int) (int64, error) { return 0, ErrNotImplemented }
 
-func descendants(int) []int { return nil }
+func descendants(int) []procRef { return nil }
 
 func killSession(int) {}

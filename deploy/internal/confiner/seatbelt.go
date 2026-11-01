@@ -30,6 +30,13 @@ const (
 	exitExecFailed      = 71
 )
 
+// procRef names a live process by pid AND the start time it was seen with, so
+// a signal to it can be withheld once the pid belongs to something else.
+type procRef struct {
+	pid   int
+	start int64
+}
+
 // SeatbeltConfig configures the macOS Seatbelt backend.
 type SeatbeltConfig struct {
 	// SandboxExec is the sandbox-exec binary; "" means /usr/bin/sandbox-exec.
@@ -294,8 +301,12 @@ func (s *Seatbelt) sandboxedOutput(ctx context.Context, profile, work, program s
 // write itself cannot succeed, Probe fails on that and a later denial is
 // never read as enforcement.
 func (s *Seatbelt) Probe(ctx context.Context) error {
-	if fi, err := os.Stat(s.cfg.SandboxExec); err != nil || !fi.Mode().IsRegular() {
-		return fmt.Errorf("confiner: seatbelt: sandbox-exec is not available at %s (%v)", s.cfg.SandboxExec, err)
+	fi, err := os.Stat(s.cfg.SandboxExec)
+	if err != nil {
+		return fmt.Errorf("confiner: seatbelt: sandbox-exec is not available: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("confiner: seatbelt: sandbox-exec at %s is not a regular file", s.cfg.SandboxExec)
 	}
 	suffix, err := randomSuffix()
 	if err != nil {
@@ -329,14 +340,8 @@ func (s *Seatbelt) Probe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("confiner: seatbelt probe: %w", err)
 	}
-	switch code {
-	case 0:
-		return fmt.Errorf("confiner: seatbelt probe: the sandbox did not deny a write outside the workspace (%s)", target)
-	case exitProfileRejected, exitExecFailed:
-		return fmt.Errorf("confiner: seatbelt probe: sandbox-exec did not run the probe command (exit %d): %s", code, strings.TrimSpace(string(out)))
-	}
-	if _, err := os.Stat(target); !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("confiner: seatbelt probe: the sandbox reported a denial but %s exists (%v)", target, err)
+	if err := denialVerdict(code, out, target); err != nil {
+		return err
 	}
 
 	inside := filepath.Join(work, "in")
@@ -349,6 +354,26 @@ func (s *Seatbelt) Probe(ctx context.Context) error {
 	}
 	if _, err := os.Stat(inside); err != nil {
 		return fmt.Errorf("confiner: seatbelt probe: the write inside the workspace left no file: %w", err)
+	}
+	return nil
+}
+
+// denialVerdict decides whether the probe's outside write was DENIED: only a
+// non-zero exit that is the command's own (not sandbox-exec's 65/71, and not
+// a signalled child with no exit code) together with an absent file counts.
+// Anything else is a probe error, so enforcement is never inferred from a
+// failure that is not a denial.
+func denialVerdict(code int, out []byte, target string) error {
+	switch {
+	case code == 0:
+		return fmt.Errorf("confiner: seatbelt probe: the sandbox did not deny a write outside the workspace (%s)", target)
+	case code == exitProfileRejected || code == exitExecFailed:
+		return fmt.Errorf("confiner: seatbelt probe: sandbox-exec did not run the probe command (exit %d): %s", code, strings.TrimSpace(string(out)))
+	case code < 0:
+		return fmt.Errorf("confiner: seatbelt probe: the probe command did not run to completion (signalled, no exit code): %s", strings.TrimSpace(string(out)))
+	}
+	if _, err := os.Stat(target); !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("confiner: seatbelt probe: the sandbox reported a denial but %s exists (%v)", target, err)
 	}
 	return nil
 }
@@ -455,28 +480,35 @@ func (s *Seatbelt) Launch(ctx context.Context, spec Spec) (Compartment, error) {
 	}
 	cmd.Stdout, cmd.Stderr = sink, sink
 	if err := cmd.Start(); err != nil {
-		c.removeFiles()
+		// Nothing was recorded yet, and a LIVE compartment may hold this
+		// Name: only this launch's own scratch dir goes, never the PID record.
+		c.removeScratch()
 		return nil, fmt.Errorf("confiner: start sandbox-exec: %w", err)
 	}
 	c.cmd, c.pid = cmd, cmd.Process.Pid
 
+	// abandon ends a process this launch started but cannot keep: it is this
+	// exec.Cmd's own un-reaped child, so its pid cannot have been reused and
+	// the ungated kill is safe. Nothing recorded, nothing left behind.
+	abandon := func(reason error) (Compartment, error) {
+		killSession(c.pid)
+		_ = cmd.Wait()
+		c.removeScratch()
+		return nil, fmt.Errorf("confiner: compartment %q: %w", spec.Name, reason)
+	}
 	// The record pairs the pid with its start time so a later process can
-	// tell this process from a reused pid. No start time means the process is
-	// already gone: nothing is recorded rather than a guessed value.
-	if start, err := processStart(c.pid); err != nil {
-		s.cfg.Logger.Warn("compartment has no pid record: its start time is unavailable", "compartment", spec.Name, "pid", c.pid, "error", err)
-	} else {
-		c.start = start
-		if err := writePIDRecord(c.pidFile, pidRecord{PID: c.pid, StartUnixMicro: start, Store: spec.Store}); err != nil {
-			// A record under this name already exists: a compartment may be
-			// live under it, and this one must not run unrecorded.
-			killSession(c.pid)
-			_ = cmd.Wait()
-			if scratch != "" {
-				_ = os.RemoveAll(scratch)
-			}
-			return nil, fmt.Errorf("confiner: compartment %q: %w", spec.Name, err)
-		}
+	// tell this process from a reused pid. A process whose start time cannot
+	// be read could never be matched by a later Timeout, Remove or Reap, so it
+	// is not allowed to run: fail closed rather than run unrecorded.
+	start, err := processStart(c.pid)
+	if err != nil {
+		return abandon(fmt.Errorf("start time unavailable, refusing to run it unrecorded: %w", err))
+	}
+	c.start = start
+	if err := writePIDRecord(c.pidFile, pidRecord{PID: c.pid, StartUnixMicro: start, Store: spec.Store}); err != nil {
+		// A record under this name already exists: a compartment may be live
+		// under it, and this one must not run unrecorded.
+		return abandon(err)
 	}
 
 	var timer *time.Timer
@@ -543,12 +575,19 @@ func (c *seatbeltCompartment) kill() {
 	}
 }
 
-// removeFiles removes the PID record and the scratch dir; both the exit
-// goroutine and Remove call it, so a file already gone is not an error.
+// removeFiles removes the PID record this compartment wrote and its scratch
+// dir; both the exit goroutine and Remove call it, so a file already gone is
+// not an error. It is only reached once writePIDRecord has succeeded, so the
+// record it removes is this compartment's own.
 func (c *seatbeltCompartment) removeFiles() {
 	if err := os.Remove(c.pidFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		c.s.cfg.Logger.Warn("pid record not removed", "compartment", c.name, "error", err)
 	}
+	c.removeScratch()
+}
+
+// removeScratch removes the scratch dir, if any.
+func (c *seatbeltCompartment) removeScratch() {
 	if c.scratch != "" {
 		if err := os.RemoveAll(c.scratch); err != nil {
 			c.s.cfg.Logger.Warn("scratch dir not removed", "compartment", c.name, "error", err)
@@ -584,6 +623,9 @@ func (c *seatbeltCompartment) Remove(context.Context) error {
 	case <-c.done:
 		return nil
 	case <-t.C:
+		// Gated by the runtime rather than a start time: os.Process refuses
+		// with ErrProcessDone once wait4 has returned, so this can never reach
+		// a reused pid.
 		_ = c.cmd.Process.Kill()
 		return fmt.Errorf("confiner: compartment %q did not exit within 10s of removal", c.name)
 	}

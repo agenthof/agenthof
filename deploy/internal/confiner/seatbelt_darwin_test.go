@@ -520,6 +520,65 @@ func TestSeatbeltDidNotLaunch65And71(t *testing.T) {
 	}
 }
 
+// A Launch that fails to start under a Name a LIVE compartment already holds
+// must not touch that compartment's PID record: the record is what keeps the
+// live one visible to RemoveStore and Reap.
+func TestSeatbeltStartFailureKeepsALiveCompartmentsRecord(t *testing.T) {
+	s := newTestSeatbelt(t, nil)
+	mustCreateStore(t, s, "w")
+	ctx := context.Background()
+	live, err := s.Launch(ctx, Spec{Name: "refexec-01", Store: "w", Argv: []string{"sleep", "60"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Remove(ctx) })
+	// The profile text is already accepted (same Scratch/Paths), so the next
+	// Launch skips the dry-run and reaches cmd.Start, which fails: the
+	// sandbox-exec path no longer exists.
+	real := s.cfg.SandboxExec
+	s.cfg.SandboxExec = filepath.Join(t.TempDir(), "missing-sandbox-exec")
+	_, err = s.Launch(ctx, Spec{Name: "refexec-01", Store: "w", Argv: []string{"sleep", "60"}})
+	s.cfg.SandboxExec = real
+	if err == nil {
+		t.Fatal("Launch with a missing sandbox-exec succeeded")
+	}
+	rec, err := readPIDRecord(s.pidFile("refexec-01"))
+	if err != nil || rec.PID != live.PID() {
+		t.Fatalf("the live compartment's record after a failed start: %+v, %v (want pid %d)", rec, err, live.PID())
+	}
+	if err := s.RemoveStore(ctx, "w", false); !errors.Is(err, ErrStoreInUse) {
+		t.Fatalf("RemoveStore after a failed start = %v, want ErrStoreInUse", err)
+	}
+	if err := s.Reap(ctx, "refexec-"); err != nil {
+		t.Fatal(err)
+	}
+	waitGone(t, live.PID(), 3*time.Second)
+	if _, err := os.Stat(s.pidFile("refexec-01")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record after Reap: %v", err)
+	}
+}
+
+// The verdict on the probe's outside write: only a real denial (a non-zero
+// exit that is not sandbox-exec's own, and no file) counts as enforcement.
+func TestSeatbeltProbeDenialVerdict(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "out")
+	for code, wantErr := range map[int]string{0: "did not deny", 65: "did not run", 71: "did not run", -1: "did not run", 1: ""} {
+		err := denialVerdict(code, []byte("Operation not permitted"), target)
+		switch {
+		case wantErr == "" && err != nil:
+			t.Errorf("exit %d: %v, want a denial", code, err)
+		case wantErr != "" && (err == nil || !strings.Contains(err.Error(), wantErr)):
+			t.Errorf("exit %d: %v, want an error containing %q", code, err, wantErr)
+		}
+	}
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := denialVerdict(1, nil, target); err == nil || !strings.Contains(err.Error(), "exists") {
+		t.Fatalf("a denial with the file present = %v", err)
+	}
+}
+
 // Launch never creates the store: the caller provisions it.
 func TestSeatbeltLaunchRequiresAnExistingStore(t *testing.T) {
 	s := newTestSeatbelt(t, nil)

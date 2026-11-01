@@ -19,28 +19,34 @@ func processStart(pid int) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	return startMicro(kp), nil
+}
+
+// startMicro is a kernel process record's start time as unix micro.
+func startMicro(kp *unix.KinfoProc) int64 {
 	tv := kp.Proc.P_starttime
-	return tv.Sec*1_000_000 + int64(tv.Usec), nil
+	return tv.Sec*1_000_000 + int64(tv.Usec)
 }
 
 // descendants lists every live process that descends from pid, transitively,
-// by parent pid. A descendant whose parent has already exited has been
-// reparented to launchd and is not found: the walk is best-effort by
-// construction, which is the tier's stated teardown limit.
-func descendants(pid int) []int {
+// by parent pid, each with the start time the snapshot saw. A descendant
+// whose parent has already exited has been reparented to launchd and is not
+// found: the walk is best-effort by construction, which is the tier's stated
+// teardown limit.
+func descendants(pid int) []procRef {
 	all, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
 		return nil
 	}
 	in := map[int]bool{pid: true}
-	var out []int
+	var out []procRef
 	for changed := true; changed; {
 		changed = false
-		for _, kp := range all {
-			child, parent := int(kp.Proc.P_pid), int(kp.Eproc.Ppid)
+		for i := range all {
+			child, parent := int(all[i].Proc.P_pid), int(all[i].Eproc.Ppid)
 			if child > 1 && in[parent] && !in[child] {
 				in[child] = true
-				out = append(out, child)
+				out = append(out, procRef{pid: child, start: startMicro(&all[i])})
 				changed = true
 			}
 		}
@@ -52,11 +58,13 @@ func descendants(pid int) []int {
 // (Launch starts every compartment with Setsid, so pid is its own group id)
 // and then every descendant the walk can still see. The descendants are
 // listed BEFORE the group is signalled, because killing a parent reparents its
-// children to launchd and would hide them from the walk. Every signal is
-// best-effort. A pid of 1 or lower is refused outright: kill(-1) would signal
-// every process the user owns and kill(0) the caller's own group — the PID
-// record reader already rejects such values, and this guard stands on its own
-// so no caller can reach them.
+// children to launchd and would hide them from the walk; each one is then
+// signalled only while the kernel still reports the start time the snapshot
+// saw, so a descendant that exited in between and whose pid was reallocated is
+// skipped. Every signal is best-effort. A pid of 1 or lower is refused
+// outright: kill(-1) would signal every process the user owns and kill(0) the
+// caller's own group — the PID record reader already rejects such values, and
+// this guard stands on its own so no caller can reach them.
 func killSession(pid int) {
 	if pid <= 1 {
 		return
@@ -64,8 +72,11 @@ func killSession(pid int) {
 	desc := descendants(pid)
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
 	for _, d := range desc {
-		if d > 1 {
-			_ = syscall.Kill(d, syscall.SIGKILL)
+		if d.pid <= 1 {
+			continue
+		}
+		if start, err := processStart(d.pid); err == nil && start == d.start {
+			_ = syscall.Kill(d.pid, syscall.SIGKILL)
 		}
 	}
 }
