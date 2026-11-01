@@ -3,11 +3,33 @@ package confiner
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
+
+// hardLinkUnsupported names a filesystem-without-hard-links failure so a launch
+// fails clearly; a taken name (fs.ErrExist) is the exclusive-claim refusal, not
+// a missing-hard-links error, and any other errno leaves the launch's own error.
+func TestHardLinkUnsupportedClassifiesErrors(t *testing.T) {
+	for _, no := range []error{syscall.EPERM, syscall.EOPNOTSUPP, syscall.ENOTSUP, syscall.EXDEV} {
+		if !hardLinkUnsupported(fmt.Errorf("link: %w", no)) {
+			t.Errorf("%v: not classified as no-hard-links", no)
+		}
+	}
+	for name, err := range map[string]error{
+		"taken name": fs.ErrExist,
+		"not exist":  fs.ErrNotExist,
+		"plain":      errors.New("io"),
+	} {
+		if hardLinkUnsupported(err) {
+			t.Errorf("%s (%v): classified as no-hard-links", name, err)
+		}
+	}
+}
 
 func TestPIDRecordRoundTripAndExclusive(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "refexec-01.pid")

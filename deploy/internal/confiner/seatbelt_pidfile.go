@@ -4,9 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 )
+
+// errNoHardLinks reports that the pid dir's filesystem cannot publish a record.
+// writePIDRecord links a complete temporary into place so a reader never finds
+// a partial one, and that needs hard-link support; a filesystem without it
+// fails the link clearly here rather than leaving records half-written.
+var errNoHardLinks = errors.New("confiner: the pid-dir filesystem does not support hard links, which publishing a compartment's record needs")
 
 // pidRecord is what the Seatbelt backend keeps per compartment, so a later
 // process (RemoveStore, Reap) can tell the SAME process from a reused pid: the
@@ -76,9 +84,28 @@ func writePIDRecord(path string, r pidRecord) error {
 	}
 	defer func() { _ = os.Remove(tmp) }()
 	if err := os.Link(tmp, path); err != nil {
+		if hardLinkUnsupported(err) {
+			return fmt.Errorf("confiner: create pid record: %w (%v)", errNoHardLinks, err)
+		}
 		return fmt.Errorf("confiner: create pid record: %w", err)
 	}
 	return nil
+}
+
+// hardLinkUnsupported reports whether a link(2) error is the filesystem saying
+// it has no hard links. A taken name (fs.ErrExist) is NOT such a case — it is
+// writePIDRecord's exclusive-claim refusal, which the caller recognises — so it
+// is excluded first. The errno set mirrors control.linkSegment's.
+func hardLinkUnsupported(err error) bool {
+	if errors.Is(err, fs.ErrExist) {
+		return false
+	}
+	for _, no := range []error{syscall.EPERM, syscall.EOPNOTSUPP, syscall.ENOTSUP, syscall.EXDEV} {
+		if errors.Is(err, no) {
+			return true
+		}
+	}
+	return false
 }
 
 // replacePIDRecord atomically replaces the record at path, which the caller

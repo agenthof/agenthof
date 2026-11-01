@@ -60,7 +60,10 @@ A key the selected backend does not consume is refused rather than ignored
 (a podman config with `store_root`, a seatbelt config with `image`), and so
 is the retired `workspace.volume`. `store_root` and `pid_dir` must be
 absolute, and `store_root` short enough that a Unix socket path beneath it
-fits the platform's limit. On a host with no backend (anything but Linux and
+fits the platform's limit. `pid_dir` must be on a filesystem that supports
+hard links, which refexec uses to publish a compartment's record atomically;
+on one that does not, a launch fails clearly rather than writing a record a
+concurrent sweep could read half-written. On a host with no backend (anything but Linux and
 macOS) there is no default and refexec refuses to start.
 
 `refexec -config refexec.yaml -check` validates the file and prints the
