@@ -3,10 +3,13 @@
 package confiner
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // ownerStart is the start time of pid in clock ticks since boot, from
@@ -45,6 +48,16 @@ func ownerStart(pid int) (int64, error) {
 		return 0, fmt.Errorf("confiner: /proc/%d/stat: start time: %w", pid, err)
 	}
 	return ticks, nil
+}
+
+// ownerGone reports whether an ownerStart error means the process is
+// definitely gone: it has exited, /proc/<pid> does not exist, or the kernel
+// refused the read with ESRCH because the process went away between the open
+// and the read. Every other error — a permission denial, an I/O error, a stat
+// line that does not parse — leaves the owner's liveness undeterminable (see
+// ownerRef.alive).
+func ownerGone(err error) bool {
+	return errors.Is(err, errOwnerExited) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH)
 }
 
 // bootID is the kernel's id for this boot. Ticks since boot only name a

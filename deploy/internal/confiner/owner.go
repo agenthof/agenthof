@@ -101,12 +101,24 @@ func selfOwner() (ownerRef, error) {
 // A pid of 1 or lower, and an owner from another boot, are never alive. The
 // pid is checked BEFORE the kernel is asked, because pid 0 names a kernel
 // process whose start time a stale or unstamped record must never match.
+//
+// An owner whose liveness cannot be determined is reported ALIVE. The two
+// mistakes are not symmetric: taking a live owner for dead reaps a sibling
+// instance's compartment, ending its command mid-flight and handing its
+// runtime a killed exit to attest as the command's own; taking a dead owner
+// for alive leaves a leftover in place for the next sweep to remove. So only
+// an error that definitively says the process is gone (ownerGone) counts as
+// dead; any other — a permission denial, an I/O error, a kernel record that
+// does not parse — leaves the compartment where it is.
 func (o ownerRef) alive(boot string) bool {
 	if o.pid <= 1 || o.boot != boot {
 		return false
 	}
 	start, err := ownerStart(o.pid)
-	return err == nil && start == o.start
+	if err == nil {
+		return start == o.start
+	}
+	return !ownerGone(err)
 }
 
 // reapableBy reports whether a compartment stamped with owner o is a

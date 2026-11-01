@@ -2,7 +2,11 @@
 
 package confiner
 
-import "golang.org/x/sys/unix"
+import (
+	"errors"
+
+	"golang.org/x/sys/unix"
+)
 
 // szomb is the kernel's P_stat for a process that has exited but has not been
 // reaped by its parent (sys/proc.h SZOMB). The kernel still has a record for
@@ -24,6 +28,17 @@ func ownerStart(pid int) (int64, error) {
 		return 0, errOwnerExited
 	}
 	return startMicro(kp), nil
+}
+
+// ownerGone reports whether an ownerStart error means the process is
+// definitely gone: it has exited, or the kernel has no record for the pid.
+// unix.SysctlKinfoProc reports the latter as EIO — its own size check, when
+// the kernel answers kern.proc.pid with no record rather than failing the
+// call — so EIO here is "no such process", not a device error; ESRCH is the
+// kernel's own name for the same condition. Every other error leaves the
+// owner's liveness undeterminable (see ownerRef.alive).
+func ownerGone(err error) bool {
+	return errors.Is(err, errOwnerExited) || errors.Is(err, unix.EIO) || errors.Is(err, unix.ESRCH)
 }
 
 // bootID is "" on macOS: a start time there counts from the Unix epoch, so
