@@ -3,9 +3,9 @@
 # compartment. No network. No credential environment. An ephemeral tmpfs at
 # /work — or, with REFBOX_WORKSPACE_VOLUME set, a named podman volume there,
 # the workspace a first-hand exec runtime (deploy/refexec) shares with this
-# compartment for the recipe's lifetime. Agenthof is reached only through the
-# bind-mounted socket directory. Requires podman and a Linux host. The CI job
-# runs this script.
+# compartment for the recipe's lifetime. Either way /work is the agent's
+# working directory. Agenthof is reached only through the bind-mounted socket
+# directory. Requires podman and a Linux host. The CI job runs this script.
 # REFBOX_ARGS appends agent arguments after -socket (see below).
 set -euo pipefail
 
@@ -36,6 +36,11 @@ rm -f "$SOCK_DIR"/gw-*.sock "$SOCK_DIR/$SOCKET"
 # /work is an ephemeral tmpfs unless REFBOX_WORKSPACE_VOLUME names a podman
 # volume, which is then mounted there instead (created by the refexec
 # launcher; removed when the recipe is torn down). Unset, nothing changes.
+# The image has no /work of its own: a fresh volume mounted on a path absent
+# from the image is chowned to the container user (the host user, below), so
+# the agent can write it. An image /work would hand the volume its ownership
+# instead. -w makes the mount the agent's working directory, so the agent
+# finds its workspace at "." however it is run.
 if [ -n "${REFBOX_WORKSPACE_VOLUME:-}" ]; then
 	workspace=(-v "$REFBOX_WORKSPACE_VOLUME:/work")
 else
@@ -51,6 +56,7 @@ common=(
 	--network none
 	--read-only
 	"${workspace[@]}"
+	-w /work
 	--cap-drop=ALL
 	--security-opt no-new-privileges
 	--userns=keep-id

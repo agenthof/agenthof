@@ -291,9 +291,9 @@ recipe for that obligation, for a single agent:
   `/work`; it is not part of the agent;
 - `deploy/refbox/refbox-run.sh` starts it with rootless podman: `--network
   none` (no interface but the compartment's own loopback), a read-only root,
-  a tmpfs at `/work`, every Linux capability dropped, a memory / CPU / pid /
-  wall-clock cap, and one bind mount — the socket directory, at the same path
-  inside and out;
+  a tmpfs at `/work` which is also the agent's working directory, every Linux
+  capability dropped, a memory / CPU / pid / wall-clock cap, and one bind
+  mount — the socket directory, at the same path inside and out;
 - Agenthof, on the host, listens in that directory when
   `refbox_socket_dir` is set, and dials the agent's `unix://` endpoint. The
   agent calls models, tools, and exec only through that gateway socket. The

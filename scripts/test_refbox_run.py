@@ -52,6 +52,20 @@ class RefboxRunTest(unittest.TestCase):
     def test_an_empty_knob_is_the_default(self):
         self.assertEqual(self.run_recipe(REFBOX_ARGS=""), self.run_recipe())
 
+    def test_the_tmpfs_workspace_is_the_working_directory(self):
+        self.env.pop("REFBOX_WORKSPACE_VOLUME", None)
+        argv = self.run_recipe()
+        self.assertEqual(argv[argv.index("--tmpfs") + 1], "/work")
+        self.assertEqual(argv[argv.index("-w") + 1], "/work")
+        self.assertEqual([a for a in argv if a.endswith(":/work")], [], "no volume is mounted at /work without the knob")
+
+    def test_the_volume_workspace_is_the_working_directory(self):
+        argv = self.run_recipe(REFBOX_WORKSPACE_VOLUME="agenthof-work")
+        self.assertIn("agenthof-work:/work", argv)
+        self.assertEqual(argv[argv.index("agenthof-work:/work") - 1], "-v")
+        self.assertEqual(argv[argv.index("-w") + 1], "/work")
+        self.assertNotIn("--tmpfs", argv)
+
 
 if __name__ == "__main__":
     unittest.main()
