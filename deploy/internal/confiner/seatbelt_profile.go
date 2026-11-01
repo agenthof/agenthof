@@ -3,6 +3,7 @@ package confiner
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -23,6 +24,14 @@ type profileInput struct {
 	// store root, the PID dir, the spawn root (if any), the operator's
 	// deny_read.
 	DenyRead []string
+	// Traverse are the entries of DenyRead that a compartment must resolve a
+	// path THROUGH: the store root (over the stores and the scratch dirs) and
+	// the spawn root (over a child's socket dir). Each gets metadata on the
+	// root directory itself, as a literal, so its subtree stays denied. An
+	// entry that is not in DenyRead produces nothing: the field can only
+	// modify a deny, never grant on its own. The PID dir and the home
+	// credential stores are never traversed and are not listed.
+	Traverse []string
 }
 
 // sbplBaseline is the part of every profile that no input changes. Reads are
@@ -54,7 +63,8 @@ const sbplDevAllow = `(allow file-write* (literal "/dev/null") (literal "/dev/ze
 
 // sbplProfile renders one compartment's profile. The order is the security
 // contract: in SBPL a later, more specific rule wins, so the read denies come
-// first and the compartment's own allows come after them. Each own allow
+// first, then the metadata re-grant on the roots the compartment traverses,
+// then the compartment's own allows. Each own allow
 // (the WORK store, every RW Path, the scratch dir) grants read AND write:
 // file-write* alone grants no read, and these subtrees sit under roots the
 // denies just closed, so a write-only allow would leave the compartment
@@ -72,6 +82,22 @@ func sbplProfile(in profileInput) string {
 	}
 	for _, p := range in.DenyRead {
 		line(`(deny file-read* (subpath ` + sbplQuote(p) + `))`)
+	}
+	// A compartment works INSIDE a denied root: its store and scratch dir
+	// under the store root, its socket dir under the spawn root. Resolving a
+	// path through the root needs metadata (stat, search) on the root
+	// directory itself, which the subpath deny took away along with
+	// everything under it: a shell's cd into the store and git init, which
+	// stats every ancestor of its work tree, fail with "Operation not
+	// permitted" on the root. The literal re-grants metadata on the root
+	// directory ONLY. Its contents stay denied: a sibling store's files and
+	// metadata and a listing of the root are still refused, and the allows
+	// below re-open the compartment's own subtrees. The lines sit after every
+	// deny so no later deny shadows them.
+	for _, p := range in.Traverse {
+		if slices.Contains(in.DenyRead, p) {
+			line(`(allow file-read-metadata (literal ` + sbplQuote(p) + `))`)
+		}
 	}
 	line(`(allow file-read* file-write* (subpath (param "WORK")))`)
 	for _, p := range in.Paths {

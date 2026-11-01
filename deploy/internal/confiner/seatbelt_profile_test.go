@@ -12,7 +12,8 @@ import (
 func TestSBPLProfileGolden(t *testing.T) {
 	got := sbplProfile(profileInput{Scratch: "/private/var/s/.scratch/refexec-01",
 		Paths:    []Path{{Path: "/private/var/sp/r-1", RW: true}, {Path: "/opt/ro", RW: false}},
-		DenyRead: append(fixedHomeDenies("/home/op"), "/private/var/s", "/private/var/p", "/private/var/sp", "/home/op/ledger")})
+		DenyRead: append(fixedHomeDenies("/home/op"), "/private/var/s", "/private/var/p", "/private/var/sp", "/home/op/ledger"),
+		Traverse: []string{"/private/var/s", "/private/var/sp"}})
 	want := `(version 1)
 (deny default)
 (allow process-fork)
@@ -34,6 +35,8 @@ func TestSBPLProfileGolden(t *testing.T) {
 (deny file-read* (subpath "/private/var/p"))
 (deny file-read* (subpath "/private/var/sp"))
 (deny file-read* (subpath "/home/op/ledger"))
+(allow file-read-metadata (literal "/private/var/s"))
+(allow file-read-metadata (literal "/private/var/sp"))
 (allow file-read* file-write* (subpath (param "WORK")))
 (allow file-read* file-write* (subpath "/private/var/sp/r-1"))
 (allow file-read* (subpath "/opt/ro"))
@@ -51,7 +54,8 @@ func TestSBPLProfileGolden(t *testing.T) {
 func TestSBPLProfileGoldenSharedHostScratch(t *testing.T) {
 	got := sbplProfile(profileInput{Scratch: "/private/var/s/.scratch/refexec-01", SharedHostScratch: true,
 		Paths:    []Path{{Path: "/private/var/sp/r-1", RW: true}},
-		DenyRead: []string{"/private/var/s", "/private/var/p"}})
+		DenyRead: []string{"/private/var/s", "/private/var/p"},
+		Traverse: []string{"/private/var/s"}})
 	want := `(version 1)
 (deny default)
 (allow process-fork)
@@ -66,6 +70,7 @@ func TestSBPLProfileGoldenSharedHostScratch(t *testing.T) {
 (deny network*)
 (deny file-read* (subpath "/private/var/s"))
 (deny file-read* (subpath "/private/var/p"))
+(allow file-read-metadata (literal "/private/var/s"))
 (allow file-read* file-write* (subpath (param "WORK")))
 (allow file-read* file-write* (subpath "/private/var/sp/r-1"))
 (allow file-read* file-write* (subpath "/private/var/s/.scratch/refexec-01"))
@@ -144,10 +149,12 @@ func checkNetworkAllows(t *testing.T, lines []string, rw []string) {
 
 // checkForbidden pins the constructs no input may ever produce: a broad /dev
 // write (the operator's TTYs live there), signalling arbitrary host
-// processes, and any network allow beyond the per-RW-Path unix-socket rule.
+// processes, any network allow beyond the per-RW-Path unix-socket rule, and
+// a metadata re-grant on a SUBTREE (only the literal root directory may get
+// one).
 func checkForbidden(t *testing.T, profile string) {
 	t.Helper()
-	for _, bad := range []string{`(subpath "/dev")`, `(target others)`, `(allow network*)`, `(allow network-outbound)`, `(allow network-bind)`, `(allow network-inbound`, `(allow file-write*)`, `(allow default)`} {
+	for _, bad := range []string{`(subpath "/dev")`, `(target others)`, `(allow network*)`, `(allow network-outbound)`, `(allow network-bind)`, `(allow network-inbound`, `(allow file-write*)`, `(allow default)`, `(allow file-read-metadata (subpath`, `(allow file-read-metadata)`} {
 		if strings.Contains(profile, bad) {
 			t.Errorf("profile contains forbidden %q:\n%s", bad, profile)
 		}
@@ -241,6 +248,49 @@ func TestSBPLProfileInvariants(t *testing.T) {
 			if mustIndex(t, lines, allow) <= work {
 				t.Errorf("%q must follow the WORK allow", allow)
 			}
+		}
+	})
+
+	t.Run("traversable roots get a literal metadata allow after every deny and before WORK", func(t *testing.T) {
+		p := sbplProfile(profileInput{Paths: []Path{{Path: "/x", RW: true}}, DenyRead: append(denies, "/private/var/sp", "/home/op/ledger"), Traverse: []string{"/private/var/s", "/private/var/sp"}})
+		checkForbidden(t, p)
+		lines := profileLines(t, p)
+		work := mustIndex(t, lines, workAllow)
+		storeMeta := mustIndex(t, lines, `(allow file-read-metadata (literal "/private/var/s"))`)
+		spawnMeta := mustIndex(t, lines, `(allow file-read-metadata (literal "/private/var/sp"))`)
+		// Exactly one metadata line per traversable root, in Traverse order,
+		// directly before the WORK allow, so no later deny can shadow them.
+		if storeMeta != work-2 || spawnMeta != work-1 {
+			t.Fatalf("metadata allows at %d and %d, WORK at %d:\n%s", storeMeta, spawnMeta, work, p)
+		}
+		for i, l := range lines {
+			if strings.HasPrefix(l, "(deny file-read*") && i > storeMeta {
+				t.Errorf("deny %q at %d comes after a metadata allow at %d", l, i, storeMeta)
+			}
+		}
+		if n := strings.Count(p, "file-read-metadata"); n != 2 {
+			t.Fatalf("file-read-metadata appears %d times, want 2:\n%s", n, p)
+		}
+		// The PID dir and the home credential stores are denied without one.
+		for _, never := range []string{"/private/var/p", "/home/op/.ssh", "/home/op/ledger"} {
+			if strings.Contains(p, `(allow file-read-metadata (literal "`+never+`"))`) {
+				t.Errorf("%s got a metadata allow:\n%s", never, p)
+			}
+		}
+	})
+
+	t.Run("a metadata allow is only ever a modifier on a deny", func(t *testing.T) {
+		// A Traverse entry that no deny names grants nothing: the field can
+		// re-open the directory entry of a denied root, never widen on its own.
+		p := sbplProfile(profileInput{DenyRead: denies, Traverse: []string{"/elsewhere"}})
+		checkForbidden(t, p)
+		if strings.Contains(p, "file-read-metadata") {
+			t.Fatalf("a Traverse entry outside DenyRead produced a line:\n%s", p)
+		}
+		// No Traverse, no metadata line at all.
+		p = sbplProfile(profileInput{DenyRead: denies})
+		if strings.Contains(p, "file-read-metadata") {
+			t.Fatalf("no Traverse, yet a metadata line:\n%s", p)
 		}
 	})
 

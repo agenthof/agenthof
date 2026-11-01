@@ -76,6 +76,9 @@ type Seatbelt struct {
 	// denyRead are the read-denied subtrees in profile order, each resolved
 	// and sbplSafe.
 	denyRead []string
+	// traverse are the denied roots a compartment resolves paths through (the
+	// store root, the spawn root when set), re-opened for metadata only.
+	traverse []string
 	// compiled holds the SHA-256 of every profile text this backend's
 	// sandbox-exec has accepted in a dry-run.
 	compiled sync.Map
@@ -125,11 +128,16 @@ func NewSeatbelt(c SeatbeltConfig) (*Seatbelt, error) {
 		deny = append(deny, r)
 	}
 	deny = append(deny, c.StoreRoot, c.PIDDir)
+	// The roots the compartment must resolve a path through: its store sits
+	// under the store root and refspawn's socket dir under the spawn root.
+	// The PID dir is never traversed.
+	traverse := []string{c.StoreRoot}
 	if c.SpawnRoot != "" {
 		if c.SpawnRoot, err = resolveProfilePath("spawn_root", c.SpawnRoot); err != nil {
 			return nil, err
 		}
 		deny = append(deny, c.SpawnRoot)
+		traverse = append(traverse, c.SpawnRoot)
 	}
 	resolvedDeny := make([]string, 0, len(c.DenyRead))
 	for _, p := range c.DenyRead {
@@ -143,7 +151,7 @@ func NewSeatbelt(c SeatbeltConfig) (*Seatbelt, error) {
 	deny = append(deny, resolvedDeny...)
 
 	c.Logger.Warn("limits not enforced on this tier", "tier", TierSeatbelt)
-	return &Seatbelt{cfg: c, denyRead: deny}, nil
+	return &Seatbelt{cfg: c, denyRead: deny, traverse: traverse}, nil
 }
 
 // processHome is the backend process's own home: HOME, else its user record.
@@ -236,7 +244,7 @@ func (s *Seatbelt) ValidateProgram(program string) error {
 
 // profile renders one compartment's profile over the backend's deny list.
 func (s *Seatbelt) profile(scratch string, paths []Path) string {
-	return sbplProfile(profileInput{Scratch: scratch, SharedHostScratch: s.cfg.SharedHostScratch, Paths: paths, DenyRead: s.denyRead})
+	return sbplProfile(profileInput{Scratch: scratch, SharedHostScratch: s.cfg.SharedHostScratch, Paths: paths, DenyRead: s.denyRead, Traverse: s.traverse})
 }
 
 // sandboxArgs is sandbox-exec's argument list for running program under
