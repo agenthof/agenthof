@@ -139,7 +139,7 @@ func (f *fakeSupervisor) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
-	line, _ := json.Marshal(map[string]any{"child_dir": childDir, "agent_sockets": sockets, "exec_socket": execSock})
+	line, _ := json.Marshal(map[string]any{"child_dir": childDir, "agent_sockets": sockets, "exec_socket": execSock, "tier": "podman"})
 	_, _ = w.Write(append(line, '\n'))
 	w.(http.Flusher).Flush()
 	<-r.Context().Done() // the gateway released the lease
@@ -193,7 +193,7 @@ func fakeRefexec(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"exit_code": 0, "output": "hi\n", "output_sha": hex.EncodeToString(sum[:]), "truncated": false, "output_bytes": 3,
 		"runtime_attestation": map[string]any{"runtime": "refexec", "session": "refexec-0a1b2c3d", "command": req.Command,
-			"pid": 4242, "spawn": 1, "credential_env": "", "env_names": []string{}, "materialization": ""},
+			"pid": 4242, "spawn": 1, "credential_env": "", "env_names": []string{}, "materialization": "", "confiner": "podman"},
 	})
 }
 
@@ -359,7 +359,7 @@ func TestDistinctStepAgents(t *testing.T) {
 
 func TestCheckPlacement(t *testing.T) {
 	lease := func(childDir, execSock string) *refspawn.Lease {
-		return refspawn.NewLease(childDir, map[string]string{"a": childDir + "/a.sock"}, execSock, io.NopCloser(strings.NewReader("")))
+		return refspawn.NewLease(childDir, map[string]string{"a": childDir + "/a.sock"}, execSock, "", nil, io.NopCloser(strings.NewReader("")))
 	}
 	for _, c := range []struct {
 		name, rootDir, childDir, execSock string
@@ -461,7 +461,7 @@ func TestSpawnPlacementViolationIsRefused(t *testing.T) {
 	closed := make(chan struct{})
 	stub := &stubProvisioner{lease: refspawn.NewLease(childDir, map[string]string{"child": filepath.Join(childDir, "child.sock")},
 		filepath.Join(childDir, "refexec.sock"), // INSIDE the mounted dir: an agent could dial it directly
-		closeNotifier{ReadCloser: pr, closed: closed})}
+		"", nil, closeNotifier{ReadCloser: pr, closed: closed})}
 	deps := buildDeps(t, spawnTestConfig(), t.TempDir(), stub)
 	res, err := deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
 	if err != nil || res.Status != "refused" || res.Reason != reasonCompartmentUnavailable || res.ChildRunID != "" || res.Provisioned {
@@ -509,7 +509,7 @@ func TestSpawnLeaseEndCancelsChild(t *testing.T) {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	pr, pw := io.Pipe()
-	stub := &stubProvisioner{lease: refspawn.NewLease(childDir, map[string]string{"child": filepath.Join(childDir, "child.sock")}, filepath.Join(execDir, "refexec.sock"), pr)}
+	stub := &stubProvisioner{lease: refspawn.NewLease(childDir, map[string]string{"child": filepath.Join(childDir, "child.sock")}, filepath.Join(execDir, "refexec.sock"), "", nil, pr)}
 	cfg := spawnTestConfig()
 	cfg.Gateway.StepTimeout = 2 * time.Minute // far longer than this test may take
 	deps := buildDeps(t, cfg, t.TempDir(), stub)
@@ -574,6 +574,35 @@ func TestSpawnLedgerFailureIsAnError(t *testing.T) {
 	if err == nil {
 		t.Fatal("a child whose ledger cannot be opened is an internal failure, not a quiet outcome")
 	}
+}
+
+// The tier the supervisor named for the child's set (the fake answers
+// "podman") comes back on every outcome of a provisioned child, so the
+// parent's spawn event can record it: a child that ran, one the registry
+// refused, and one whose ledger could not be written.
+func TestSpawnRecordsTheLeaseTierOnTheParentEvent(t *testing.T) {
+	t.Run("succeeded", func(t *testing.T) {
+		deps, _ := liveDeps(t, spawnTestConfig(), t.TempDir())
+		res, err := deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
+		if err != nil || res.Status != "succeeded" || res.ChildConfiner != "podman" {
+			t.Fatalf("res=%+v err=%v, want a succeeded child carrying the lease's tier", res, err)
+		}
+	})
+	t.Run("policy-refused", func(t *testing.T) {
+		deps, _ := liveDeps(t, spawnTestConfig(), t.TempDir())
+		res, err := deps.Spawn(context.Background(), "locked", "locked-wf", "x", parentBinding())
+		if err != nil || res.Status != "refused" || !res.Provisioned || res.ChildConfiner != "podman" {
+			t.Fatalf("res=%+v err=%v, want a provisioned refusal carrying the lease's tier", res, err)
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		deps, _ := liveDeps(t, spawnTestConfig(), t.TempDir())
+		deps.logDir = "/dev/null/not-a-dir" // no ledger can be opened here
+		res, err := deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
+		if err == nil || !res.Provisioned || res.ChildConfiner != "podman" {
+			t.Fatalf("res=%+v err=%v, want an internal failure that still carries the lease's tier", res, err)
+		}
+	})
 }
 
 func TestSpawnProvisionsDistinctStepAgentsAndReleases(t *testing.T) {
@@ -697,6 +726,9 @@ func TestRunSpawnsGovernedChild(t *testing.T) {
 	if sp.Status != "succeeded" || sp.ChildRunID == "" || sp.ChildRole != "worker" || sp.ChildWorkflow != "child-wf" || sp.Depth != 1 || sp.OutputSHA == "" {
 		t.Fatalf("spawn event = %+v", sp)
 	}
+	if sp.ChildConfiner != "podman" {
+		t.Fatalf("spawn event child_confiner = %q, want the tier the supervisor named for the child's set", sp.ChildConfiner)
+	}
 	child, _, err := engine.ReadLog(logDir, sp.ChildRunID)
 	if err != nil {
 		t.Fatal(err)
@@ -777,7 +809,7 @@ func TestRunNestedSpawnPlacementChecksTheSpawningChildsSocketDir(t *testing.T) {
 	}
 	answer := refspawn.NewLease(filepath.Join(filepath.Dir(childSocketDir), "r-grandchild"),
 		map[string]string{"child": filepath.Join(childSocketDir, "child.sock")},
-		filepath.Join(nestedExecDir, "refexec.sock"), io.NopCloser(strings.NewReader("")))
+		filepath.Join(nestedExecDir, "refexec.sock"), "", nil, io.NopCloser(strings.NewReader("")))
 	if err := checkPlacement(rootSocketDir(t, root), answer); err != nil {
 		t.Fatalf("against the root's dir this answer passes (%v); the refusal above can only come from the child's own dir", err)
 	}

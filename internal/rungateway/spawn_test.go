@@ -507,6 +507,39 @@ func TestSpawnInternalFailureRecordedWithFixedReason(t *testing.T) {
 	}
 }
 
+func TestSpawnEventCarriesChildConfiner(t *testing.T) {
+	// The tier the child's runtime applied rides on the parent's spawn event
+	// whether the child ran to a result or the Spawner failed internally: the
+	// child's compartments were provisioned either way.
+	cases := []struct {
+		name   string
+		result SpawnResult
+		err    error
+		status string
+		code   int
+	}{
+		{"succeeded", SpawnResult{ChildRunID: "r-child", Status: "succeeded", Provisioned: true, ChildConfiner: "seatbelt", ChildConfinerOpts: []string{"shared-host-scratch"}}, nil, "succeeded", http.StatusOK},
+		{"failed with error", SpawnResult{ChildRunID: "r-child", Status: "failed", Provisioned: true, ChildConfiner: "seatbelt", ChildConfinerOpts: []string{"shared-host-scratch"}}, errors.New("ledger write failed"), "failed", http.StatusBadGateway},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sp := &stubSpawner{result: c.result, err: c.err}
+			rec := &eventRecorder{}
+			base, token, _ := startSpawnGateway(t, context.Background(), spawnPolicy(3, 2, 4), testBinding(), spawnAgent(workerChild), sp, rec)
+			if code, _ := postSpawn(t, context.Background(), base, token, spawnBody("worker", "child-wf", "x")); code != c.code {
+				t.Fatalf("code = %d, want %d", code, c.code)
+			}
+			ev := spawnEvents(rec)
+			if len(ev) != 1 || ev[0].Status != c.status {
+				t.Fatalf("events = %+v", ev)
+			}
+			if ev[0].ChildConfiner != "seatbelt" || !reflect.DeepEqual(ev[0].ChildConfinerOpts, []string{"shared-host-scratch"}) {
+				t.Fatalf("child_confiner = %q opts = %v, want seatbelt and [shared-host-scratch]", ev[0].ChildConfiner, ev[0].ChildConfinerOpts)
+			}
+		})
+	}
+}
+
 func TestSpawnCapsAgentSuppliedNames(t *testing.T) {
 	sp := &stubSpawner{}
 	rec := &eventRecorder{}

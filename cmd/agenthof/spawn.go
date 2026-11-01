@@ -241,7 +241,7 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 		// (unreachable today; impossible rather than merely unreachable).
 		opts := d.options(&parent)
 		opts.NewGateway = nil
-		return d.runChild(ctx, childRole, childWorkflow, input, parent, d.executor(), opts, false)
+		return d.runChild(ctx, childRole, childWorkflow, input, parent, d.executor(), opts, false, "", nil)
 	}
 	if d.sup == nil {
 		logger.Warn("spawn refused", "reason", "no compartment supervisor configured")
@@ -277,12 +277,15 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 	opts := d.options(&parent)
 	opts.RunID = childID
 	opts.NewGateway = childGateway{deps: d, socketDir: lease.ChildDir, execURL: config.UnixScheme + lease.ExecSocket}.newGateway
-	return d.runChild(childCtx, childRole, childWorkflow, input, parent, exec, opts, true)
+	return d.runChild(childCtx, childRole, childWorkflow, input, parent, exec, opts, true, lease.Tier, lease.TierOpts)
 }
 
 // runChild runs the engine for a child and maps its outcome onto a
-// SpawnResult. provisioned is what the door counts.
-func (d *runDeps) runChild(ctx context.Context, role, workflow, input string, parent engine.Binding, exec engine.StepExecutor, opts engine.Options, provisioned bool) (rungateway.SpawnResult, error) {
+// SpawnResult. provisioned is what the door counts; tier and tierOpts are the
+// isolation tier the supervisor reported for the child's set (empty when the
+// child was never provisioned), carried onto every outcome so the parent's
+// spawn event records it.
+func (d *runDeps) runChild(ctx context.Context, role, workflow, input string, parent engine.Binding, exec engine.StepExecutor, opts engine.Options, provisioned bool, tier string, tierOpts []string) (rungateway.SpawnResult, error) {
 	res, err := engine.Run(ctx, d.reg, role, workflow, input, parent.Invoker, exec, opts)
 	if err != nil {
 		if res.Status == "refused" && !errors.Is(err, engine.ErrLedgerWrite) {
@@ -295,13 +298,16 @@ func (d *runDeps) runChild(ctx context.Context, role, workflow, input string, pa
 			// A refusal whose record failed is joined with ErrLedgerWrite and
 			// carries a filesystem path: it takes the error path below, where
 			// the door records its own fixed "spawn did not complete".
-			return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "refused", Reason: reasonChildRefusedByPolicy, Provisioned: provisioned}, nil
+			return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "refused", Reason: reasonChildRefusedByPolicy, Provisioned: provisioned,
+				ChildConfiner: tier, ChildConfinerOpts: tierOpts}, nil
 		}
-		return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "failed", Provisioned: provisioned}, err
+		return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "failed", Provisioned: provisioned,
+			ChildConfiner: tier, ChildConfinerOpts: tierOpts}, err
 	}
 	status := res.Status
 	if status == "cancelled" {
 		status = "failed" // the door's vocabulary: a child torn down with its parent did not succeed
 	}
-	return rungateway.SpawnResult{ChildRunID: res.RunID, Status: status, OutputSHA: res.OutputSHA, OutputPreview: res.OutputPreview, Provisioned: provisioned}, nil
+	return rungateway.SpawnResult{ChildRunID: res.RunID, Status: status, OutputSHA: res.OutputSHA, OutputPreview: res.OutputPreview, Provisioned: provisioned,
+		ChildConfiner: tier, ChildConfinerOpts: tierOpts}, nil
 }

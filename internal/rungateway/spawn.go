@@ -34,13 +34,18 @@ const (
 // refused before provisioning (the pre-run gate), a provision that failed,
 // or an internal failure before provisioning gives its slot back; a
 // provisioned child counts whatever happened next, even a registry refusal.
+// ChildConfiner and ChildConfinerOpts are the isolation tier the child's
+// runtime applied and any loosenings of it, as the supervisor named them
+// ("" when none was reported); they ride on the parent's spawn event.
 type SpawnResult struct {
-	ChildRunID    string
-	Status        string
-	Reason        string
-	OutputSHA     string
-	OutputPreview string
-	Provisioned   bool
+	ChildRunID        string
+	Status            string
+	Reason            string
+	OutputSHA         string
+	OutputPreview     string
+	Provisioned       bool
+	ChildConfiner     string
+	ChildConfinerOpts []string
 }
 
 // Spawner runs one governed child run on the door's behalf and returns when
@@ -177,7 +182,8 @@ func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, age
 			// ledger gets a fixed reason and the log an error class.
 			logger.Error("spawn did not complete", "child_run", res.ChildRunID, "class", errClass(err))
 			appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: "failed", Reason: reasonSpawnIncomplete,
-				ChildRunID: res.ChildRunID, ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth, Binding: bind})
+				ChildRunID: res.ChildRunID, ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth, Binding: bind,
+				ChildConfiner: res.ChildConfiner, ChildConfinerOpts: res.ChildConfinerOpts})
 			http.Error(w, reasonSpawnIncomplete, http.StatusBadGateway)
 			return
 		}
@@ -195,7 +201,8 @@ func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, age
 		logger.Info("spawn finished", "child_run", res.ChildRunID, "status", status)
 		appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: status, Reason: reason,
 			ChildRunID: res.ChildRunID, ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth,
-			OutputSHA: res.OutputSHA, Binding: bind})
+			OutputSHA: res.OutputSHA, Binding: bind,
+			ChildConfiner: res.ChildConfiner, ChildConfinerOpts: res.ChildConfinerOpts})
 		code := http.StatusOK
 		if status == "refused" {
 			code = http.StatusForbidden

@@ -668,7 +668,7 @@ func refexecStub(t *testing.T) string {
 			"truncated": false, "output_bytes": len(output),
 			"runtime_attestation": map[string]any{
 				"runtime": "refexec", "session": "refexec-stub", "command": req.Command,
-				"pid": 4242, "spawn": 1, "credential_env": "", "env_names": []string{}, "materialization": "",
+				"pid": 4242, "spawn": 1, "credential_env": "", "env_names": []string{}, "materialization": "", "confiner": "podman",
 			},
 		})
 	})}

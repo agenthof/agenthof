@@ -9,7 +9,9 @@
 // Contract: POST /provision {"child_run_id", "agents": [...]}. A status
 // other than 200 (sent before anything is flushed) is a refusal. 200 is
 // followed by exactly one JSON line {"child_dir", "agent_sockets",
-// "exec_socket"} once every socket is dialable; the body then stays open
+// "exec_socket", "tier", "tier_opts"} once every socket is dialable ("tier"
+// names the isolation tier the child's runtime applied and "tier_opts" any
+// per-deployment loosenings of it; an older supervisor names neither); the body then stays open
 // for as long as the set lives — its EOF means the set is gone, and the
 // client closing it asks for the teardown.
 package refspawn
@@ -26,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +70,8 @@ type provisionLine struct {
 	ChildDir     string            `json:"child_dir"`
 	AgentSockets map[string]string `json:"agent_sockets"`
 	ExecSocket   string            `json:"exec_socket"`
+	Tier         string            `json:"tier"`
+	TierOpts     []string          `json:"tier_opts,omitempty"`
 }
 
 // Lease is one provisioned set, alive for as long as the held body is
@@ -74,11 +79,17 @@ type provisionLine struct {
 // its own gateway sockets live there; it is mounted into the child's
 // compartments); AgentSockets maps every requested agent to its socket;
 // ExecSocket is the child's own refexec, in a directory that is NOT under
-// ChildDir — the Spawner checks that before use.
+// ChildDir — the Spawner checks that before use. Tier and TierOpts are the
+// isolation tier the supervisor reports for the set and any loosenings of
+// it, as it names them: "" from a supervisor that reports none, and an
+// unfamiliar well-formed name is kept verbatim, never checked against a
+// list.
 type Lease struct {
 	ChildDir     string
 	AgentSockets map[string]string
 	ExecSocket   string
+	Tier         string
+	TierOpts     []string
 
 	body io.Closer
 	done chan struct{}
@@ -87,8 +98,8 @@ type Lease struct {
 
 // NewLease wraps a held body: it drains body until it ends and then closes
 // Done. The Client uses it on the response body; a test uses it on a pipe.
-func NewLease(childDir string, agentSockets map[string]string, execSocket string, body io.ReadCloser) *Lease {
-	l := &Lease{ChildDir: childDir, AgentSockets: agentSockets, ExecSocket: execSocket, body: body, done: make(chan struct{})}
+func NewLease(childDir string, agentSockets map[string]string, execSocket, tier string, tierOpts []string, body io.ReadCloser) *Lease {
+	l := &Lease{ChildDir: childDir, AgentSockets: agentSockets, ExecSocket: execSocket, Tier: tier, TierOpts: tierOpts, body: body, done: make(chan struct{})}
 	go func() {
 		_, _ = io.Copy(io.Discard, body) // the supervisor writes nothing more; EOF or an error is "the set is gone"
 		close(l.done)
@@ -181,7 +192,7 @@ func (c *Client) Provision(ctx context.Context, childRunID string, agents []stri
 	logger.Info("refspawn set provisioned", "agents", len(pl.AgentSockets))
 	// The body is wrapped in the buffered reader (it may hold bytes past the
 	// line); the lease drains that reader and closes the underlying body.
-	return NewLease(pl.ChildDir, pl.AgentSockets, pl.ExecSocket, readCloser{Reader: rd, Closer: resp.Body}), nil
+	return NewLease(pl.ChildDir, pl.AgentSockets, pl.ExecSocket, pl.Tier, pl.TierOpts, readCloser{Reader: rd, Closer: resp.Body}), nil
 }
 
 // readCloser pairs the buffered reader with the body's Close.
@@ -190,8 +201,17 @@ type readCloser struct {
 	io.Closer
 }
 
+// maxTierOpts caps how many loosenings a supervisor may report for a set.
+const maxTierOpts = 16
+
+// tierToken is the shape of a tier name or option token: lowercase, starting
+// with a letter, short. It is a shape, not a list — a tier this client has
+// never heard of is recorded verbatim, so a new backend needs no client change.
+var tierToken = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
+
 // validLine is the shape check on the supervisor's one line: absolute
-// paths throughout, and a socket for every agent that was asked for.
+// paths throughout, a socket for every agent that was asked for, and a tier
+// that is empty (an older supervisor) or well-formed, with well-formed opts.
 func validLine(pl provisionLine, agents []string) bool {
 	if !filepath.IsAbs(pl.ChildDir) || !filepath.IsAbs(pl.ExecSocket) {
 		return false
@@ -199,6 +219,17 @@ func validLine(pl provisionLine, agents []string) bool {
 	for _, a := range agents {
 		sock, ok := pl.AgentSockets[a]
 		if !ok || !filepath.IsAbs(sock) {
+			return false
+		}
+	}
+	if pl.Tier != "" && !tierToken.MatchString(pl.Tier) {
+		return false
+	}
+	if len(pl.TierOpts) > maxTierOpts {
+		return false
+	}
+	for _, o := range pl.TierOpts {
+		if !tierToken.MatchString(o) {
 			return false
 		}
 	}

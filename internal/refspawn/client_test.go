@@ -79,6 +79,23 @@ func (f *fakeSupervisor) serve(w http.ResponseWriter, r *http.Request) {
 		delete(line["agent_sockets"].(map[string]string), "b")
 	case "relative-exec":
 		line["exec_socket"] = "r-child-exec/refexec.sock"
+	case "tier-seatbelt":
+		line["tier"] = "seatbelt"
+		line["tier_opts"] = []string{"shared-host-scratch"}
+	case "tier-unknown":
+		line["tier"] = "wsl2"
+	case "tier-malformed":
+		line["tier"] = "Pod man"
+	case "tier-opt-malformed":
+		line["tier"] = "podman"
+		line["tier_opts"] = []string{"ok-opt", "Not Ok"}
+	case "tier-opts-many":
+		line["tier"] = "podman"
+		opts := make([]string, 17)
+		for i := range opts {
+			opts[i] = "opt"
+		}
+		line["tier_opts"] = opts
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
@@ -207,6 +224,51 @@ func TestProvisionMalformedLineIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestProvisionCarriesTheChildTier(t *testing.T) {
+	f := newFakeSupervisor(t, "tier-seatbelt")
+	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer lease.Release()
+	if lease.Tier != "seatbelt" || len(lease.TierOpts) != 1 || lease.TierOpts[0] != "shared-host-scratch" {
+		t.Fatalf("tier = %q opts = %v, want seatbelt and [shared-host-scratch]", lease.Tier, lease.TierOpts)
+	}
+	// An older supervisor names no tier: still a working lease, tier empty.
+	g := newFakeSupervisor(t, "ok")
+	old, err := mustClient(t, g.url()).Provision(context.Background(), "r-child", []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("Provision (older supervisor): %v", err)
+	}
+	defer old.Release()
+	if old.Tier != "" || len(old.TierOpts) != 0 {
+		t.Fatalf("tier = %q opts = %v, want none from a supervisor that names none", old.Tier, old.TierOpts)
+	}
+}
+
+func TestProvisionUnknownTierIsRecordedVerbatim(t *testing.T) {
+	f := newFakeSupervisor(t, "tier-unknown")
+	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("Provision: %v (a well-formed tier the client has never heard of is not an error)", err)
+	}
+	defer lease.Release()
+	if lease.Tier != "wsl2" {
+		t.Fatalf("tier = %q, want wsl2 verbatim", lease.Tier)
+	}
+}
+
+func TestProvisionMalformedTierIsUnavailable(t *testing.T) {
+	for _, mode := range []string{"tier-malformed", "tier-opt-malformed", "tier-opts-many"} {
+		f := newFakeSupervisor(t, mode)
+		lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"})
+		if !errors.Is(err, ErrUnavailable) || lease != nil {
+			t.Fatalf("%s: err=%v lease=%v, want ErrUnavailable and no lease", mode, err, lease)
+		}
+		waitFor(t, mode+": the supervisor to see the hang-up", func() bool { held, _ := f.counts(); return held == 0 })
+	}
+}
+
 func TestProvisionUnreachableIsUnavailable(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "sp")
 	if err != nil {
@@ -255,7 +317,7 @@ func TestNewRejectsNonUnixEndpoint(t *testing.T) {
 
 func TestNewLeaseWatchesTheBody(t *testing.T) {
 	pr, pw := io.Pipe()
-	l := NewLease("/tmp/sp/r-x", map[string]string{"a": "/tmp/sp/r-x/a.sock"}, "/tmp/sp/r-x-exec/refexec.sock", pr)
+	l := NewLease("/tmp/sp/r-x", map[string]string{"a": "/tmp/sp/r-x/a.sock"}, "/tmp/sp/r-x-exec/refexec.sock", "", nil, pr)
 	select {
 	case <-l.Done():
 		t.Fatal("Done closed before the body ended")
