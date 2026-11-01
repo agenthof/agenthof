@@ -40,5 +40,12 @@ func runStub(args []string) int {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	logger.Info("refspawn stub: compartments are host processes, volumes are directories")
-	return startup(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, Logger: logger}))
+	return startup(cfg, logger, stubConfiner(logger, exe))
+}
+
+// stubConfiner builds the fake-argv podman DIRECTLY and never calls the
+// factory, so a stub run cannot select a real sandbox backend whatever the OS
+// default is.
+func stubConfiner(logger *slog.Logger, exe string) confiner.Confiner {
+	return confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, Logger: logger})
 }

@@ -21,6 +21,13 @@ import (
 // handed one by accident. Built with `go test -c`, never installed.
 const stubFlag = "-refexec-test-stub"
 
+// stubConfiner builds the fake-argv podman DIRECTLY and never calls the
+// factory, so a stub run cannot select a real sandbox backend whatever the OS
+// default is.
+func stubConfiner(cfg execConfig, exe string) confiner.Confiner {
+	return confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, GuestWorkspace: cfg.Keys.WorkspacePath})
+}
+
 func runStub(args []string) int {
 	fs := flag.NewFlagSet("refexec-stub", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "refexec YAML config")
@@ -39,9 +46,7 @@ func runStub(args []string) int {
 		return 1
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	// The stub builds the fake-argv podman DIRECTLY and never calls the factory,
-	// so a stub run cannot select a real sandbox backend.
-	r := newRunner(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, GuestWorkspace: cfg.Keys.WorkspacePath}))
+	r := newRunner(cfg, logger, stubConfiner(cfg, exe))
 	h := r.handler()
 	if *misattest {
 		h = forgeCommand(h)
