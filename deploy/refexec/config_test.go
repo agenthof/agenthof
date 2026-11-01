@@ -46,6 +46,45 @@ func TestParseConfigValid(t *testing.T) {
 	}
 }
 
+// The additive keys a supervisor renders for a child: a workspace store in
+// place of a volume, and a confiner tier name. The store maps onto the same
+// field the volume does; the tier is validated and carried but not acted on.
+func TestParseConfigAcceptsConfinerAndStore(t *testing.T) {
+	withStore := strings.Replace(validYAML, "volume: agenthof-work", "store: agenthof-work", 1)
+	cfg, err := parseConfig([]byte("confiner: podman\n" + withStore))
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.WorkspaceVolume != "agenthof-work" || cfg.Confiner != "podman" || cfg.WorkspacePath != "/work" {
+		t.Fatalf("parseConfig = %+v, want WorkspaceVolume agenthof-work, Confiner podman", cfg)
+	}
+	// store alone, without confiner: the tier is optional.
+	if cfg, err = parseConfig([]byte(withStore)); err != nil || cfg.Confiner != "" || cfg.WorkspaceVolume != "agenthof-work" {
+		t.Fatalf("store without confiner: %+v, %v", cfg, err)
+	}
+	// volume still parses unchanged.
+	if cfg, err = parseConfig([]byte(validYAML)); err != nil || cfg.WorkspaceVolume != "agenthof-work" {
+		t.Fatalf("volume shape regressed: %+v, %v", cfg, err)
+	}
+	bothKeys := strings.Replace(validYAML, "  volume: agenthof-work\n", "  volume: agenthof-work\n  store: agenthof-work\n", 1)
+	if _, err = parseConfig([]byte(bothKeys)); err == nil || !strings.Contains(err.Error(), "workspace.store and workspace.volume") {
+		t.Fatalf("both keys set: err = %v, want a refusal naming both", err)
+	}
+	neither := strings.Replace(validYAML, "  volume: agenthof-work\n", "", 1)
+	if _, err = parseConfig([]byte(neither)); err == nil || !strings.Contains(err.Error(), "workspace.store or workspace.volume") {
+		t.Fatalf("neither key set: err = %v, want a refusal", err)
+	}
+	badStore := strings.Replace(withStore, "store: agenthof-work", "store: ../etc", 1)
+	if _, err = parseConfig([]byte(badStore)); err == nil || !strings.Contains(err.Error(), "workspace.store") {
+		t.Fatalf("bad store name: err = %v", err)
+	}
+	for _, bad := range []string{"Podman", "pod man", "1podman", strings.Repeat("a", 41)} {
+		if _, err = parseConfig([]byte("confiner: " + bad + "\n" + withStore)); err == nil || !strings.Contains(err.Error(), "confiner must be a lowercase backend name") {
+			t.Errorf("confiner %q: err = %v, want a refusal", bad, err)
+		}
+	}
+}
+
 func TestParseConfigRejectsOmissions(t *testing.T) {
 	cases := []struct {
 		name    string

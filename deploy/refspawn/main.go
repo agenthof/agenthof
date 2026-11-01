@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
 	"github.com/agenthof/agenthof/deploy/internal/refrunner"
 )
 
@@ -43,12 +44,15 @@ func main() {
 		return
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	os.Exit(serve(cfg, logger, []string{"podman"}))
+	os.Exit(serve(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{Logger: logger})))
 }
 
-// serve prepares spawn_root, listens, reaps leftovers and serves until a
-// signal. The stub mode (test tree) calls it with a fake podman.
-func serve(cfg spawnConfig, logger *slog.Logger, podman []string) int {
+// serve prepares spawn_root, reaps leftovers, listens and serves until a
+// signal. The leftovers are reaped before the socket exists: a supervisor
+// that cannot account for an earlier one's compartments refuses to serve
+// rather than count slots it does not know it holds. The stub mode (test
+// tree) calls it with a confiner over a fake podman.
+func serve(cfg spawnConfig, logger *slog.Logger, c confiner.Confiner) int {
 	if err := os.MkdirAll(cfg.SpawnRoot, 0o700); err != nil {
 		logger.Error("spawn_root", "error", err)
 		return 1
@@ -57,13 +61,16 @@ func serve(cfg spawnConfig, logger *slog.Logger, podman []string) int {
 		logger.Error("spawn_root", "error", err)
 		return 1
 	}
+	s := newSupervisor(cfg, logger, c)
+	if err := s.reap(); err != nil {
+		logger.Error("could not account for leftover compartments; refusing to serve", "error", err)
+		return 1
+	}
 	ln, err := refrunner.Listen(cfg.Socket)
 	if err != nil {
 		logger.Error("listen failed", "error", err)
 		return 1
 	}
-	s := newSupervisor(cfg, logger, podman)
-	s.reap()
 	logger.Info("refspawn listening", "socket", cfg.Socket, "spawn_root", cfg.SpawnRoot,
 		"agents", len(cfg.Images), "max_compartments", cfg.MaxCompartments, "timeout", cfg.Timeout)
 	if err := refrunner.Serve(ln, s.handler(), logger, s.close); err != nil {

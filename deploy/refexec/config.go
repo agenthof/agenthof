@@ -10,15 +10,19 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
 )
 
 // fileConfig is the YAML shape. Pointers distinguish an OMITTED key from an
 // empty one: a missing env_allow is rejected, never read as "nothing".
 type fileConfig struct {
 	Socket    string `yaml:"socket"`
+	Confiner  string `yaml:"confiner"`
 	Image     string `yaml:"image"`
 	Workspace *struct {
 		Volume string `yaml:"volume"`
+		Store  string `yaml:"store"`
 		Path   string `yaml:"path"`
 	} `yaml:"workspace"`
 	Timeout string `yaml:"timeout"`
@@ -37,8 +41,9 @@ type fileConfig struct {
 // never nil after a successful parse.
 type execConfig struct {
 	Socket          string        // absolute Unix socket path; its directory is the access gate
+	Confiner        string        // the confinement tier name a supervisor renders; validated but not yet acted on (refexec runs podman)
 	Image           string        // the image every compartment runs; pulled by the operator, never at run time
-	WorkspaceVolume string        // the podman volume shared with the agent's compartment
+	WorkspaceVolume string        // the workspace store shared with the agent's compartment (workspace.store, or the older workspace.volume)
 	WorkspacePath   string        // where it is mounted, rw, in every compartment (and the working directory)
 	Timeout         time.Duration // podman --timeout backstop; set it to the agents' exec.timeout
 	Memory          string        // podman --memory
@@ -77,7 +82,11 @@ func parseConfig(data []byte) (execConfig, error) {
 
 	var errs []error
 	fail := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
-	cfg := execConfig{Socket: fc.Socket, Image: fc.Image}
+	cfg := execConfig{Socket: fc.Socket, Confiner: fc.Confiner, Image: fc.Image}
+
+	if fc.Confiner != "" && !confiner.ValidToken(fc.Confiner) {
+		fail("confiner must be a lowercase backend name")
+	}
 
 	if !filepath.IsAbs(fc.Socket) {
 		fail("socket must be an absolute Unix socket path")
@@ -89,15 +98,28 @@ func parseConfig(data []byte) (execConfig, error) {
 		fail("image must be an image reference (registry/name:tag or @digest), nothing else")
 	}
 	if fc.Workspace == nil {
-		fail("workspace is required (volume + path)")
+		fail("workspace is required (store + path)")
 	} else {
-		if !volumeRE.MatchString(fc.Workspace.Volume) {
-			fail("workspace.volume must be a podman volume name")
+		switch ws := fc.Workspace; {
+		case ws.Store != "" && ws.Volume != "":
+			fail("workspace.store and workspace.volume are the same setting: set one")
+		case ws.Store == "" && ws.Volume == "":
+			fail("workspace.store or workspace.volume is required")
+		case ws.Store != "":
+			if !volumeRE.MatchString(ws.Store) {
+				fail("workspace.store must be a workspace store name")
+			}
+			cfg.WorkspaceVolume = ws.Store
+		default:
+			if !volumeRE.MatchString(ws.Volume) {
+				fail("workspace.volume must be a podman volume name")
+			}
+			cfg.WorkspaceVolume = ws.Volume
 		}
 		if !filepath.IsAbs(fc.Workspace.Path) {
 			fail("workspace.path must be an absolute path inside the compartment")
 		}
-		cfg.WorkspaceVolume, cfg.WorkspacePath = fc.Workspace.Volume, fc.Workspace.Path
+		cfg.WorkspacePath = fc.Workspace.Path
 	}
 	cfg.Timeout = parseDuration("timeout", fc.Timeout, fail)
 	if fc.Limits == nil {

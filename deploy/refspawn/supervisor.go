@@ -17,15 +17,19 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
 )
 
 // Wire contract — pinned by hand with internal/refspawn (never imported
 // across): POST /provision {"child_run_id", "agents": [...]}. A status
 // other than 200, sent before anything is flushed, is a refusal. 200 is
 // followed by exactly one JSON line {"child_dir", "agent_sockets",
-// "exec_socket"} once every socket is dialable; the body then stays open
-// for as long as the set lives and ends when the set is gone. The client
-// closing the body asks for the teardown.
+// "exec_socket", "tier", "tier_opts"} once every socket is dialable; the
+// body then stays open for as long as the set lives and ends when the set
+// is gone. The client closing the body asks for the teardown. tier and
+// tier_opts name the confinement the set runs under; tier_opts is omitted
+// when there are none.
 type provisionRequest struct {
 	ChildRunID string   `json:"child_run_id"`
 	Agents     []string `json:"agents"`
@@ -35,6 +39,8 @@ type provisionLine struct {
 	ChildDir     string            `json:"child_dir"`
 	AgentSockets map[string]string `json:"agent_sockets"`
 	ExecSocket   string            `json:"exec_socket"`
+	Tier         string            `json:"tier"`
+	TierOpts     []string          `json:"tier_opts,omitempty"`
 }
 
 const (
@@ -57,22 +63,22 @@ var (
 // children and their compartment names, and the set of held requests it
 // must wait for at shutdown.
 type supervisor struct {
-	cfg        spawnConfig
-	logger     *slog.Logger
-	podmanArgv []string // {"podman"}; tests substitute a fake
-	environ    func() []string
-	mu         sync.Mutex
-	used       int             // agent compartments reserved across every live child
-	live       map[string]bool // child run ids with a set: one per child, never two
-	names      map[string]bool // compartment names in use: one owner each, never two
-	wg         sync.WaitGroup
+	cfg      spawnConfig
+	logger   *slog.Logger
+	confiner confiner.Confiner // what confines a compartment; tests substitute a fake
+	environ  func() []string   // the environment each child's refexec is started with
+	mu       sync.Mutex
+	used     int             // agent compartments reserved across every live child
+	live     map[string]bool // child run ids with a set: one per child, never two
+	names    map[string]bool // compartment names in use: one owner each, never two
+	wg       sync.WaitGroup
 }
 
-func newSupervisor(cfg spawnConfig, logger *slog.Logger, podman []string) *supervisor {
+func newSupervisor(cfg spawnConfig, logger *slog.Logger, c confiner.Confiner) *supervisor {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &supervisor{cfg: cfg, logger: logger, podmanArgv: podman, environ: os.Environ,
+	return &supervisor{cfg: cfg, logger: logger, confiner: c, environ: os.Environ,
 		live: map[string]bool{}, names: map[string]bool{}}
 }
 
@@ -126,10 +132,14 @@ func (s *supervisor) release(id string, names []string) {
 
 // close is Serve's onShutdown: every held connection has already been cut,
 // so every handler is tearing its set down; wait for them, then reap
-// whatever is left by prefix.
+// whatever is left by prefix. A failed reap is only warned about: this is
+// best-effort cleanup on the way out, and the next start's reap refuses to
+// serve if leftovers still cannot be listed.
 func (s *supervisor) close() {
 	s.wg.Wait()
-	s.reap()
+	if err := s.reap(); err != nil {
+		s.logger.Warn("shutdown reap incomplete; the next start reaps what is left", "error", err)
+	}
 }
 
 // handleProvision serves one child's set for its whole life. A failure after
@@ -232,30 +242,30 @@ func (s *supervisor) handleProvision(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// childSet is one child's isolated set: its volume, its directories, its
-// refexec process and its agent compartments.
+// childSet is one child's isolated set: its workspace store, its
+// directories, its refexec process and its agent compartments.
 type childSet struct {
 	s        *supervisor
 	id       string
 	agents   []string
 	images   map[string]string
-	volume   string
+	store    string
 	childDir string
 	execDir  string
 	sockets  map[string]string
 	execSock string
 
-	volumeMade   bool
-	refexec      *exec.Cmd
-	refexecExit  chan struct{}
-	cancelAgents context.CancelFunc
-	agentWait    sync.WaitGroup
-	agentExit    chan string
+	storeMade   bool
+	refexec     *exec.Cmd
+	refexecExit chan struct{}
+	comps       map[string]confiner.Compartment // by agent name, filled as each one launches
+	agentExit   chan string
 }
 
 func (s *supervisor) newSet(id string, agents []string, images map[string]string) *childSet {
 	set := &childSet{s: s, id: id, agents: agents, images: images,
-		volume:   containerPrefix + id + "-work",
+		store:    containerPrefix + id + "-work",
+		comps:    map[string]confiner.Compartment{},
 		childDir: filepath.Join(s.cfg.SpawnRoot, id),
 		execDir:  filepath.Join(s.cfg.SpawnRoot, id+execDirSuffix),
 		sockets:  map[string]string{}, refexecExit: make(chan struct{}), agentExit: make(chan string, len(agents))}
@@ -267,12 +277,13 @@ func (s *supervisor) newSet(id string, agents []string, images map[string]string
 }
 
 func (set *childSet) line() provisionLine {
-	return provisionLine{ChildDir: set.childDir, AgentSockets: set.sockets, ExecSocket: set.execSock}
+	return provisionLine{ChildDir: set.childDir, AgentSockets: set.sockets, ExecSocket: set.execSock,
+		Tier: string(set.s.confiner.Tier()), TierOpts: set.s.confiner.Opts()}
 }
 
-// start creates the directories and the volume, forks the child's refexec,
-// and starts one compartment per agent. On any error the caller tears
-// down what was started.
+// start creates the directories and the workspace store, forks the child's
+// refexec, and starts one compartment per agent. On any error the caller
+// tears down what was started.
 func (set *childSet) start() error {
 	for _, d := range []string{set.childDir, set.execDir} {
 		if err := os.RemoveAll(d); err != nil { // a leftover from a crash
@@ -285,12 +296,12 @@ func (set *childSet) start() error {
 			return err
 		}
 	}
-	if _, err := set.s.podman(context.Background(), 30*time.Second, "volume", "create", set.volume); err != nil {
+	if err := set.s.confiner.CreateStore(context.Background(), set.store); err != nil {
 		return err
 	}
-	set.volumeMade = true
+	set.storeMade = true
 	cfgPath := filepath.Join(set.execDir, "refexec.yaml")
-	if err := os.WriteFile(cfgPath, []byte(renderRefexecConfig(set.s.cfg.Refexec, set.execSock, set.volume)), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(renderRefexecConfig(set.s.cfg.Refexec, set.execSock, set.store, set.s.confiner.Tier())), 0o600); err != nil {
 		return err
 	}
 	argv := set.s.cfg.Refexec.Command
@@ -304,28 +315,27 @@ func (set *childSet) start() error {
 	go func() { _ = rx.Wait(); close(set.refexecExit) }()
 	set.s.logger.Info("refexec started", "child", set.id, "pid", rx.Process.Pid)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	set.cancelAgents = cancel
+	// The agent runs with the workspace as its working directory and the
+	// child's socket directory (read-write) at its own path; the supervisor's
+	// --timeout is the backstop. Its socket path follows the program, so it
+	// overrides the image's own -socket (last wins).
+	lim := confiner.Limits(set.s.cfg.Limits)
 	for _, a := range set.agents {
 		name := compartmentName(set.id, a)
-		args := append(append([]string{}, set.s.podmanArgv[1:]...), refboxRunArgs(set.s.cfg, name, set.images[a], set.volume, set.childDir, set.sockets[a])...)
-		c := exec.CommandContext(ctx, set.s.podmanArgv[0], args...)
-		// Cancelling removes the CONTAINER; killing the podman client would
-		// leave it running under conmon.
-		c.Cancel = func() error { set.s.remove(name); return nil }
-		c.WaitDelay = 10 * time.Second
-		c.Env = set.s.environ()
-		c.Stdout, c.Stderr = os.Stderr, os.Stderr
-		if err := c.Start(); err != nil {
+		comp, err := set.s.confiner.Launch(context.Background(), confiner.Spec{
+			Name: name, Program: set.images[a], Argv: []string{"-socket", set.sockets[a]},
+			Store: set.store, Paths: []confiner.Path{{Path: set.childDir, RW: true}},
+			Limits: lim, Timeout: set.s.cfg.Timeout, Output: os.Stderr,
+		})
+		if err != nil {
 			return fmt.Errorf("start compartment %s: %w", name, err)
 		}
-		set.agentWait.Add(1)
+		set.comps[a] = comp
 		go func() {
-			defer set.agentWait.Done()
-			_ = c.Wait()
+			<-comp.Done()
 			set.agentExit <- name
 		}()
-		set.s.logger.Info("compartment started", "child", set.id, "compartment", name, "pid", c.Process.Pid)
+		set.s.logger.Info("compartment started", "child", set.id, "compartment", name, "pid", comp.PID())
 	}
 	return nil
 }
@@ -369,8 +379,8 @@ func (set *childSet) waitReady(ctx context.Context, timeout time.Duration) error
 }
 
 // teardown removes the set IN ORDER: refexec first (it owns the transient
-// exec compartments that still mount the volume, and removes them on
-// SIGTERM), then the agent compartments, then the volume — podman refuses
+// exec compartments that still use the workspace store, and removes them on
+// SIGTERM), then the agent compartments, then the store — podman refuses
 // to remove a volume any container still mounts — then the directories.
 func (set *childSet) teardown() {
 	l := set.s.logger.With("child", set.id)
@@ -384,27 +394,31 @@ func (set *childSet) teardown() {
 			<-set.refexecExit
 		}
 	}
-	if set.cancelAgents != nil {
-		set.cancelAgents()
-		set.agentWait.Wait()
+	// Remove returns once the compartment is gone, so every agent is stopped
+	// before the store is touched. Its error is noise here: a compartment that
+	// already exited is gone, and the backend logs the complaint.
+	for _, a := range set.agents {
+		if comp, ok := set.comps[a]; ok {
+			_ = comp.Remove(context.Background())
+		}
 	}
-	if set.volumeMade {
-		// No -f: podman refuses a mounted volume, so this removal succeeding
-		// IS the proof that the order above did its work and nothing holds
-		// the child's workspace any more. The retries cover the moment
-		// between a compartment's removal and podman releasing the mount; a
-		// volume still held after them — an exec compartment that outlived a
-		// killed refexec — is left for the next start's reap rather than
-		// pulled out from under whatever is still writing to it.
+	if set.storeMade {
+		// Not forced: a store still in use is refused, so this removal
+		// succeeding IS the proof that the order above did its work and
+		// nothing holds the child's workspace any more. The retries cover the
+		// moment between a compartment's removal and the engine releasing the
+		// mount; a store still held after them — an exec compartment that
+		// outlived a killed refexec — is left for the next start's reap rather
+		// than pulled out from under whatever is still writing to it.
 		var err error
 		for range 5 {
-			if _, err = set.s.podman(context.Background(), 30*time.Second, "volume", "rm", set.volume); err == nil {
+			if err = set.s.confiner.RemoveStore(context.Background(), set.store, false); err == nil {
 				break
 			}
 			time.Sleep(time.Second)
 		}
 		if err != nil {
-			l.Warn("volume not removed; the next start reaps it", "volume", set.volume, "error", err)
+			l.Warn("workspace store not removed; the next start reaps it", "store", set.store, "error", err)
 		}
 	}
 	_ = os.RemoveAll(set.childDir)

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
 )
 
 // stubFlag re-executes this test binary as the hermetic e2e's refspawn: the
@@ -37,5 +39,5 @@ func runStub(args []string) int {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	logger.Info("refspawn stub: compartments are host processes, volumes are directories")
-	return serve(cfg, logger, []string{exe, fakePodmanFlag})
+	return serve(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, Logger: logger}))
 }
