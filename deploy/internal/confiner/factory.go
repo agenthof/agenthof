@@ -93,9 +93,14 @@ func Select(opts Options) (Confiner, error) {
 				return nil, fmt.Errorf("confiner %q: %s must be an absolute path, got %q", tier, key.name, key.val)
 			}
 		}
-		// The Seatbelt backend is not built yet: the selection is real, the
-		// construction is not.
-		return nil, fmt.Errorf("confiner %q: %w", tier, ErrNotImplemented)
+		s, err := NewSeatbelt(SeatbeltConfig{
+			StoreRoot: k.StoreRoot, PIDDir: k.PIDDir, DenyRead: k.DenyRead, SharedHostScratch: k.SharedHostScratch,
+			SpawnRoot: opts.SpawnRoot, Environ: opts.Environ, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("confiner %q: %w", tier, err)
+		}
+		return s, nil
 	}
 	return nil, fmt.Errorf("confiner %q: %w", tier, ErrNotImplemented)
 }

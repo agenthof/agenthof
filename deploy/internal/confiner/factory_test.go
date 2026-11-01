@@ -38,11 +38,14 @@ func TestSelectOSDefault(t *testing.T) {
 		t.Fatalf("linux default = %q, want podman", c.Tier())
 	}
 
-	// The darwin default reaches the seatbelt branch; the backend itself is
-	// not built yet.
-	_, err = Select(Options{GOOS: "darwin", Keys: Keys{StoreRoot: "/s", PIDDir: "/p"}})
-	if !errors.Is(err, ErrNotImplemented) || !strings.Contains(err.Error(), "seatbelt") {
-		t.Fatalf("darwin default = %v, want ErrNotImplemented naming seatbelt", err)
+	// The darwin default constructs the Seatbelt backend (it runs nothing:
+	// Probe is the runtime's call), on any build OS.
+	c, err = Select(Options{GOOS: "darwin", Keys: Keys{StoreRoot: "/s", PIDDir: "/p"}})
+	if err != nil {
+		t.Fatalf("darwin: %v", err)
+	}
+	if _, ok := c.(*Seatbelt); !ok || c.Tier() != TierSeatbelt {
+		t.Fatalf("darwin default = %T (%q), want *Seatbelt", c, c.Tier())
 	}
 
 	_, err = Select(Options{GOOS: "windows", Keys: Keys{Image: "img:1"}})

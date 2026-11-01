@@ -20,9 +20,15 @@ import (
 // on the host. The shipped binaries have no such mode; this is test-tree code.
 const fakePodmanFlag = "-confiner-test-podman"
 
+// testModes are the re-exec modes of this test binary, keyed by their first
+// argument; OS-specific test files register theirs from an init.
+var testModes = map[string]func(args []string) int{fakePodmanFlag: fakePodman}
+
 func TestMain(m *testing.M) {
-	if len(os.Args) > 1 && os.Args[1] == fakePodmanFlag {
-		os.Exit(fakePodman(os.Args[2:]))
+	if len(os.Args) > 1 {
+		if mode, ok := testModes[os.Args[1]]; ok {
+			os.Exit(mode(os.Args[2:]))
+		}
 	}
 	os.Exit(m.Run())
 }
