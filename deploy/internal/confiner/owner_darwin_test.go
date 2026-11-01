@@ -39,11 +39,14 @@ func TestOwnerGoneClassifiesErrors(t *testing.T) {
 	}
 }
 
-// An owner whose start time cannot be read is treated as ALIVE, so its
-// compartments are left in place: reaping a live sibling's compartment ends
-// its command mid-flight, while leaving a leftover only defers cleanup to the
-// next sweep.
-func TestOwnerAliveWhenLivenessUndeterminable(t *testing.T) {
+// alive follows whether the kernel still has a record for the owner's pid at
+// its recorded start time: the own stamp is alive, and a pid the kernel has no
+// record for is gone and so reapable. The other direction — an UNDETERMINABLE
+// ownerStart error leaving the owner alive so its compartments are left in
+// place — has no injection point here; it is pinned by
+// TestOwnerGoneClassifiesErrors (EPERM/EINVAL/a plain error are not "gone")
+// composed with alive's `return !ownerGone(err)`.
+func TestOwnerAliveTracksKernelRecord(t *testing.T) {
 	self := mustSelfOwner(t)
 	o := ownerRef{pid: self.pid, start: self.start, boot: self.boot}
 	if !o.alive(self.boot) {

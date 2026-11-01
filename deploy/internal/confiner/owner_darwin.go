@@ -34,9 +34,11 @@ func ownerStart(pid int) (int64, error) {
 // definitely gone: it has exited, or the kernel has no record for the pid.
 // unix.SysctlKinfoProc reports the latter as EIO — its own size check, when
 // the kernel answers kern.proc.pid with no record rather than failing the
-// call — so EIO here is "no such process", not a device error; ESRCH is the
-// kernel's own name for the same condition. Every other error leaves the
-// owner's liveness undeterminable (see ownerRef.alive).
+// call — so EIO here is "no such process", not a device error. ESRCH, the
+// POSIX "no such process" errno, is accepted for the same condition as a
+// defensive guard, though this sysctl reports a missing pid as EIO and does
+// not itself return ESRCH. Every other error leaves the owner's liveness
+// undeterminable (see ownerRef.alive).
 func ownerGone(err error) bool {
 	return errors.Is(err, errOwnerExited) || errors.Is(err, unix.EIO) || errors.Is(err, unix.ESRCH)
 }
