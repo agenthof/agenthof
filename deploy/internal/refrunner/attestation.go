@@ -18,16 +18,19 @@ type Attestation struct {
 	Runtime         string   // "refbridge" | "refexec"
 	Session         string   // refbridge: the MCP session id; refexec: the per-request id, which is also the compartment's name
 	Command         []string // the argv the runtime was asked to run
-	PID             int      // the process the runtime holds first-hand: refbridge's stdio child, or refexec's `podman run` client — never a pid inside a compartment
+	PID             int      // the host pid the runtime held first-hand — never a pid inside a compartment
 	Spawn           int      // refbridge: the child's 1-based generation within the session; refexec: always 1
 	CredentialEnv   string   // refbridge only: the NAME of the variable the credential was materialized into
 	EnvNames        []string // the variable NAMES the runtime itself set on the process, sorted; an image's own ENV layer is not included — the runtime never sees it
 	Materialization string   // refbridge only: env-at-spawn | respawn-on-rotation
+	Confiner        string   // the isolation tier the runtime applied, as it names it; "" for refbridge
+	ConfinerOpts    []string // the per-deployment loosenings the backend applied, as tokens
 }
 
-// Meta is the wire form: exactly the keys internal/rungateway decodes.
+// Meta is the wire form: exactly the keys internal/rungateway decodes. The
+// confiner keys are additive: present only when the runtime applied a tier.
 func (a Attestation) Meta() map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"runtime":         a.Runtime,
 		"session":         a.Session,
 		"command":         a.Command,
@@ -37,4 +40,11 @@ func (a Attestation) Meta() map[string]any {
 		"env_names":       a.EnvNames,
 		"materialization": a.Materialization,
 	}
+	if a.Confiner != "" {
+		m["confiner"] = a.Confiner
+	}
+	if len(a.ConfinerOpts) > 0 {
+		m["confiner_opts"] = a.ConfinerOpts
+	}
+	return m
 }

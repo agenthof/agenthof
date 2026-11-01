@@ -152,10 +152,43 @@ func TestDecodeAttestationPerRuntime(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
+	t.Run("refexec: the confiner tier is recorded verbatim, known or not", func(t *testing.T) {
+		for _, tier := range []string{"podman", "seatbelt", "wsl2"} {
+			att, err := decodeAttestation(mut(goodExecAttestation(), "confiner", tier), "refexec")
+			if err != nil || att == nil || att.Confiner != tier {
+				t.Fatalf("tier %q: att=%+v err=%v", tier, att, err)
+			}
+		}
+		att, err := decodeAttestation(goodExecAttestation(), "refexec")
+		if err != nil || att.Confiner != "" || att.ConfinerOpts != nil {
+			t.Fatalf("absent confiner: att=%+v err=%v", att, err)
+		}
+	})
+	t.Run("refexec: confiner opts are recorded verbatim, known or not", func(t *testing.T) {
+		for _, opt := range []string{"shared-host-scratch", "zz-future"} {
+			att, err := decodeAttestation(mut(goodExecAttestation(), "confiner_opts", []any{opt}), "refexec")
+			if err != nil || att == nil || len(att.ConfinerOpts) != 1 || att.ConfinerOpts[0] != opt {
+				t.Fatalf("opt %q: att=%+v err=%v", opt, att, err)
+			}
+		}
+	})
+	t.Run("refexec: sixteen opts are accepted", func(t *testing.T) {
+		if _, err := decodeAttestation(mut(goodExecAttestation(), "confiner_opts", repeatedOpts(16)), "refexec"); err != nil {
+			t.Fatalf("err = %v", err)
+		}
+	})
 	malformed := map[string]struct {
 		raw      map[string]any
 		declared string
 	}{
+		"refexec confiner uppercase":                {mut(goodExecAttestation(), "confiner", "Podman"), "refexec"},
+		"refexec confiner with a space":             {mut(goodExecAttestation(), "confiner", "pod man"), "refexec"},
+		"refexec confiner with a trailing newline":  {mut(goodExecAttestation(), "confiner", "x\n"), "refexec"},
+		"refexec confiner of 41 characters":         {mut(goodExecAttestation(), "confiner", "a"+strings.Repeat("b", 40)), "refexec"},
+		"refexec confiner opt uppercase":            {mut(goodExecAttestation(), "confiner_opts", []any{"Shared"}), "refexec"},
+		"refexec seventeen confiner opts":           {mut(goodExecAttestation(), "confiner_opts", repeatedOpts(17)), "refexec"},
+		"refbridge claiming a confiner tier":        {mut(goodAttestation(), "confiner", "podman"), "refbridge"},
+		"refbridge claiming confiner opts":          {mut(goodAttestation(), "confiner_opts", []any{"shared-host-scratch"}), "refbridge"},
 		"refexec claiming a credential variable":    {mut(goodExecAttestation(), "credential_env", "DEMO_TOKEN"), "refexec"},
 		"refexec claiming a materialization":        {mut(goodExecAttestation(), "materialization", "env-at-spawn"), "refexec"},
 		"refexec answering a refbridge declaration": {goodExecAttestation(), "refbridge"},
@@ -172,6 +205,15 @@ func TestDecodeAttestationPerRuntime(t *testing.T) {
 			}
 		})
 	}
+}
+
+// repeatedOpts returns n well-shaped confiner_opts tokens.
+func repeatedOpts(n int) []any {
+	opts := make([]any, n)
+	for i := range opts {
+		opts[i] = "opt"
+	}
+	return opts
 }
 
 // mut returns m with one key replaced.

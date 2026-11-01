@@ -51,11 +51,18 @@ type RuntimeAttestation struct {
 	Runtime         string   `json:"runtime"`         // "refbridge" | "refexec"
 	Session         string   `json:"session"`         // refbridge: its MCP session id; refexec: the per-request id, also the compartment's name — the key into the runtime's own log
 	Command         []string `json:"command"`         // the argv the runtime was asked to run
-	PID             int      `json:"pid"`             // the process the runtime holds first-hand: refbridge's child, or refexec's `podman run` client on the host — never a pid inside a compartment
+	PID             int      `json:"pid"`             // the host pid the runtime held first-hand — never a pid inside a compartment
 	Spawn           int      `json:"spawn"`           // refbridge: children spawned in this session so far (increments on a rotation respawn); refexec: always 1
 	CredentialEnv   string   `json:"credential_env"`  // refbridge: the NAME of the variable the credential was materialized into; refexec: empty (credential-less)
 	EnvNames        []string `json:"env_names"`       // the variable NAMES the runtime set on the process, sorted; refbridge: the child's whole environment; refexec: what it injected — an image's own ENV layer is not seen by refexec
 	Materialization string   `json:"materialization"` // refbridge: env-at-spawn | respawn-on-rotation; refexec: empty
+	// Confiner is the isolation tier the runtime applied, as it names it
+	// (podman | seatbelt | a value this reader does not know — recorded
+	// verbatim, never rejected); absent for refbridge. Additive (Article VI).
+	Confiner string `json:"confiner,omitempty"`
+	// ConfinerOpts are the per-deployment loosenings the backend applied, as
+	// tokens; recorded verbatim. Additive.
+	ConfinerOpts []string `json:"confiner_opts,omitempty"`
 }
 
 // DoorAccountingAdmission is the door_accounting value the engine stamps on
@@ -63,31 +70,33 @@ type RuntimeAttestation struct {
 const DoorAccountingAdmission = "admission"
 
 type Event struct {
-	Time             time.Time `json:"time"`
-	Type             string    `json:"type"`
-	Step             string    `json:"step,omitempty"`
-	Agent            string    `json:"agent,omitempty"`
-	Status           string    `json:"status,omitempty"`
-	Reason           string    `json:"reason,omitempty"`
-	Artifact         string    `json:"artifact,omitempty"`     // for tool_call, reused to carry a short preview of the tool result
-	ArtifactSHA      string    `json:"artifact_sha,omitempty"` // for tool_call, reused to carry the sha256 of the tool result
-	Execution        string    `json:"execution,omitempty"`
-	ConfigHash       string    `json:"config_hash,omitempty"`
-	AuthMode         string    `json:"auth_mode,omitempty"`         // set by tool_call to the resource's credential mode, e.g. "static_env"
-	ResourcesTouched []string  `json:"resources_touched,omitempty"` // set by tool_call to the touched tool resource's id; still reserved for a future multi-resource call
-	Tool             string    `json:"tool,omitempty"`              // set by tool_call: the tool name invoked (or attempted)
-	ArgsSHA          string    `json:"args_sha,omitempty"`          // set by tool_call: sha256 of the raw call arguments (never the args themselves)
-	Command          []string  `json:"command,omitempty"`           // set by exec: the reported argv
-	ExitCode         *int      `json:"exit_code,omitempty"`         // set by exec: pointer so 0 (success) is distinct from absent
-	OutputSHA        string    `json:"output_sha,omitempty"`        // set by exec: the runtime's sha256 of the output it returned (on a historical attested event, the hash the agent reported); set by spawn: sha256 of the child's final artifact; never the output or the artifact
-	Mode             string    `json:"mode,omitempty"`              // set by exec: "runtime" (a declared runtime ran it first-hand; see RuntimeAttestation). Ledgers written before exec became first-hand only carry "attested" (the agent's own report); the field is read and rendered verbatim
-	Model            string    `json:"model,omitempty"`             // set by model_call: the logical model requested
-	PromptTokens     *int      `json:"prompt_tokens,omitempty"`     // set by model_call (non-streaming): usage
-	CompletionTokens *int      `json:"completion_tokens,omitempty"` // set by model_call (non-streaming): usage
-	ChildRunID       string    `json:"child_run_id,omitempty"`      // set by spawn: the child run this event links to, whenever one was started (absent when the door refused before starting one)
-	ChildRole        string    `json:"child_role,omitempty"`        // set by spawn: the role the child ran, or was asked to run, as
-	ChildWorkflow    string    `json:"child_workflow,omitempty"`    // set by spawn: the child's workflow
-	Depth            int       `json:"depth,omitempty"`             // set by spawn: the child's depth in the delegation tree (this run's depth + 1)
+	Time              time.Time `json:"time"`
+	Type              string    `json:"type"`
+	Step              string    `json:"step,omitempty"`
+	Agent             string    `json:"agent,omitempty"`
+	Status            string    `json:"status,omitempty"`
+	Reason            string    `json:"reason,omitempty"`
+	Artifact          string    `json:"artifact,omitempty"`     // for tool_call, reused to carry a short preview of the tool result
+	ArtifactSHA       string    `json:"artifact_sha,omitempty"` // for tool_call, reused to carry the sha256 of the tool result
+	Execution         string    `json:"execution,omitempty"`
+	ConfigHash        string    `json:"config_hash,omitempty"`
+	AuthMode          string    `json:"auth_mode,omitempty"`           // set by tool_call to the resource's credential mode, e.g. "static_env"
+	ResourcesTouched  []string  `json:"resources_touched,omitempty"`   // set by tool_call to the touched tool resource's id; still reserved for a future multi-resource call
+	Tool              string    `json:"tool,omitempty"`                // set by tool_call: the tool name invoked (or attempted)
+	ArgsSHA           string    `json:"args_sha,omitempty"`            // set by tool_call: sha256 of the raw call arguments (never the args themselves)
+	Command           []string  `json:"command,omitempty"`             // set by exec: the reported argv
+	ExitCode          *int      `json:"exit_code,omitempty"`           // set by exec: pointer so 0 (success) is distinct from absent
+	OutputSHA         string    `json:"output_sha,omitempty"`          // set by exec: the runtime's sha256 of the output it returned (on a historical attested event, the hash the agent reported); set by spawn: sha256 of the child's final artifact; never the output or the artifact
+	Mode              string    `json:"mode,omitempty"`                // set by exec: "runtime" (a declared runtime ran it first-hand; see RuntimeAttestation). Ledgers written before exec became first-hand only carry "attested" (the agent's own report); the field is read and rendered verbatim
+	Model             string    `json:"model,omitempty"`               // set by model_call: the logical model requested
+	PromptTokens      *int      `json:"prompt_tokens,omitempty"`       // set by model_call (non-streaming): usage
+	CompletionTokens  *int      `json:"completion_tokens,omitempty"`   // set by model_call (non-streaming): usage
+	ChildRunID        string    `json:"child_run_id,omitempty"`        // set by spawn: the child run this event links to, whenever one was started (absent when the door refused before starting one)
+	ChildRole         string    `json:"child_role,omitempty"`          // set by spawn: the role the child ran, or was asked to run, as
+	ChildWorkflow     string    `json:"child_workflow,omitempty"`      // set by spawn: the child's workflow
+	Depth             int       `json:"depth,omitempty"`               // set by spawn: the child's depth in the delegation tree (this run's depth + 1)
+	ChildConfiner     string    `json:"child_confiner,omitempty"`      // set by spawn: the isolation tier the child's runtime applied, as it names it; recorded verbatim
+	ChildConfinerOpts []string  `json:"child_confiner_opts,omitempty"` // set by spawn: the per-deployment loosenings the child's backend applied, as tokens; recorded verbatim
 	// DoorCalls is set by step_succeeded and step_failed: how many door
 	// calls the step's gateway ADMITTED — the count the recorded door events
 	// inside this step's window are checked against. A pointer, like

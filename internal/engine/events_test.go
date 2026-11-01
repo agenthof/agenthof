@@ -413,6 +413,41 @@ func TestEventModelCallFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEventConfinerFieldsAreAdditive(t *testing.T) {
+	e := Event{Type: "exec", RuntimeAttestation: &RuntimeAttestation{Runtime: "refexec", Session: "s", Command: []string{"true"}, PID: 1, Spawn: 1, EnvNames: []string{},
+		Confiner: "seatbelt", ConfinerOpts: []string{"shared-host-scratch"}}}
+	data, _ := json.Marshal(e)
+	// appended after materialization, so TestEventExecRuntimeRoundTrip's pinned fragment is unchanged
+	want := `"materialization":"","confiner":"seatbelt","confiner_opts":["shared-host-scratch"]}`
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("missing %s in %s", want, data)
+	}
+	empty, _ := json.Marshal(Event{Type: "exec", RuntimeAttestation: &RuntimeAttestation{Runtime: "refexec"}})
+	for _, k := range []string{`"confiner":`, `"confiner_opts":`, `"child_confiner":`, `"child_confiner_opts":`} {
+		if strings.Contains(string(empty), k) {
+			t.Fatalf("omitempty violated for %s", k)
+		}
+	}
+	sp, _ := json.Marshal(Event{Type: "spawn", ChildConfiner: "podman"})
+	if !strings.Contains(string(sp), `"child_confiner":"podman"`) || strings.Contains(string(sp), "child_confiner_opts") {
+		t.Fatal(string(sp))
+	}
+	var got Event
+	if err := json.Unmarshal([]byte(`{"type":"exec","runtime_attestation":{"runtime":"refexec","confiner":"microvm","confiner_opts":["zz-unknown"]}}`), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RuntimeAttestation.Confiner != "microvm" || got.RuntimeAttestation.ConfinerOpts[0] != "zz-unknown" {
+		t.Fatal("an unknown tier/token must decode verbatim")
+	}
+	var child Event
+	if err := json.Unmarshal([]byte(`{"type":"spawn","child_confiner":"microvm","child_confiner_opts":["zz-unknown"]}`), &child); err != nil {
+		t.Fatal(err)
+	}
+	if child.ChildConfiner != "microvm" || child.ChildConfinerOpts[0] != "zz-unknown" {
+		t.Fatal("an unknown child tier/token must decode verbatim")
+	}
+}
+
 func TestEventExecRuntimeRoundTrip(t *testing.T) {
 	zero := 0
 	e := Event{Type: "exec", Status: "succeeded", Command: []string{"cat", "/work/agent-note.txt"}, ExitCode: &zero,
