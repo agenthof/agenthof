@@ -219,10 +219,11 @@ PIDS+=($!)
 # of exactly the allowlist, so `env` prints the one marker and nothing else —
 # the proof that it was refexec that ran it, and that it ran it clean.
 cat >"$WORK/refexec.yaml" <<EOF
+confiner: podman
 socket: $EXEC_DIR/exec.sock
 image: example.test/exec:1
 workspace:
-  volume: acceptance-work
+  store: acceptance-work
   path: /work
 timeout: 30s
 limits:

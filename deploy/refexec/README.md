@@ -13,14 +13,15 @@ refexec is a **host process**, like `agenthof` — it invokes `podman` itself,
 so it is not containerized. It is credential-less: no bearer is injected and
 nothing is materialized.
 
-## Config (every key is required; nothing is defaulted)
+## Config (every key is required except `confiner` and the backend keys)
 
 ```yaml
+confiner: podman                          # optional: podman (the Linux default) or seatbelt (the macOS default)
 socket: /run/agenthof-exec/refexec.sock   # absolute; its directory must be mode 0700 and owned by the user refexec runs as
 image: docker.io/library/busybox:1.36.1   # the image every compartment runs; pull it yourself, refexec never does
 workspace:
-  volume: agenthof-work   # the podman volume shared with the agent's refbox compartment
-  path: /work             # mounted rw there, and the working directory
+  store: agenthof-work    # the workspace store (a podman volume) shared with the agent's refbox compartment
+  path: /work             # podman only; optional, defaults to /work: mounted rw there, and the working directory
 timeout: 2m               # podman --timeout backstop; set it to the agents' exec.timeout
 limits:
   memory: 256m
@@ -31,9 +32,20 @@ compartments:
 env_allow: []             # the ONLY variable names passed to the command, copied from refexec's own environment
 ```
 
-`refexec -config refexec.yaml -check` validates the file and prints
-`socket=<path>` and `workspace=<volume>:<path>` without listening; a file
-that omits any key fails there.
+`refexec -config refexec.yaml -check` validates the file and prints the
+launcher lines without listening: for podman, `socket=<path>` and
+`workspace=<store>:<path>`; for any other backend, `socket=<path>`,
+`workspace=<store>` and `store_path=<host directory>`. A file that omits a
+required key, sets a key the selected backend does not consume, or uses the
+retired `workspace.volume` fails there. At start refexec probes the backend and
+removes leftover `refexec-` compartments before it opens the socket; if either
+fails it exits without listening.
+
+On macOS the `seatbelt` backend replaces podman: the config sets `store_root`
+and `pid_dir` (absolute paths) instead of `image` and `workspace.path`, and
+`deploy/refexec/refexec-run-seatbelt.sh` (with `REFEXEC_CONFIG` set to such a
+config) creates the socket directory and the store directory before starting
+refexec.
 
 The socket's directory is the access gate. refexec checks at startup that it
 is mode 0700 and owned by the user it runs as, and refuses to start

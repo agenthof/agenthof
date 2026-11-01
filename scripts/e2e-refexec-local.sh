@@ -68,13 +68,14 @@ go test -c -o "$WORK/refexec-stub" ./deploy/refexec
 NONCE="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 OUTS=()
 
-# --- the runtime's config (the fake podman ignores image, volume and limits)
+# --- the runtime's config (the fake podman ignores image, store and limits)
 exec_config() { # $1 = socket path, $2 = "no-timeout" to omit the timeout
 	cat <<EOF
+confiner: podman
 socket: $1
 image: example.test/exec:1
 workspace:
-  volume: e2e-work
+  store: e2e-work
   path: /work
 limits:
   memory: 256m

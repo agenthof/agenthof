@@ -235,10 +235,11 @@ PIDS+=($!)
 # Its environment carries the allowlisted marker AND a canary that is NOT on
 # env_allow: the compartment must see the first and never the second.
 cat >"$WORK/refexec.yaml" <<EOF
+confiner: podman
 socket: $EXEC_DIR/refexec.sock
 image: $EXEC_IMAGE
 workspace:
-  volume: $VOLUME
+  store: $VOLUME
   path: /work
 timeout: 30s
 limits:

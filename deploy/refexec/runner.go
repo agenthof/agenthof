@@ -76,9 +76,9 @@ func (r *runner) run(ctx context.Context, argv []string) (result, error) {
 		return result{}, err
 	}
 	comp, err := r.confiner.Launch(ctx, confiner.Spec{
-		Name: session, Program: r.cfg.Image, Argv: argv,
-		Store: r.cfg.WorkspaceVolume, Scratch: true, EnvNames: r.cfg.EnvAllow,
-		Limits:  confiner.Limits{Memory: r.cfg.Memory, CPUs: r.cfg.CPUs, PIDs: r.cfg.PIDs},
+		Name: session, Program: r.cfg.Keys.Image, Argv: argv,
+		Store: r.cfg.Store, Scratch: true, EnvNames: r.cfg.EnvAllow,
+		Limits:  r.cfg.Limits,
 		Timeout: r.cfg.Timeout,
 	})
 	if err != nil {

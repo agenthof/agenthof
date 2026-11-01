@@ -39,7 +39,9 @@ func runStub(args []string) int {
 		return 1
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	r := newRunner(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, GuestWorkspace: cfg.WorkspacePath}))
+	// The stub builds the fake-argv podman DIRECTLY and never calls the factory,
+	// so a stub run cannot select a real sandbox backend.
+	r := newRunner(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, GuestWorkspace: cfg.Keys.WorkspacePath}))
 	h := r.handler()
 	if *misattest {
 		h = forgeCommand(h)

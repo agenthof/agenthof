@@ -7,13 +7,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
+	"github.com/agenthof/agenthof/deploy/internal/confiner/confinertest"
 )
 
 // validYAML is the complete shape; every key is required (config is law).
-const validYAML = `socket: /run/agenthof-exec/refexec.sock
+const validYAML = `confiner: podman
+socket: /run/agenthof-exec/refexec.sock
 image: docker.io/library/busybox:1.36.1
 workspace:
-  volume: agenthof-work
+  store: agenthof-work
   path: /work
 timeout: 2m
 limits:
@@ -31,9 +35,10 @@ func TestParseConfigValid(t *testing.T) {
 		t.Fatalf("parseConfig: %v", err)
 	}
 	want := execConfig{
-		Socket: "/run/agenthof-exec/refexec.sock", Image: "docker.io/library/busybox:1.36.1",
-		WorkspaceVolume: "agenthof-work", WorkspacePath: "/work", Timeout: 2 * time.Minute,
-		Memory: "256m", CPUs: "1", PIDs: 64, MaxCompartments: 2, EnvAllow: []string{},
+		Socket: "/run/agenthof-exec/refexec.sock", Confiner: "podman", Store: "agenthof-work",
+		Keys:    confiner.Keys{Image: "docker.io/library/busybox:1.36.1", WorkspacePath: "/work"},
+		Limits:  confiner.Limits{Memory: "256m", CPUs: "1", PIDs: 64},
+		Timeout: 2 * time.Minute, MaxCompartments: 2, EnvAllow: []string{},
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Fatalf("parseConfig = %+v, want %+v", cfg, want)
@@ -41,47 +46,114 @@ func TestParseConfigValid(t *testing.T) {
 	if cfg.EnvAllow == nil {
 		t.Fatal("an empty env_allow must be a non-nil empty slice, never nil")
 	}
-	if got := cfg.checkLines(); got != "socket=/run/agenthof-exec/refexec.sock\nworkspace=agenthof-work:/work\n" {
-		t.Fatalf("checkLines = %q", got)
+}
+
+// The confiner key is optional, and a Seatbelt-shaped config has no image and
+// no workspace.path. parseConfig decodes every backend key as written; which of
+// them the selected backend consumes is the factory's decision.
+func TestParseConfigOptionalConfinerAndBackendKeysDecode(t *testing.T) {
+	noConfiner := strings.Replace(validYAML, "confiner: podman\n", "", 1)
+	cfg, err := parseConfig([]byte(noConfiner))
+	if err != nil || cfg.Confiner != "" || cfg.Store != "agenthof-work" {
+		t.Fatalf("no confiner line: %+v, %v", cfg, err)
+	}
+
+	const seatbeltYAML = `confiner: seatbelt
+socket: /private/var/run/refexec/refexec.sock
+workspace:
+  store: agenthof-work
+store_root: /private/var/agenthof/stores
+pid_dir: /private/var/agenthof/pids
+deny_read: [/x]
+shared_host_scratch: true
+timeout: 2m
+limits:
+  memory: 256m
+  cpus: "1"
+  pids: 64
+compartments:
+  max: 2
+env_allow: []
+`
+	cfg, err = parseConfig([]byte(seatbeltYAML))
+	if err != nil {
+		t.Fatalf("seatbelt-shaped config: %v", err)
+	}
+	wantKeys := confiner.Keys{
+		StoreRoot: "/private/var/agenthof/stores", PIDDir: "/private/var/agenthof/pids",
+		DenyRead: []string{"/x"}, SharedHostScratch: true,
+	}
+	if cfg.Confiner != confiner.TierSeatbelt || !reflect.DeepEqual(cfg.Keys, wantKeys) {
+		t.Fatalf("seatbelt-shaped config = %+v, want Keys %+v", cfg, wantKeys)
+	}
+	// No tier branching: a podman config that also sets a Seatbelt key parses;
+	// the factory refuses it later (TestSelectConfinerRejectsUnconsumedKeysAtLoad).
+	if _, err = parseConfig([]byte(validYAML + "pid_dir: /p\n")); err != nil {
+		t.Fatalf("parseConfig must not branch on the tier: %v", err)
 	}
 }
 
-// The additive keys a supervisor renders for a child: a workspace store in
-// place of a volume, and a confiner tier name. The store maps onto the same
-// field the volume does; the tier is validated and carried but not acted on.
-func TestParseConfigAcceptsConfinerAndStore(t *testing.T) {
-	withStore := strings.Replace(validYAML, "volume: agenthof-work", "store: agenthof-work", 1)
-	cfg, err := parseConfig([]byte("confiner: podman\n" + withStore))
+func TestParseConfigRejects(t *testing.T) {
+	longSock := "/" + strings.Repeat("s", 104) // 105 bytes
+	cases := []struct {
+		name    string
+		goos    string
+		mut     func(string) string
+		wantErr string
+	}{
+		{"confiner not a token", "linux", func(s string) string { return strings.Replace(s, "confiner: podman", "confiner: Podman", 1) }, "confiner must be a lowercase backend name"},
+		{"store traversal", "linux", func(s string) string { return strings.Replace(s, "store: agenthof-work", "store: ../etc", 1) }, "workspace.store"},
+		{"store is the scratch dir", "linux", func(s string) string { return strings.Replace(s, "store: agenthof-work", "store: .scratch", 1) }, "workspace.store"},
+		{"no store", "linux", func(s string) string { return strings.Replace(s, "  store: agenthof-work\n", "", 1) }, "workspace.store"},
+		{"retired volume key", "linux", func(s string) string { return strings.Replace(s, "store: agenthof-work", "volume: agenthof-work", 1) }, "field volume not found"},
+		{"socket too long on darwin", "darwin", func(s string) string {
+			return strings.Replace(s, "/run/agenthof-exec/refexec.sock", longSock, 1)
+		}, "unix socket path too long"},
+		{"store_root too long on darwin", "darwin", func(s string) string {
+			return s + "store_root: /" + strings.Repeat("r", 70) + "\n"
+		}, "unix socket path too long"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseConfigOn([]byte(tc.mut(validYAML)), tc.goos)
+			if err == nil {
+				t.Fatalf("expected an error mentioning %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not mention %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+	// The same 105-byte socket fits where the limit is 108.
+	if _, err := parseConfigOn([]byte(strings.Replace(validYAML, "/run/agenthof-exec/refexec.sock", longSock, 1)), "linux"); err != nil {
+		t.Fatalf("a 105-byte socket on linux: %v", err)
+	}
+}
+
+func TestCheckLinesPerBackend(t *testing.T) {
+	cfg := execConfig{Socket: "/s/refexec.sock", Store: "agenthof-work", Keys: confiner.Keys{WorkspacePath: "/work"}}
+	exe, err := os.Executable()
 	if err != nil {
-		t.Fatalf("parseConfig: %v", err)
+		t.Fatal(err)
 	}
-	if cfg.WorkspaceVolume != "agenthof-work" || cfg.Confiner != "podman" || cfg.WorkspacePath != "/work" {
-		t.Fatalf("parseConfig = %+v, want WorkspaceVolume agenthof-work, Confiner podman", cfg)
-	}
-	// store alone, without confiner: the tier is optional.
-	if cfg, err = parseConfig([]byte(withStore)); err != nil || cfg.Confiner != "" || cfg.WorkspaceVolume != "agenthof-work" {
-		t.Fatalf("store without confiner: %+v, %v", cfg, err)
-	}
-	// volume still parses unchanged.
-	if cfg, err = parseConfig([]byte(validYAML)); err != nil || cfg.WorkspaceVolume != "agenthof-work" {
-		t.Fatalf("volume shape regressed: %+v, %v", cfg, err)
-	}
-	bothKeys := strings.Replace(validYAML, "  volume: agenthof-work\n", "  volume: agenthof-work\n  store: agenthof-work\n", 1)
-	if _, err = parseConfig([]byte(bothKeys)); err == nil || !strings.Contains(err.Error(), "workspace.store and workspace.volume") {
-		t.Fatalf("both keys set: err = %v, want a refusal naming both", err)
-	}
-	neither := strings.Replace(validYAML, "  volume: agenthof-work\n", "", 1)
-	if _, err = parseConfig([]byte(neither)); err == nil || !strings.Contains(err.Error(), "workspace.store or workspace.volume") {
-		t.Fatalf("neither key set: err = %v, want a refusal", err)
-	}
-	badStore := strings.Replace(withStore, "store: agenthof-work", "store: ../etc", 1)
-	if _, err = parseConfig([]byte(badStore)); err == nil || !strings.Contains(err.Error(), "workspace.store") {
-		t.Fatalf("bad store name: err = %v", err)
-	}
-	for _, bad := range []string{"Podman", "pod man", "1podman", strings.Repeat("a", 41)} {
-		if _, err = parseConfig([]byte("confiner: " + bad + "\n" + withStore)); err == nil || !strings.Contains(err.Error(), "confiner must be a lowercase backend name") {
-			t.Errorf("confiner %q: err = %v, want a refusal", bad, err)
-		}
+	// The branch is on Tier(), never on how the Confiner was built: the stub's
+	// fake-argv podman prints the podman form.
+	fakeArgv := confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, GuestWorkspace: "/work"})
+	for _, tc := range []struct {
+		name string
+		c    confiner.Confiner
+		want string
+	}{
+		{"fake-argv podman", fakeArgv, "socket=/s/refexec.sock\nworkspace=agenthof-work:/work\n"},
+		{"podman tier whatever StorePath says", &confinertest.Fake{TierName: "podman", Root: "/x"}, "socket=/s/refexec.sock\nworkspace=agenthof-work:/x/agenthof-work\n"},
+		{"seatbelt", &confinertest.Fake{TierName: "seatbelt", Root: "/private/var/s"}, "socket=/s/refexec.sock\nworkspace=agenthof-work\nstore_path=/private/var/s/agenthof-work\n"},
+		{"any future non-podman tier", &confinertest.Fake{TierName: "zz-future", Root: "/r"}, "socket=/s/refexec.sock\nworkspace=agenthof-work\nstore_path=/r/agenthof-work\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := checkLines(cfg, tc.c); got != tc.want {
+				t.Fatalf("checkLines = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -92,12 +164,10 @@ func TestParseConfigRejectsOmissions(t *testing.T) {
 		wantErr string
 	}{
 		{"relative socket", func(s string) string { return strings.Replace(s, "socket: /run/", "socket: run/", 1) }, "socket must be an absolute"},
-		{"no image", func(s string) string { return strings.Replace(s, "image: docker.io/library/busybox:1.36.1\n", "", 1) }, "image is required"},
 		{"image with whitespace", func(s string) string { return strings.Replace(s, "busybox:1.36.1", "busybox:1.36.1 --privileged", 1) }, "image must be an image reference"},
 		{"no workspace", func(s string) string {
-			return strings.Replace(s, "workspace:\n  volume: agenthof-work\n  path: /work\n", "", 1)
+			return strings.Replace(s, "workspace:\n  store: agenthof-work\n  path: /work\n", "", 1)
 		}, "workspace is required"},
-		{"bad volume name", func(s string) string { return strings.Replace(s, "volume: agenthof-work", "volume: ../etc", 1) }, "workspace.volume"},
 		{"relative workspace path", func(s string) string { return strings.Replace(s, "path: /work", "path: work", 1) }, "workspace.path must be an absolute"},
 		{"no timeout", func(s string) string { return strings.Replace(s, "timeout: 2m\n", "", 1) }, "timeout is required"},
 		{"bad timeout", func(s string) string { return strings.Replace(s, "timeout: 2m", "timeout: soon", 1) }, "timeout must be a positive duration"},
@@ -149,7 +219,7 @@ func TestLoadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	if cfg.Image != "docker.io/library/busybox:1.36.1" || cfg.MaxCompartments != 2 {
+	if cfg.Keys.Image != "docker.io/library/busybox:1.36.1" || cfg.MaxCompartments != 2 {
 		t.Fatalf("loadConfig = %+v", cfg)
 	}
 	missing := filepath.Join(dir, "absent.yaml")

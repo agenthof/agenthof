@@ -25,9 +25,10 @@ import (
 
 func testConfig() execConfig {
 	return execConfig{
-		Socket: "/tmp/never/refexec.sock", Image: "example.test/exec:1",
-		WorkspaceVolume: "work", WorkspacePath: "/work", Timeout: 30 * time.Second,
-		Memory: "256m", CPUs: "1", PIDs: 64, MaxCompartments: 2,
+		Socket: "/tmp/never/refexec.sock", Confiner: confiner.TierPodman, Store: "work",
+		Keys:    confiner.Keys{Image: "example.test/exec:1", WorkspacePath: "/work"},
+		Limits:  confiner.Limits{Memory: "256m", CPUs: "1", PIDs: 64},
+		Timeout: 30 * time.Second, MaxCompartments: 2,
 		EnvAllow: []string{"REFEXEC_TEST_UNSET", "REFEXEC_TEST_MARKER"},
 	}
 }
@@ -41,7 +42,7 @@ func fakeRunner(t *testing.T, cfg execConfig) (*runner, string) {
 	}
 	log := filepath.Join(t.TempDir(), "podman.jsonl")
 	t.Setenv("REFEXEC_TEST_ARGLOG", log)
-	c := confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, GuestWorkspace: cfg.WorkspacePath})
+	c := confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, GuestWorkspace: cfg.Keys.WorkspacePath})
 	return newRunner(cfg, slog.New(slog.DiscardHandler), c), log
 }
 
