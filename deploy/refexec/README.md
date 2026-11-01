@@ -235,6 +235,11 @@ The agent's `exec.url` must name the config's `socket`. There is no refbox
 recipe for macOS: the agent runs wherever the operator runs it, and the
 workspace is the store directory on the host.
 
+`scripts/e2e-refexec-seatbelt.sh` runs this whole path with the real
+`sandbox-exec`: the ledger names the Seatbelt tier, a command that tries the
+network is refused inside its compartment, a write outside the store fails
+and leaves no file, and no PID record or scratch dir is left behind.
+
 ## Limits, stated
 
 - Direct network access is denied in every compartment, on either backend.

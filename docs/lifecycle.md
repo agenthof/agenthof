@@ -22,7 +22,10 @@ reached only through the socket directory mounted into them, and a first-hand
 command's compartment has direct network access denied; its result returns through the gateway.
 The per-door podman proofs
 (`scripts/e2e-refbox.sh`, `e2e-refexec.sh`, `e2e-refbridge.sh`,
-`e2e-refspawn.sh`) cover each compartment on its own.
+`e2e-refspawn.sh`) cover each compartment on its own, and
+`scripts/e2e-refexec-seatbelt.sh` covers the exec door's macOS Seatbelt
+backend — direct network access denied, writes scoped to the workspace,
+host-readable — with the real `sandbox-exec`.
 
 ## The command
 

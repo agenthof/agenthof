@@ -37,7 +37,10 @@ host processes started by test stand-ins; nothing here proves no-egress or
 that an agent could not reach a provider on its own. Those walls are the job
 of the operator's runtime. They are proven separately: per door by the podman
 proofs (`scripts/e2e-refbox.sh`, `scripts/e2e-refexec.sh`,
-`scripts/e2e-refbridge.sh`, `scripts/e2e-refspawn.sh`), and for this combined
+`scripts/e2e-refbridge.sh`, `scripts/e2e-refspawn.sh`), for the exec door's
+macOS Seatbelt backend by `scripts/e2e-refexec-seatbelt.sh` (direct network
+access denied, writes scoped to the workspace, host-readable — a weaker tier
+than podman), and for this combined
 scenario by `scripts/e2e-acceptance.sh` (`make acceptance-podman`), which runs
 the scripted agent on real rootless podman and checks that the agent, bridge
 and sub-agent compartments cannot reach the provider at the host's address, nor an
