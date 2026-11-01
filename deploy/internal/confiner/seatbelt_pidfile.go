@@ -39,10 +39,10 @@ func writePIDRecord(path string, r pidRecord) error {
 }
 
 // readPIDRecord reads a record written by writePIDRecord. A record that does
-// not decode, or that names a non-positive pid (which no live compartment has,
-// and which a signal to -pid would turn into the caller's own process group),
-// is an error; the caller treats an unreadable record as a compartment that is
-// already gone.
+// not decode, or whose pid is 1 or lower, is an error: no compartment is ever
+// pid 1 (launchd) or lower, and a signal to -pid for those values would reach
+// the caller's own process group (0) or every process the user owns (1). The
+// caller treats an unreadable record as a compartment that is already gone.
 func readPIDRecord(path string) (pidRecord, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -52,7 +52,7 @@ func readPIDRecord(path string) (pidRecord, error) {
 	if err := json.Unmarshal(body, &r); err != nil {
 		return pidRecord{}, fmt.Errorf("confiner: pid record %s: %w", path, err)
 	}
-	if r.PID <= 0 {
+	if r.PID <= 1 {
 		return pidRecord{}, fmt.Errorf("confiner: pid record %s: pid %d is not a process", path, r.PID)
 	}
 	return r, nil

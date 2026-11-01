@@ -12,7 +12,7 @@ import (
 func TestSBPLProfileGolden(t *testing.T) {
 	got := sbplProfile(profileInput{Scratch: "/private/var/s/.scratch/refexec-01",
 		Paths:    []Path{{Path: "/private/var/sp/r-1", RW: true}, {Path: "/opt/ro", RW: false}},
-		DenyRead: append(fixedHomeDenies("/Users/op"), "/private/var/s", "/private/var/p", "/private/var/sp", "/Users/op/ledger")})
+		DenyRead: append(fixedHomeDenies("/home/op"), "/private/var/s", "/private/var/p", "/private/var/sp", "/home/op/ledger")})
 	want := `(version 1)
 (deny default)
 (allow process-fork)
@@ -25,15 +25,15 @@ func TestSBPLProfileGolden(t *testing.T) {
 (allow file-read*)
 (allow file-ioctl)
 (deny network*)
-(deny file-read* (subpath "/Users/op/.ssh"))
-(deny file-read* (subpath "/Users/op/.aws"))
-(deny file-read* (subpath "/Users/op/.gnupg"))
-(deny file-read* (subpath "/Users/op/.config/gh"))
-(deny file-read* (subpath "/Users/op/Library/Keychains"))
+(deny file-read* (subpath "/home/op/.ssh"))
+(deny file-read* (subpath "/home/op/.aws"))
+(deny file-read* (subpath "/home/op/.gnupg"))
+(deny file-read* (subpath "/home/op/.config/gh"))
+(deny file-read* (subpath "/home/op/Library/Keychains"))
 (deny file-read* (subpath "/private/var/s"))
 (deny file-read* (subpath "/private/var/p"))
 (deny file-read* (subpath "/private/var/sp"))
-(deny file-read* (subpath "/Users/op/ledger"))
+(deny file-read* (subpath "/home/op/ledger"))
 (allow file-read* file-write* (subpath (param "WORK")))
 (allow file-read* file-write* (subpath "/private/var/sp/r-1"))
 (allow file-read* (subpath "/opt/ro"))
@@ -46,10 +46,47 @@ func TestSBPLProfileGolden(t *testing.T) {
 	}
 }
 
+// The loosened backend's variant: the shared host scratch allow sits between
+// the compartment's own allows and the /dev line, and nothing else moves.
+func TestSBPLProfileGoldenSharedHostScratch(t *testing.T) {
+	got := sbplProfile(profileInput{Scratch: "/private/var/s/.scratch/refexec-01", SharedHostScratch: true,
+		Paths:    []Path{{Path: "/private/var/sp/r-1", RW: true}},
+		DenyRead: []string{"/private/var/s", "/private/var/p"}})
+	want := `(version 1)
+(deny default)
+(allow process-fork)
+(allow process-exec)
+(allow sysctl-read)
+(allow mach-lookup)
+(deny mach-lookup (global-name "com.apple.lsd.mapdb") (global-name "com.apple.lsd.modifydb") (global-name "com.apple.lsd.xpc") (global-name "com.apple.lsd.open"))
+(allow signal (target self))
+(allow signal (target children))
+(allow file-read*)
+(allow file-ioctl)
+(deny network*)
+(deny file-read* (subpath "/private/var/s"))
+(deny file-read* (subpath "/private/var/p"))
+(allow file-read* file-write* (subpath (param "WORK")))
+(allow file-read* file-write* (subpath "/private/var/sp/r-1"))
+(allow file-read* file-write* (subpath "/private/var/s/.scratch/refexec-01"))
+(allow file-read* file-write* (subpath "/private/tmp"))
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/stdin") (literal "/dev/stdout") (literal "/dev/stderr") (subpath "/dev/fd"))
+(allow network-bind network-outbound (subpath "/private/var/sp/r-1"))
+`
+	if got != want {
+		t.Fatalf("profile:\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func TestFixedHomeDenies(t *testing.T) {
-	want := []string{"/Users/op/.ssh", "/Users/op/.aws", "/Users/op/.gnupg", "/Users/op/.config/gh", "/Users/op/Library/Keychains"}
-	if got := fixedHomeDenies("/Users/op"); !slices.Equal(got, want) {
+	want := []string{"/home/op/.ssh", "/home/op/.aws", "/home/op/.gnupg", "/home/op/.config/gh", "/home/op/Library/Keychains"}
+	if got := fixedHomeDenies("/home/op"); !slices.Equal(got, want) {
 		t.Fatalf("fixedHomeDenies = %q, want %q", got, want)
+	}
+	// A trailing slash on the home must not produce "//.ssh", which no SBPL
+	// subpath rule would match.
+	if got := fixedHomeDenies("/home/op/"); !slices.Equal(got, want) {
+		t.Fatalf("fixedHomeDenies with a trailing slash = %q, want %q", got, want)
 	}
 }
 
@@ -115,9 +152,6 @@ func checkForbidden(t *testing.T, profile string) {
 			t.Errorf("profile contains forbidden %q:\n%s", bad, profile)
 		}
 	}
-	if strings.Contains(profile, "file-write*") && !strings.Contains(profile, "file-read* file-write*") {
-		t.Errorf("a write allow without read:\n%s", profile)
-	}
 	for _, l := range profileLines(t, profile) {
 		if strings.Contains(l, "file-write*") && strings.Contains(l, "subpath") && !strings.HasPrefix(l, "(allow file-read* file-write* (subpath ") && l != devAllow {
 			t.Errorf("a write-only subpath allow (unreadable to the compartment): %q", l)
@@ -126,7 +160,7 @@ func checkForbidden(t *testing.T, profile string) {
 }
 
 func TestSBPLProfileInvariants(t *testing.T) {
-	denies := append(fixedHomeDenies("/Users/op"), "/private/var/s", "/private/var/p")
+	denies := append(fixedHomeDenies("/home/op"), "/private/var/s", "/private/var/p")
 
 	t.Run("no scratch, no scratch line", func(t *testing.T) {
 		p := sbplProfile(profileInput{Paths: []Path{{Path: "/x", RW: true}}, DenyRead: denies})
@@ -226,7 +260,7 @@ func TestSBPLProfileInvariants(t *testing.T) {
 
 	t.Run("one RW path yields exactly one network rule, nothing else can add one", func(t *testing.T) {
 		p := sbplProfile(profileInput{Scratch: "/private/var/s/.scratch/c", SharedHostScratch: true,
-			Paths: []Path{{Path: "/x", RW: true}, {Path: "/ro"}}, DenyRead: append(denies, "/Users/op/ledger")})
+			Paths: []Path{{Path: "/x", RW: true}, {Path: "/ro"}}, DenyRead: append(denies, "/home/op/ledger")})
 		checkForbidden(t, p)
 		lines := profileLines(t, p)
 		checkNetworkAllows(t, lines, []string{"/x"})
@@ -292,7 +326,7 @@ func TestSBPLSafe(t *testing.T) {
 	}{
 		{"/ok/path", true},
 		{"/", true},
-		{"/Users/op/Library/Application Support", true},
+		{"/home/op/Library/Application Support", true},
 		{"rel", false},
 		{"", false},
 		{`/a"b`, false},

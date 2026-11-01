@@ -47,6 +47,7 @@ func TestReadPIDRecordRejectsGarbage(t *testing.T) {
 		"empty":    "",
 		"notjson":  "pid 12",
 		"zero-pid": `{"pid":0,"start_unix_micro":1,"store":"w"}`,
+		"pid-1":    `{"pid":1,"start_unix_micro":1,"store":"w"}`,
 		"neg-pid":  `{"pid":-5,"start_unix_micro":1,"store":"w"}`,
 	} {
 		p := filepath.Join(dir, name+".pid")

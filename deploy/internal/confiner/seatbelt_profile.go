@@ -114,11 +114,11 @@ func sbplQuote(path string) string {
 // own home: the credential stores a host-readable compartment must not read.
 func fixedHomeDenies(home string) []string {
 	return []string{
-		home + "/.ssh",
-		home + "/.aws",
-		home + "/.gnupg",
-		home + "/.config/gh",
-		home + "/Library/Keychains",
+		filepath.Join(home, ".ssh"),
+		filepath.Join(home, ".aws"),
+		filepath.Join(home, ".gnupg"),
+		filepath.Join(home, ".config", "gh"),
+		filepath.Join(home, "Library", "Keychains"),
 	}
 }
 
