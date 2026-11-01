@@ -165,12 +165,10 @@ func run(t *testing.T, s *Seatbelt, spec Spec) Result {
 	return res
 }
 
-// szomb is the kernel's P_stat for a process that has exited but not been
-// reaped (sys/proc.h SZOMB). kill(pid, 0) still succeeds for one, and a
-// test-owned child stays one until the test reaps it, so liveness here means
-// "the kernel knows the pid and it is not a zombie".
-const szomb = 5
-
+// alive: the kernel knows the pid and it is not a zombie. kill(pid, 0) still
+// succeeds for a zombie, and a test-owned child stays one until the test
+// reaps it, so liveness here means "the kernel knows the pid and it is not a
+// zombie".
 func alive(pid int) bool {
 	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	return err == nil && kp.Proc.P_stat != szomb
@@ -239,6 +237,61 @@ func startSleeper(t *testing.T) int {
 		_ = cmd.Wait()
 	})
 	return cmd.Process.Pid
+}
+
+// startSibling stands in for ANOTHER running instance (a second refexec on
+// the same store root and pid dir): a live process the test owns, as the
+// owner stamp a backend would carry, plus a way to end it — killed AND
+// reaped, so what remains is no process at all, not a zombie.
+func startSibling(t *testing.T) (owner ownerRef, end func()) {
+	t.Helper()
+	cmd := exec.Command("/bin/sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	end = func() {
+		once.Do(func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		})
+	}
+	t.Cleanup(end)
+	start, err := ownerStart(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ownerRef{pid: cmd.Process.Pid, start: start}, end
+}
+
+// siblingSeatbelt is a second backend over the SAME store root and pid dir as
+// s, stamping its compartments as owner: what a second instance sharing the
+// operator's directories looks like to the first.
+func siblingSeatbelt(t *testing.T, s *Seatbelt, owner ownerRef) *Seatbelt {
+	t.Helper()
+	sib := newTestSeatbelt(t, func(c *SeatbeltConfig) { c.StoreRoot, c.PIDDir = s.cfg.StoreRoot, s.cfg.PIDDir })
+	sib.owner = owner
+	return sib
+}
+
+// mustExist fails when any of paths is missing.
+func mustExist(t *testing.T, what string, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s: %s: %v", what, p, err)
+		}
+	}
+}
+
+// mustBeGone fails when any of paths still exists.
+func mustBeGone(t *testing.T, what string, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: %s: %v", what, p, err)
+		}
+	}
 }
 
 func TestSeatbeltResolvesSymlinkedRoots(t *testing.T) {
@@ -520,9 +573,11 @@ func TestSeatbeltDidNotLaunch65And71(t *testing.T) {
 	}
 }
 
-// A Launch that fails to start under a Name a LIVE compartment already holds
-// must not touch that compartment's PID record: the record is what keeps the
-// live one visible to RemoveStore and Reap.
+// A Launch under a Name a LIVE compartment already holds is refused by the
+// claim, before anything starts, and must not touch that compartment's PID
+// record: the record is what keeps the live one visible to RemoveStore and
+// Reap. A Launch under a FREE name that then fails to start leaves nothing
+// behind: its claim goes with it.
 func TestSeatbeltStartFailureKeepsALiveCompartmentsRecord(t *testing.T) {
 	s := newTestSeatbelt(t, nil)
 	mustCreateStore(t, s, "w")
@@ -532,30 +587,31 @@ func TestSeatbeltStartFailureKeepsALiveCompartmentsRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = live.Remove(ctx) })
-	// The profile text is already accepted (same Scratch/Paths), so the next
-	// Launch skips the dry-run and reaches cmd.Start, which fails: the
-	// sandbox-exec path no longer exists.
+	_, err = s.Launch(ctx, Spec{Name: "refexec-01", Store: "w", Argv: []string{"sleep", "60"}})
+	if err == nil || !errors.Is(err, os.ErrExist) {
+		t.Fatalf("Launch under a live compartment's name: %v, want the record to refuse it", err)
+	}
+	rec, err := readPIDRecord(s.pidFile("refexec-01"))
+	if err != nil || rec.PID != live.PID() {
+		t.Fatalf("the live compartment's record after a refused launch: %+v, %v (want pid %d)", rec, err, live.PID())
+	}
+	if err := s.RemoveStore(ctx, "w", false); !errors.Is(err, ErrStoreInUse) {
+		t.Fatalf("RemoveStore after a refused launch = %v, want ErrStoreInUse", err)
+	}
+
+	// The profile text is already accepted (same Scratch/Paths), so a Launch
+	// under a free name skips the dry-run and reaches cmd.Start, which fails:
+	// the sandbox-exec path no longer exists.
 	real := s.cfg.SandboxExec
 	s.cfg.SandboxExec = filepath.Join(t.TempDir(), "missing-sandbox-exec")
-	_, err = s.Launch(ctx, Spec{Name: "refexec-01", Store: "w", Argv: []string{"sleep", "60"}})
+	_, err = s.Launch(ctx, Spec{Name: "refexec-02", Store: "w", Scratch: true, Argv: []string{"sleep", "60"}})
 	s.cfg.SandboxExec = real
 	if err == nil {
 		t.Fatal("Launch with a missing sandbox-exec succeeded")
 	}
-	rec, err := readPIDRecord(s.pidFile("refexec-01"))
-	if err != nil || rec.PID != live.PID() {
-		t.Fatalf("the live compartment's record after a failed start: %+v, %v (want pid %d)", rec, err, live.PID())
-	}
-	if err := s.RemoveStore(ctx, "w", false); !errors.Is(err, ErrStoreInUse) {
-		t.Fatalf("RemoveStore after a failed start = %v, want ErrStoreInUse", err)
-	}
-	if err := s.Reap(ctx, "refexec-"); err != nil {
-		t.Fatal(err)
-	}
-	waitGone(t, live.PID(), 3*time.Second)
-	if _, err := os.Stat(s.pidFile("refexec-01")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("record after Reap: %v", err)
-	}
+	mustBeGone(t, "after a failed start", s.pidFile("refexec-02"), s.scratchDir("refexec-02"))
+	assertAlive(t, live.PID(), "a failed start under another name ended the live compartment")
+	mustExist(t, "after a failed start", s.pidFile("refexec-01"))
 }
 
 // The verdict on the probe's outside write: only a real denial (a non-zero
@@ -740,7 +796,12 @@ func TestSeatbeltRemoveStoreInUseThenForce(t *testing.T) {
 	}
 }
 
-func TestSeatbeltReapKillsOwnedSession(t *testing.T) {
+// The caller's OWN compartments are leftovers to it: an instance that reaps
+// on its way out (refspawn's shutdown sweep) has already torn its sets down,
+// so whatever still carries its stamp is something it failed to remove. The
+// sweep stays scoped to the prefix: another prefix's live record is not
+// touched.
+func TestSeatbeltReapSweepsTheCallersOwnLeftovers(t *testing.T) {
 	s := newTestSeatbelt(t, nil)
 	mustCreateStore(t, s, "w")
 	mustCreateStore(t, s, "refexec-stale-store")
@@ -766,16 +827,8 @@ func TestSeatbeltReapKillsOwnedSession(t *testing.T) {
 		t.Fatalf("Reap: %v", err)
 	}
 	waitGone(t, pid, 3*time.Second)
-	for _, p := range []string{s.pidFile("refexec-a"), s.scratchDir("refexec-a"), s.StorePath("refexec-stale-store")} {
-		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s after Reap: %v", p, err)
-		}
-	}
-	for _, p := range []string{otherFile, s.StorePath("w")} {
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("Reap touched %s: %v", p, err)
-		}
-	}
+	mustBeGone(t, "after Reap", s.pidFile("refexec-a"), s.scratchDir("refexec-a"), s.StorePath("refexec-stale-store"))
+	mustExist(t, "Reap touched", otherFile, s.StorePath("w"))
 	assertAlive(t, other, "Reap killed a process another prefix owns")
 	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -785,6 +838,104 @@ func TestSeatbeltReapKillsOwnedSession(t *testing.T) {
 	if err := s.Reap(ctx, ""); err == nil {
 		t.Fatal("Reap accepted an empty prefix")
 	}
+}
+
+// Two instances share one store root and pid dir (what refspawn's children
+// do). Instance B's startup Reap must leave instance A's compartment in
+// flight exactly as it is — its process, its record, its scratch dir, the
+// store it runs on and a claim A has made but not yet completed — because A
+// is still running: A's command would otherwise end with a killed exit that
+// A attests as the command's own. Once A is gone, the same compartment IS a
+// leftover and B's next Reap removes all of it.
+func TestSeatbeltReapSparesALiveSiblingsCompartment(t *testing.T) {
+	sibling, endSibling := startSibling(t)
+	a := newTestSeatbelt(t, nil)
+	a.owner = sibling
+	mustCreateStore(t, a, "w")
+	mustCreateStore(t, a, "refexec-set-work") // a prefixed store A's record names
+	ctx := context.Background()
+	c, err := a.Launch(ctx, Spec{Name: "refexec-a", Store: "refexec-set-work", Scratch: true, Argv: []string{"sleep", "60"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A claim A has made and not yet completed: the moment between the
+	// record and the process, frozen.
+	pending := a.pidFile("refexec-pending")
+	if err := writePIDRecord(pending, pidRecord{Store: "w", OwnerPID: sibling.pid, OwnerStartUnixMicro: sibling.start}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(a.scratchDir("refexec-pending"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A's own leftover beside them: a record whose owner is A but whose
+	// process is long gone. Still A's, so still not B's to touch.
+	stale := a.pidFile("refexec-a-old")
+	if err := writePIDRecord(stale, pidRecord{PID: 2_000_000_000, StartUnixMicro: 1, Store: "w", OwnerPID: sibling.pid, OwnerStartUnixMicro: sibling.start}); err != nil {
+		t.Fatal(err)
+	}
+	aLeaves := []string{a.pidFile("refexec-a"), a.scratchDir("refexec-a"), a.StorePath("refexec-set-work"), pending, a.scratchDir("refexec-pending"), stale}
+
+	b := siblingSeatbelt(t, a, mustSelfOwner(t))
+	if err := b.Reap(ctx, "refexec-"); err != nil {
+		t.Fatalf("B's Reap: %v", err)
+	}
+	assertAlive(t, c.PID(), "B's startup Reap killed A's compartment in flight")
+	mustExist(t, "B's Reap touched what A, still running, owns", aLeaves...)
+	select {
+	case <-c.Done():
+		t.Fatal("A's compartment ended during B's Reap")
+	default:
+	}
+
+	// A is gone: now they are leftovers.
+	endSibling()
+	if err := b.Reap(ctx, "refexec-"); err != nil {
+		t.Fatalf("B's second Reap: %v", err)
+	}
+	waitGone(t, c.PID(), 3*time.Second)
+	mustBeGone(t, "after A exited, B's Reap left", aLeaves...)
+	mustExist(t, "B's Reap removed an unprefixed store", a.StorePath("w"))
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := c.Wait(wctx); err != nil {
+		t.Fatalf("Wait after Reap: %v", err)
+	}
+}
+
+// A record from before the owner stamp existed names no owner. Only an
+// instance that predates the stamp could have written it and that instance
+// has exited, so the record is a leftover: its process, if still the one
+// recorded, is ended, and its files go.
+func TestSeatbeltReapSweepsAnUnstampedRecord(t *testing.T) {
+	s := newTestSeatbelt(t, nil)
+	ctx := context.Background()
+	orphan := startSleeper(t)
+	start, err := processStart(orphan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Written as an old binary would: the pid, its start time, the store.
+	path := s.pidFile("refexec-old")
+	if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"pid":%d,"start_unix_micro":%d,"store":"w"}`+"\n", orphan, start)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(s.scratchDir("refexec-old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reap(ctx, "refexec-"); err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	waitGone(t, orphan, 3*time.Second)
+	mustBeGone(t, "after Reap", path, s.scratchDir("refexec-old"))
+}
+
+func mustSelfOwner(t *testing.T) ownerRef {
+	t.Helper()
+	o, err := selfOwner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return o
 }
 
 // A stale record whose pid is now an unrelated process

@@ -47,6 +47,12 @@ type PodmanConfig struct {
 // privileges, and the host user's id (--userns=keep-id).
 type Podman struct {
 	cfg PodmanConfig
+	// owner is this process's stamp, set as a label on every container this
+	// backend runs so a later Reap can tell the compartments of a running
+	// instance from the leftovers of one that is gone. ownerErr is why it
+	// could not be read; Probe and Launch refuse on it.
+	owner    ownerRef
+	ownerErr error
 }
 
 var _ Confiner = (*Podman)(nil)
@@ -67,7 +73,9 @@ func NewPodman(c PodmanConfig) *Podman {
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.DiscardHandler)
 	}
-	return &Podman{cfg: c}
+	p := &Podman{cfg: c}
+	p.owner, p.ownerErr = selfOwner()
+	return p
 }
 
 // Tier is TierPodman.
@@ -115,8 +123,13 @@ func (p *Podman) output(ctx context.Context, timeout time.Duration, args ...stri
 
 // Probe requires a LOCAL, rootless, Linux engine. A client pointed at a
 // remote engine (podman-machine) is refused on every OS: the host paths a
-// compartment is given would not be the engine's.
+// compartment is given would not be the engine's. It also requires this
+// process's own owner stamp, without which no compartment could be told from
+// a leftover.
 func (p *Podman) Probe(ctx context.Context) error {
+	if p.ownerErr != nil {
+		return p.ownerErr
+	}
 	out, err := p.output(ctx, 30*time.Second, "info", "--format", podmanProbeFormat)
 	if err != nil {
 		return fmt.Errorf("confiner: podman info probe failed: %w", err)
@@ -132,22 +145,23 @@ func (p *Podman) Probe(ctx context.Context) error {
 	return nil
 }
 
-// runArgs builds the one `podman run` for a compartment: no network, a
-// read-only root, an optional tmpfs scratch, every capability dropped, no new
-// privileges, the host user's id, the resource caps, the wall clock as a
-// backstop to the caller's own deadline, the workspace store — and nothing
-// else writable — mounted at the guest workspace path (also the working
-// directory), the allow-listed host paths at their own path, the requested
-// environment names, then the image and the argv. --pull=never: the operator
-// fetches the image; a compartment is offline by construction. applied is the
-// environment-variable NAME list the run carries, sorted; never nil.
+// runArgs builds the one `podman run` for a compartment: the owner label, no
+// network, a read-only root, an optional tmpfs scratch, every capability
+// dropped, no new privileges, the host user's id, the resource caps, the wall
+// clock as a backstop to the caller's own deadline, the workspace store — and
+// nothing else writable — mounted at the guest workspace path (also the
+// working directory), the allow-listed host paths at their own path, the
+// requested environment names, then the image and the argv. --pull=never: the
+// operator fetches the image; a compartment is offline by construction.
+// applied is the environment-variable NAME list the run carries, sorted;
+// never nil.
 func (p *Podman) runArgs(spec Spec) (args []string, applied []string) {
 	secs := int(spec.Timeout / time.Second)
 	if secs < 1 {
 		secs = 1
 	}
 	guest := p.cfg.GuestWorkspace
-	args = []string{"run", "--rm", "--name", spec.Name, "--pull=never", "--network", "none", "--read-only"}
+	args = []string{"run", "--rm", "--name", spec.Name, "--label", ownerLabel + "=" + p.owner.String(), "--pull=never", "--network", "none", "--read-only"}
 	if spec.Scratch {
 		args = append(args, "--tmpfs", "/tmp")
 	}
@@ -201,6 +215,9 @@ func (p *Podman) runArgs(spec Spec) (args []string, applied []string) {
 // the client then exits on its own; WaitDelay bounds how long its pipes are
 // waited for.
 func (p *Podman) Launch(_ context.Context, spec Spec) (Compartment, error) {
+	if p.ownerErr != nil {
+		return nil, p.ownerErr
+	}
 	if err := p.ValidateProgram(spec.Program); err != nil {
 		return nil, err
 	}
@@ -320,20 +337,43 @@ func (p *Podman) RemoveStore(ctx context.Context, name string, force bool) error
 	return nil
 }
 
-// Reap removes every container and volume whose name starts with prefix: the
-// leftovers of a previous run that died with compartments in flight. A failed
-// listing is returned (the caller decides whether to refuse or warn); a
-// leftover that cannot be removed is logged and does not stop the sweep.
+// psOwnerFormat lists each container as its name and its owner label, space
+// separated; a container with no such label lists as its name alone.
+const psOwnerFormat = `{{.Names}} {{index .Labels "` + ownerLabel + `"}}`
+
+// Reap removes the LEFTOVER containers whose name starts with prefix, and
+// every volume under it: what a previous run left when it died with
+// compartments in flight. A container's owner label names the process that
+// ran it; a container whose owner is still running and is not the caller is
+// another instance's compartment in flight, not a leftover, and is left
+// alone. One whose owner is gone, is the caller itself (sweeping its own
+// leftovers on the way out) or is unknown (no label) is removed. The engine
+// is local (Probe), so the owner is a process on this host. A failed listing
+// is returned (the caller decides whether to refuse or warn); a leftover that
+// cannot be removed is logged and does not stop the sweep.
 func (p *Podman) Reap(ctx context.Context, prefix string) error {
 	if prefix == "" {
 		return errors.New("confiner: reap needs a name prefix (an empty one would match everything)")
 	}
 	filter := "name=^" + prefix
 	var errs []error
-	if out, err := p.output(ctx, 30*time.Second, "ps", "-aq", "--filter", filter); err != nil {
+	if out, err := p.output(ctx, 30*time.Second, "ps", "-a", "--filter", filter, "--format", psOwnerFormat); err != nil {
 		errs = append(errs, err)
 	} else {
-		for _, name := range strings.Fields(string(out)) {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			name := fields[0]
+			var owner ownerRef
+			if len(fields) > 1 {
+				owner, _ = parseOwner(fields[1])
+			}
+			if !owner.reapableBy(p.owner) {
+				p.cfg.Logger.Info("leaving a compartment another running instance owns", "compartment", name, "owner_pid", owner.pid)
+				continue
+			}
 			p.cfg.Logger.Info("reaping leftover compartment", "compartment", name)
 			if _, err := p.output(ctx, 30*time.Second, "rm", "-f", name); err != nil {
 				p.cfg.Logger.Warn("leftover compartment not removed", "compartment", name, "error", err)

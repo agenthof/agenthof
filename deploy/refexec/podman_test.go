@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 }
 
 // twoArgFlags are the `podman run` flags refexec passes with a separate value.
-var twoArgFlags = map[string]bool{"--name": true, "--network": true, "--tmpfs": true, "--security-opt": true, "--user": true, "-v": true, "-e": true, "-w": true}
+var twoArgFlags = map[string]bool{"--name": true, "--label": true, "--network": true, "--tmpfs": true, "--security-opt": true, "--user": true, "-v": true, "-e": true, "-w": true}
 
 // fakeRecord is one line of the fake's log (REFEXEC_TEST_ARGLOG): what podman
 // was asked, by which client process, and which child it started.

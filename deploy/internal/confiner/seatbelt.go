@@ -73,6 +73,10 @@ type SeatbeltConfig struct {
 // process can match against the live process's start time.
 type Seatbelt struct {
 	cfg SeatbeltConfig
+	// owner is this process's stamp, written into every PID record this
+	// backend creates so a later Reap can tell the compartments of a running
+	// instance from the leftovers of one that is gone.
+	owner ownerRef
 	// denyRead are the read-denied subtrees in profile order, each resolved
 	// and sbplSafe.
 	denyRead []string
@@ -149,9 +153,13 @@ func NewSeatbelt(c SeatbeltConfig) (*Seatbelt, error) {
 	}
 	c.DenyRead = resolvedDeny
 	deny = append(deny, resolvedDeny...)
+	owner, err := selfOwner()
+	if err != nil {
+		return nil, fmt.Errorf("confiner: seatbelt: %w", err)
+	}
 
 	c.Logger.Warn("limits not enforced on this tier", "tier", TierSeatbelt)
-	return &Seatbelt{cfg: c, denyRead: deny, traverse: traverse}, nil
+	return &Seatbelt{cfg: c, owner: owner, denyRead: deny, traverse: traverse}, nil
 }
 
 // processHome is the backend process's own home: HOME, else its user record.
@@ -416,8 +424,9 @@ func lookProgram(program string) (string, error) {
 // Launch starts one compartment: sandbox-exec under the compartment's
 // profile, exec'ing the program in place in its own session, with the store as
 // working directory and WORK, only the named environment (plus TMPDIR when
-// Scratch), and a PID record of its pid, start time and store. It never
-// creates the store.
+// Scratch), and a PID record of its pid, start time, store and owner. The
+// record is claimed, pending, before anything else exists under the name, and
+// completed once the process is running. It never creates the store.
 func (s *Seatbelt) Launch(ctx context.Context, spec Spec) (Compartment, error) {
 	if !ValidStoreName(spec.Name) {
 		return nil, fmt.Errorf("confiner: %q is not a legal compartment name", spec.Name)
@@ -462,15 +471,29 @@ func (s *Seatbelt) Launch(ctx context.Context, spec Spec) (Compartment, error) {
 	if err := s.compile(ctx, profile, store); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrDidNotLaunch, err)
 	}
+	c := &seatbeltCompartment{s: s, name: spec.Name, pidFile: s.pidFile(spec.Name), scratch: scratch, done: make(chan struct{})}
+
+	// Claim the name first: a PENDING record (no pid yet) that carries the
+	// owner. From here until the record is completed below, another
+	// instance's Reap sees a name a running instance owns and leaves the
+	// scratch dir created next alone; without the claim it would see an
+	// unaccounted-for scratch dir and remove it from under the command. An
+	// existing record means a compartment may be live under this name, so the
+	// launch is refused before anything is started or created.
+	rec := pidRecord{Store: spec.Store, OwnerPID: s.owner.pid, OwnerStartUnixMicro: s.owner.start}
+	if err := writePIDRecord(c.pidFile, rec); err != nil {
+		return nil, fmt.Errorf("confiner: compartment %q: %w", spec.Name, err)
+	}
 	if scratch != "" {
 		if err := os.MkdirAll(filepath.Dir(scratch), 0o700); err != nil {
+			c.removeFiles()
 			return nil, fmt.Errorf("confiner: scratch dir: %w", err)
 		}
 		if err := os.Mkdir(scratch, 0o700); err != nil {
+			c.removeFiles()
 			return nil, fmt.Errorf("confiner: scratch dir: %w", err)
 		}
 	}
-	c := &seatbeltCompartment{s: s, name: spec.Name, pidFile: s.pidFile(spec.Name), scratch: scratch, done: make(chan struct{})}
 
 	env, applied := childEnv(s.cfg.Environ(), spec.EnvNames, scratch)
 	cmd := exec.Command(s.cfg.SandboxExec, sandboxArgs(profile, store, abs, argv[1:]...)...)
@@ -488,20 +511,20 @@ func (s *Seatbelt) Launch(ctx context.Context, spec Spec) (Compartment, error) {
 	}
 	cmd.Stdout, cmd.Stderr = sink, sink
 	if err := cmd.Start(); err != nil {
-		// Nothing was recorded yet, and a LIVE compartment may hold this
-		// Name: only this launch's own scratch dir goes, never the PID record.
-		c.removeScratch()
+		// The claim above is this launch's own, so the record goes with the
+		// scratch dir.
+		c.removeFiles()
 		return nil, fmt.Errorf("confiner: start sandbox-exec: %w", err)
 	}
 	c.cmd, c.pid = cmd, cmd.Process.Pid
 
 	// abandon ends a process this launch started but cannot keep: it is this
 	// exec.Cmd's own un-reaped child, so its pid cannot have been reused and
-	// the ungated kill is safe. Nothing recorded, nothing left behind.
+	// the ungated kill is safe. Its record and scratch dir go with it.
 	abandon := func(reason error) (Compartment, error) {
 		killSession(c.pid)
 		_ = cmd.Wait()
-		c.removeScratch()
+		c.removeFiles()
 		return nil, fmt.Errorf("confiner: compartment %q: %w", spec.Name, reason)
 	}
 	// The record pairs the pid with its start time so a later process can
@@ -513,9 +536,8 @@ func (s *Seatbelt) Launch(ctx context.Context, spec Spec) (Compartment, error) {
 		return abandon(fmt.Errorf("start time unavailable, refusing to run it unrecorded: %w", err))
 	}
 	c.start = start
-	if err := writePIDRecord(c.pidFile, pidRecord{PID: c.pid, StartUnixMicro: start, Store: spec.Store}); err != nil {
-		// A record under this name already exists: a compartment may be live
-		// under it, and this one must not run unrecorded.
+	rec.PID, rec.StartUnixMicro = c.pid, start
+	if err := replacePIDRecord(c.pidFile, rec); err != nil {
 		return abandon(err)
 	}
 
@@ -584,8 +606,8 @@ func (c *seatbeltCompartment) kill() {
 
 // removeFiles removes the PID record this compartment wrote and its scratch
 // dir; both the exit goroutine and Remove call it, so a file already gone is
-// not an error. It is only reached once writePIDRecord has succeeded, so the
-// record it removes is this compartment's own.
+// not an error. It is only reached once the claim (writePIDRecord) has
+// succeeded, so the record it removes is this compartment's own.
 func (c *seatbeltCompartment) removeFiles() {
 	if err := os.Remove(c.pidFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		c.s.cfg.Logger.Warn("pid record not removed", "compartment", c.name, "error", err)
@@ -651,8 +673,8 @@ func (s *Seatbelt) CreateStore(_ context.Context, name string) error {
 
 // storeInUse reports whether a PID record names store and its process is
 // still the one the record was written for (its start time matches). A
-// record whose process is gone or reused does not count; an unreadable one
-// is left for Reap.
+// record whose process is gone or reused does not count, nor does a pending
+// one (no process yet); an unreadable one is left for Reap.
 func (s *Seatbelt) storeInUse(store string) (bool, error) {
 	entries, err := os.ReadDir(s.cfg.PIDDir)
 	if err != nil {
@@ -663,7 +685,7 @@ func (s *Seatbelt) storeInUse(store string) (bool, error) {
 			continue
 		}
 		rec, err := readPIDRecord(filepath.Join(s.cfg.PIDDir, e.Name()))
-		if err != nil || rec.Store != store {
+		if err != nil || rec.Store != store || rec.PID == 0 {
 			continue
 		}
 		if start, err := processStart(rec.PID); err == nil && start == rec.StartUnixMicro {
@@ -695,15 +717,23 @@ func (s *Seatbelt) RemoveStore(_ context.Context, name string, force bool) error
 	return nil
 }
 
-// Reap sweeps the leftovers of compartments whose names start with prefix:
+// Reap sweeps the LEFTOVERS of compartments whose names start with prefix:
 // every <PIDDir>/<prefix>*.pid record, then every <StoreRoot>/<prefix>* store
-// and <StoreRoot>/.scratch/<prefix>* scratch dir. A record's process is
-// signalled ONLY when the kernel's start time for its pid equals the recorded
-// one: a stale record from a crash or a reboot whose pid now belongs to some
-// other process (an editor, a terminal, a backup) is deleted without a signal.
-// An unreadable record, a missing process and a start-time mismatch are all
-// "already gone". A listing failure is returned; a leftover that cannot be
-// removed is logged and does not stop the sweep.
+// and <StoreRoot>/.scratch/<prefix>* scratch dir — except what a compartment
+// of another RUNNING instance accounts for. A record names its owner (the
+// process that launched the compartment); when that owner is still running
+// and is not the caller, the record, its process, its scratch dir and the
+// store it names are left exactly as they are: several instances may share
+// one store root and pid dir, and a sibling's command in flight is not a
+// leftover. An owner that is gone, the caller itself (sweeping its own
+// leftovers on the way out) or a record with no owner stamp marks a leftover.
+// A leftover's process is signalled ONLY when the kernel's start time for its
+// pid equals the recorded one: a stale record from a crash or a reboot whose
+// pid now belongs to some other process (an editor, a terminal, a backup) is
+// deleted without a signal. An unreadable record, a pending record, a missing
+// process and a start-time mismatch are all "already gone". A listing failure
+// is returned; a leftover that cannot be removed is logged and does not stop
+// the sweep.
 func (s *Seatbelt) Reap(_ context.Context, prefix string) error {
 	if prefix == "" {
 		return errors.New("confiner: reap needs a name prefix (an empty one would match everything)")
@@ -712,20 +742,29 @@ func (s *Seatbelt) Reap(_ context.Context, prefix string) error {
 	if err != nil {
 		return fmt.Errorf("confiner: reap: %w", err)
 	}
+	// What another running instance owns: compartment names (their scratch
+	// dirs stay) and the stores those compartments run on (they stay too).
+	liveNames, liveStores := map[string]bool{}, map[string]bool{}
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".pid") {
 			continue
 		}
+		comp := strings.TrimSuffix(name, ".pid")
 		path := filepath.Join(s.cfg.PIDDir, name)
 		rec, err := readPIDRecord(path)
 		switch {
 		case err != nil:
 			s.cfg.Logger.Info("removing an unreadable pid record", "file", path, "error", err)
-		default:
+		case !rec.owner().reapableBy(s.owner):
+			s.cfg.Logger.Info("leaving a compartment another running instance owns", "compartment", comp, "owner_pid", rec.OwnerPID)
+			liveNames[comp] = true
+			liveStores[rec.Store] = true
+			continue
+		case rec.PID > 0:
 			start, err := processStart(rec.PID)
 			if err == nil && start == rec.StartUnixMicro {
-				s.cfg.Logger.Info("reaping leftover compartment", "compartment", strings.TrimSuffix(name, ".pid"), "pid", rec.PID)
+				s.cfg.Logger.Info("reaping leftover compartment", "compartment", comp, "pid", rec.PID)
 				killSession(rec.PID)
 			}
 		}
@@ -733,15 +772,15 @@ func (s *Seatbelt) Reap(_ context.Context, prefix string) error {
 			s.cfg.Logger.Warn("leftover pid record not removed", "file", path, "error", err)
 		}
 	}
-	s.removePrefixed(s.cfg.StoreRoot, prefix, "store", true)
-	s.removePrefixed(filepath.Join(s.cfg.StoreRoot, ".scratch"), prefix, "scratch dir", false)
+	s.removePrefixed(s.cfg.StoreRoot, prefix, "store", true, liveStores)
+	s.removePrefixed(filepath.Join(s.cfg.StoreRoot, ".scratch"), prefix, "scratch dir", false, liveNames)
 	return nil
 }
 
-// removePrefixed removes every directory in dir whose name starts with prefix.
-// With storesOnly, a name that is not a legal store name (the backend's own
-// .scratch, a probe's leftover) is never touched.
-func (s *Seatbelt) removePrefixed(dir, prefix, what string, storesOnly bool) {
+// removePrefixed removes every directory in dir whose name starts with prefix
+// and is not in keep. With storesOnly, a name that is not a legal store name
+// (the backend's own .scratch, a probe's leftover) is never touched.
+func (s *Seatbelt) removePrefixed(dir, prefix, what string, storesOnly bool, keep map[string]bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -751,7 +790,7 @@ func (s *Seatbelt) removePrefixed(dir, prefix, what string, storesOnly bool) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if !e.IsDir() || !strings.HasPrefix(name, prefix) || (storesOnly && !ValidStoreName(name)) {
+		if !e.IsDir() || !strings.HasPrefix(name, prefix) || keep[name] || (storesOnly && !ValidStoreName(name)) {
 			continue
 		}
 		s.cfg.Logger.Info("reaping leftover "+what, "name", name)

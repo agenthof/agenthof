@@ -190,7 +190,7 @@ func mounted(volume string) bool {
 }
 
 // twoArgFlags are the `podman run` flags refspawn passes with a separate value.
-var twoArgFlags = map[string]bool{"--name": true, "--network": true, "--tmpfs": true, "--security-opt": true, "--user": true, "-v": true, "-e": true, "-w": true}
+var twoArgFlags = map[string]bool{"--name": true, "--label": true, "--network": true, "--tmpfs": true, "--security-opt": true, "--user": true, "-v": true, "-e": true, "-w": true}
 
 // fakePodman answers `run` by starting the image as a host program with the
 // argv after it (plus -workspace <dir> for a `-v <vol>:/work` mount, so a

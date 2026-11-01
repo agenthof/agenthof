@@ -69,10 +69,12 @@ launcher lines without listening: for podman, `socket=<path>` and
 `workspace=<store>` and `store_path=<host directory>`. A file that omits a
 required key, sets a key the selected backend does not consume, uses the
 retired `workspace.volume`, or names a `workspace.store` starting with
-`refexec-` fails there. At start refexec probes the backend and removes
-leftover `refexec-` compartments — and any store under that prefix — before
-it opens the socket, which is why a workspace store may not carry it; if
-either fails it exits without listening — there is no fallback to running a
+`refexec-` fails there. At start refexec probes the backend and removes the
+leftover `refexec-` compartments of a refexec that is no longer running —
+and any store under that prefix — before it opens the socket, which is why a
+workspace store may not carry it; the compartments of another refexec that
+is still running on the same backend are left alone. If the probe or the
+sweep fails it exits without listening — there is no fallback to running a
 command unconfined.
 
 The socket's directory is the access gate. refexec checks at startup that it
