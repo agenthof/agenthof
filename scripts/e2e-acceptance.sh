@@ -590,8 +590,8 @@ case "$MODEL_LINE" in *"governed:$NONCE"*) fail "the model reply body reached th
 EXEC_ATT="$(field "$L" exec runtime_attestation succeeded)"
 case "$EXEC_ATT" in *'"runtime": "refexec"'*) ;; *) fail "no refexec attestation on the exec" ;; esac
 case "$EXEC_ATT" in *'"command": ["env"]'*) ;; *) fail "the attestation does not name env" ;; esac
-case "$EXEC_ATT" in *'"env_names": ["ACCEPTANCE_E2E_MARKER"]'*) ;; *) fail "the attestation does not name exactly the allowlisted variable as injected: $EXEC_ATT" ;; esac
-grep -Eq "exec env — exit 0 \(runtime\) \[runtime-attested: refexec env pid [0-9]+ spawn 1\]" <<<"$AUDIT" || fail "audit did not render the first-hand exec"
+case "$EXEC_ATT" in *'"env_names": ["ACCEPTANCE_E2E_MARKER", "TMPDIR"]'*) ;; *) fail "the attestation does not name exactly the allowlisted variable as injected: $EXEC_ATT" ;; esac
+grep -Eq "exec env — exit 0 \(runtime\) \[runtime-attested: refexec env pid [0-9]+ spawn 1; confiner: podman[^]]*\]" <<<"$AUDIT" || fail "audit did not render the first-hand exec"
 EXEC_ART_LINE="$(out_of grep '^exec: ' <<<"$ART")"
 [ -n "$EXEC_ART_LINE" ] || fail "the artifact has no exec line"
 grep -Eq "(^| )ACCEPTANCE_E2E_MARKER=1( |$)" <<<"$EXEC_ART_LINE" || fail "the allowlisted variable did not reach the compartment: $EXEC_ART_LINE"

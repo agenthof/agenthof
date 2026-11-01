@@ -408,8 +408,8 @@ PY
 EXEC_ATT="$(field "$L" exec runtime_attestation succeeded)"
 case "$EXEC_ATT" in *'"runtime": "refexec"'*) ;; *) fail "no refexec attestation on the exec" ;; esac
 case "$EXEC_ATT" in *'"command": ["env"]'*) ;; *) fail "the attestation does not name env" ;; esac
-grep -Eq "exec env — exit 0 \(runtime\) \[runtime-attested: refexec env pid [0-9]+ spawn 1\]" <<<"$AUDIT" || fail "audit did not render the first-hand exec"
-grep -qxF "exec: ACCEPTANCE_E2E_MARKER=1" <<<"$ART" || fail "the exec output is not exactly the allowlisted variable (the compartment's environment was not the allowlist)"
+grep -Eq "exec env — exit 0 \(runtime\) \[runtime-attested: refexec env pid [0-9]+ spawn 1; confiner: podman[^]]*\]" <<<"$AUDIT" || fail "audit did not render the first-hand exec"
+grep -qxF "exec: ACCEPTANCE_E2E_MARKER=1 TMPDIR=/tmp" <<<"$ART" || fail "the exec output is not exactly the allowlisted variable (the compartment's environment was not the allowlist)"
 EXEC_LINE="$(out_of grep '"type":"exec"' "$L")"
 [ -n "$EXEC_LINE" ] || fail "no exec line in the parent's ledger, so the absence check below would prove nothing"
 case "$EXEC_LINE" in *ACCEPTANCE_E2E_MARKER=1*) fail "the exec output body reached the exec event" ;; esac

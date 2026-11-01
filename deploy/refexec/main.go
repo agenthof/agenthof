@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
 	"github.com/agenthof/agenthof/deploy/internal/refrunner"
 )
 
@@ -47,7 +48,7 @@ func main() {
 		logger.Error("listen failed", "error", err)
 		os.Exit(1)
 	}
-	r := newRunner(cfg, logger, []string{"podman"})
+	r := newRunner(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{GuestWorkspace: cfg.WorkspacePath, Logger: logger}))
 	logger.Info("refexec listening", "socket", cfg.Socket, "image", cfg.Image,
 		"workspace", cfg.WorkspaceVolume+":"+cfg.WorkspacePath, "timeout", cfg.Timeout,
 		"max_compartments", cfg.MaxCompartments, "env_allow", cfg.EnvAllow)

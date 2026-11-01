@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
 	"github.com/agenthof/agenthof/deploy/internal/refrunner"
 )
 
@@ -38,7 +39,7 @@ func runStub(args []string) int {
 		return 1
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	r := newRunner(cfg, logger, []string{exe, fakePodmanFlag})
+	r := newRunner(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, GuestWorkspace: cfg.WorkspacePath}))
 	h := r.handler()
 	if *misattest {
 		h = forgeCommand(h)
