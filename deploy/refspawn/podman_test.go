@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,11 +12,109 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
 )
+
+// refexecShape mirrors, by hand, the YAML shape refexec's config parser
+// accepts (deploy/refexec/config.go fileConfig): the two packages never
+// import each other, so this is the pinned contract. Decoding a rendered
+// config into it with KnownFields(true) fails on any key refexec would
+// reject. Keep it field-for-field with refexec's fileConfig.
+type refexecShape struct {
+	Socket    string `yaml:"socket"`
+	Confiner  string `yaml:"confiner"`
+	Image     string `yaml:"image"`
+	Workspace *struct {
+		Store string `yaml:"store"`
+		Path  string `yaml:"path"`
+	} `yaml:"workspace"`
+	StoreRoot         string    `yaml:"store_root"`
+	PIDDir            string    `yaml:"pid_dir"`
+	DenyRead          *[]string `yaml:"deny_read"`
+	SharedHostScratch bool      `yaml:"shared_host_scratch"`
+	Timeout           string    `yaml:"timeout"`
+	Limits            *struct {
+		Memory string `yaml:"memory"`
+		CPUs   string `yaml:"cpus"`
+		PIDs   int    `yaml:"pids"`
+	} `yaml:"limits"`
+	Compartments *struct {
+		Max int `yaml:"max"`
+	} `yaml:"compartments"`
+	EnvAllow *[]string `yaml:"env_allow"`
+}
+
+func decodeRefexecShape(t *testing.T, rendered string) refexecShape {
+	t.Helper()
+	var got refexecShape
+	dec := yaml.NewDecoder(bytes.NewReader([]byte(rendered)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("rendered config does not decode under refexec's strict shape: %v\n%s", err, rendered)
+	}
+	return got
+}
+
+func TestRenderRefexecConfigPerBackend(t *testing.T) {
+	rc := refexecConfig{Image: "example.test/exec:1", Timeout: 2 * time.Minute,
+		Limits: limits{Memory: "256m", CPUs: "1", PIDs: 64}, MaxCompartments: 2, EnvAllow: []string{"A", "B"}}
+	const sock, store, spawnRoot = "/r/c-exec/refexec.sock", "agenthof-spawn-r-1-work", "/r/children"
+
+	podman := renderRefexecConfig(rc, sock, store, confiner.TierPodman, confiner.Keys{Image: rc.Image}, spawnRoot)
+	wantPodman := "socket: /r/c-exec/refexec.sock\nconfiner: podman\nimage: example.test/exec:1\n" +
+		"workspace:\n  store: agenthof-spawn-r-1-work\n  path: /work\n" +
+		"timeout: 2m0s\nlimits:\n  memory: 256m\n  cpus: \"1\"\n  pids: 64\ncompartments:\n  max: 2\nenv_allow: [A, B]\n"
+	if podman != wantPodman {
+		t.Fatalf("podman render:\n%s\nwant:\n%s", podman, wantPodman)
+	}
+	p := decodeRefexecShape(t, podman)
+	if p.Image != "example.test/exec:1" || p.Workspace == nil || p.Workspace.Path != "/work" || p.Workspace.Store != store ||
+		p.StoreRoot != "" || p.PIDDir != "" || p.DenyRead != nil || p.SharedHostScratch {
+		t.Fatalf("podman decoded = %+v", p)
+	}
+	if strings.Contains(podman, spawnRoot) {
+		t.Fatalf("spawn_root must not reach a podman child (an unconsumed key it rejects):\n%s", podman)
+	}
+
+	keys := confiner.Keys{StoreRoot: "/s/stores", PIDDir: "/s/pids", DenyRead: []string{"/op/secrets", "/op/more"}}
+	seatbelt := renderRefexecConfig(rc, sock, store, confiner.TierSeatbelt, keys, spawnRoot)
+	wantSeatbelt := "socket: /r/c-exec/refexec.sock\nconfiner: seatbelt\nstore_root: /s/stores\npid_dir: /s/pids\n" +
+		"deny_read: [\"/op/secrets\", \"/op/more\", \"/r/children\"]\n" +
+		"timeout: 2m0s\nlimits:\n  memory: 256m\n  cpus: \"1\"\n  pids: 64\ncompartments:\n  max: 2\nenv_allow: [A, B]\n" +
+		"workspace:\n  store: agenthof-spawn-r-1-work\n"
+	if seatbelt != wantSeatbelt {
+		t.Fatalf("seatbelt render:\n%s\nwant:\n%s", seatbelt, wantSeatbelt)
+	}
+	s := decodeRefexecShape(t, seatbelt)
+	if s.Image != "" || s.Workspace == nil || s.Workspace.Path != "" || s.Workspace.Store != store || s.SharedHostScratch ||
+		s.DenyRead == nil || !reflect.DeepEqual(*s.DenyRead, []string{"/op/secrets", "/op/more", spawnRoot}) {
+		t.Fatalf("seatbelt decoded = %+v", s)
+	}
+
+	// shared_host_scratch is emitted only when set, and an operator with no
+	// deny_read still denies spawn_root.
+	keys = confiner.Keys{StoreRoot: "/s/stores", PIDDir: "/s/pids", SharedHostScratch: true}
+	scratch := renderRefexecConfig(rc, sock, store, confiner.TierSeatbelt, keys, spawnRoot)
+	sc := decodeRefexecShape(t, scratch)
+	if !strings.Contains(scratch, "shared_host_scratch: true\n") || !sc.SharedHostScratch || sc.DenyRead == nil || !reflect.DeepEqual(*sc.DenyRead, []string{spawnRoot}) {
+		t.Fatalf("scratch render:\n%s", scratch)
+	}
+
+	for name, out := range map[string]string{"podman": podman, "seatbelt": seatbelt, "scratch": scratch} {
+		if strings.Contains(out, "volume:") {
+			t.Errorf("%s render contains volume:\n%s", name, out)
+		}
+	}
+}
 
 // The test binary re-executes itself in four roles so the real supervisor
 // can be driven with no podman: as `podman` (fakePodmanFlag), as the agent
@@ -104,7 +203,7 @@ var twoArgFlags = map[string]bool{"--name": true, "--network": true, "--tmpfs": 
 // volume's host directory. Anything else is a podman usage error (125). An
 // image that is this test binary itself runs as the fake agent.
 func fakePodman(args []string) int {
-	if len(args) == 1 && args[0] == "info" {
+	if len(args) > 0 && args[0] == "info" { // Probe: `info --format ...`
 		fmt.Println("linux true false")
 		return 0
 	}

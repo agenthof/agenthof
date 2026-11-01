@@ -286,6 +286,7 @@ wait_socket "$BRIDGE_DIR/stdio-tool.sock" "the bridge socket" 30 "$BRIDGE_NAME"
 # that volume. Its compartment timeout covers the step; ready_timeout covers
 # a cold distroless Python importing langchain.
 cat >"$WORK/refspawn.yaml" <<EOF
+confiner: podman
 socket: $SUP_DIR/refspawn.sock
 spawn_root: $SPAWN_ROOT
 images:

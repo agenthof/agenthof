@@ -247,6 +247,7 @@ exec "$PYTHON" "$ROOT/examples/langchain-agent/agent.py" --driver model --model 
 EOF
 chmod 0755 "$WORK/langchain-image"
 cat >"$WORK/refspawn.yaml" <<EOF
+confiner: podman
 socket: $SUP_DIR/refspawn.sock
 spawn_root: $SPAWN_ROOT
 images:

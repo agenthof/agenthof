@@ -150,6 +150,7 @@ wait_port "$AGENT_PORT" "echo-agent"
 # here too: a config missing a key is refused before anything starts.
 spawn_config() { # $1 = socket path, $2 = "no-images" to omit the images block, $3 = max_compartments
 	cat <<EOF
+confiner: podman
 socket: $1
 spawn_root: $SPAWN_ROOT
 EOF

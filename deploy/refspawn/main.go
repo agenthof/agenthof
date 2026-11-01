@@ -17,10 +17,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 
 	"github.com/agenthof/agenthof/deploy/internal/confiner"
 	"github.com/agenthof/agenthof/deploy/internal/refrunner"
@@ -39,19 +41,57 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	c, err := selectConfiner(cfg, logger)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	if *check {
 		fmt.Print(cfg.checkLines())
 		return
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	os.Exit(serve(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{Logger: logger})))
+	os.Exit(startup(cfg, logger, c))
+}
+
+// selectConfiner builds the backend the config names (the OS default when it
+// names none). The factory refuses a key the backend does not consume.
+func selectConfiner(cfg spawnConfig, logger *slog.Logger) (confiner.Confiner, error) {
+	c, err := confiner.Select(confiner.Options{Tier: cfg.Confiner, Keys: cfg.Keys, SpawnRoot: cfg.SpawnRoot, Logger: logger})
+	if err != nil {
+		return nil, fmt.Errorf("refspawn config: %w", err)
+	}
+	return c, nil
+}
+
+// startup refuses to serve unless the backend is usable (Probe) and can run
+// every configured program (ValidateProgram), then serves. Nothing is
+// prepared or listened on before both pass. Agent names are checked in sorted
+// order so the first refusal is deterministic.
+func startup(cfg spawnConfig, logger *slog.Logger, c confiner.Confiner) int {
+	if err := c.Probe(context.Background()); err != nil {
+		logger.Error("confiner is not usable; refusing to serve", "confiner", c.Tier(), "error", err)
+		return 1
+	}
+	agents := make([]string, 0, len(cfg.Images))
+	for agent := range cfg.Images {
+		agents = append(agents, agent)
+	}
+	sort.Strings(agents)
+	for _, agent := range agents {
+		if err := c.ValidateProgram(cfg.Images[agent]); err != nil {
+			logger.Error("images entry refused by the confiner; refusing to serve", "agent", agent, "confiner", c.Tier(), "error", err)
+			return 1
+		}
+	}
+	return serve(cfg, logger, c)
 }
 
 // serve prepares spawn_root, reaps leftovers, listens and serves until a
 // signal. The leftovers are reaped before the socket exists: a supervisor
 // that cannot account for an earlier one's compartments refuses to serve
 // rather than count slots it does not know it holds. The stub mode (test
-// tree) calls it with a confiner over a fake podman.
+// tree) reaches it through startup with a confiner over a fake podman.
 func serve(cfg spawnConfig, logger *slog.Logger, c confiner.Confiner) int {
 	if err := os.MkdirAll(cfg.SpawnRoot, 0o700); err != nil {
 		logger.Error("spawn_root", "error", err)

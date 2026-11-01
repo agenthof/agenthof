@@ -301,7 +301,7 @@ func (set *childSet) start() error {
 	}
 	set.storeMade = true
 	cfgPath := filepath.Join(set.execDir, "refexec.yaml")
-	if err := os.WriteFile(cfgPath, []byte(renderRefexecConfig(set.s.cfg.Refexec, set.execSock, set.store, set.s.confiner.Tier())), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(renderRefexecConfig(set.s.cfg.Refexec, set.execSock, set.store, set.s.confiner.Tier(), set.s.cfg.Keys, set.s.cfg.SpawnRoot)), 0o600); err != nil {
 		return err
 	}
 	argv := set.s.cfg.Refexec.Command

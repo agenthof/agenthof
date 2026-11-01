@@ -4,6 +4,7 @@
 # Agenthof's refbox socket dir, which is mounted into agent compartments, and
 # never under spawn_root. The demo paths are placeholders; the e2e rewrites
 # them to a temp dir.
+confiner: podman
 socket: /run/agenthof-spawn/refspawn.sock
 # Per-child directories live here: <spawn_root>/<run id> (the child's agent
 # and gateway sockets; mounted into that child's compartments only) and

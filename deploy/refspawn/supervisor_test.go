@@ -19,8 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/agenthof/agenthof/deploy/internal/confiner"
 	"github.com/agenthof/agenthof/deploy/internal/confiner/confinertest"
 )
@@ -252,33 +250,11 @@ func TestProvisionStartsSetAndAnswersOnceReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rendered struct {
-		Socket    string `yaml:"socket"`
-		Confiner  string `yaml:"confiner"`
-		Image     string `yaml:"image"`
-		Workspace struct {
-			Store string `yaml:"store"`
-			Path  string `yaml:"path"`
-		} `yaml:"workspace"`
-		Timeout string `yaml:"timeout"`
-		Limits  struct {
-			Memory string `yaml:"memory"`
-			CPUs   string `yaml:"cpus"`
-			PIDs   int    `yaml:"pids"`
-		} `yaml:"limits"`
-		Compartments struct {
-			Max int `yaml:"max"`
-		} `yaml:"compartments"`
-		EnvAllow []string `yaml:"env_allow"`
-	}
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	if err := dec.Decode(&rendered); err != nil {
-		t.Fatalf("rendered refexec config does not decode under refexec's strict shape: %v\n%s", err, data)
-	}
-	if rendered.Socket != h.line.ExecSocket || rendered.Image != "example.test/exec:1" || rendered.Confiner != "podman" || rendered.Workspace.Store != "agenthof-spawn-r-0a0b0c0d-work" ||
-		rendered.Workspace.Path != "/work" || rendered.Timeout != "2m0s" || rendered.Limits.CPUs != "1" || rendered.Limits.PIDs != 64 ||
-		rendered.Compartments.Max != 2 || rendered.EnvAllow == nil {
+	rendered := decodeRefexecShape(t, string(data))
+	if rendered.Socket != h.line.ExecSocket || rendered.Image != "example.test/exec:1" || rendered.Confiner != "podman" ||
+		rendered.Workspace == nil || rendered.Workspace.Store != "agenthof-spawn-r-0a0b0c0d-work" || rendered.Workspace.Path != "/work" ||
+		rendered.Timeout != "2m0s" || rendered.Limits == nil || rendered.Limits.CPUs != "1" || rendered.Limits.PIDs != 64 ||
+		rendered.Compartments == nil || rendered.Compartments.Max != 2 || rendered.EnvAllow == nil {
 		t.Fatalf("rendered = %+v", rendered)
 	}
 	if h.line.Tier != "podman" {

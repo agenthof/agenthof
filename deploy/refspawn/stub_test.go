@@ -10,7 +10,8 @@ import (
 )
 
 // stubFlag re-executes this test binary as the hermetic e2e's refspawn: the
-// real config, listener, serve loop, supervisor and wire contract, with the
+// real config, startup checks (probe and per-image validation), listener,
+// serve loop, supervisor and wire contract, with the
 // fake podman (podman_test.go) in place of podman — so each "compartment" is
 // the configured program run directly on the host, and each "volume" is a
 // directory under REFSPAWN_TEST_VOLROOT. Test-tree code on purpose: the
@@ -39,5 +40,5 @@ func runStub(args []string) int {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	logger.Info("refspawn stub: compartments are host processes, volumes are directories")
-	return serve(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, Logger: logger}))
+	return startup(cfg, logger, confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, Logger: logger}))
 }
