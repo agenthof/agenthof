@@ -98,10 +98,16 @@ var twoArgFlags = map[string]bool{"--name": true, "--network": true, "--tmpfs": 
 // write to the workspace lands in the volume's directory), writing the
 // child's pid under the container name and exiting with the child's
 // status; `rm -f NAME` kills that child; `volume create|rm|ls` keep a
-// directory per volume; `ps -aq --filter name=^P` lists running names.
-// Anything else is a podman usage error (125). An image that is this test
-// binary itself runs as the fake agent.
+// directory per volume; `ps -aq --filter name=^P` lists running names;
+// `info` reports a local, rootless Linux engine. A `-e NAME=VALUE` is passed
+// verbatim, and `-w /work` sets the working directory to the workspace
+// volume's host directory. Anything else is a podman usage error (125). An
+// image that is this test binary itself runs as the fake agent.
 func fakePodman(args []string) int {
+	if len(args) == 1 && args[0] == "info" {
+		fmt.Println("linux true false")
+		return 0
+	}
 	if len(args) == 0 || volroot() == "" {
 		return 125
 	}
@@ -185,8 +191,8 @@ func filterPrefix(args []string) string {
 }
 
 func fakeRun(args []string) int {
-	var name, image, volume, workspace string
-	var argv []string
+	var name, image, volume, workspace, workdir string
+	var argv, extraEnv []string
 	rest := args[1:]
 	for i := 0; i < len(rest); i++ {
 		a := rest[i]
@@ -205,6 +211,12 @@ func fakeRun(args []string) int {
 				if vol, ok := strings.CutSuffix(rest[i+1], ":/work"); ok {
 					volume, workspace = vol, filepath.Join(volroot(), vol)
 				}
+			case "-w":
+				workdir = rest[i+1]
+			case "-e":
+				if strings.Contains(rest[i+1], "=") {
+					extraEnv = append(extraEnv, rest[i+1])
+				}
 			}
 			i++
 		}
@@ -222,7 +234,10 @@ func fakeRun(args []string) int {
 		argv = append(argv, "-workspace", workspace)
 	}
 	cmd := exec.Command(image, argv...)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), extraEnv...)
+	if workspace != "" && workdir == "/work" {
+		cmd.Dir = workspace
+	}
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "fake podman:", err)
