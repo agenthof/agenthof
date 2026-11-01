@@ -138,8 +138,17 @@ func (f *Fake) Launch(_ context.Context, spec confiner.Spec) (confiner.Compartme
 		return nil, errors.New("confinertest: empty Argv")
 	}
 
-	var env, names []string
+	// env is non-nil on purpose: a nil cmd.Env would make the child inherit the
+	// whole host environment.
+	env := []string{}
+	var names []string
 	for _, n := range spec.EnvNames {
+		if n == "TMPDIR" && spec.Scratch {
+			continue // the scratch dir supplies TMPDIR below, exactly once
+		}
+		if slices.Contains(names, n) {
+			continue
+		}
 		if v, ok := os.LookupEnv(n); ok {
 			env = append(env, n+"="+v)
 			names = append(names, n)

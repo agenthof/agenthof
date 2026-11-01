@@ -269,6 +269,51 @@ func TestFakeProbeAndReapErrors(t *testing.T) {
 	}
 }
 
+func TestFakeChildGetsAnEmptyEnvironmentWhenNoNameApplies(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("FAKE_HOST_ONLY", "leak")
+	f := New(t.TempDir())
+	c, err := f.Launch(ctx, confiner.Spec{Name: "noenv", Argv: []string{"sh", "-c", `echo ${FAKE_HOST_ONLY:-absent}`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(res.Output) != "absent\n" {
+		t.Fatalf("a host variable not named in EnvNames leaked into the child: %q", res.Output)
+	}
+	if len(res.EnvNames) != 0 {
+		t.Fatalf("EnvNames = %v, want empty", res.EnvNames)
+	}
+}
+
+func TestFakeTmpdirInEnvNamesWithScratchIsAttestedOnceAndIsTheScratchDir(t *testing.T) {
+	ctx := context.Background()
+	f := New(t.TempDir()) // before the Setenv: t.TempDir itself reads TMPDIR
+	t.Setenv("TMPDIR", "/host/tmp")
+	c, err := f.Launch(ctx, confiner.Spec{
+		Name:     "tmpdir",
+		Argv:     []string{"sh", "-c", `printf %s "$TMPDIR"`},
+		Scratch:  true,
+		EnvNames: []string{"TMPDIR"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(res.EnvNames, []string{"TMPDIR"}) {
+		t.Fatalf("EnvNames = %v, want TMPDIR exactly once", res.EnvNames)
+	}
+	if got := string(res.Output); got == "" || got == "/host/tmp" {
+		t.Fatalf("TMPDIR = %q, want the scratch dir, not the host value", got)
+	}
+}
+
 func TestFakeOpsSnapshotIsACopy(t *testing.T) {
 	f := New(t.TempDir())
 	_ = f.Probe(context.Background())
