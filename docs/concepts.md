@@ -184,10 +184,12 @@ corroboration of the gateway's decisions is a reserved future direction, not
 something Agenthof claims today.
 
 Allowlisted commands run in a trusted operator-side runtime — the reference
-one is `refexec`, a rootless-podman supervisor on the operator's host — that
-runs each command on the agent's behalf and attests first-hand what ran;
-Agenthof authorizes the command against the allowlist and records that
-account. There is no agent-asserted exec: an agent's own report of a command
+one is `refexec`, which confines each command on the operator's host: in a
+rootless podman container on Linux, or under a macOS Seatbelt OS-sandbox
+profile; both share the host kernel, and the ledger names the tier the
+runtime reports — that runs each command on the agent's behalf and attests
+first-hand what ran; Agenthof authorizes the command against the allowlist
+and records that account. There is no agent-asserted exec: an agent's own report of a command
 is refused at the door, and the refusal is recorded. Agenthof itself never
 runs the command: exec has no credential to starve, so containment is the
 operator's runtime's job, and the first-hand record trusts that runtime, as

@@ -11,7 +11,7 @@ credential, the agent never holds it. The tool/MCP gateway injects a resource
 credential per call. The model gateway injects the per-role provider key, so
 a fronted agent reaches models through Agenthof and never holds that key.
 Allowlisted commands run in a trusted operator-side runtime — the reference
-one is `refexec`, a rootless-podman supervisor on the operator's host — that
+one is `refexec`, which confines each command on the operator's host — that
 runs each command on the agent's behalf and attests it first-hand, and each
 is recorded. There is no agent-asserted exec: an agent's own report of a
 command it ran is not a record, and a call to report one is refused at the
