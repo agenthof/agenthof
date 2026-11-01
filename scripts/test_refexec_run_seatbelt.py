@@ -42,6 +42,9 @@ class RefexecRunSeatbeltTest(unittest.TestCase):
         res = self.launch(out)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(self.store.stat().st_mode & 0o777, 0o700)
+        # The store root did not exist either: created along the way, it is
+        # 0700 too, not the umask default a bare `mkdir -p -m` would leave.
+        self.assertEqual(self.store.parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(self.sock_dir.stat().st_mode & 0o777, 0o700)
         self.assertTrue(self.started.exists(), "the launcher must hand over to refexec")
 

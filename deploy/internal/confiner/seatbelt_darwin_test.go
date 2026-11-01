@@ -423,6 +423,41 @@ func TestSeatbeltProbePasses(t *testing.T) {
 
 // Enforcement is never inferred from a permission error. When the
 // unsandboxed control write cannot succeed, Probe fails and says so.
+// Probe sweeps the probe dirs a refexec that died mid-Probe left under both
+// roots — its own, those of an instance that is gone, and those from before
+// the stamp — and leaves another RUNNING instance's probe in flight alone.
+func TestSeatbeltProbeSweepsStaleProbeDirs(t *testing.T) {
+	s := newTestSeatbelt(t, nil)
+	sibling, _ := startSibling(t)
+	var keep, gone []string
+	for _, root := range []string{s.cfg.PIDDir, s.cfg.StoreRoot} {
+		keep = append(keep, filepath.Join(root, probePrefix+sibling.String()+"-aaaaaaaaaaaa"))
+		gone = append(gone,
+			filepath.Join(root, probePrefix+s.owner.String()+"-bbbbbbbbbbbb"),
+			filepath.Join(root, probePrefix+"2000000000-1-cccccccccccc"),
+			filepath.Join(root, probePrefix+"dddddddddddd"))
+	}
+	for _, d := range append(append([]string{}, keep...), gone...) {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Probe(context.Background()); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	mustExist(t, "Probe removed a running instance's probe dir", keep...)
+	mustBeGone(t, "Probe left a stale probe dir", gone...)
+	for _, root := range []string{s.cfg.PIDDir, s.cfg.StoreRoot} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("%s after Probe: %v, want only the sibling's probe dir", root, entries)
+		}
+	}
+}
+
 func TestSeatbeltProbeFailsWhenTheControlWriteFails(t *testing.T) {
 	s := newTestSeatbelt(t, nil)
 	if err := os.Chmod(s.cfg.PIDDir, 0o500); err != nil {

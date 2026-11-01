@@ -60,7 +60,6 @@ type execConfig struct {
 
 var (
 	envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	imageRE   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@-]*$`)
 	memoryRE  = regexp.MustCompile(`^[0-9]+[bkmg]?$`)
 	cpusRE    = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
 )
@@ -106,14 +105,15 @@ func parseConfigOn(data []byte, goos string) (execConfig, error) {
 		fail("socket: %v", err)
 	}
 	if fc.StoreRoot != "" {
-		// The Seatbelt backend binds a socket under <store_root>/.scratch/refexec-<16 hex>.
+		// A compartment's scratch dir is <store_root>/.scratch/refexec-<16 hex>,
+		// exported as TMPDIR; a precaution for tools that create sockets under
+		// TMPDIR, whose paths must fit the platform's limit.
 		if err := confiner.CheckSunPath(fc.StoreRoot+"/.scratch/refexec-"+strings.Repeat("x", 16), goos); err != nil {
 			fail("store_root: %v", err)
 		}
 	}
-	if fc.Image != "" && !imageRE.MatchString(fc.Image) {
-		fail("image must be an image reference (registry/name:tag or @digest), nothing else")
-	}
+	// The image's shape is the podman backend's to check (confiner.Select
+	// validates it), so one rule covers refexec and refspawn's rendered configs.
 	if fc.Workspace == nil {
 		fail("workspace is required (store)")
 	} else {

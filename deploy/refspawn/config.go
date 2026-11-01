@@ -51,11 +51,12 @@ type fileLimits struct {
 	PIDs   int    `yaml:"pids"`
 }
 
-// limits are podman's cgroup caps for one compartment.
+// limits are the resource caps for one compartment, in the confiner's format;
+// whether a backend enforces them is per tier.
 type limits struct {
-	Memory string // podman --memory
-	CPUs   string // podman --cpus
-	PIDs   int    // podman --pids-limit
+	Memory string // a memory cap such as 256m
+	CPUs   string // a cpu count such as 1 or 0.5
+	PIDs   int    // a pid cap
 }
 
 // refexecConfig is what refspawn renders into each child's refexec config:
@@ -64,7 +65,7 @@ type limits struct {
 type refexecConfig struct {
 	Command         []string      // argv prefix of the refexec host process; "-config <file>" is appended
 	Image           string        // the image every exec compartment runs; podman's key, empty under a backend that has none
-	Timeout         time.Duration // refexec's podman --timeout backstop
+	Timeout         time.Duration // refexec's per-compartment deadline, the backstop to the gateway's own
 	Limits          limits
 	MaxCompartments int      // the child's concurrent exec compartments (refexec's compartments.max)
 	EnvAllow        []string // never nil after a successful parse
@@ -77,7 +78,7 @@ type spawnConfig struct {
 	Confiner        confiner.Tier     // the confinement backend; "" selects the OS default
 	Keys            confiner.Keys     // the backend-specific keys, handed to the factory as decoded
 	Images          map[string]string // agent name -> the program its compartment runs (podman: an image); an agent not listed cannot be spawned
-	Timeout         time.Duration     // podman --timeout for every agent compartment; size it at or above agenthof's step_timeout
+	Timeout         time.Duration     // the deadline for every agent compartment; size it at or above agenthof's step_timeout
 	ReadyTimeout    time.Duration     // how long a child's sockets may take to become dialable before the set is torn down
 	Limits          limits
 	MaxCompartments int // agent compartments across every live child; a set that will not fit is refused whole, never queued
@@ -94,7 +95,7 @@ const (
 
 var (
 	envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	nameRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)     // a podman container / volume name, and so an agent name and a child run id
+	nameRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)     // a compartment / store name (confiner.ValidStoreName's shape), and so an agent name and a child run id
 	imageRE   = regexp.MustCompile(`^[A-Za-z0-9/][A-Za-z0-9._/:@-]*$`) // an image reference; a leading / lets the test stub name a program
 	memoryRE  = regexp.MustCompile(`^[0-9]+[bkmg]?$`)
 	cpusRE    = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
@@ -244,7 +245,7 @@ func parseLimits(key string, fl *fileLimits, fail func(string, ...any)) limits {
 		return limits{}
 	}
 	if !memoryRE.MatchString(fl.Memory) {
-		fail("%s.memory must be a podman memory limit such as 256m", key)
+		fail("%s.memory must be a memory limit such as 256m", key)
 	}
 	if !cpusRE.MatchString(fl.CPUs) {
 		fail("%s.cpus must be a number such as 1 or 0.5", key)

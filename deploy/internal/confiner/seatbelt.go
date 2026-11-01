@@ -328,8 +328,13 @@ func (s *Seatbelt) Probe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	outside := filepath.Join(s.cfg.PIDDir, ".probe-"+suffix)
-	work := filepath.Join(s.cfg.StoreRoot, ".probe-"+suffix)
+	s.sweepProbeDirs()
+	// The probe dirs carry this process's owner stamp, so a later Probe can
+	// tell the leftovers of a probe that died from a probe another running
+	// instance is in the middle of.
+	tag := probePrefix + s.owner.String() + "-" + suffix
+	outside := filepath.Join(s.cfg.PIDDir, tag)
+	work := filepath.Join(s.cfg.StoreRoot, tag)
 	if err := os.Mkdir(outside, 0o700); err != nil {
 		return fmt.Errorf("confiner: seatbelt probe control: %w", err)
 	}
@@ -392,6 +397,44 @@ func denialVerdict(code int, out []byte, target string) error {
 		return fmt.Errorf("confiner: seatbelt probe: the sandbox reported a denial but %s exists (%v)", target, err)
 	}
 	return nil
+}
+
+// probePrefix starts the name of every probe dir: .probe-<owner>-<hex>. It
+// begins with ".", so neither a reap prefix nor a store name ever matches it.
+const probePrefix = ".probe-"
+
+// sweepProbeDirs removes, under the pid dir and the store root, the probe
+// dirs of a probe that did not finish: a refexec that died mid-Probe. A probe
+// dir is reapable on the same rule as a compartment: its owner is gone, is
+// this process, or cannot be read from the name (a dir from before the stamp
+// existed); one whose owner is another running instance is that instance's
+// probe in flight and is left alone. Failures are logged: a leftover that
+// cannot be removed does not stop a probe.
+func (s *Seatbelt) sweepProbeDirs() {
+	for _, dir := range []string{s.cfg.PIDDir, s.cfg.StoreRoot} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			s.cfg.Logger.Warn("probe leftovers not listed", "dir", dir, "error", err)
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if !e.IsDir() || !strings.HasPrefix(name, probePrefix) {
+				continue
+			}
+			var owner ownerRef
+			if rest := strings.TrimPrefix(name, probePrefix); strings.LastIndexByte(rest, '-') > 0 {
+				owner, _ = parseOwner(rest[:strings.LastIndexByte(rest, '-')])
+			}
+			if !owner.reapableBy(s.owner) {
+				continue
+			}
+			s.cfg.Logger.Info("removing a leftover probe dir", "dir", filepath.Join(dir, name))
+			if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+				s.cfg.Logger.Warn("leftover probe dir not removed", "dir", filepath.Join(dir, name), "error", err)
+			}
+		}
+	}
 }
 
 func randomSuffix() (string, error) {
@@ -583,7 +626,9 @@ type seatbeltCompartment struct {
 	name string
 	cmd  *exec.Cmd
 	pid  int
-	// start is the recorded start time of pid; 0 when it could not be read.
+	// start is the recorded start time of pid, which Launch read before it
+	// let the process run (a process whose start time cannot be read is
+	// abandoned, never recorded).
 	start   int64
 	pidFile string
 	scratch string
@@ -652,10 +697,9 @@ func (c *seatbeltCompartment) Remove(context.Context) error {
 	case <-c.done:
 		return nil
 	case <-t.C:
-		// Gated by the runtime rather than a start time: os.Process refuses
-		// with ErrProcessDone once wait4 has returned, so this can never reach
-		// a reused pid.
-		_ = c.cmd.Process.Kill()
+		// The same start-time-gated kill as above: a process that is still
+		// the recorded one gets the signal again, a reused pid gets nothing.
+		c.kill()
 		return fmt.Errorf("confiner: compartment %q did not exit within 10s of removal", c.name)
 	}
 }

@@ -37,9 +37,40 @@ env_allow: []
 	if err != nil {
 		t.Fatalf("parseConfig must accept it (the factory owns key consumption): %v", err)
 	}
-	_, err = selectConfiner(cfg)
+	_, err = selectConfiner(cfg, slog.New(slog.DiscardHandler))
 	if !errors.Is(err, confiner.ErrUnconsumedKeys) || !strings.Contains(err.Error(), "image") {
 		t.Fatalf("selectConfiner err = %v, want ErrUnconsumedKeys naming image", err)
+	}
+}
+
+// The image's shape is the podman backend's rule, applied when the confiner
+// is selected (so before -check prints or anything starts): a value that is
+// not an image reference — one that could be read as a flag — is refused.
+// The config parse itself does not judge it, so refexec and refspawn's
+// rendered configs follow one rule.
+func TestSelectConfinerRefusesAnImageThatIsNotAReference(t *testing.T) {
+	const y = `confiner: podman
+socket: /run/refexec/refexec.sock
+image: docker.io/library/busybox:1.36.1 --privileged
+workspace:
+  store: agenthof-work
+  path: /work
+timeout: 2m
+limits:
+  memory: 256m
+  cpus: "1"
+  pids: 64
+compartments:
+  max: 2
+env_allow: []
+`
+	cfg, err := parseConfigOn([]byte(y), "linux")
+	if err != nil {
+		t.Fatalf("parseConfig must accept it (the backend owns the image's shape): %v", err)
+	}
+	_, err = selectConfiner(cfg, slog.New(slog.DiscardHandler))
+	if err == nil || !strings.Contains(err.Error(), "not an image reference") {
+		t.Fatalf("selectConfiner err = %v, want the image refused", err)
 	}
 }
 

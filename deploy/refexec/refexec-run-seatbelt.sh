@@ -25,11 +25,13 @@ while IFS= read -r line; do
 done <<<"$CHECK"
 [ -n "$socket" ] && [ -n "$store_path" ] || { echo "refexec-run-seatbelt: -check did not report socket and store_path" >&2; exit 1; }
 
-# 0700: the directory is the access gate refexec insists on.
-mkdir -p -m 0700 "$(dirname "$socket")"
+# 0700: the directory is the access gate refexec insists on. The umask, not
+# -m, sets the mode, so a parent directory created along the way (the store
+# root, when it does not exist yet) is 0700 as well, not just the leaf.
+(umask 077 && mkdir -p "$(dirname "$socket")")
 
 # The workspace store lives as long as the recipe: create it once, keep it
 # across runs, remove the directory when the recipe is torn down.
-mkdir -p -m 0700 "$store_path"
+(umask 077 && mkdir -p "$store_path")
 
 exec "$BIN" -config "$CONFIG"

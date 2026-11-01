@@ -189,7 +189,6 @@ func TestParseConfigRejectsOmissions(t *testing.T) {
 		wantErr string
 	}{
 		{"relative socket", func(s string) string { return strings.Replace(s, "socket: /run/", "socket: run/", 1) }, "socket must be an absolute"},
-		{"image with whitespace", func(s string) string { return strings.Replace(s, "busybox:1.36.1", "busybox:1.36.1 --privileged", 1) }, "image must be an image reference"},
 		{"no workspace", func(s string) string {
 			return strings.Replace(s, "workspace:\n  store: agenthof-work\n  path: /work\n", "", 1)
 		}, "workspace is required"},

@@ -43,7 +43,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	c, err := selectConfiner(cfg)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	c, err := selectConfiner(cfg, logger)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "refexec:", err)
 		os.Exit(2)
@@ -53,7 +54,6 @@ func main() {
 		return
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	r, ln, err := startup(cfg, logger, c)
 	if err != nil {
 		logger.Error("startup failed", "error", err)
@@ -68,9 +68,9 @@ func main() {
 }
 
 // selectConfiner builds the backend the config names (or the OS default). A key
-// the backend does not consume is refused here, before anything starts.
-func selectConfiner(cfg execConfig) (confiner.Confiner, error) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+// the backend does not consume, or an image the backend will not run, is
+// refused here, before anything starts.
+func selectConfiner(cfg execConfig, logger *slog.Logger) (confiner.Confiner, error) {
 	return confiner.Select(confiner.Options{Tier: cfg.Confiner, Keys: cfg.Keys, Environ: os.Environ, Logger: logger})
 }
 
