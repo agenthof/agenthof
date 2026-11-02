@@ -959,7 +959,7 @@ func TestRebuildFromNothing(t *testing.T) {
 	})
 }
 
-// TestRebuildRefusesGapNamesOrdinal (Review Focus 4): a key with no version
+// TestRebuildRefusesGapNamesOrdinal: a key with no version
 // is a hole in the chain and refuses whole, naming the held ranges and the
 // missing ordinal, with nothing written and no record; a delete marker on
 // top of a version is not a gap; a marker alone is; an empty prefix refuses
