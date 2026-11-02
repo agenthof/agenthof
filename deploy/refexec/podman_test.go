@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 }
 
 // twoArgFlags are the `podman run` flags refexec passes with a separate value.
-var twoArgFlags = map[string]bool{"--name": true, "--network": true, "--tmpfs": true, "--security-opt": true, "--user": true, "-v": true, "-e": true, "-w": true}
+var twoArgFlags = map[string]bool{"--name": true, "--label": true, "--network": true, "--tmpfs": true, "--security-opt": true, "--user": true, "-v": true, "-e": true, "-w": true}
 
 // fakeRecord is one line of the fake's log (REFEXEC_TEST_ARGLOG): what podman
 // was asked, by which client process, and which child it started.
@@ -59,15 +59,20 @@ func record(rec fakeRecord) {
 }
 
 // fakePodman answers `run` by starting the argv after the image with an
-// environment of exactly the -e names (their values from its own
-// environment, as podman does), writing the child's pid under the container
-// name, and exiting with the child's status; and `rm -f NAME` by killing
-// that child. Everything else is a podman usage error (125).
+// environment of exactly the -e entries (NAME takes its value from its own
+// environment, as podman does; NAME=VALUE is passed verbatim) and, when -w
+// names a directory that exists on the host, that working directory, writing
+// the child's pid under the container name, and exiting with the child's
+// status; `rm -f NAME` by killing that child; and `info` by reporting a
+// local, rootless Linux engine. Everything else is a podman usage error (125).
 func fakePodman(args []string) int {
 	if len(args) == 0 {
 		return 125
 	}
 	switch args[0] {
+	case "info":
+		fmt.Println("linux true false")
+		return 0
 	case "rm":
 		name := args[len(args)-1]
 		record(fakeRecord{Op: "rm", PID: os.Getpid(), Name: name, Args: args})
@@ -79,7 +84,7 @@ func fakePodman(args []string) int {
 		}
 		return 0
 	case "run":
-		var name, image string
+		var name, image, workdir string
 		var argv []string
 		env := []string{} // non-nil: an empty environment, never an inherited one
 		rest := args[1:]
@@ -97,7 +102,13 @@ func fakePodman(args []string) int {
 				case "--name":
 					name = rest[i+1]
 				case "-e":
-					env = append(env, rest[i+1]+"="+os.Getenv(rest[i+1]))
+					if strings.Contains(rest[i+1], "=") {
+						env = append(env, rest[i+1])
+					} else {
+						env = append(env, rest[i+1]+"="+os.Getenv(rest[i+1]))
+					}
+				case "-w":
+					workdir = rest[i+1]
 				}
 				i++
 			}
@@ -107,6 +118,10 @@ func fakePodman(args []string) int {
 		}
 		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Env = env
+		// The guest workspace path ("/work") usually does not exist on the host.
+		if fi, err := os.Stat(workdir); err == nil && fi.IsDir() {
+			cmd.Dir = workdir
+		}
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		if err := cmd.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "fake podman:", err)
@@ -129,4 +144,18 @@ func fakePodman(args []string) int {
 		return 0
 	}
 	return 125
+}
+
+func TestFakePodmanPassesEqualsFormEnvVerbatim(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(exe, fakePodmanFlag, "run", "--name", "n", "-e", "TMPDIR=/tmp", "img", "sh", "-c", "echo $TMPDIR").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "/tmp" {
+		t.Fatalf("TMPDIR = %q, want /tmp", got)
+	}
 }

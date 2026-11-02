@@ -19,10 +19,13 @@ not containment. The same combined run on real rootless podman —
 `make acceptance-podman` — is the containment proof for the combination:
 every compartment is started with no network; the long-lived ones are
 reached only through the socket directory mounted into them, and a first-hand
-command's compartment has no network; its result returns through the gateway.
+command's compartment has direct network access denied; its result returns through the gateway.
 The per-door podman proofs
 (`scripts/e2e-refbox.sh`, `e2e-refexec.sh`, `e2e-refbridge.sh`,
-`e2e-refspawn.sh`) cover each compartment on its own.
+`e2e-refspawn.sh`) cover each compartment on its own, and
+`scripts/e2e-refexec-seatbelt.sh` covers the exec door's macOS Seatbelt
+backend — direct network access denied, writes scoped to the workspace,
+host-readable — with the real `sandbox-exec`.
 
 ## The command
 
@@ -291,9 +294,9 @@ recipe for that obligation, for a single agent:
   `/work`; it is not part of the agent;
 - `deploy/refbox/refbox-run.sh` starts it with rootless podman: `--network
   none` (no interface but the compartment's own loopback), a read-only root,
-  a tmpfs at `/work`, every Linux capability dropped, a memory / CPU / pid /
-  wall-clock cap, and one bind mount — the socket directory, at the same path
-  inside and out;
+  a tmpfs at `/work` which is also the agent's working directory, every Linux
+  capability dropped, a memory / CPU / pid / wall-clock cap, and one bind
+  mount — the socket directory, at the same path inside and out;
 - Agenthof, on the host, listens in that directory when
   `refbox_socket_dir` is set, and dials the agent's `unix://` endpoint. The
   agent calls models, tools, and exec only through that gateway socket. The
@@ -315,8 +318,9 @@ commands do.
 
 The exec door is `refexec` (`deploy/refexec/`): an operator-side supervisor,
 a host process next to Agenthof, runs each allowlisted command in its own
-rootless-podman compartment with no network, on a workspace volume the
-recipe shares with refbox, and attests to Agenthof what ran; the exec line
+confined compartment with direct network access denied — rootless podman on
+Linux (on a workspace volume the recipe shares with refbox), or the weaker
+macOS Seatbelt tier — and attests to Agenthof what ran, naming the tier; the exec line
 is that runtime's account, never the agent's. It is core, offline-only, and
 trusts refexec. A narrow network allowlist for those commands is reserved. The CI job
 `refbox` runs this recipe for both images and checks the perimeter: the
@@ -551,8 +555,8 @@ flag and exit-code reference.
 | refbox reference compartment: a rootless-podman recipe (`deploy/refbox/`) with no network, no injected credentials, and an ephemeral workspace (or, with `REFBOX_WORKSPACE_VOLUME`, a named volume shared with `refexec`). The agent reaches Agenthof only over the socket directory; a Go echo agent and a Python LangChain agent both run there from their own images, the latter making its model call through the gateway socket in that directory. Exec is first-hand through `refexec` when the agent declares `exec` | a network allowlist for first-hand commands |
 | model gateway: the agent calls `<proxy URL>v1/chat/completions` with the run token; Agenthof authorizes the logical model, injects the per-role provider key, and records `model_call`. Non-streaming calls record token counts. Budgets are the upstream gateway's, via the provisioned role key | Agenthof-side spend caps; a per-role list of models; OAuth-protected model providers |
 | inbound MCP proxy for an agent's declared tools — allowlisted, credential-injecting, ledgered, able to mint its own upstream token via the `client_credentials` grant, and able to call a per-user upstream on behalf of the invoking human via RFC 8693 token exchange (`grant_type: token_exchange`) | delegation with an actor token; re-authentication when the invoker's token expires mid-run |
-| exec, first-hand: the allowlist check, then `refexec` runs the command in a no-network compartment and Agenthof records its account as `exec` with `runtime_attestation`; the retired agent-asserted routes answer a recorded refusal. Agenthof itself never runs the command | Agenthof running a command itself; an agent-reported exec (retired — historical `mode: attested` events still verify and render) |
-| spawn: an agent asks its gateway for a governed child run of a `may_spawn`-listed role/workflow; the child is a full run under the same invoker, with its own ledger linked to the parent, run in compartments of its own — one workspace volume shared by that child's agents, one refbox compartment per agent, one `refexec` — provisioned by the operator's supervisor (`deploy/refspawn`) and torn down with the parent step; bounded by `max_depth`, `max_parallel`, `max_total_spawns`; `investigate --run` shows the tree | a shared or persistent child workspace; an asynchronous submit-and-await spawn; a separate acting-agent identity |
+| exec, first-hand: the allowlist check, then `refexec` runs the command in a compartment with direct network access denied (rootless podman on Linux, Seatbelt on macOS) and Agenthof records its account as `exec` with `runtime_attestation`, naming the tier; the retired agent-asserted routes answer a recorded refusal. Agenthof itself never runs the command | Agenthof running a command itself; an agent-reported exec (retired — historical `mode: attested` events still verify and render) |
+| spawn: an agent asks its gateway for a governed child run of a `may_spawn`-listed role/workflow; the child is a full run under the same invoker, with its own ledger linked to the parent, run in compartments of its own — one workspace shared by that child's agents, one confined compartment per agent (a rootless-podman refbox container on Linux, a Seatbelt sandbox on macOS), one `refexec` — provisioned by the operator's supervisor (`deploy/refspawn`) and torn down with the parent step; bounded by `max_depth`, `max_parallel`, `max_total_spawns`; `investigate --run` shows the tree | a shared or persistent child workspace; an asynchronous submit-and-await spawn; a separate acting-agent identity |
 | hash-chained ledger + `audit` / `audit verify`; a finished run's receipt anchored into a transparency log on demand or by a sweep, its proof beside the ledger (`audit anchor --run` / `--pending`) | enforced capabilities beyond the tool allowlist (the proxy allowlists which tools an agent may reach; it does not otherwise constrain what the agent's own code does) |
 | RBAC by group; linear workflow + fail-back | multi-resource / cross-repo scope |
 | cross-run + control incident timeline (`investigate`) + config-join on `audit <run-id>` | DAG workflows |

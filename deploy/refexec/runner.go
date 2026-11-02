@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,25 +11,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"os/exec"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf8"
 
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
 	"github.com/agenthof/agenthof/deploy/internal/refrunner"
 )
-
-// maxOutput caps the combined stdout+stderr a compartment can hand back:
-// what is returned is what the agent gets and what output_sha covers.
-const maxOutput = 1 << 20
-
-// truncationMarker ends a capped output, so the agent sees that it is
-// partial without parsing the response's truncated flag.
-const truncationMarker = "\n[output truncated by refexec]\n"
 
 var errCapReached = errors.New("refexec: compartment cap reached")
 
@@ -38,19 +25,18 @@ var errCapReached = errors.New("refexec: compartment cap reached")
 // one command, one attestation. It holds nothing between requests but the
 // concurrency slots.
 type runner struct {
-	cfg     execConfig
-	logger  *slog.Logger
-	podman  []string // the podman client's argv prefix: {"podman"}; tests substitute a fake
-	environ func() []string
-	slots   chan struct{} // one token per compartment the cap allows
-	wg      sync.WaitGroup
+	cfg      execConfig
+	logger   *slog.Logger
+	confiner confiner.Confiner // what confines a compartment; tests substitute a fake
+	slots    chan struct{}     // one token per compartment the cap allows
+	wg       sync.WaitGroup
 }
 
-func newRunner(cfg execConfig, logger *slog.Logger, podman []string) *runner {
+func newRunner(cfg execConfig, logger *slog.Logger, c confiner.Confiner) *runner {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &runner{cfg: cfg, logger: logger, podman: podman, environ: os.Environ, slots: make(chan struct{}, cfg.MaxCompartments)}
+	return &runner{cfg: cfg, logger: logger, confiner: c, slots: make(chan struct{}, cfg.MaxCompartments)}
 }
 
 // result is one compartment's outcome. Output is already capped.
@@ -60,55 +46,6 @@ type result struct {
 	Truncated   bool
 	OutputBytes int64
 	Attestation refrunner.Attestation
-}
-
-// envNames lists the env_allow names refexec's own environment holds, sorted.
-// Each is passed to podman as `-e NAME`, so podman copies the value from the
-// client's environment: the value never appears in an argv or a log. These
-// are what refexec attests it injected; an image's own ENV layer adds names
-// refexec never sees.
-func (r *runner) envNames() []string {
-	own := map[string]bool{}
-	for _, kv := range r.environ() {
-		name, _, _ := strings.Cut(kv, "=")
-		own[name] = true
-	}
-	names := []string{}
-	for _, name := range r.cfg.EnvAllow {
-		if own[name] {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	return names
-}
-
-// podmanRunArgs builds the one `podman run` for a compartment: no network,
-// a read-only root, a tmpfs scratch, every capability dropped, no new
-// privileges, the host user's id, the operator's resource caps, the
-// per-command wall clock as a backstop to the gateway's deadline, the
-// workspace volume — and nothing else — mounted at the workspace path,
-// which is also the working directory, the allowlisted environment names,
-// then the image and the argv. --pull=never: the operator fetches the
-// image; refexec never does, so a compartment is offline by construction.
-func podmanRunArgs(cfg execConfig, session string, envNames, argv []string) []string {
-	secs := int(cfg.Timeout / time.Second)
-	if secs < 1 {
-		secs = 1
-	}
-	args := []string{"run", "--rm", "--name", session,
-		"--pull=never", "--network", "none", "--read-only", "--tmpfs", "/tmp",
-		"--cap-drop=ALL", "--security-opt", "no-new-privileges",
-		"--userns=keep-id", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-		"--memory=" + cfg.Memory, "--cpus=" + cfg.CPUs, "--pids-limit=" + strconv.Itoa(cfg.PIDs),
-		"--timeout=" + strconv.Itoa(secs),
-		"-v", cfg.WorkspaceVolume + ":" + cfg.WorkspacePath, "-w", cfg.WorkspacePath,
-	}
-	for _, name := range envNames {
-		args = append(args, "-e", name)
-	}
-	args = append(args, cfg.Image)
-	return append(args, argv...)
 }
 
 // newSession mints the per-request id, which is also the compartment's
@@ -121,41 +58,9 @@ func newSession() (string, error) {
 	return "refexec-" + hex.EncodeToString(b), nil
 }
 
-// capWriter keeps the first max bytes written and counts every byte. It is
-// the compartment's combined stdout+stderr: exec.Cmd serializes writes to a
-// shared non-*os.File writer, so no lock is needed.
-type capWriter struct {
-	max   int
-	buf   bytes.Buffer
-	total int64
-}
-
-func (c *capWriter) Write(p []byte) (int, error) {
-	c.total += int64(len(p))
-	if room := c.max - c.buf.Len(); room > 0 {
-		keep := p
-		if len(keep) > room {
-			keep = keep[:room]
-		}
-		c.buf.Write(keep)
-	}
-	return len(p), nil
-}
-
-// output returns what is handed back: the kept bytes, plus the marker when
-// anything was dropped.
-func (c *capWriter) output() ([]byte, bool) {
-	if c.total > int64(c.max) {
-		return append(c.buf.Bytes(), truncationMarker...), true
-	}
-	return c.buf.Bytes(), false
-}
-
 // run executes argv in one compartment and returns its outcome. Cancelling
 // ctx (the gateway's deadline, or the gateway hanging up) removes the
-// CONTAINER with `podman rm -f`: killing the podman client's process group
-// would leave the container running under conmon. The client then exits on
-// its own; WaitDelay is the backstop if it does not.
+// compartment through the confiner, which ends it however its backend does.
 func (r *runner) run(ctx context.Context, argv []string) (result, error) {
 	select {
 	case r.slots <- struct{}{}:
@@ -170,64 +75,42 @@ func (r *runner) run(ctx context.Context, argv []string) (result, error) {
 	if err != nil {
 		return result{}, err
 	}
-	names := r.envNames()
-	args := append(append([]string{}, r.podman[1:]...), podmanRunArgs(r.cfg, session, names, argv)...)
-	cmd := exec.CommandContext(ctx, r.podman[0], args...)
-	cmd.Cancel = func() error {
-		r.logger.Info("compartment removed", "session", session)
-		r.remove(session)
-		return nil
+	comp, err := r.confiner.Launch(ctx, confiner.Spec{
+		Name: session, Program: r.cfg.Keys.Image, Argv: argv,
+		Store: r.cfg.Store, Scratch: true, EnvNames: r.cfg.EnvAllow,
+		Limits:  r.cfg.Limits,
+		Timeout: r.cfg.Timeout,
+	})
+	if err != nil {
+		return result{}, fmt.Errorf("refexec: start compartment: %w", err)
 	}
-	cmd.WaitDelay = 10 * time.Second
-	out := &capWriter{max: maxOutput}
-	cmd.Stdout, cmd.Stderr = out, out
-	cmd.Env = r.environ() // the podman CLIENT's environment (its storage, PATH, the values -e copies); the command's is only what -e names
-	if err := cmd.Start(); err != nil {
-		return result{}, fmt.Errorf("refexec: start podman: %w", err)
-	}
-	r.logger.Info("compartment started", "session", session, "command", argv[0], "pid", cmd.Process.Pid, "env_names", names)
-	waitErr := cmd.Wait()
+	r.logger.Info("compartment started", "session", session, "command", argv[0], "pid", comp.PID())
+	res, err := comp.Wait(ctx)
 	if ctx.Err() != nil {
+		// Remove runs under its own bounded context. Its error is noise here: a
+		// compartment that already exited is gone, and the backend logs it.
+		_ = comp.Remove(context.Background())
+		r.logger.Info("compartment removed", "session", session)
 		return result{}, ctx.Err()
 	}
-	exit := 0
-	if waitErr != nil {
-		var ee *exec.ExitError
-		if !errors.As(waitErr, &ee) {
-			return result{}, fmt.Errorf("refexec: podman: %w", waitErr)
+	if err != nil {
+		if errors.Is(err, confiner.ErrDidNotLaunch) {
+			// The command never ran (podman's exit 125: the image is absent under
+			// --pull=never, a storage error, a bad flag). Attesting an exit with a
+			// real argv and pid would be a false first-hand record, so return an
+			// error and let the gateway record a door failure instead.
+			return result{}, fmt.Errorf("refexec: the confiner did not run the command: %w", err)
 		}
-		exit = ee.ExitCode()
-		// 125 is podman's own reserved code for "podman itself failed" — the
-		// image is absent under --pull=never, a storage error, a bad flag: the
-		// command never ran. Attesting 125 as the command's exit (with a real
-		// argv and pid) would be a false first-hand record, so return an error
-		// and let the gateway record a door failure instead. A command that
-		// itself exits 125 is indistinguishable and treated the same; 125 is
-		// podman-reserved, so a real command rarely uses it.
-		if exit == 125 {
-			return result{}, fmt.Errorf("refexec: podman did not run the command (exit 125)")
-		}
+		return result{}, fmt.Errorf("refexec: compartment: %w", err)
 	}
-	output, truncated := out.output()
-	r.logger.Info("compartment finished", "session", session, "exit", exit, "output_bytes", out.total, "truncated", truncated)
+	r.logger.Info("compartment finished", "session", session, "exit", res.Exit, "output_bytes", res.OutputBytes, "truncated", res.Truncated, "env_names", res.EnvNames)
 	return result{
-		ExitCode: exit, Output: output, Truncated: truncated, OutputBytes: out.total,
-		Attestation: refrunner.Attestation{Runtime: "refexec", Session: session, Command: argv, PID: cmd.Process.Pid, Spawn: 1, EnvNames: names},
+		ExitCode: res.Exit, Output: res.Output, Truncated: res.Truncated, OutputBytes: res.OutputBytes,
+		Attestation: refrunner.Attestation{
+			Runtime: "refexec", Session: session, Command: argv, PID: comp.PID(), Spawn: 1,
+			EnvNames: res.EnvNames, Confiner: string(r.confiner.Tier()), ConfinerOpts: r.confiner.Opts(),
+		},
 	}, nil
-}
-
-// remove stops and deletes the compartment. Best effort: a container that
-// already exited under --rm is gone, and podman's complaint about that is
-// noise. podman's text may name the container; it never carries a value.
-func (r *runner) remove(session string) {
-	args := append(append([]string{}, r.podman[1:]...), "rm", "-f", session)
-	rmCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(rmCtx, r.podman[0], args...)
-	cmd.Env = r.environ()
-	if err := cmd.Run(); err != nil {
-		r.logger.Warn("compartment not removed", "session", session, "error", err)
-	}
 }
 
 // close waits for every compartment in flight to finish. Serve has already

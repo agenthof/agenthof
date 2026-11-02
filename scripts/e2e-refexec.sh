@@ -21,7 +21,9 @@ IMAGE="${REFBOX_IMAGE:-refbox-echo:test}"
 NAME="${REFBOX_NAME:-refbox-exec}"
 SOCKET="refbox-echo.sock"
 EXEC_IMAGE="${REFEXEC_IMAGE:-docker.io/library/busybox:1.36.1}"
-VOLUME="refexec-e2e-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+# The long-lived workspace store; it must stay off the refexec- prefix that
+# refexec's startup reap removes (refexec -check refuses such a store).
+VOLUME="e2e-work-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 
 SOCK_DIR="$(mktemp -d)"                    # the gateway + agent socket dir, mounted into refbox
 export AGENTHOF_REFBOX_SOCKET_DIR="$SOCK_DIR"
@@ -114,10 +116,10 @@ run() { # $1 = input; sets OUT, RUNID, AUDIT
 #    the output (the step's artifact preview is the output by design).
 run "write:hello-$NONCE; exec-run:cat /work/agent-note.txt"
 echo "$OUT" | grep -q "finished: succeeded" || { podman logs "$NAME" || true; cat "$WORK/refexec.err" || true; fail "run did not succeed"; }
-echo "$AUDIT" | grep -Eq "exec cat /work/agent-note.txt — exit 0 \(runtime\) \[runtime-attested: refexec cat /work/agent-note.txt pid [0-9]+ spawn 1\]" || fail "no first-hand exec line rendered"
+echo "$AUDIT" | grep -Eq "exec cat /work/agent-note.txt — exit 0 \(runtime\) \[runtime-attested: refexec cat /work/agent-note.txt pid [0-9]+ spawn 1; confiner: podman[^]]*\]" || fail "no first-hand exec line rendered"
 grep -q '"mode":"runtime"' "$WORK/logs/$RUNID.jsonl" || fail "exec event is not mode runtime"
 grep -q '"runtime_attestation":{"runtime":"refexec","session":"refexec-' "$WORK/logs/$RUNID.jsonl" || fail "no refexec attestation in the ledger"
-grep -q '"credential_env":"","env_names":\[\],"materialization":""' "$WORK/logs/$RUNID.jsonl" || fail "the attestation must be credential-less with no injected names (env_allow is empty)"
+grep -q '"credential_env":"","env_names":\["TMPDIR"\],"materialization":"","confiner":"podman"' "$WORK/logs/$RUNID.jsonl" || fail "the attestation must be credential-less naming only the scratch TMPDIR (env_allow is empty) and the podman tier"
 grep -q '"type":"exec"' "$WORK/logs/$RUNID.jsonl" || fail "no exec event in the ledger"
 if grep '"type":"exec"' "$WORK/logs/$RUNID.jsonl" | grep -q "hello-$NONCE"; then fail "the output body reached the exec event"; fi
 ART="$WORK/artifacts/$(printf 'hello-%s\n' "$NONCE" | sha_stdin)"

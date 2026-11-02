@@ -4,15 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
+
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
 )
 
 // containerPrefix names everything refspawn makes: agent compartments
-// (<prefix><id>-<agent>) and workspace volumes (<prefix><id>-work). The
+// (<prefix><id>-<agent>) and workspace stores (<prefix><id>-work). The
 // start-up reap removes whatever carries it. refexec's own transient exec
 // compartments are named refexec-… and are never reaped here: every
 // child's refexec shares that prefix, and each refexec removes its own.
@@ -29,39 +29,35 @@ const execDirSuffix = "-exec"
 // own.
 func compartmentName(id, agent string) string { return containerPrefix + id + "-" + agent }
 
-// refboxRunArgs is the one `podman run` for an agent compartment: the
-// refbox recipe's arg set (deploy/refbox/refbox-run.sh) with the child's
-// workspace volume at /work, the child's socket directory bind-mounted at
-// its own path, --pull=never (a missing image is a fast exit 125, never a
-// pull inside a --network none start), the supervisor's --timeout as the
-// backstop, and the agent's socket path appended after the image so it
-// overrides the image's own -socket (last wins).
-func refboxRunArgs(cfg spawnConfig, name, image, volume, childDir, sock string) []string {
-	secs := int(cfg.Timeout / time.Second)
-	if secs < 1 {
-		secs = 1
-	}
-	return []string{"run", "--rm", "--name", name, "--pull=never",
-		"--network", "none", "--read-only",
-		"-v", volume + ":/work",
-		"--cap-drop=ALL", "--security-opt", "no-new-privileges",
-		"--userns=keep-id", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-		"--memory=" + cfg.Limits.Memory, "--cpus=" + cfg.Limits.CPUs, "--pids-limit=" + strconv.Itoa(cfg.Limits.PIDs),
-		"--timeout=" + strconv.Itoa(secs),
-		"-v", childDir + ":" + childDir,
-		image, "-socket", sock,
-	}
-}
-
-// renderRefexecConfig writes the full key set refexec requires (every key,
-// no unknowns) for one child: this child's exec socket in the sibling exec
-// directory, this child's volume at /work, and the operator's exec
-// template for everything else.
-func renderRefexecConfig(rc refexecConfig, socket, volume string) string {
+// renderRefexecConfig writes the key set refexec requires (every key, no
+// unknowns) for one child: this child's exec socket in the sibling exec
+// directory, the confiner tier, this child's workspace store, and the
+// operator's exec template for everything else. Each backend gets only the
+// keys it consumes, because refexec refuses one its backend does not: podman
+// gets the image and the guest workspace path; Seatbelt gets store_root,
+// pid_dir, deny_read (the operator's list plus spawn_root, so the exec
+// compartments' profile also denies reads under spawn_root) and, when set,
+// shared_host_scratch. Neither gets a volume key: the store name is the only
+// handle on the workspace.
+func renderRefexecConfig(rc refexecConfig, socket, store string, tier confiner.Tier, keys confiner.Keys, spawnRoot string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "socket: %s\n", socket)
-	fmt.Fprintf(&b, "image: %s\n", rc.Image)
-	fmt.Fprintf(&b, "workspace:\n  volume: %s\n  path: /work\n", volume)
+	fmt.Fprintf(&b, "confiner: %s\n", tier)
+	switch tier {
+	case confiner.TierPodman:
+		fmt.Fprintf(&b, "image: %s\n", rc.Image)
+		fmt.Fprintf(&b, "workspace:\n  store: %s\n  path: /work\n", store)
+	case confiner.TierSeatbelt:
+		fmt.Fprintf(&b, "store_root: %s\npid_dir: %s\n", keys.StoreRoot, keys.PIDDir)
+		deny := make([]string, 0, len(keys.DenyRead)+1)
+		for _, p := range append(append([]string{}, keys.DenyRead...), spawnRoot) {
+			deny = append(deny, strconv.Quote(p))
+		}
+		fmt.Fprintf(&b, "deny_read: [%s]\n", strings.Join(deny, ", "))
+		if keys.SharedHostScratch {
+			b.WriteString("shared_host_scratch: true\n")
+		}
+	}
 	fmt.Fprintf(&b, "timeout: %s\n", rc.Timeout)
 	fmt.Fprintf(&b, "limits:\n  memory: %s\n  cpus: %q\n  pids: %d\n", rc.Limits.Memory, rc.Limits.CPUs, rc.Limits.PIDs)
 	fmt.Fprintf(&b, "compartments:\n  max: %d\n", rc.MaxCompartments)
@@ -73,65 +69,26 @@ func renderRefexecConfig(rc refexecConfig, socket, volume string) string {
 		b.WriteString(n)
 	}
 	b.WriteString("]\n")
+	if tier != confiner.TierPodman { // podman's workspace block carries its guest path and sits with its image
+		fmt.Fprintf(&b, "workspace:\n  store: %s\n", store)
+	}
 	return b.String()
 }
 
-// podman runs one podman command to completion under a bound and returns
-// its combined output on failure. podman's text may name a container or a
-// volume; it never carries a value.
-func (s *supervisor) podman(ctx context.Context, timeout time.Duration, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	full := append(append([]string{}, s.podmanArgv[1:]...), args...)
-	cmd := exec.CommandContext(ctx, s.podmanArgv[0], full...)
-	cmd.Env = s.environ()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return out, fmt.Errorf("podman %s: %w: %s", strings.Join(args[:min(2, len(args))], " "), err, strings.TrimSpace(string(out)))
-	}
-	return out, nil
-}
-
-// remove stops and deletes one container. Best effort: a container that
-// already exited under --rm is gone, and podman's complaint is noise.
-func (s *supervisor) remove(name string) {
-	if _, err := s.podman(context.Background(), 30*time.Second, "rm", "-f", name); err != nil {
-		s.logger.Warn("compartment not removed", "compartment", name, "error", err)
-	}
-}
-
-// reap removes every container and volume refspawn's prefix names, and
-// every directory under spawn_root: the leftovers of a previous refspawn
-// that died with children in flight. Run at start and again at shutdown.
-func (s *supervisor) reap() {
-	ctx := context.Background()
-	if out, err := s.podman(ctx, 30*time.Second, "ps", "-aq", "--filter", "name=^"+containerPrefix); err == nil {
-		for _, c := range strings.Fields(string(out)) {
-			s.logger.Info("reaping leftover compartment", "compartment", c)
-			s.remove(c)
-		}
-	} else {
-		s.logger.Warn("could not list leftover compartments", "error", err)
-	}
-	if out, err := s.podman(ctx, 30*time.Second, "volume", "ls", "-q", "--filter", "name=^"+containerPrefix); err == nil {
-		for _, v := range strings.Fields(string(out)) {
-			s.logger.Info("reaping leftover volume", "volume", v)
-			// -f here, unlike an ordered teardown: a leftover may still be
-			// mounted by a container refspawn does not name — an exec
-			// compartment of a refexec that died with its supervisor — and
-			// there is nothing left running to release it.
-			if _, err := s.podman(ctx, 30*time.Second, "volume", "rm", "-f", v); err != nil {
-				s.logger.Warn("leftover volume not removed", "volume", v, "error", err)
-			}
-		}
-	} else {
-		s.logger.Warn("could not list leftover volumes", "error", err)
-	}
-	entries, err := os.ReadDir(s.cfg.SpawnRoot)
-	if err != nil {
-		return
+// reap removes every compartment and store the confiner finds under
+// refspawn's prefix, and every directory under spawn_root: the leftovers of
+// a previous refspawn that died with children in flight. Run at start and
+// again at shutdown. The spawn_root sweep is refspawn's own and runs even
+// when the confiner's reap failed; that failure is returned for the caller
+// to refuse on (at start) or warn about (at shutdown).
+func (s *supervisor) reap() error {
+	err := s.confiner.Reap(context.Background(), containerPrefix)
+	entries, rdErr := os.ReadDir(s.cfg.SpawnRoot)
+	if rdErr != nil {
+		return err
 	}
 	for _, e := range entries {
 		_ = os.RemoveAll(filepath.Join(s.cfg.SpawnRoot, e.Name()))
 	}
+	return err
 }

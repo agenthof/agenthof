@@ -150,6 +150,7 @@ wait_port "$AGENT_PORT" "echo-agent"
 # here too: a config missing a key is refused before anything starts.
 spawn_config() { # $1 = socket path, $2 = "no-images" to omit the images block, $3 = max_compartments
 	cat <<EOF
+confiner: podman
 socket: $1
 spawn_root: $SPAWN_ROOT
 EOF
@@ -523,6 +524,7 @@ no_reason "$(ledger "$PARENT")"
 grep -q "child=$CHILD" "$WORK/refspawn.err" || fail "the supervisor never provisioned a set under the child's run id"
 grep -q "compartment started.*child=$CHILD.*compartment=agenthof-spawn-$CHILD-child" "$WORK/refspawn.err" || fail "the child's agent did not run in a compartment named for the child"
 echo "$AUDIT" | grep -q "spawn worker/child-wf → run $CHILD succeeded (depth 1) — artifact ${CHILD_SHA:0:8}" || fail "audit did not render the spawn line"
+echo "$AUDIT" | grep -q "spawn worker/child-wf → run $CHILD succeeded .*\[child-confiner: podman — shared-kernel container tier" || fail "the spawn line does not record the confiner tier the supervisor provisioned the child under"
 CHILD_AUDIT="$(out_of "$WORK/agenthof" audit "$CHILD" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl")"
 echo "$CHILD_AUDIT" | grep -q "ledger integrity: verified" || fail "the child's ledger does not verify"
 echo "$CHILD_AUDIT" | grep -q "ledger completeness: complete (" || fail "the child's ledger does not account for itself"

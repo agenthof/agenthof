@@ -351,10 +351,18 @@ func listenUnix(path string) (net.Listener, error) {
 	return net.Listen("unix", path)
 }
 
+// defineFlags registers the agent's flags on fs. -workspace defaults to the
+// working directory: every confiner starts the agent with the workspace as
+// its working directory, so "." is the workspace without naming a path.
+func defineFlags(fs *flag.FlagSet) (addr, socket, workspace *string) {
+	addr = fs.String("addr", "127.0.0.1:8080", "TCP listen address (ignored when -socket is set)")
+	socket = fs.String("socket", "", "Unix socket path to listen on; overrides -addr")
+	workspace = fs.String("workspace", ".", "directory the write: directive writes agent-note.txt into (default: the working directory, which is the workspace)")
+	return addr, socket, workspace
+}
+
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8080", "TCP listen address (ignored when -socket is set)")
-	socket := flag.String("socket", "", "Unix socket path to listen on; overrides -addr")
-	workspace := flag.String("workspace", "/work", "directory the write: directive writes agent-note.txt into (the refbox workspace)")
+	addr, socket, workspace := defineFlags(flag.CommandLine)
 	flag.Parse()
 
 	srv := &http.Server{Handler: newMux(*workspace)}

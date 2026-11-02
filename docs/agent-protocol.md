@@ -80,8 +80,8 @@ To use a model, a tool, a command, or a governed child run, your agent calls the
 
 The proxy URL is usually `http://host:port/` (note the **trailing slash** — strip it
 before appending a path, or you get `//v1/...`, which the gateway answers with a `307`
-the client may not follow). Inside a no-network sandbox like
-[refbox](../deploy/refbox) it is a `unix://<socket-path>` address (no trailing slash); if
+the client may not follow). Inside a sandbox run with `--network none`, like
+[refbox](../deploy/refbox), it is a `unix://<socket-path>` address (no trailing slash); if
 your agent runs there, dial the Unix socket instead of a TCP host (`echo-agent` shows
 both).
 
@@ -119,12 +119,15 @@ tools it was granted.
 An agent whose config declares `exec: {runtime: refexec, url: unix://…, timeout: …,
 allow: [...]}` does not run the command: it calls `POST <proxy-url>/exec/run` with
 `{"command": [argv]}` and gets `200 {"exit": <int>, "output": "<string>", "truncated":
-<bool>}` once the operator's runtime has run it in a no-network compartment on the shared
+<bool>}` once the operator's runtime has run it in a direct-network-denied compartment on the shared
 workspace — or `403` (off the allowlist, or no `exec` declared; recorded) or `502` (the
 runtime call failed, recorded). The exec door is *first-hand*: the ledger gets the
 runtime's account of what ran, never the agent's. The retired agent-asserted routes
 `/exec/authorize` and `/exec/attest` answer `403` on every agent and are recorded as
-refusals. See [`docs/lifecycle-exec.md`](lifecycle-exec.md).
+refusals. The workspace is the compartment's working directory on every backend, so
+address files by a relative path; `/work` is the mount point under rootless podman, not a
+contract, and under macOS Seatbelt the workspace is a host directory (`<store_root>/<store>`)
+with no `/work`. See [`docs/lifecycle-exec.md`](lifecycle-exec.md).
 
 ### Spawn door — a governed child run
 

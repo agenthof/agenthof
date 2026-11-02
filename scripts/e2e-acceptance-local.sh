@@ -219,10 +219,11 @@ PIDS+=($!)
 # of exactly the allowlist, so `env` prints the one marker and nothing else —
 # the proof that it was refexec that ran it, and that it ran it clean.
 cat >"$WORK/refexec.yaml" <<EOF
+confiner: podman
 socket: $EXEC_DIR/exec.sock
 image: example.test/exec:1
 workspace:
-  volume: acceptance-work
+  store: acceptance-work
   path: /work
 timeout: 30s
 limits:
@@ -246,6 +247,7 @@ exec "$PYTHON" "$ROOT/examples/langchain-agent/agent.py" --driver model --model 
 EOF
 chmod 0755 "$WORK/langchain-image"
 cat >"$WORK/refspawn.yaml" <<EOF
+confiner: podman
 socket: $SUP_DIR/refspawn.sock
 spawn_root: $SPAWN_ROOT
 images:
@@ -408,8 +410,8 @@ PY
 EXEC_ATT="$(field "$L" exec runtime_attestation succeeded)"
 case "$EXEC_ATT" in *'"runtime": "refexec"'*) ;; *) fail "no refexec attestation on the exec" ;; esac
 case "$EXEC_ATT" in *'"command": ["env"]'*) ;; *) fail "the attestation does not name env" ;; esac
-grep -Eq "exec env — exit 0 \(runtime\) \[runtime-attested: refexec env pid [0-9]+ spawn 1\]" <<<"$AUDIT" || fail "audit did not render the first-hand exec"
-grep -qxF "exec: ACCEPTANCE_E2E_MARKER=1" <<<"$ART" || fail "the exec output is not exactly the allowlisted variable (the compartment's environment was not the allowlist)"
+grep -Eq "exec env — exit 0 \(runtime\) \[runtime-attested: refexec env pid [0-9]+ spawn 1; confiner: podman[^]]*\]" <<<"$AUDIT" || fail "audit did not render the first-hand exec"
+grep -qxF "exec: ACCEPTANCE_E2E_MARKER=1 TMPDIR=/tmp" <<<"$ART" || fail "the exec output is not exactly the allowlisted variable (the compartment's environment was not the allowlist)"
 EXEC_LINE="$(out_of grep '"type":"exec"' "$L")"
 [ -n "$EXEC_LINE" ] || fail "no exec line in the parent's ledger, so the absence check below would prove nothing"
 case "$EXEC_LINE" in *ACCEPTANCE_E2E_MARKER=1*) fail "the exec output body reached the exec event" ;; esac

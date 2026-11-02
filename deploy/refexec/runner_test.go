@@ -18,13 +18,17 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
+	"github.com/agenthof/agenthof/deploy/internal/confiner/confinertest"
 )
 
 func testConfig() execConfig {
 	return execConfig{
-		Socket: "/tmp/never/refexec.sock", Image: "example.test/exec:1",
-		WorkspaceVolume: "work", WorkspacePath: "/work", Timeout: 30 * time.Second,
-		Memory: "256m", CPUs: "1", PIDs: 64, MaxCompartments: 2,
+		Socket: "/tmp/never/refexec.sock", Confiner: confiner.TierPodman, Store: "work",
+		Keys:    confiner.Keys{Image: "example.test/exec:1", WorkspacePath: "/work"},
+		Limits:  confiner.Limits{Memory: "256m", CPUs: "1", PIDs: 64},
+		Timeout: 30 * time.Second, MaxCompartments: 2,
 		EnvAllow: []string{"REFEXEC_TEST_UNSET", "REFEXEC_TEST_MARKER"},
 	}
 }
@@ -38,7 +42,8 @@ func fakeRunner(t *testing.T, cfg execConfig) (*runner, string) {
 	}
 	log := filepath.Join(t.TempDir(), "podman.jsonl")
 	t.Setenv("REFEXEC_TEST_ARGLOG", log)
-	return newRunner(cfg, slog.New(slog.DiscardHandler), []string{exe, fakePodmanFlag}), log
+	c := confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, GuestWorkspace: cfg.Keys.WorkspacePath})
+	return newRunner(cfg, slog.New(slog.DiscardHandler), c), log
 }
 
 func records(t *testing.T, log string) []fakeRecord {
@@ -93,8 +98,11 @@ func TestRunReturnsExitOutputAndAttestation(t *testing.T) {
 		!strings.HasPrefix(att.Session, "refexec-") || att.Session != rec.Name || att.PID != rec.PID || att.PID == rec.Child {
 		t.Fatalf("attestation = %+v, want the podman client's pid %d (not the child %d) and session == container name %q", att, rec.PID, rec.Child, rec.Name)
 	}
-	if !reflect.DeepEqual(att.EnvNames, []string{"REFEXEC_TEST_MARKER"}) {
-		t.Fatalf("env_names = %v, want only the allowlisted name that is set", att.EnvNames)
+	if !reflect.DeepEqual(att.EnvNames, []string{"REFEXEC_TEST_MARKER", "TMPDIR"}) {
+		t.Fatalf("env_names = %v, want the allowlisted names that are set plus the scratch TMPDIR", att.EnvNames)
+	}
+	if att.Confiner != "podman" || att.ConfinerOpts != nil {
+		t.Fatalf("confiner = %q opts = %v, want podman and no opts", att.Confiner, att.ConfinerOpts)
 	}
 }
 
@@ -121,7 +129,7 @@ func TestPodmanRunIsLockedDown(t *testing.T) {
 		" --cap-drop=ALL ", " --security-opt no-new-privileges ", " --userns=keep-id ",
 		" --user " + fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()) + " ",
 		" --memory=256m ", " --cpus=1 ", " --pids-limit=64 ", " --timeout=30 ",
-		" -v work:/work ", " -w /work ", " -e REFEXEC_TEST_MARKER ", " example.test/exec:1 true ",
+		" -v work:/work ", " -w /work ", " -e REFEXEC_TEST_MARKER ", " -e TMPDIR=/tmp ", " example.test/exec:1 true ",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("podman args lack %q:\n%s", want, joined)
@@ -137,31 +145,6 @@ func TestPodmanRunIsLockedDown(t *testing.T) {
 	}
 	if rec.Args[len(rec.Args)-1] != "true" || rec.Args[len(rec.Args)-2] != "example.test/exec:1" {
 		t.Fatalf("image then argv must end the invocation: %v", rec.Args)
-	}
-}
-
-func TestPodmanRunArgsShape(t *testing.T) {
-	cfg := testConfig()
-	cfg.Timeout = 1500 * time.Millisecond
-	args := podmanRunArgs(cfg, "refexec-00", []string{"A", "B"}, []string{"cat", "/work/x"})
-	joined := strings.Join(args, " ")
-	if !strings.HasSuffix(joined, " -e A -e B example.test/exec:1 cat /work/x") || !strings.Contains(joined, " --timeout=1 ") {
-		t.Fatalf("args = %q", joined)
-	}
-}
-
-// The command runs with an EMPTY environment (the fake mirrors podman), so
-// `sh -c` finds `yes` and `head` only through the shell's compiled-in default
-// PATH — true for dash (Ubuntu) and for macOS's /bin/sh. A failure here on
-// another /bin/sh is that, not the cap.
-func TestOutputIsCappedAndCounted(t *testing.T) {
-	r, _ := fakeRunner(t, testConfig())
-	res, err := r.run(context.Background(), []string{"sh", "-c", "yes | head -c 1200000"})
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if !res.Truncated || res.OutputBytes != 1200000 || len(res.Output) != maxOutput+len(truncationMarker) || !strings.HasSuffix(string(res.Output), truncationMarker) {
-		t.Fatalf("truncated=%v bytes=%d len=%d", res.Truncated, res.OutputBytes, len(res.Output))
 	}
 }
 
@@ -217,9 +200,31 @@ func TestCapRefusesWhenFull(t *testing.T) {
 }
 
 func TestPodmanMissingIsAnError(t *testing.T) {
-	r := newRunner(testConfig(), slog.New(slog.DiscardHandler), []string{"/nonexistent/podman"})
-	if _, err := r.run(context.Background(), []string{"true"}); err == nil || !strings.Contains(err.Error(), "start podman") {
-		t.Fatalf("err = %v, want a start podman failure", err)
+	c := confiner.NewPodman(confiner.PodmanConfig{Argv: []string{"/nonexistent/podman"}})
+	r := newRunner(testConfig(), slog.New(slog.DiscardHandler), c)
+	if _, err := r.run(context.Background(), []string{"true"}); err == nil || (!strings.Contains(err.Error(), "did not run") && !strings.Contains(err.Error(), "start")) {
+		t.Fatalf("err = %v, want a failure to start podman", err)
+	}
+}
+
+// A confiner that reports ErrDidNotLaunch (podman's exit 125) means the
+// command never ran: run returns an error, so the handler answers 502 and the
+// gateway records a door failure instead of an attested exit.
+func TestDidNotLaunchIsADoorFailure(t *testing.T) {
+	r := newRunner(testConfig(), slog.New(slog.DiscardHandler), confinertest.New(t.TempDir()))
+	_, err := r.run(context.Background(), []string{"sh", "-c", "exit 125"})
+	if !errors.Is(err, confiner.ErrDidNotLaunch) {
+		t.Fatalf("run err = %v, want ErrDidNotLaunch", err)
+	}
+	srv := httptest.NewServer(r.handler())
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/run", "application/json", strings.NewReader(`{"command":["sh","-c","exit 125"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
 	}
 }
 
@@ -261,7 +266,7 @@ func TestHandlerServesRun(t *testing.T) {
 	if out.ExitCode != 0 || out.Output != "hi" || out.OutputSHA != hex.EncodeToString(sum[:]) || out.Truncated || out.OutputBytes != 2 {
 		t.Fatalf("response = %+v", out)
 	}
-	for _, k := range []string{"runtime", "session", "command", "pid", "spawn", "credential_env", "env_names", "materialization"} {
+	for _, k := range []string{"runtime", "session", "command", "pid", "spawn", "credential_env", "env_names", "materialization", "confiner"} {
 		if _, ok := out.Attestation[k]; !ok {
 			t.Fatalf("attestation lacks %q: %v", k, out.Attestation)
 		}
@@ -269,7 +274,7 @@ func TestHandlerServesRun(t *testing.T) {
 	if out.Attestation["runtime"] != "refexec" || out.Attestation["credential_env"] != "" || out.Attestation["materialization"] != "" || out.Attestation["spawn"] != float64(1) {
 		t.Fatalf("attestation = %v", out.Attestation)
 	}
-	if names, ok := out.Attestation["env_names"].([]any); !ok || len(names) != 1 || names[0] != "REFEXEC_TEST_MARKER" {
+	if names, ok := out.Attestation["env_names"].([]any); !ok || len(names) != 2 || names[0] != "REFEXEC_TEST_MARKER" || names[1] != "TMPDIR" {
 		t.Fatalf("env_names = %v, want a JSON array (never null) of the injected names", out.Attestation["env_names"])
 	}
 }

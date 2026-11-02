@@ -138,13 +138,14 @@ The governed core is real and runnable today:
 - **Exec gateway, first-hand** — allowlisted commands, run by a trusted
   operator-side runtime. The agent asks, and `deploy/refexec` — a reference
   operator-side runtime on the host — runs the allowlisted command in a
-  rootless-podman compartment with no network on a workspace shared with the
-  agent's compartment, and attests what ran; Agenthof authorizes the command
+  confined compartment with direct network access denied (rootless podman, or
+  macOS Seatbelt — see the confinement backends below) on a workspace shared
+  with the agent's compartment, and attests what ran; Agenthof authorizes the command
   against the config allowlist and records that account on the `exec` event.
   Agenthof itself runs no command, and an agent's own report of one is
   refused and recorded. Historical agent-reported exec events in old ledgers
   still verify and render.
-- **Sub-agent spawn, isolated per child** — a fronted agent asks its per-run
+- **Sub-agent spawn, a separate set per child** — a fronted agent asks its per-run
   gateway for a governed child run of a `{role, workflow}` its `may_spawn`
   lists, and gets the child's result back as a hash and a preview. Each
   child is a full run under the same human — its own ledger, linked to the
@@ -153,11 +154,24 @@ The governed core is real and runnable today:
   static cycle check at `apply`, and torn down with its parent's step;
   `investigate --run` shows the tree. A child runs in compartments of its
   own: `deploy/refspawn`, a reference operator-side supervisor on the host,
-  gives it one workspace volume, one rootless-podman refbox compartment per
-  agent in its workflow, and one `refexec` bound to that volume, and
-  removes them in order when the child is over. With no supervisor a child
+  gives it one workspace, one confined compartment per agent in its workflow
+  (a rootless-podman refbox container, or a macOS Seatbelt sandbox), and one
+  `refexec` bound to that workspace, and removes them in order when the
+  child is over. With no supervisor a child
   is refused, never run beside its parent. Agenthof itself still runs
   nothing.
+- **Confinement backends, selected per host** — the reference runtimes'
+  confinement is a selection seam. `deploy/refexec` and `deploy/refspawn`
+  choose a backend from their config, or the host's default: rootless podman
+  on Linux, macOS Seatbelt on macOS. The choice is fail-closed: a runtime
+  probes its backend before it serves and refuses to start if the probe
+  fails, and a key the chosen backend does not use is refused rather than
+  ignored — a command never runs outside the selected backend. The ledger names the tier each
+  exec and each spawned child ran under, and `audit` states what that tier
+  does and does not guarantee. The tiers are honestly different: both share
+  the host kernel and sit below any VM, and Seatbelt is the weaker of the
+  two — host-readable, with no resource caps and best-effort process
+  teardown.
 - **Served runs and a read API** — `agenthof serve` hosts concurrent
   governed runs behind an HTTP API where every call carries the human's
   own OIDC token: start a run, poll it, read its ledger with an honest
@@ -291,11 +305,10 @@ The governed core is real and runnable today:
   already executes only the install its control ledger records (above); what
   that cannot catch — a consistent rewrite of pointer and ledger together — is
   what external anchoring of the head (`anchor: tlog`, above) is for.
-- **More confinement backends** — the reference runtime's confinement becomes a
-  selection seam with OS-native backends beyond rootless podman (for example
-  macOS Seatbelt, Linux Landlock), chosen per host with a fail-closed default
-  and the applied tier named in the ledger — an honest contract, since a
-  shared-kernel sandbox is not a container is not a VM.
+- **Further confinement backends** — more tiers behind the same selection
+  seam (for example Linux Landlock, Windows through WSL2, and a VM-class
+  tier), each named in the ledger with its own honest statement of what it
+  does and does not guarantee.
 
 ## Later
 

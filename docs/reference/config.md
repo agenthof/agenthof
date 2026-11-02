@@ -188,8 +188,8 @@ every command against `allow`, asks the declared operator-side runtime
 (`refexec`) to run it over a `unix://` socket, and records that runtime's
 first-hand account (`runtime_attestation`). Agenthof never runs the command
 itself, and the agent never runs it either. The door requires an
-operator-run runtime — a Linux host with rootless podman — and there is no
-exec without one.
+operator-run runtime — on a Linux host with rootless podman, or a macOS host
+using the weaker Seatbelt tier — and there is no exec without one.
 
 | Field | YAML key | Type | Required | Default |
 |---|---|---|---|---|

@@ -387,6 +387,126 @@ func TestRenderSpawn(t *testing.T) {
 	}
 }
 
+const (
+	podmanGrade   = "shared-kernel container tier (rootless podman, --userns=keep-id); below any VM/microVM tier"
+	seatbeltGrade = "shared-kernel OS-sandbox tier (macOS Seatbelt): same trust basis as podman — shared kernel, below any VM/microVM tier; direct network denied; writes scoped; host-readable; no resource caps; process teardown best-effort"
+)
+
+// renderConfined renders one succeeded exec event carrying a runtime
+// attestation with the given confiner tier and opts.
+func renderConfined(tier string, opts []string) string {
+	zero := 0
+	att := &engine.RuntimeAttestation{Runtime: "refexec", Command: []string{"true"}, PID: 4242, Spawn: 1, Confiner: tier, ConfinerOpts: opts}
+	events := []engine.Event{{Type: "exec", Status: "succeeded", Command: []string{"true"}, ExitCode: &zero, Mode: "runtime", RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()}}
+	return Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
+}
+
+func TestRenderConfinerGradePodman(t *testing.T) {
+	out := renderConfined("podman", nil)
+	want := "[runtime-attested: refexec true pid 4242 spawn 1; confiner: podman — " + podmanGrade + "]"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in:\n%s", want, out)
+	}
+}
+
+func TestRenderConfinerGradeSeatbeltIsUnconditional(t *testing.T) {
+	// The ledger never records whether limits: was configured, so the
+	// seatbelt grade must not depend on it: two events with the identical
+	// attestation render the identical full grade.
+	zero := 0
+	att := &engine.RuntimeAttestation{Runtime: "refexec", Command: []string{"true"}, PID: 4242, Spawn: 1, Confiner: "seatbelt"}
+	events := []engine.Event{
+		{Type: "exec", Status: "succeeded", Command: []string{"true"}, ExitCode: &zero, Mode: "runtime", RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()},
+		{Type: "exec", Status: "succeeded", Command: []string{"true"}, ExitCode: &zero, Mode: "runtime", RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()},
+	}
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
+	want := "; confiner: seatbelt — " + seatbeltGrade + "]"
+	if n := strings.Count(out, want); n != 2 {
+		t.Fatalf("want the full seatbelt grade on both events, found %d in:\n%s", n, out)
+	}
+	for _, banned := range []string{"no network", "isolated", "tamper", "backstop", "reads confined"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("render must never contain %q:\n%s", banned, out)
+		}
+	}
+}
+
+func TestRenderConfinerOptsQualifyAndUnknownRenderVerbatim(t *testing.T) {
+	out := renderConfined("podman", []string{"shared-host-scratch"})
+	if want := "spawn 1; confiner: podman — " + podmanGrade + "; shared host scratch]"; !strings.Contains(out, want) {
+		t.Fatalf("missing %q in:\n%s", want, out)
+	}
+	out = renderConfined("podman", []string{"zz-future"})
+	if want := "spawn 1; confiner: podman — " + podmanGrade + "; zz-future]"; !strings.Contains(out, want) {
+		t.Fatalf("missing %q in:\n%s", want, out)
+	}
+	out = renderConfined("seatbelt", []string{"shared-host-scratch", "zz-future"})
+	if want := seatbeltGrade + "; shared host scratch; zz-future]"; !strings.Contains(out, want) {
+		t.Fatalf("opts must render in order, qualified or verbatim; missing %q in:\n%s", want, out)
+	}
+}
+
+func TestRenderUnknownTierVerbatimNoGrade(t *testing.T) {
+	out := renderConfined("wsl2", nil)
+	if want := "pid 4242 spawn 1; confiner: wsl2]"; !strings.Contains(out, want) {
+		t.Fatalf("missing %q in:\n%s", want, out)
+	}
+	if strings.Contains(out, "confiner: wsl2 —") {
+		t.Fatalf("an unknown tier must carry no grade:\n%s", out)
+	}
+}
+
+func TestRenderWithoutConfinerIsUnchanged(t *testing.T) {
+	zero := 0
+	att := &engine.RuntimeAttestation{Runtime: "refexec", Session: "refexec-0a1b", Command: []string{"cat", "/work/agent-note.txt"}, PID: 4242, Spawn: 1, EnvNames: []string{}}
+	events := []engine.Event{{Type: "exec", Status: "succeeded", Command: []string{"cat", "/work/agent-note.txt"}, ExitCode: &zero, Mode: "runtime", RuntimeAttestation: att, Time: time.Unix(0, 0).UTC()}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
+	want := "exec cat /work/agent-note.txt — exit 0 (runtime) [runtime-attested: refexec cat /work/agent-note.txt pid 4242 spawn 1]\n"
+	if !strings.Contains(out, want) {
+		t.Fatalf("the no-confiner line must render byte-for-byte unchanged; missing %q in:\n%s", want, out)
+	}
+}
+
+func TestRenderSpawnChildConfiner(t *testing.T) {
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "lead-role", Workflow: "lead-wf", RunID: "r-parent"}
+	render := func(e engine.Event) string {
+		e.Time = time.Unix(0, 0).UTC()
+		e.Binding = bind
+		return Render([]engine.Event{e}, ledger.Head{Count: 1}, nil, completeness.Check([]engine.Event{e}), "")
+	}
+	child := func(status, reason, tier string, opts []string) engine.Event {
+		return engine.Event{Type: "spawn", Status: status, ChildRole: "worker", ChildWorkflow: "child-wf", ChildRunID: "r-child", Depth: 1, OutputSHA: "0123456789abcdef", Reason: reason, ChildConfiner: tier, ChildConfinerOpts: opts}
+	}
+	note := " [child-confiner: seatbelt — " + seatbeltGrade + "]\n"
+
+	cases := []struct {
+		e    engine.Event
+		want string
+	}{
+		{child("succeeded", "", "seatbelt", nil),
+			"spawn worker/child-wf → run r-child succeeded (depth 1) — artifact 01234567" + note},
+		{child("failed", "boom", "seatbelt", nil),
+			"spawn worker/child-wf → run r-child failed (depth 1) — boom" + note},
+		{child("refused", "not allowed", "seatbelt", nil),
+			"spawn worker/child-wf → run r-child refused (depth 1) — not allowed" + note},
+		{child("succeeded", "", "seatbelt", []string{"shared-host-scratch", "zz-future"}),
+			"artifact 01234567 [child-confiner: seatbelt — " + seatbeltGrade + "; shared host scratch; zz-future]\n"},
+		{child("succeeded", "", "wsl2", nil),
+			"artifact 01234567 [child-confiner: wsl2]\n"},
+		{child("succeeded", "", "", nil),
+			"spawn worker/child-wf → run r-child succeeded (depth 1) — artifact 01234567\n"},
+	}
+	for _, c := range cases {
+		out := render(c.e)
+		if !strings.Contains(out, c.want) {
+			t.Errorf("status %q tier %q: missing %q in:\n%s", c.e.Status, c.e.ChildConfiner, c.want, out)
+		}
+	}
+	if out := render(child("succeeded", "", "", nil)); strings.Contains(out, "child-confiner") {
+		t.Errorf("no child confiner must add nothing:\n%s", out)
+	}
+}
+
 func TestRenderPrintsCompletenessAfterIntegrity(t *testing.T) {
 	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "r", Workflow: "w", RunID: "r-1a2b3c4d"}
 	n := 0

@@ -78,6 +78,7 @@ podman pull "$EXEC_IMAGE" >/dev/null
 # refspawn's config: the two agent images, a compartment cap of 3 (a pair
 # plus one), and the refexec template.
 cat >"$WORK/refspawn.yaml" <<EOF
+confiner: podman
 socket: $SUP_DIR/refspawn.sock
 spawn_root: $SPAWN_ROOT
 images:

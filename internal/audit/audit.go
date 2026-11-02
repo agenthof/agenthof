@@ -162,13 +162,13 @@ func Render(events []engine.Event, head ledger.Head, verr error, comp completene
 				} else if len(sha) > 8 {
 					sha = sha[:8]
 				}
-				fmt.Fprintf(&sb, "  %s  spawn %s → %s succeeded (depth %d) — artifact %s\n", t, target, run, e.Depth, sha)
+				fmt.Fprintf(&sb, "  %s  spawn %s → %s succeeded (depth %d) — artifact %s%s\n", t, target, run, e.Depth, sha, childConfinerNote(e))
 			case "failed", "refused":
 				reason := e.Reason
 				if reason == "" {
 					reason = "see the child run's ledger"
 				}
-				fmt.Fprintf(&sb, "  %s  spawn %s → %s %s (depth %d) — %s\n", t, target, run, e.Status, e.Depth, reason)
+				fmt.Fprintf(&sb, "  %s  spawn %s → %s %s (depth %d) — %s%s\n", t, target, run, e.Status, e.Depth, reason, childConfinerNote(e))
 			default:
 				fmt.Fprintf(&sb, "  %s  spawn %s → %s %s\n", t, target, run, e.Status)
 			}
@@ -244,5 +244,58 @@ func runtimeAttested(e engine.Event) string {
 	if a == nil {
 		return ""
 	}
-	return fmt.Sprintf(" [runtime-attested: %s %s pid %d spawn %d]", a.Runtime, strings.Join(a.Command, " "), a.PID, a.Spawn)
+	return fmt.Sprintf(" [runtime-attested: %s %s pid %d spawn %d%s]", a.Runtime, strings.Join(a.Command, " "), a.PID, a.Spawn, confinerNote(a.Confiner, a.ConfinerOpts))
+}
+
+// confinerGrades states, per recorded confiner tier, what that tier does and
+// does not guarantee. The ledger records the tier name the runtime reported,
+// not the policy behind it, so each grade is unconditional: it describes the
+// tier, never a configuration the ledger cannot confirm. A tier absent here is
+// rendered by name alone, with no grade.
+var confinerGrades = map[string]string{
+	"podman":   "shared-kernel container tier (rootless podman, --userns=keep-id); below any VM/microVM tier",
+	"seatbelt": "shared-kernel OS-sandbox tier (macOS Seatbelt): same trust basis as podman — shared kernel, below any VM/microVM tier; direct network denied; writes scoped; host-readable; no resource caps; process teardown best-effort",
+}
+
+// confinerOptQualifiers words the per-deployment loosenings a backend may
+// record. An unrecognised token is rendered verbatim rather than dropped.
+var confinerOptQualifiers = map[string]string{"shared-host-scratch": "shared host scratch"}
+
+// confinerNote renders the recorded confiner tier and its opts onto a
+// runtime-attested line: empty when no tier was recorded, otherwise
+// "; confiner: <tier>", its grade when the tier is known, then each opt in
+// order. An unknown tier is shown verbatim and ungraded.
+func confinerNote(tier string, opts []string) string {
+	if tier == "" {
+		return ""
+	}
+	return "; confiner: " + confinerText(tier, opts)
+}
+
+// childConfinerNote renders the tier the child's runtime applied onto a spawn
+// line, in the same terms as confinerNote.
+func childConfinerNote(e engine.Event) string {
+	if e.ChildConfiner == "" {
+		return ""
+	}
+	return " [child-confiner: " + confinerText(e.ChildConfiner, e.ChildConfinerOpts) + "]"
+}
+
+// confinerText is the shared body of both notes: the tier, " — <grade>" when
+// the tier is known, then each opt introduced by "; " (its qualifier when
+// known, else the token verbatim).
+func confinerText(tier string, opts []string) string {
+	var sb strings.Builder
+	sb.WriteString(tier)
+	if g, ok := confinerGrades[tier]; ok {
+		sb.WriteString(" — " + g)
+	}
+	for _, o := range opts {
+		q, ok := confinerOptQualifiers[o]
+		if !ok {
+			q = o
+		}
+		sb.WriteString("; " + q)
+	}
+	return sb.String()
 }

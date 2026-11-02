@@ -68,13 +68,14 @@ go test -c -o "$WORK/refexec-stub" ./deploy/refexec
 NONCE="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 OUTS=()
 
-# --- the runtime's config (the fake podman ignores image, volume and limits)
+# --- the runtime's config (the fake podman ignores image, store and limits)
 exec_config() { # $1 = socket path, $2 = "no-timeout" to omit the timeout
 	cat <<EOF
+confiner: podman
 socket: $1
 image: example.test/exec:1
 workspace:
-  volume: e2e-work
+  store: e2e-work
   path: /work
 limits:
   memory: 256m
@@ -244,22 +245,24 @@ run() { # $1 = workflow, $2 = input; sets OUT, RUNID, AUDIT
 	echo "$AUDIT" | grep -q "ledger completeness: complete (" || fail "$1: ledger does not account for itself"
 }
 ATTESTED='\[runtime-attested: refexec'
+ATTEST_END='; confiner: podman[^]]*\]'
 
 # 1. The agent writes its note and the runtime runs `env` first-hand: the
-#    output is the artifact, exactly the allowlisted variable, and the ledger
+#    output is the artifact, exactly the allowlisted variable plus the
+#    compartment's scratch TMPDIR, and the ledger
 #    exec event carries the first-hand account — never the output.
 run exec-runner "write:hello-$NONCE; exec-run:env"
 echo "$OUT" | grep -q "finished: succeeded" || fail "exec-runner did not succeed"
-echo "$AUDIT" | grep -Eq "exec env — exit 0 \(runtime\) $ATTESTED env pid [0-9]+ spawn 1\]" || fail "no first-hand exec line rendered"
+echo "$AUDIT" | grep -Eq "exec env — exit 0 \(runtime\) $ATTESTED env pid [0-9]+ spawn 1$ATTEST_END" || fail "no first-hand exec line rendered"
 grep -q '"mode":"runtime"' "$WORK/logs/$RUNID.jsonl" || fail "exec event is not mode runtime"
 grep -q '"runtime_attestation":{"runtime":"refexec","session":"refexec-' "$WORK/logs/$RUNID.jsonl" || fail "no refexec attestation in the ledger"
-grep -q '"credential_env":"","env_names":\["REFEXEC_E2E_MARKER"\],"materialization":""' "$WORK/logs/$RUNID.jsonl" || fail "attestation must be credential-less and name exactly the injected variable"
+grep -q '"credential_env":"","env_names":\["REFEXEC_E2E_MARKER","TMPDIR"\],"materialization":"","confiner":"podman"' "$WORK/logs/$RUNID.jsonl" || fail "attestation must be credential-less and name exactly the injected variable"
 if grep -q "LEAKED_SECRET" "$WORK/logs/$RUNID.jsonl"; then fail "a non-allowlisted variable was attested"; fi
 # The step's artifact preview is the output by design; the exec event must
 # carry only its hash.
 grep -q '"type":"exec"' "$WORK/logs/$RUNID.jsonl" || fail "no exec event in the ledger"
 if grep '"type":"exec"' "$WORK/logs/$RUNID.jsonl" | grep -q "REFEXEC_E2E_MARKER=1"; then fail "the output body reached the exec event"; fi
-ART="$WORK/artifacts/$(printf 'REFEXEC_E2E_MARKER=1\n' | sha_stdin)"
+ART="$WORK/artifacts/$(printf 'REFEXEC_E2E_MARKER=1\nTMPDIR=/tmp\n' | sha_stdin)"
 grep -q "\"output_sha\":\"$(basename "$ART")\"" "$WORK/logs/$RUNID.jsonl" || fail "the exec event's output_sha is not the artifact's hash"
 [ -f "$ART" ] || { ls "$WORK/artifacts"; fail "no artifact equal to the command's output (the environment was not exactly the allowlist, or the store hashes differently)"; }
 [ "$(cat "$WS/agent-note.txt")" = "hello-$NONCE" ] || fail "the agent did not write its note"
@@ -269,7 +272,7 @@ echo "first-hand run: artifact, clean environment, attestation, no output in the
 # 2. A non-zero exit is a failed exec that still carries the attestation.
 run exec-runner "exec-run:false"
 echo "$OUT" | grep -q "finished: failed" || fail "a non-zero exit must fail the step"
-echo "$AUDIT" | grep -Eq "exec false — exit 1 \(runtime\) $ATTESTED false pid [0-9]+ spawn 1\]" || fail "failed exec not rendered with its attestation"
+echo "$AUDIT" | grep -Eq "exec false — exit 1 \(runtime\) $ATTESTED false pid [0-9]+ spawn 1$ATTEST_END" || fail "failed exec not rendered with its attestation"
 
 # 3. An off-allowlist command is refused before the runtime is asked. It is
 #    harmless on purpose: the stand-in runtime runs commands on the host.

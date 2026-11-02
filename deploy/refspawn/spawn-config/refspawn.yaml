@@ -4,6 +4,10 @@
 # Agenthof's refbox socket dir, which is mounted into agent compartments, and
 # never under spawn_root. The demo paths are placeholders; the e2e rewrites
 # them to a temp dir.
+# The confinement backend: podman (the Linux default) or seatbelt (the macOS
+# default). A seatbelt config replaces refexec.image with store_root and
+# pid_dir and maps each agent to an absolute executable path; see README.md.
+confiner: podman
 socket: /run/agenthof-spawn/refspawn.sock
 # Per-child directories live here: <spawn_root>/<run id> (the child's agent
 # and gateway sockets; mounted into that child's compartments only) and
@@ -14,7 +18,8 @@ spawn_root: /run/agenthof-spawn/children
 # yourself (refspawn runs podman with --pull=never).
 images:
   refbox-echo: localhost/refbox-echo:test
-# podman --timeout for every agent compartment: a backstop. Set it at or
+# The per-compartment deadline for every agent compartment (podman: --timeout,
+# a backstop; seatbelt: refspawn's own kill timer). Set it at or
 # above Agenthof's step_timeout, else a child under a long step is cut short.
 timeout: 10m
 # How long a child's sockets may take to accept a connection before the set

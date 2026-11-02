@@ -235,10 +235,11 @@ PIDS+=($!)
 # Its environment carries the allowlisted marker AND a canary that is NOT on
 # env_allow: the compartment must see the first and never the second.
 cat >"$WORK/refexec.yaml" <<EOF
+confiner: podman
 socket: $EXEC_DIR/refexec.sock
 image: $EXEC_IMAGE
 workspace:
-  volume: $VOLUME
+  store: $VOLUME
   path: /work
 timeout: 30s
 limits:
@@ -285,6 +286,7 @@ wait_socket "$BRIDGE_DIR/stdio-tool.sock" "the bridge socket" 30 "$BRIDGE_NAME"
 # that volume. Its compartment timeout covers the step; ready_timeout covers
 # a cold distroless Python importing langchain.
 cat >"$WORK/refspawn.yaml" <<EOF
+confiner: podman
 socket: $SUP_DIR/refspawn.sock
 spawn_root: $SPAWN_ROOT
 images:
@@ -590,8 +592,8 @@ case "$MODEL_LINE" in *"governed:$NONCE"*) fail "the model reply body reached th
 EXEC_ATT="$(field "$L" exec runtime_attestation succeeded)"
 case "$EXEC_ATT" in *'"runtime": "refexec"'*) ;; *) fail "no refexec attestation on the exec" ;; esac
 case "$EXEC_ATT" in *'"command": ["env"]'*) ;; *) fail "the attestation does not name env" ;; esac
-case "$EXEC_ATT" in *'"env_names": ["ACCEPTANCE_E2E_MARKER"]'*) ;; *) fail "the attestation does not name exactly the allowlisted variable as injected: $EXEC_ATT" ;; esac
-grep -Eq "exec env — exit 0 \(runtime\) \[runtime-attested: refexec env pid [0-9]+ spawn 1\]" <<<"$AUDIT" || fail "audit did not render the first-hand exec"
+case "$EXEC_ATT" in *'"env_names": ["ACCEPTANCE_E2E_MARKER", "TMPDIR"]'*) ;; *) fail "the attestation does not name exactly the allowlisted variable as injected: $EXEC_ATT" ;; esac
+grep -Eq "exec env — exit 0 \(runtime\) \[runtime-attested: refexec env pid [0-9]+ spawn 1; confiner: podman[^]]*\]" <<<"$AUDIT" || fail "audit did not render the first-hand exec"
 EXEC_ART_LINE="$(out_of grep '^exec: ' <<<"$ART")"
 [ -n "$EXEC_ART_LINE" ] || fail "the artifact has no exec line"
 grep -Eq "(^| )ACCEPTANCE_E2E_MARKER=1( |$)" <<<"$EXEC_ART_LINE" || fail "the allowlisted variable did not reach the compartment: $EXEC_ART_LINE"

@@ -10,7 +10,9 @@ the run, the refusals, and the rendered audit line — see the testscript
 The exec door is first-hand. The agent never runs the command: it asks
 Agenthof to, and a trusted operator-side runtime the operator declared —
 `refexec`, in `deploy/refexec/`, a host process next to Agenthof — runs it
-in its own rootless-podman compartment and attests to Agenthof what ran.
+in its own confined compartment (rootless podman on Linux, macOS Seatbelt;
+see [the confinement backends](#the-confinement-backends)) and attests to
+Agenthof what ran.
 Agenthof authorizes the command, forwards it, checks the runtime's account
 against what it authorized, and records that account. Agenthof itself does
 not run the command, and an agent's own report of one is not a record. For
@@ -22,8 +24,9 @@ the runtime, see [`deploy/refexec/README.md`](../deploy/refexec/README.md).
     |  {command}                |-- match config allowlist         |                         |
     | <-- 403                   |-- no match: exec, refused ----------------------------------->|
     |                           |-- socket dir private? no: exec, failed ---------------------->|
-    |                           |-- POST /run {command} ---------->| podman run --network none |
-    |                           |                                  |   --read-only, /work rw   |
+    |                           |-- POST /run {command} ---------->| confined compartment      |
+    |                           |                                  |   direct network denied,  |
+    |                           |                                  |   workspace rw            |
     |                           |                                  |   runs argv, captures     |
     |                           | <-- {exit_code, output,          |   output (1 MiB cap)      |
     |                           |      output_sha, truncated,      |                         |
@@ -63,8 +66,10 @@ the removed value `contained`) is rejected the same way. See
 [`reference/config.md`](reference/config.md#exec).
 
 The trade, stated plainly: the exec door requires an operator-run `refexec`
-— a Linux host with rootless podman, like the rest of the reference
-runtimes. There is no runtime-free exec.
+— on a Linux host with rootless podman, or on a macOS host using the
+Seatbelt tier, which is a weaker tier (see
+[the confinement backends](#the-confinement-backends)). There is no
+runtime-free exec.
 
 For the duration of that agent's step, Agenthof starts a listener on
 `127.0.0.1` and an ephemeral port, reachable only from the host Agenthof
@@ -135,18 +140,53 @@ and the run token. Agenthof, in order:
 
 A body that is not JSON is answered `400` and records nothing.
 
-refexec, per call, starts one compartment: `--network none`, a read-only
-root with a tmpfs scratch at `/tmp`, every capability dropped, no new
-privileges, the host user's id, the operator's memory / CPU / pid caps,
+refexec, per call, starts one compartment under the confinement backend its
+config selects (below). Under rootless podman that is `--network none`, a
+read-only root with a tmpfs scratch at `/tmp`, every capability dropped, no
+new privileges, the host user's id, the operator's memory / CPU / pid caps,
 `--pull=never`, and one volume — the workspace, read-write, at the
-workspace path, which is also the working directory. The command's
+workspace path, which is also the working directory. Under Seatbelt it is
+a host process started under a generated sandbox profile that denies direct
+network access, scopes writes to the workspace directory and a private
+scratch directory, and runs in its own session, with the workspace
+directory as its working directory. On either backend the command's
 environment is only the `env_allow` names from refexec's config that
-refexec's own environment holds (an image's own `ENV` layer adds what it
+refexec's own environment holds, plus `TMPDIR` pointing at the
+compartment's scratch space (a podman image's own `ENV` layer adds what it
 adds; refexec does not see it). Combined stdout and stderr are captured up
 to 1 MiB and cut with a marker beyond that. Cancelling the call (the
 deadline, or Agenthof hanging up) removes the compartment. refexec keeps no
 state between calls beyond its cap on concurrent compartments; a call past
 that cap is refused, never queued.
+
+## The confinement backends
+
+The operator picks the backend with `confiner:` in refexec's config; with
+none named, the host's default is used (podman on Linux, Seatbelt on
+macOS). refexec probes the chosen backend before it opens its socket — for
+Seatbelt, that a write outside the workspace is denied and one inside it
+succeeds — and refuses to start if the probe fails; there is no fallback to
+running a command unconfined. The two backends are not equivalent:
+
+- **`podman` — the container tier.** A rootless-podman container on a shared
+  kernel: the command sees only its image, a tmpfs at `/tmp` and the
+  workspace volume, with the memory / CPU / pid caps enforced and the
+  container removed on cancel. A shared kernel is still below any VM tier.
+- **`seatbelt` — the macOS OS-sandbox tier.** A host process under a
+  Seatbelt profile, on the same shared kernel, and weaker than the
+  container tier in ways an operator must weigh: it is **host-readable**
+  (the command can read the host filesystem except a deny list — the
+  credential stores under the operator's home, refexec's own store and pid
+  directories, and any `deny_read` paths the operator adds); direct network
+  access is denied and writes are scoped to the workspace and a private
+  scratch directory; it has **no resource caps** (the `limits` values are
+  not enforced); and **process teardown is best-effort** — a descendant
+  that detaches into a new session can outlive the compartment's removal
+  (the next refexec start sweeps the leftovers it can still match, but
+  cannot reach a process that has detached).
+
+The ledger names the backend that ran each command (below), so a reader
+sees which tier an exec line stands on.
 
 ## The record
 
@@ -157,7 +197,19 @@ that cap is refused, never queued.
 | `output_sha` | refexec's SHA-256 of the output it returned; Agenthof recomputed it over what it received |
 | `mode` | `runtime` |
 | `status` | `succeeded` when the exit is `0`, `failed` otherwise — or `failed` with a `reason` when the door itself failed, or `refused` with a `reason` |
-| `runtime_attestation` | refexec's first-hand account: `runtime: refexec`, `session` (the compartment's name, the key into refexec's own log), `command`, `pid` (the host pid of the `podman run` client refexec held — never a pid inside the compartment), `spawn: 1`, `env_names` (the variable names refexec injected), and empty `credential_env` / `materialization` (refexec is credential-less) |
+| `runtime_attestation` | refexec's first-hand account: `runtime: refexec`, `session` (the compartment's name, the key into refexec's own log), `command`, `pid` (the host pid refexec held first-hand — never a pid inside the compartment), `spawn: 1`, `env_names` (the variable names refexec injected, always including `TMPDIR`), `confiner` and `confiner_opts` (below), and empty `credential_env` / `materialization` (refexec is credential-less) |
+
+Inside `runtime_attestation`, `confiner` is the tier the compartment ran
+under, as refexec names it (`podman` or `seatbelt` today), and
+`confiner_opts` lists any per-deployment loosening that tier applied (for
+Seatbelt, `shared-host-scratch` when the operator opted into a scratch
+directory shared with the host). Both are the runtime's own statement of
+what it applied, recorded verbatim; a tier this version does not recognise
+is shown by name and ungraded. The ledger records the tier's name, not the
+policy behind it, so the grade `audit` shows is a statement about the tier
+as a whole: what that kind of confinement does and does not guarantee, never
+a claim about one configuration of it. A line from a runtime that predates
+these fields carries no tier and renders without one.
 
 The event also carries the run's delegation binding, like every other event
 in the run. It carries `output_sha`, never the output itself. The output
@@ -165,9 +217,15 @@ goes back to the agent; what the agent does with it — for instance, return
 it as the step's artifact — is recorded the way any step result is.
 
 `audit` renders it as
-`exec cat /work/agent-note.txt — exit 0 (runtime) [runtime-attested: refexec cat /work/agent-note.txt pid 4242 spawn 1]`,
+`exec cat /work/agent-note.txt — exit 0 (runtime) [runtime-attested: refexec cat /work/agent-note.txt pid 4242 spawn 1; confiner: podman — shared-kernel container tier (rootless podman, --userns=keep-id); below any VM/microVM tier]`,
 on a failed exit too; a refusal renders as `exec … refused — <reason>` and a
-door failure as `exec … failed — <reason>`.
+door failure as `exec … failed — <reason>`. Under Seatbelt the suffix reads
+`; confiner: seatbelt — shared-kernel OS-sandbox tier (macOS Seatbelt): same
+trust basis as podman — shared kernel, below any VM/microVM tier; direct
+network denied; writes scoped; host-readable; no resource caps; process
+teardown best-effort`, with `; shared host scratch` appended when that
+loosening is on. The grade is the tier's honest limits, stated on the line
+so a reader need not know the backends to read it.
 
 ## The retired agent-asserted routes
 
@@ -191,23 +249,30 @@ agent's word, not a runtime's.
 
 ## The workspace
 
-The workspace is a named podman volume, mounted read-write at `/work` into
-the agent's refbox compartment (`REFBOX_WORKSPACE_VOLUME` on the refbox
-recipe) and at refexec's `workspace.path`, which must also be `/work`, into
-every refexec compartment. Its life is the recipe's, not a run's: refexec's
-launcher creates it, every run shares it, and the operator removes it
-(`podman volume rm`) when tearing the recipe down — nothing removes it
-automatically. One refbox, one refexec, one volume. refbox starts before any
-run exists, so nothing can mint a volume per run. Agenthof stays out of
-storage.
+The workspace is the compartment's working directory on every backend, so
+a relative path resolves against the workspace wherever refexec runs; that
+is the only path convention an agent may rely on. An absolute path to it
+depends on the backend. Under rootless podman the workspace is a named
+volume, mounted read-write at refexec's `workspace.path` (`/work` by
+default) into every refexec compartment, and at the same path into the
+agent's refbox compartment (`REFBOX_WORKSPACE_VOLUME` on the refbox recipe,
+which must agree). `/work` is podman's mount point, not a contract of the
+exec door. Under Seatbelt the workspace is a plain host directory,
+`<store_root>/<store>`, which the compartment sees at that real path; there
+is no `/work`. Its life is the recipe's, not a run's: refexec's launcher
+creates it, every run shares it, and the operator removes it (`podman volume
+rm`, or deleting the store directory) when tearing the recipe down —
+nothing removes it automatically. One refbox, one refexec, one workspace.
+refbox starts before any run exists, so nothing can mint a workspace per
+run. Agenthof stays out of storage.
 
 ## What the record does and does not prove
 
 The guarantee, stated plainly: *refexec, a runtime the operator started
-and trusts, ran exactly this argv in a compartment with no network, and
-this is its account of the exit and the output; Agenthof authorized the
-argv, checked the account against it, and recorded it — and did not run
-the command.*
+and trusts, ran exactly this argv in a compartment under the tier the
+record names, with direct network access denied, and this is its account
+of the exit and the output; Agenthof authorized the argv, checked the
+account against it, and recorded it — and did not run the command.*
 
 - It is refexec's word. A compromised refexec could misreport, as a
   compromised sandbox could; the record is first-hand, not tamper-proof.
@@ -216,8 +281,14 @@ the command.*
 - It says what ran and what it printed. The files the command read are the
   agent's, before, during and after; there is no input-integrity claim and
   no serialization of concurrent commands on the workspace.
-- It is offline. Commands that need the network fail inside their
-  compartment, and the failure is recorded first-hand.
+- Direct network access is denied. Commands that need the network fail
+  inside their compartment, and the failure is recorded first-hand.
+- The tier on the line is the tier's limit, not a stronger one. Both
+  tiers share the host kernel, and both sit below a VM. Seatbelt is the
+  weaker of the two: the command can read most of the host filesystem
+  (minus a deny list), there are no memory / CPU / pid caps, and
+  teardown of what a command left running is best-effort. Read the exec
+  line for the tier it names, and choose the backend knowing that.
 - A refusal is first-hand evidence that this door was asked and said no. It
   is not evidence about what the agent did next inside its own compartment;
   that compartment's confinement is the operator's, and Agenthof does not
@@ -229,8 +300,8 @@ the command.*
 
 | Shipped today | Not a capability |
 | --- | --- |
-| the first-hand door: the allowlist check, then `refexec` runs the command in a no-network compartment and Agenthof records its account as `exec` with `runtime_attestation`; the retired agent-asserted routes answer a recorded refusal | Agenthof running the command itself — rejected at `apply`; exec containment is the operator's runtime's job, and Agenthof's job is to govern and record |
+| the first-hand door: the allowlist check, then `refexec` runs the command in a compartment with direct network access denied — rootless podman on Linux, Seatbelt on macOS — and Agenthof records its account as `exec` with `runtime_attestation`, naming the tier; the retired agent-asserted routes answer a recorded refusal | Agenthof running the command itself — rejected at `apply`; exec containment is the operator's runtime's job, and Agenthof's job is to govern and record |
 | historical `mode: attested` events in old ledgers verify and render | an agent-reported exec — retired; no new such event can be created |
-| | a network allowlist for first-hand commands (they run with no network); a runtime other than `refexec`; exec without an operator-run runtime |
+| | a network allowlist for first-hand commands (direct network access is denied); a confinement tier stronger than a shared-kernel container (a VM or micro-VM backend); a runtime other than `refexec`; exec without an operator-run runtime |
 
 Only shipped behavior is a guarantee.

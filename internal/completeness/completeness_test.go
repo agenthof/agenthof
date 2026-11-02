@@ -133,6 +133,20 @@ func TestPreMigrationFixtureReadsNoClaim(t *testing.T) {
 	}
 }
 
+// The confiner fields are additive data on existing event kinds, not a new
+// kind: Check keys on event type only, so an unknown tier name changes nothing.
+func TestCheckIgnoresConfinerFields(t *testing.T) {
+	exec := ev("exec")
+	exec.RuntimeAttestation = &engine.RuntimeAttestation{Runtime: "refexec", Confiner: "zzz-unknown", ConfinerOpts: []string{"zzz-opt"}}
+	spawn := ev("spawn")
+	spawn.ChildConfiner = "zzz"
+	spawn.ChildConfinerOpts = []string{"zzz-opt"}
+	events := []engine.Event{started(), stepStart("a"), exec, spawn, stepOK("a", 2), finished("succeeded")}
+	if r := Check(events); r.Verdict != Complete || r.DoorCalls != 2 {
+		t.Fatalf("%+v, want complete with 2 door calls", r)
+	}
+}
+
 func TestLine(t *testing.T) {
 	for want, r := range map[string]Report{
 		"ledger completeness: complete (7 door call(s) accounted)\n":                                                       {Verdict: Complete, DoorCalls: 7},

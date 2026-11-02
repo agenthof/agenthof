@@ -71,11 +71,12 @@ Pre-release, and the governed core is real and runnable today:
   `deploy/refbridge`, which attests first-hand what it ran on every call, recorded
   when the resource declares `runtime: refbridge`; the
   **exec** door is *first-hand* through the reference runtime in `deploy/refexec`,
-  which runs the allowlisted command in a no-network rootless-podman compartment
-  and attests what ran — Agenthof records that account and never runs the
+  which runs the allowlisted command in a confined compartment with direct
+  network access denied (rootless podman on Linux, macOS Seatbelt) and attests
+  what ran — Agenthof records that account and never runs the
   command itself (an agent's own report of a command is refused and recorded);
   and the **spawn** door runs each sub-agent as its own governed child run —
-  isolated in its own compartments and workspace by the reference supervisor in
+  run in its own compartments and workspace by the reference supervisor in
   `deploy/refspawn` — with the caller's delegation binding carried down;
 - **isolated agents** — a reference sandbox runtime (`deploy/refbox`) runs an
   agent — a Go echo agent or a Python LangChain agent, both shipped as
@@ -135,18 +136,21 @@ Pre-release, and the governed core is real and runnable today:
   and `audit <run-id>` names the exact `apply` that put a run's config on record.
 
 **The reference runtimes (`ref*`)** are operator-side runtimes that run on the
-host and drive rootless podman, so the agent reaches a capability only through
+host and drive the operator's confinement backend — rootless podman, or macOS
+Seatbelt for refexec and refspawn — so the agent reaches a capability only through
 Agenthof and the operator's sandbox contains it — Agenthof itself runs and
 isolates nothing. Each ships as a reference you can run or replace:
 
 - **`deploy/refbox`** — the no-network sandbox an agent *runs in*, reaching
   Agenthof only over a bind-mounted Unix socket;
-- **`deploy/refexec`** — runs an allowlisted command first-hand in a no-network
-  compartment and attests what ran (the **exec** door);
+- **`deploy/refexec`** — runs an allowlisted command first-hand in a confined
+  compartment (rootless podman or macOS Seatbelt, with the tier named in the
+  ledger) and attests what ran (the **exec** door);
 - **`deploy/refbridge`** — fronts a stdio-only MCP server over a socket and
   attests first-hand on every call (the **tool** door for stdio tools);
-- **`deploy/refspawn`** — gives each sub-agent run its own isolated
-  compartments and workspace (the **spawn** door).
+- **`deploy/refspawn`** — gives each sub-agent run its own compartments and
+  workspace, under the same selectable confinement tiers as refexec (the
+  **spawn** door).
 
 The containment guarantee is the sandbox's, not Agenthof's, and is stated
 plainly in each runtime's docs.

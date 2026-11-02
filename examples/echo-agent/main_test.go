@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -459,5 +460,18 @@ func TestSpawnTranslatesTheChildSeparator(t *testing.T) {
 	defer mu.Unlock()
 	if seen["role"] != "worker" || seen["workflow"] != "pair-wf" || seen["input"] != "only:writer:write:x ; only:reader:read:" {
 		t.Fatalf("the door saw %v: the child's | separator must arrive as ;", seen)
+	}
+}
+
+// The workspace is the working directory: a confiner starts the agent there,
+// so the default must not name a fixed path such as /work.
+func TestWorkspaceDefaultIsTheWorkingDirectory(t *testing.T) {
+	fs := flag.NewFlagSet("echo-agent", flag.ContinueOnError)
+	_, _, workspace := defineFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if *workspace != "." {
+		t.Fatalf("-workspace default = %q, want %q", *workspace, ".")
 	}
 }

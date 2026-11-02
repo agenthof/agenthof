@@ -31,12 +31,20 @@ const (
 	maxAttestedArgv     = 32
 	maxAttestedEnvNames = 64
 	maxAttestedRunes    = 200 // per argv element and for the session id — the ledger's usual bound
+
+	// maxAttestedConfinerOpts bounds the confiner_opts tokens a refexec may attest.
+	maxAttestedConfinerOpts = 16
 )
 
 var (
 	errAttestationMissing   = errors.New("runtime attestation missing")
 	errAttestationMalformed = errors.New("runtime attestation malformed")
 	envNameRE               = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	// confinerTokenRE is the shape of a confiner tier or opt token. It restates
+	// the confiner package's token shape on purpose: core never imports deploy/.
+	// Shape only — a well-formed token this reader does not know is recorded
+	// verbatim, never rejected (Article VI).
+	confinerTokenRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
 )
 
 // takeRuntimeAttestation removes the runtime attestation from result's _meta
@@ -122,11 +130,27 @@ func validAttestation(a *engine.RuntimeAttestation, declared string) bool {
 			return false
 		}
 	}
+	// The confiner fields are refexec's and optional: shape-checked, never
+	// enum-checked. refbridge runs no confiner and must carry neither.
+	if a.Confiner != "" && !confinerTokenRE.MatchString(a.Confiner) {
+		return false
+	}
+	if len(a.ConfinerOpts) > maxAttestedConfinerOpts {
+		return false
+	}
+	for _, opt := range a.ConfinerOpts {
+		if !confinerTokenRE.MatchString(opt) {
+			return false
+		}
+	}
 	// The credential fields are refbridge's: it materializes a credential
 	// into its child and says where. refexec is credential-less and must say
 	// so — a refexec claiming a credential variable is not the contract.
 	if a.Runtime == "refexec" {
 		return a.CredentialEnv == "" && a.Materialization == ""
+	}
+	if a.Confiner != "" || len(a.ConfinerOpts) > 0 {
+		return false
 	}
 	if !envNameRE.MatchString(a.CredentialEnv) || len([]rune(a.CredentialEnv)) > maxAttestedRunes {
 		return false

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -18,7 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
+	"github.com/agenthof/agenthof/deploy/internal/confiner/confinertest"
 )
 
 // testConfig is a supervisor whose "images" are host programs (the fake
@@ -75,7 +77,7 @@ func fakeSupervisor(t *testing.T, cfg spawnConfig) (*supervisor, *httptest.Serve
 	log := filepath.Join(filepath.Dir(cfg.SpawnRoot), "podman.jsonl")
 	t.Setenv("REFSPAWN_TEST_ARGLOG", log)
 	t.Setenv("REFSPAWN_TEST_VOLROOT", volroot)
-	s := newSupervisor(cfg, slog.New(slog.DiscardHandler), []string{exe, fakePodmanFlag})
+	s := newSupervisor(cfg, slog.New(slog.DiscardHandler), confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}}))
 	srv := httptest.NewServer(s.handler())
 	t.Cleanup(srv.Close)
 	t.Cleanup(s.close)
@@ -226,7 +228,7 @@ func TestProvisionStartsSetAndAnswersOnceReady(t *testing.T) {
 		joined := " " + strings.Join(r.Args, " ") + " "
 		for _, want := range []string{
 			" run --rm --name agenthof-spawn-r-0a0b0c0d-", " --pull=never ", " --network none ", " --read-only ",
-			" -v agenthof-spawn-r-0a0b0c0d-work:/work ", " --cap-drop=ALL ", " --security-opt no-new-privileges ", " --userns=keep-id ",
+			" -v agenthof-spawn-r-0a0b0c0d-work:/work ", " -w /work ", " --cap-drop=ALL ", " --security-opt no-new-privileges ", " --userns=keep-id ",
 			" --user " + strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()) + " ",
 			" --memory=256m ", " --cpus=1 ", " --pids-limit=64 ", " --timeout=600 ",
 			" -v " + childDir + ":" + childDir + " ", " -socket " + childDir + "/",
@@ -248,33 +250,15 @@ func TestProvisionStartsSetAndAnswersOnceReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rendered struct {
-		Socket    string `yaml:"socket"`
-		Image     string `yaml:"image"`
-		Workspace struct {
-			Volume string `yaml:"volume"`
-			Path   string `yaml:"path"`
-		} `yaml:"workspace"`
-		Timeout string `yaml:"timeout"`
-		Limits  struct {
-			Memory string `yaml:"memory"`
-			CPUs   string `yaml:"cpus"`
-			PIDs   int    `yaml:"pids"`
-		} `yaml:"limits"`
-		Compartments struct {
-			Max int `yaml:"max"`
-		} `yaml:"compartments"`
-		EnvAllow []string `yaml:"env_allow"`
-	}
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	if err := dec.Decode(&rendered); err != nil {
-		t.Fatalf("rendered refexec config does not decode under refexec's strict shape: %v\n%s", err, data)
-	}
-	if rendered.Socket != h.line.ExecSocket || rendered.Image != "example.test/exec:1" || rendered.Workspace.Volume != "agenthof-spawn-r-0a0b0c0d-work" ||
-		rendered.Workspace.Path != "/work" || rendered.Timeout != "2m0s" || rendered.Limits.CPUs != "1" || rendered.Limits.PIDs != 64 ||
-		rendered.Compartments.Max != 2 || rendered.EnvAllow == nil {
+	rendered := decodeRefexecShape(t, string(data))
+	if rendered.Socket != h.line.ExecSocket || rendered.Image != "example.test/exec:1" || rendered.Confiner != "podman" ||
+		rendered.Workspace == nil || rendered.Workspace.Store != "agenthof-spawn-r-0a0b0c0d-work" || rendered.Workspace.Path != "/work" ||
+		rendered.Timeout != "2m0s" || rendered.Limits == nil || rendered.Limits.CPUs != "1" || rendered.Limits.PIDs != 64 ||
+		rendered.Compartments == nil || rendered.Compartments.Max != 2 || rendered.EnvAllow == nil {
 		t.Fatalf("rendered = %+v", rendered)
+	}
+	if h.line.Tier != "podman" {
+		t.Fatalf("line tier = %q, want podman", h.line.Tier)
 	}
 	s.mu.Lock()
 	used := s.used
@@ -557,7 +541,9 @@ func TestReapRemovesLeftoversByPrefix(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(volroot, ".pids", "agenthof-spawn-stale-a.pid"), []byte(strconv.Itoa(sleeper.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s.reap()
+	if err := s.reap(); err != nil {
+		t.Fatalf("reap: %v", err)
+	}
 	seq := strings.Join(ops(records(t, log)), "\n")
 	if !strings.Contains(seq, "rm agenthof-spawn-stale-a") || !strings.Contains(seq, "volume-rm agenthof-spawn-stale-work") {
 		t.Fatalf("reap must remove containers and volumes with the prefix: %v", strings.Split(seq, "\n"))
@@ -582,13 +568,66 @@ func TestReapRemovesLeftoversByPrefix(t *testing.T) {
 	}
 }
 
-func TestRefboxRunArgsShape(t *testing.T) {
-	cfg := testConfig(t, nil)
-	cfg.Timeout = 1500 * time.Millisecond
-	args := refboxRunArgs(cfg, "agenthof-spawn-r-x-a", "img:1", "agenthof-spawn-r-x-work", "/tmp/sp/r-x", "/tmp/sp/r-x/a.sock")
-	joined := strings.Join(args, " ")
-	if !strings.HasSuffix(joined, " -v /tmp/sp/r-x:/tmp/sp/r-x img:1 -socket /tmp/sp/r-x/a.sock") || !strings.Contains(joined, " --timeout=1 ") || !strings.HasPrefix(joined, "run --rm --name agenthof-spawn-r-x-a --pull=never ") {
-		t.Fatalf("args = %q", joined)
+// A leftover the confiner cannot list is a start-up refusal: serving over
+// compartments of an earlier refspawn this one cannot account for would break
+// the slot count. The socket is never listened on.
+func TestServeRefusesWhenStartupReapFails(t *testing.T) {
+	cfg := testConfig(t, selfImages(t, "a"))
+	fake := confinertest.New(t.TempDir())
+	fake.ReapErr = errors.New("podman ps: boom")
+	if code := serve(cfg, slog.New(slog.DiscardHandler), fake); code != 1 {
+		t.Fatalf("serve = %d, want 1", code)
+	}
+	if _, err := os.Stat(cfg.Socket); !os.IsNotExist(err) {
+		t.Fatalf("the socket exists (%v): serve listened despite the failed reap", err)
+	}
+	if got := fake.OpsSnapshot(); len(got) != 1 || got[0] != "reap "+containerPrefix {
+		t.Fatalf("ops = %v, want exactly the one reap", got)
+	}
+}
+
+// At shutdown the same failure is best-effort cleanup: close returns, and the
+// spawn_root sweep still ran.
+func TestCloseReapFailureIsWarnOnly(t *testing.T) {
+	cfg := testConfig(t, selfImages(t, "a"))
+	if err := os.MkdirAll(filepath.Join(cfg.SpawnRoot, "stale"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := confinertest.New(t.TempDir())
+	fake.ReapErr = errors.New("podman ps: boom")
+	s := newSupervisor(cfg, slog.New(slog.DiscardHandler), fake)
+	s.close()
+	if got := fake.OpsSnapshot(); len(got) != 1 || got[0] != "reap "+containerPrefix {
+		t.Fatalf("ops = %v, want exactly the one reap", got)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.SpawnRoot, "stale")); !os.IsNotExist(err) {
+		t.Fatal("the spawn_root sweep must run even when the confiner reap failed")
+	}
+}
+
+// The line carries the confiner's tier and opts under the wire names the
+// gateway-side client decodes (internal/refspawn): these tags are a contract.
+// The fake confiner execs Argv[0], so this builds the line rather than
+// provisioning over HTTP; the podman-backed provisioning test above covers
+// the HTTP path.
+func TestProvisionLineCarriesTier(t *testing.T) {
+	cfg := testConfig(t, selfImages(t, "a"))
+	fake := confinertest.New(t.TempDir())
+	fake.TierName, fake.OptTokens = "fake", []string{confiner.OptSharedHostScratch}
+	s := newSupervisor(cfg, slog.New(slog.DiscardHandler), fake)
+	raw, err := json.Marshal(s.newSet("r-1", []string{"a"}, selfImages(t, "a")).line())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"tier":"fake"`, `"tier_opts":["shared-host-scratch"]`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("line %s lacks %s", raw, want)
+		}
+	}
+	fake.OptTokens = nil
+	raw, _ = json.Marshal(s.newSet("r-1", []string{"a"}, selfImages(t, "a")).line())
+	if strings.Contains(string(raw), "tier_opts") {
+		t.Fatalf("no opts: line %s must omit tier_opts", raw)
 	}
 }
 
@@ -606,7 +645,7 @@ func TestPodmanRealSet(t *testing.T) {
 	if err := os.MkdirAll(cfg.SpawnRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	s := newSupervisor(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)), []string{"podman"})
+	s := newSupervisor(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)), confiner.NewPodman(confiner.PodmanConfig{}))
 	srv := httptest.NewServer(s.handler())
 	t.Cleanup(srv.Close)
 	t.Cleanup(s.close)

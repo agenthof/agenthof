@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 
+	"github.com/agenthof/agenthof/deploy/internal/confiner"
 	"github.com/agenthof/agenthof/deploy/internal/refrunner"
 )
 
@@ -19,6 +20,13 @@ import (
 // shipped refexec has no mode that skips podman, and an operator cannot be
 // handed one by accident. Built with `go test -c`, never installed.
 const stubFlag = "-refexec-test-stub"
+
+// stubConfiner builds the fake-argv podman DIRECTLY and never calls the
+// factory, so a stub run cannot select a real sandbox backend whatever the OS
+// default is.
+func stubConfiner(cfg execConfig, exe string) confiner.Confiner {
+	return confiner.NewPodman(confiner.PodmanConfig{Argv: []string{exe, fakePodmanFlag}, GuestWorkspace: cfg.Keys.WorkspacePath})
+}
 
 func runStub(args []string) int {
 	fs := flag.NewFlagSet("refexec-stub", flag.ContinueOnError)
@@ -38,7 +46,7 @@ func runStub(args []string) int {
 		return 1
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	r := newRunner(cfg, logger, []string{exe, fakePodmanFlag})
+	r := newRunner(cfg, logger, stubConfiner(cfg, exe))
 	h := r.handler()
 	if *misattest {
 		h = forgeCommand(h)
