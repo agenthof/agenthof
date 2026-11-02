@@ -30,13 +30,6 @@ const (
 	exitExecFailed      = 71
 )
 
-// procRef names a live process by pid AND the start time it was seen with, so
-// a signal to it can be withheld once the pid belongs to something else.
-type procRef struct {
-	pid   int
-	start int64
-}
-
 // SeatbeltConfig configures the macOS Seatbelt backend.
 type SeatbeltConfig struct {
 	// SandboxExec is the sandbox-exec binary; "" means /usr/bin/sandbox-exec.

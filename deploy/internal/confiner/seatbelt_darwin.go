@@ -28,6 +28,13 @@ func startMicro(kp *unix.KinfoProc) int64 {
 	return tv.Sec*1_000_000 + int64(tv.Usec)
 }
 
+// procRef names a live process by pid AND the start time it was seen with, so
+// a signal to it can be withheld once the pid belongs to something else.
+type procRef struct {
+	pid   int
+	start int64
+}
+
 // descendants lists every live process that descends from pid, transitively,
 // by parent pid, each with the start time the snapshot saw. A descendant
 // whose parent has already exited has been reparented to launchd and is not

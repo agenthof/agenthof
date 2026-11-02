@@ -35,7 +35,9 @@ func ownerStart(pid int) (int64, error) {
 		return 0, fmt.Errorf("confiner: /proc/%d/stat: no comm field", pid)
 	}
 	fields := strings.Fields(s[i+1:])
-	const stateIndex, startIndex = 3 - 3, 22 - 3
+	// fields begins at proc field 3 (state), so field N is at index N-3:
+	// state at 0, start time (field 22) at 19.
+	const stateIndex, startIndex = 0, 19
 	if len(fields) <= startIndex {
 		return 0, fmt.Errorf("confiner: /proc/%d/stat: %d fields after comm, want at least %d", pid, len(fields), startIndex+1)
 	}
