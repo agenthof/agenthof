@@ -87,17 +87,29 @@ func startup(cfg spawnConfig, logger *slog.Logger, c confiner.Confiner) int {
 	return serve(cfg, logger, c)
 }
 
+// prepareSpawnRoot creates spawn_root owner-only and refuses a directory on a
+// non-native (bridged or remote) filesystem, where the per-child socket
+// directories the compartments bind-mount would not behave as the kernel's own.
+func prepareSpawnRoot(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	if err := refrunner.CheckNativeFS(dir); err != nil {
+		return fmt.Errorf("refspawn: spawn_root: %w", err)
+	}
+	return nil
+}
+
 // serve prepares spawn_root, reaps leftovers, listens and serves until a
 // signal. The leftovers are reaped before the socket exists: a supervisor
 // that cannot account for an earlier one's compartments refuses to serve
 // rather than count slots it does not know it holds. The stub mode (test
 // tree) reaches it through startup with a confiner over a fake podman.
 func serve(cfg spawnConfig, logger *slog.Logger, c confiner.Confiner) int {
-	if err := os.MkdirAll(cfg.SpawnRoot, 0o700); err != nil {
-		logger.Error("spawn_root", "error", err)
-		return 1
-	}
-	if err := os.Chmod(cfg.SpawnRoot, 0o700); err != nil {
+	if err := prepareSpawnRoot(cfg.SpawnRoot); err != nil {
 		logger.Error("spawn_root", "error", err)
 		return 1
 	}

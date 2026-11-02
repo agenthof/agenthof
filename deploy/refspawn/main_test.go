@@ -88,6 +88,24 @@ func TestMainProbeFailureRefusesBeforeAnythingElse(t *testing.T) {
 // legal store name, so every name the supervisor mints must be one: a run id
 // and an agent name are both admitted only as nameRE, and the prefix starts
 // with a letter.
+// prepareSpawnRoot creates spawn_root owner-only and then vets its
+// filesystem. A native directory passes; a bridged one cannot be mounted in a
+// unit test, so the refusal itself is covered by the refrunner classifier
+// tests, and serve's use of this function by the reap-ordering test below.
+func TestPrepareSpawnRootCreatesAnOwnerOnlyDirOnANativeFS(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "a", "children")
+	if err := prepareSpawnRoot(root); err != nil {
+		t.Fatalf("prepareSpawnRoot on a native directory: %v", err)
+	}
+	fi, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("spawn_root = %v, want a 0700 directory", fi.Mode())
+	}
+}
+
 func TestMintedNamesAreValidStoreNames(t *testing.T) {
 	s := newSupervisor(testConfig(t, map[string]string{"a.b_c-d": "/ok"}), nil, confinertest.New(t.TempDir()))
 	for _, id := range []string{"r-0a0b0c0d", "r-6e7bc558e35e3553", "A", "9", "x.y_z-1"} {
