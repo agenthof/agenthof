@@ -214,8 +214,8 @@ On Windows, the agent-execution core runs inside a WSL2 Linux distro: the
 `agenthof` binary that hosts the gateway, the `deploy/` runtimes, podman, and
 the compartment all live in the distro. It is served by the existing rootless
 podman confinement, not by a separate tier, and the ledger names the tier
-`podman`. A client UI may stay native Windows. Running `agenthof` on Windows
-against a remote podman engine is refused, because the engine is not local.
+`podman`. A client UI may stay native Windows. The confined runtimes refuse a remote
+podman engine on every OS: the engine must be local.
 
 Everything the execution core binds or stores must sit on the distro's native
 Linux disk, never on a Windows-bridged mount such as `/mnt/c`: the runtime and
@@ -225,8 +225,8 @@ caller only by its directory being mode `0700` and owned by the invoking user,
 and a bridged mount may not enforce that. Agenthof refuses to bind a runtime
 or gateway socket whose directory is on a filesystem outside a short
 allow-list of local kernel filesystems (ext4, xfs, btrfs, tmpfs, overlayfs,
-f2fs), and `refspawn` refuses a `spawn_root` on one at startup, each with an
-error naming the detected filesystem. This check is not specific to WSL2: it
+f2fs, zfs), and `refspawn` refuses a `spawn_root` on one at startup, each with an
+error identifying the detected filesystem. This check is not specific to WSL2: it
 applies on any Linux host, and WSL2's `/mnt` mounts are the motivating case.
 It is checked for socket and `spawn_root` directories; podman's storage
 location is a requirement you configure, not something Agenthof checks.

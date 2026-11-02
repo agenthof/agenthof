@@ -84,10 +84,12 @@ func TestMainProbeFailureRefusesBeforeAnythingElse(t *testing.T) {
 	notStarted(t, cfg)
 }
 
-// prepareSpawnRoot creates spawn_root owner-only and then vets its
-// filesystem. A native directory passes; a bridged one cannot be mounted in a
-// unit test, so the refusal itself is covered by the refrunner classifier
-// tests, and serve's use of this function by the reap-ordering test below.
+// TestPrepareSpawnRootCreatesAnOwnerOnlyDirOnANativeFS pins that
+// prepareSpawnRoot creates spawn_root owner-only and vets its filesystem. A
+// native directory passes; a bridged one cannot be mounted in a unit test, so
+// the refusal itself is covered by the refrunner classifier tests, and serve's
+// use of this function by TestServeRefusesWhenStartupReapFails in
+// supervisor_test.go.
 func TestPrepareSpawnRootCreatesAnOwnerOnlyDirOnANativeFS(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "a", "children")
 	if err := prepareSpawnRoot(root); err != nil {

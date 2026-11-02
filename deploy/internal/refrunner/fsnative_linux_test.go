@@ -18,6 +18,9 @@ func TestMagicsMatchUnix(t *testing.T) {
 		"tmpfs":   {tmpfsMagic, uint32(unix.TMPFS_MAGIC)},
 		"overlay": {overlayfsMagic, uint32(unix.OVERLAYFS_SUPER_MAGIC)},
 		"f2fs":    {f2fsMagic, uint32(unix.F2FS_SUPER_MAGIC)},
+		// zfs is intentionally not pinned: golang.org/x/sys/unix does not define
+		// ZFS_SUPER_MAGIC (verified against OpenZFS include/sys/fs/zfs.h instead).
+		// bcachefs is intentionally excluded from the allow-list for now.
 	} {
 		if c.got != c.want {
 			t.Errorf("%s: magic = %#x, want %#x", name, c.got, c.want)

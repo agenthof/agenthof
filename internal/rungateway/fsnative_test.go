@@ -3,7 +3,7 @@ package rungateway
 import "testing"
 
 func TestClassifyAllowsNativeFilesystems(t *testing.T) {
-	for _, m := range []uint32{ext4Magic, xfsMagic, btrfsMagic, tmpfsMagic, overlayfsMagic, f2fsMagic} {
+	for _, m := range []uint32{ext4Magic, xfsMagic, btrfsMagic, tmpfsMagic, overlayfsMagic, f2fsMagic, zfsMagic} {
 		if err := classify(m); err != nil {
 			t.Errorf("magic %#x: want allowed, got %v", m, err)
 		}

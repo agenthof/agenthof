@@ -21,6 +21,8 @@ const (
 	tmpfsMagic     uint32 = 0x01021994 // TMPFS_MAGIC
 	overlayfsMagic uint32 = 0x794C7630 // OVERLAYFS_SUPER_MAGIC
 	f2fsMagic      uint32 = 0xF2F52010 // F2FS_SUPER_MAGIC
+	zfsMagic       uint32 = 0x2FC12FC1 // ZFS_SUPER_MAGIC (OpenZFS); not in x/sys/unix, so TestMagicsMatchUnix cannot pin it
+	// bcachefs is intentionally excluded for now: niche, and not in x/sys/unix.
 )
 
 // nativeMagics is the allow-list. Anything not named here (9p/v9fs, cifs/smb,
@@ -33,6 +35,7 @@ var nativeMagics = map[uint32]struct{}{
 	tmpfsMagic:     {},
 	overlayfsMagic: {},
 	f2fsMagic:      {},
+	zfsMagic:       {},
 }
 
 // classify returns nil if the filesystem magic is on the native allow-list,
@@ -41,5 +44,5 @@ func classify(magic uint32) error {
 	if _, ok := nativeMagics[magic]; ok {
 		return nil
 	}
-	return fmt.Errorf("rungateway: socket dir is on a non-native filesystem (fs magic %#x); place it on the host's local disk (ext4/xfs/btrfs/tmpfs/overlay/f2fs), not a bridged mount such as WSL2 /mnt", magic)
+	return fmt.Errorf("rungateway: socket dir is on a non-native filesystem (fs magic %#x); place it on the host's local disk (ext4/xfs/btrfs/tmpfs/overlay/f2fs/zfs), not a bridged mount such as WSL2 /mnt", magic)
 }

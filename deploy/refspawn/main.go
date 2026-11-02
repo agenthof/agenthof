@@ -4,9 +4,8 @@
 // compartment per agent in the child's workflow (all sharing that store and
 // reaching Agenthof only over a socket directory; for the podman tier, a
 // volume mounted at /work and a bind-mounted directory), and one refexec host
-// process bound to the same store — and
-// tears the set down, in order, when the child is over or anything in it
-// dies. It serves one held request per child (POST /provision) on a Unix
+// process bound to the same store — and tears the set down, in order, when the
+// child is over or anything in it dies. It serves one held request per child (POST /provision) on a Unix
 // socket only Agenthof dials, on the operator's HOST: it drives the confiner
 // backend (for the podman tier, that runs podman), so it is a host process
 // like agenthof, not a container. Agenthof itself still runs nothing. It is
@@ -96,13 +95,13 @@ func prepareSpawnRoot(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
-	}
+	// Vet the filesystem right after the dir exists (statfs needs it) and before
+	// Chmod: on a bridged mount a failing or no-op Chmod could mask the clear
+	// non-native-filesystem error.
 	if err := refrunner.CheckNativeFS(dir); err != nil {
 		return fmt.Errorf("refspawn: spawn_root: %w", err)
 	}
-	return nil
+	return os.Chmod(dir, 0o700)
 }
 
 // serve prepares spawn_root, reaps leftovers, listens and serves until a

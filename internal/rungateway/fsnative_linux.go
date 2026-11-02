@@ -17,6 +17,10 @@ func nativeFS(dir string) error {
 	if err := unix.Statfs(dir, &s); err != nil {
 		return fmt.Errorf("rungateway: statfs %q: %w", dir, err)
 	}
-	// Statfs_t.Type is int64 on Linux; the magics are 32-bit values.
-	return classify(uint32(s.Type))
+	// Statfs_t.Type is a signed integer whose width varies by arch; uint32 holds
+	// every fs magic we classify.
+	if err := classify(uint32(s.Type)); err != nil {
+		return fmt.Errorf("%s: %w", dir, err)
+	}
+	return nil
 }

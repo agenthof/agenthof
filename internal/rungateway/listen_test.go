@@ -86,9 +86,9 @@ func TestListenUnixNativeDirNoModeGate(t *testing.T) {
 }
 
 func TestListenUnixNativeTempDir(t *testing.T) {
-	// A short path under t.TempDir()'s parent would exceed sun_path on macOS, so
-	// bind in a short /tmp dir; nativeFS is also exercised directly on the
-	// (longer) t.TempDir() since it needs no socket.
+	// t.TempDir() is a long path that can exceed sun_path on macOS, so bind in a
+	// short /tmp dir; nativeFS is exercised directly on t.TempDir() since it
+	// needs no socket.
 	if err := nativeFS(t.TempDir()); err != nil {
 		t.Fatalf("nativeFS(t.TempDir()): %v", err)
 	}
