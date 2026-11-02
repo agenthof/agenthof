@@ -68,6 +68,37 @@ func TestListenGatewayRemovesStaleSocket(t *testing.T) {
 	_ = conn.Close()
 }
 
+// TestListenUnixNativeDirNoModeGate pins that listenUnix checks filesystem
+// nativeness only: the gateway socket is bearer-token authenticated and its
+// directory is mounted into the compartment (created with a plain mkdir -p), so
+// a directory that is not 0700 must still be accepted.
+func TestListenUnixNativeDirNoModeGate(t *testing.T) {
+	dir := shortSockDir(t)
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "gw-r-open-0000.sock")
+	ln, err := listenUnix(sock)
+	if err != nil {
+		t.Fatalf("listenUnix on a 0755 native dir: %v", err)
+	}
+	_ = ln.Close()
+}
+
+func TestListenUnixNativeTempDir(t *testing.T) {
+	// A short path under t.TempDir()'s parent would exceed sun_path on macOS, so
+	// bind in a short /tmp dir; nativeFS is also exercised directly on the
+	// (longer) t.TempDir() since it needs no socket.
+	if err := nativeFS(t.TempDir()); err != nil {
+		t.Fatalf("nativeFS(t.TempDir()): %v", err)
+	}
+	ln, err := listenUnix(filepath.Join(shortSockDir(t), "gw-r-native-0000.sock"))
+	if err != nil {
+		t.Fatalf("listenUnix on a native dir: %v", err)
+	}
+	_ = ln.Close()
+}
+
 func TestStartUnixSocketServesAuthedRequests(t *testing.T) {
 	dir := shortSockDir(t)
 	gw := New(config.GatewayConfig{RefboxSocketDir: dir}, ".", broker.StaticEnv{}, nil, "")
