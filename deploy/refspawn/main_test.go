@@ -84,10 +84,6 @@ func TestMainProbeFailureRefusesBeforeAnythingElse(t *testing.T) {
 	notStarted(t, cfg)
 }
 
-// The Seatbelt backend refuses a Launch or CreateStore name that is not a
-// legal store name, so every name the supervisor mints must be one: a run id
-// and an agent name are both admitted only as nameRE, and the prefix starts
-// with a letter.
 // prepareSpawnRoot creates spawn_root owner-only and then vets its
 // filesystem. A native directory passes; a bridged one cannot be mounted in a
 // unit test, so the refusal itself is covered by the refrunner classifier
@@ -106,6 +102,10 @@ func TestPrepareSpawnRootCreatesAnOwnerOnlyDirOnANativeFS(t *testing.T) {
 	}
 }
 
+// The Seatbelt backend refuses a Launch or CreateStore name that is not a
+// legal store name, so every name the supervisor mints must be one: a run id
+// and an agent name are both admitted only as nameRE, and the prefix starts
+// with a letter.
 func TestMintedNamesAreValidStoreNames(t *testing.T) {
 	s := newSupervisor(testConfig(t, map[string]string{"a.b_c-d": "/ok"}), nil, confinertest.New(t.TempDir()))
 	for _, id := range []string{"r-0a0b0c0d", "r-6e7bc558e35e3553", "A", "9", "x.y_z-1"} {

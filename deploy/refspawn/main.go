@@ -1,14 +1,16 @@
 // Command refspawn is the reference compartment supervisor for Agenthof's
 // spawn door: an operator-side runtime that provisions each spawned child
-// run its own isolated set — one workspace volume, one rootless-podman
-// refbox compartment per agent in the child's workflow (all mounting that
-// volume at /work and reaching Agenthof only over a bind-mounted socket
-// directory), and one refexec host process bound to the same volume — and
+// run its own isolated set — one workspace store, one confined refbox
+// compartment per agent in the child's workflow (all sharing that store and
+// reaching Agenthof only over a socket directory; for the podman tier, a
+// volume mounted at /work and a bind-mounted directory), and one refexec host
+// process bound to the same store — and
 // tears the set down, in order, when the child is over or anything in it
 // dies. It serves one held request per child (POST /provision) on a Unix
-// socket only Agenthof dials, on the operator's HOST: it invokes podman, so
-// it is a host process like agenthof, not a container. Agenthof itself still
-// runs nothing. It is credential-less.
+// socket only Agenthof dials, on the operator's HOST: it drives the confiner
+// backend (for the podman tier, that runs podman), so it is a host process
+// like agenthof, not a container. Agenthof itself still runs nothing. It is
+// credential-less.
 //
 // Usage:
 //
@@ -107,7 +109,7 @@ func prepareSpawnRoot(dir string) error {
 // signal. The leftovers are reaped before the socket exists: a supervisor
 // that cannot account for an earlier one's compartments refuses to serve
 // rather than count slots it does not know it holds. The stub mode (test
-// tree) reaches it through startup with a confiner over a fake podman.
+// tree) reaches it through startup with an in-process fake confiner.
 func serve(cfg spawnConfig, logger *slog.Logger, c confiner.Confiner) int {
 	if err := prepareSpawnRoot(cfg.SpawnRoot); err != nil {
 		logger.Error("spawn_root", "error", err)
