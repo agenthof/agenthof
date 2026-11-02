@@ -84,6 +84,26 @@ func TestMainProbeFailureRefusesBeforeAnythingElse(t *testing.T) {
 	notStarted(t, cfg)
 }
 
+// TestPrepareSpawnRootCreatesAnOwnerOnlyDirOnANativeFS pins that
+// prepareSpawnRoot creates spawn_root owner-only and vets its filesystem. A
+// native directory passes; a bridged one cannot be mounted in a unit test, so
+// the refusal itself is covered by the refrunner classifier tests, and serve's
+// use of this function by TestServeRefusesWhenStartupReapFails in
+// supervisor_test.go.
+func TestPrepareSpawnRootCreatesAnOwnerOnlyDirOnANativeFS(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "a", "children")
+	if err := prepareSpawnRoot(root); err != nil {
+		t.Fatalf("prepareSpawnRoot on a native directory: %v", err)
+	}
+	fi, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("spawn_root = %v, want a 0700 directory", fi.Mode())
+	}
+}
+
 // The Seatbelt backend refuses a Launch or CreateStore name that is not a
 // legal store name, so every name the supervisor mints must be one: a run id
 // and an agent name are both admitted only as nameRE, and the prefix starts

@@ -96,6 +96,26 @@ See [`docs/lifecycle-model.md`](lifecycle-model.md).
 
 **Requires:** Go >= 1.27 toolchain (auto-downloaded via `go.mod`).
 
+### Running the confined runtimes inside WSL2 (unverified)
+
+The steps above need no container engine. The confined runtimes under
+`deploy/` do, and on Windows they run inside a WSL2 distro, with rootless
+podman as on any Linux host (see
+[`docs/concepts.md`](concepts.md#windows-via-wsl2-unverified); this path has
+not yet been exercised on real Windows hardware). The distro needs:
+
+- systemd enabled and cgroup v2 in use, so rootless podman can run.
+- `subuid` and `subgid` ranges configured for your user, so rootless podman can
+  map user namespaces.
+- Your working copy, socket directories, `spawn_root`, and podman's storage on
+  the distro's native disk (under your distro home), not under `/mnt/c`.
+  Agenthof refuses socket and `spawn_root` directories on a non-native
+  filesystem.
+
+If the confinement backend's startup probe fails, check these first: a distro
+without systemd or cgroup v2, or without `subuid`/`subgid` entries is
+a likely cause.
+
 ## Next
 
 - [`docs/concepts.md`](concepts.md) — the ideas behind the registry, the

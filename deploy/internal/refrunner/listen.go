@@ -36,6 +36,9 @@ func Listen(path string) (net.Listener, error) {
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
 		return nil, fmt.Errorf("refrunner: socket dir %s is owned by uid %d, not the user this runtime runs as (uid %d)", dir, st.Uid, os.Getuid())
 	}
+	if err := CheckNativeFS(dir); err != nil {
+		return nil, err
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("refrunner: remove stale socket: %w", err)
 	}

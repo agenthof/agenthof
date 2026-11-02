@@ -34,6 +34,11 @@ func listenGateway(dir, runID string) (net.Listener, string, error) {
 // from a process killed before Stop() keep their old nonce and are swept by the
 // refbox recipe (1b), not here. The listener unlinks its socket on Close.
 func listenUnix(path string) (net.Listener, error) {
+	// Nativeness only, no mode/owner gate: the socket is bearer-token
+	// authenticated and its directory is mounted into the compartment by design.
+	if err := nativeFS(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove stale socket %q: %w", path, err)
 	}

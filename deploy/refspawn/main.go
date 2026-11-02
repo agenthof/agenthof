@@ -1,14 +1,15 @@
 // Command refspawn is the reference compartment supervisor for Agenthof's
 // spawn door: an operator-side runtime that provisions each spawned child
-// run its own isolated set — one workspace volume, one rootless-podman
-// refbox compartment per agent in the child's workflow (all mounting that
-// volume at /work and reaching Agenthof only over a bind-mounted socket
-// directory), and one refexec host process bound to the same volume — and
-// tears the set down, in order, when the child is over or anything in it
-// dies. It serves one held request per child (POST /provision) on a Unix
-// socket only Agenthof dials, on the operator's HOST: it invokes podman, so
-// it is a host process like agenthof, not a container. Agenthof itself still
-// runs nothing. It is credential-less.
+// run its own isolated set — one workspace store, one confined refbox
+// compartment per agent in the child's workflow (all sharing that store and
+// reaching Agenthof only over a socket directory; for the podman tier, a
+// volume mounted at /work and a bind-mounted directory), and one refexec host
+// process bound to the same store — and tears the set down, in order, when the
+// child is over or anything in it dies. It serves one held request per child (POST /provision) on a Unix
+// socket only Agenthof dials, on the operator's HOST: it drives the confiner
+// backend (for the podman tier, that runs podman), so it is a host process
+// like agenthof, not a container. Agenthof itself still runs nothing. It is
+// credential-less.
 //
 // Usage:
 //
@@ -87,17 +88,29 @@ func startup(cfg spawnConfig, logger *slog.Logger, c confiner.Confiner) int {
 	return serve(cfg, logger, c)
 }
 
+// prepareSpawnRoot creates spawn_root owner-only and refuses a directory on a
+// non-native (bridged or remote) filesystem, where the per-child socket
+// directories the compartments bind-mount would not behave as the kernel's own.
+func prepareSpawnRoot(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// Vet the filesystem right after the dir exists (statfs needs it) and before
+	// Chmod: on a bridged mount a failing or no-op Chmod could mask the clear
+	// non-native-filesystem error.
+	if err := refrunner.CheckNativeFS(dir); err != nil {
+		return fmt.Errorf("refspawn: spawn_root: %w", err)
+	}
+	return os.Chmod(dir, 0o700)
+}
+
 // serve prepares spawn_root, reaps leftovers, listens and serves until a
 // signal. The leftovers are reaped before the socket exists: a supervisor
 // that cannot account for an earlier one's compartments refuses to serve
 // rather than count slots it does not know it holds. The stub mode (test
-// tree) reaches it through startup with a confiner over a fake podman.
+// tree) reaches it through startup with an in-process fake confiner.
 func serve(cfg spawnConfig, logger *slog.Logger, c confiner.Confiner) int {
-	if err := os.MkdirAll(cfg.SpawnRoot, 0o700); err != nil {
-		logger.Error("spawn_root", "error", err)
-		return 1
-	}
-	if err := os.Chmod(cfg.SpawnRoot, 0o700); err != nil {
+	if err := prepareSpawnRoot(cfg.SpawnRoot); err != nil {
 		logger.Error("spawn_root", "error", err)
 		return 1
 	}
