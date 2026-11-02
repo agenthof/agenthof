@@ -55,3 +55,17 @@ func TestListenListensWith0600AndReplacesStale(t *testing.T) {
 	}
 	_ = conn.Close()
 }
+
+// TestListenAcceptsNativeFilesystem pins that wiring the nativeness guard into
+// Listen does not refuse an ordinary local temp directory.
+func TestListenAcceptsNativeFilesystem(t *testing.T) {
+	dir := socketDir(t, 0o700)
+	if err := CheckNativeFS(dir); err != nil {
+		t.Fatalf("CheckNativeFS(%s): %v", dir, err)
+	}
+	ln, err := Listen(filepath.Join(dir, "n.sock"))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	_ = ln.Close()
+}
