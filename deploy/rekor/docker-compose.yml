@@ -1,0 +1,80 @@
+# Local Rekor v1 transparency log — the real backend for scripts/e2e-rekor.sh.
+#
+# This is the one tier that drives agenthof's anchor COMMAND PATH (audit anchor /
+# audit verify and the sidecar it writes) against a REAL rekor-server, rather
+# than the in-process fake the unit tests and the .txtar journeys use. (The
+# anchor client's crypto is separately proven against a real log by
+# internal/anchor/rekor_live_test.go.) It stands up the canonical Sigstore
+# Rekor v1 stack:
+#
+#   rekor-mysql                 MySQL preloaded with the Trillian storage schema
+#   rekor-trillian-log-server   Trillian log server (gRPC on 8090) over that DB
+#   rekor-trillian-log-signer   Trillian signer (--force_master) over that DB
+#   rekor-server                Rekor v1 REST API on 3000, backed by Trillian
+#
+# Every image is PULLED and pinned (no local build): the whole stack is
+# published under ghcr.io/sigstore/rekor/, and the schema DB is Trillian's own
+# CI image. rekor-server is given no tlog_id, so it creates its Merkle tree on
+# first start; its signer runs in memory (--rekor_server.signer=memory), so the
+# served checkpoint key is ephemeral per run — exactly the "as served" / pinned
+# key distinction agenthof verifies.
+#
+# No depends_on: podman-compose (1.0.6) renders depends_on as podman
+# `--requires`, whose transitive dependency graph breaks on recreate ("container
+# ... not found in input list"). Instead, start ordering is file order plus
+# restart policies — rekor and Trillian use restart: on-failure, so a container
+# that starts before MySQL/Trillian is reachable exits and is retried until it
+# is — and e2e-rekor.sh polls rekor's /api/v1/log/publicKey for readiness. Do
+# not add depends_on back without a podman-compose that handles it.
+#
+# Only rekor-server's API port is published, as 127.0.0.1:${REKOR_PORT:-3000}.
+# Driven with podman (rootless) to match the project's containment toolchain;
+# see scripts/e2e-rekor.sh. Local-by-judgment only, never CI.
+services:
+  rekor-mysql:
+    image: gcr.io/trillian-opensource-ci/db_server:v1.4.0
+    platform: linux/amd64
+    environment:
+      - MYSQL_ROOT_PASSWORD=zaphod
+      - MYSQL_DATABASE=test
+      - MYSQL_USER=test
+      - MYSQL_PASSWORD=zaphod
+    restart: always
+
+  rekor-trillian-log-server:
+    image: ghcr.io/sigstore/rekor/trillian_log_server:v1.3.4
+    command:
+      - "--storage_system=mysql"
+      - "--mysql_uri=test:zaphod@tcp(rekor-mysql:3306)/test"
+      - "--rpc_endpoint=0.0.0.0:8090"
+      - "--http_endpoint=0.0.0.0:8091"
+      - "--quota_system=noop"
+      - "--alsologtostderr"
+    restart: on-failure
+
+  rekor-trillian-log-signer:
+    image: ghcr.io/sigstore/rekor/trillian_log_signer:v1.3.4
+    command:
+      - "--storage_system=mysql"
+      - "--mysql_uri=test:zaphod@tcp(rekor-mysql:3306)/test"
+      - "--rpc_endpoint=0.0.0.0:8090"
+      - "--http_endpoint=0.0.0.0:8091"
+      - "--force_master"
+      - "--quota_system=noop"
+      - "--alsologtostderr"
+    restart: on-failure
+
+  rekor-server:
+    image: ghcr.io/sigstore/rekor/rekor-server:v1.3.10
+    command:
+      - "serve"
+      - "--trillian_log_server.address=rekor-trillian-log-server"
+      - "--trillian_log_server.port=8090"
+      - "--rekor_server.address=0.0.0.0"
+      - "--port=3000"
+      - "--rekor_server.signer=memory"
+      - "--search_index.storage_provider=mysql"
+      - "--search_index.mysql.dsn=test:zaphod@tcp(rekor-mysql:3306)/test"
+    ports:
+      - "127.0.0.1:${REKOR_PORT:-3000}:3000"
+    restart: on-failure

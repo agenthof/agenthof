@@ -24,18 +24,22 @@ deploy/lima/lima.sh up            # create + provision the VM (first run takes a
 deploy/lima/lima.sh e2e           # run the refbox, refbridge, refexec, refspawn and acceptance e2es, then self-clean
 ```
 
-`up` provisions rootless podman, Go, and python3, and mounts the repository
+`up` provisions rootless podman (with `podman-compose` and `qemu-user-static`,
+which the `rekor` e2e needs), Go, and python3, and mounts the repository
 read-only at `/agenthof` inside the VM. The repository path is detected
 automatically, so the VM definition carries no machine-specific path.
+Provisioning runs only when the VM is created, so a VM made before those were
+added needs `lima.sh destroy && lima.sh up` (or an `apt-get install` in
+`lima.sh shell`) before `lima.sh e2e rekor`.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `lima.sh up` | Create the VM on first run, or start it if it already exists. |
-| `lima.sh e2e [refbox\|refbridge\|refexec\|refspawn\|acceptance\|all] [--keep]` | Run the compartment e2e(s) (default `all`), then self-clean unless `--keep` — which is also passed to the script, so `acceptance --keep` leaves its compartments and scratch directory for inspection. |
+| `lima.sh e2e [refbox\|refbridge\|refexec\|refspawn\|acceptance\|rekor\|all] [--keep]` | Run the compartment e2e(s) (default `all`; `rekor` stands up a real Rekor v1 stack and is by-judgment, so it is NOT in `all`), then self-clean unless `--keep` — which is also passed to the script, so `acceptance --keep` and `rekor --keep` leave their state for inspection. |
 | `lima.sh build` | Compile `agenthof` (to `~/agenthof`) and build the compartment images (`refbridge:test`, `refbox-echo:test`, `refbox-langchain:test`), ready for manual runs. |
-| `lima.sh shell` | Open a shell in the VM at `/agenthof`, with Go, podman, and python3 on `PATH`. |
+| `lima.sh shell` | Open a shell in the VM at `/agenthof`, with Go, podman, podman-compose, and python3 on `PATH`. |
 | `lima.sh clean [--all]` | Remove stopped containers and dangling images; `--all` also drops cached base images. |
 | `lima.sh down` | Stop the VM, keeping it for next time. |
 | `lima.sh destroy` | Delete the VM entirely. |

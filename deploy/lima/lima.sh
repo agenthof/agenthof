@@ -6,7 +6,8 @@
 #   lima.sh shell              open a shell in the VM at the repo (/agenthof)
 #   lima.sh build              compile agenthof and build the compartment images
 #   lima.sh e2e [name] [--keep] [--flag…]
-#                              run e2e(s): refbox | refbridge | refexec | refspawn | acceptance | all (default all);
+#                              run e2e(s): refbox | refbridge | refexec | refspawn | acceptance | rekor | all
+#                              (default all; rekor stands up a Rekor v1 stack and is by-judgment, so NOT in all);
 #                              --keep skips the prune below and is passed to each script (only acceptance acts on it),
 #                              as is any other --flag
 #   lima.sh clean [--all]      prune compartment leftovers; --all drops cached images
@@ -67,10 +68,10 @@ cmd_e2e() {
 	local name="all" keep=0 extra=()
 	for a in "$@"; do
 		case "$a" in
-			refbox|refbridge|refexec|refspawn|acceptance|all) name="$a" ;;
+			refbox|refbridge|refexec|refspawn|acceptance|rekor|all) name="$a" ;;
 			--keep) keep=1; extra+=("$a") ;;
 			--*) extra+=("$a") ;;
-			*) die "unknown e2e argument: $a (want refbox | refbridge | refexec | refspawn | acceptance | all [--keep] [--flag…])" ;;
+			*) die "unknown e2e argument: $a (want refbox | refbridge | refexec | refspawn | acceptance | rekor | all [--keep] [--flag…])" ;;
 		esac
 	done
 	local scripts=()
@@ -80,6 +81,7 @@ cmd_e2e() {
 		refexec) scripts=("scripts/e2e-refexec.sh") ;;
 		refspawn) scripts=("scripts/e2e-refspawn.sh") ;;
 		acceptance) scripts=("scripts/e2e-acceptance.sh") ;;
+		rekor) scripts=("scripts/e2e-rekor.sh") ;;
 		all) scripts=("scripts/e2e-refbox.sh" "scripts/e2e-refbridge.sh" "scripts/e2e-refexec.sh" "scripts/e2e-refspawn.sh" "scripts/e2e-acceptance.sh") ;;
 	esac
 	# Flags go to every script as given: the per-slice scripts read no
