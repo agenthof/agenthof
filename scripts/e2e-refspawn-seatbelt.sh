@@ -4,18 +4,22 @@
 # provisions a podman volume and one container per agent; here refspawn runs
 # on a macOS host with `confiner: seatbelt`, so a child's workspace store is a
 # plain directory under store_root, every agent compartment of the child is a
-# process started by /usr/bin/sandbox-exec with that directory as its working
+# process launched by the confiner with that directory as its working
 # directory, and the child's refexec — a host process refspawn forks — starts
-# each exec command under sandbox-exec too. The root run's agent is an
-# ordinary host process (there is no agent compartment on macOS). Asserts: a
+# each exec command under /usr/bin/sandbox-exec. The confinement this e2e
+# proves is the exec path's, through its denials (the agent process itself
+# cannot be told apart from a bare one from outside). The root run's agent is
+# an ordinary host process (there is no agent compartment on macOS). Asserts: a
 # two-agent child shares its one workspace (the writer's note is what the
 # reader reads — on the file path through the agents, and on the exec path
 # through the child's own refexec); the ledger records the exec first-hand
 # with the seatbelt tier, the child's audit renders the tier's grade verbatim
 # and the parent's audit renders it on the spawn line; a command that tries
 # the network is refused inside its compartment, a command that writes
-# outside the store fails and leaves no file, and a command that reads a
-# deny_read subtree is refused; while a child is alive, the refexec config
+# outside the store fails and leaves no file, a command that reads a
+# deny_read subtree or a file under spawn_root is refused while a read of an
+# ordinary host file succeeds, and a command off the exec allowlist is
+# refused before refexec is asked; while a child is alive, the refexec config
 # refspawn rendered carries the seatbelt keys (store_root, pid_dir and a
 # deny_read naming the operator's subtree and spawn_root) and no podman
 # image, the child's agent compartments hold PID records naming its store,
@@ -321,6 +325,7 @@ set_left() { # prints what is left of any child's set, nothing when it is all go
 	ls -A "$STORE_ROOT/.scratch" 2>/dev/null || true
 	ls -A "$SPAWN_ROOT" || true
 	pgrep -f "refexec -config $SPAWN_ROOT" || true
+	pgrep -f "echo-agent -socket $SPAWN_ROOT/" || true
 }
 nothing_left() {
 	local i
@@ -329,7 +334,7 @@ nothing_left() {
 		sleep 0.5
 	done
 	set_left
-	fail "$1: a store, PID record, scratch dir, directory or refexec process outlived the run (listed above)"
+	fail "$1: a store, PID record, scratch dir, directory, agent or refexec process outlived the run (listed above)"
 }
 no_store_leftover_warning() {
 	grep -q "workspace store not removed" "$WORK/refspawn.err" && fail "$1: the supervisor could not remove a store, so its non-forced RemoveStore was refused"
@@ -350,6 +355,7 @@ parent_artifact "$RUNID" | grep -q "spawn succeeded $PAIR shared-$NONCE" || fail
 [ "$(field "$(ledger "$RUNID")" spawn child_confiner succeeded)" = seatbelt ] || fail "the parent's spawn event does not record the seatbelt tier"
 echo "$AUDIT" | grep -qF " [child-confiner: $GRADE_TEXT]" || fail "the parent's audit did not render the child's seatbelt tier verbatim"
 bound "$(ledger "$PAIR")" "$PAIR" ci "$RUNID"
+child_audit "$PAIR"
 grep -q "compartment started.*child=$PAIR.*compartment=agenthof-spawn-$PAIR-writer" "$WORK/refspawn.err" || fail "no writer compartment"
 grep -q "compartment started.*child=$PAIR.*compartment=agenthof-spawn-$PAIR-reader" "$WORK/refspawn.err" || fail "no reader compartment"
 nothing_left "after the pair run"
@@ -368,15 +374,21 @@ echo "$CAUDIT" | grep -qF "; confiner: $GRADE_TEXT]" || fail "the child's audit 
 grep -q '"mode":"runtime"' "$CL" || fail "the child's exec is not mode runtime"
 grep -q '"runtime_attestation":{"runtime":"refexec","session":"refexec-' "$CL" || fail "no refexec attestation in the child's ledger"
 grep -q '"credential_env":"","env_names":\["TMPDIR"\],"materialization":"","confiner":"seatbelt"' "$CL" || fail "the attestation must be credential-less naming only the scratch TMPDIR (env_allow is empty) and the seatbelt tier"
-if grep '"type":"exec"' "$CL" | grep -q "exec-$NONCE"; then fail "the output body reached an exec event"; fi
+EXEC_EVENTS="$(grep '"type":"exec"' "$CL" || true)"
+[ -n "$EXEC_EVENTS" ] || fail "the child's ledger has no exec events, so an absence check over them would prove nothing"
+if grep -qF "exec-$NONCE" <<<"$EXEC_EVENTS"; then fail "the output body reached an exec event"; fi
 nothing_left "after the exec pair run"
 echo "exec path: a child's first-hand exec works on the child's store under sandbox-exec, tier recorded and graded — ok"
 
 # 2. Containment through the child's refexec: direct network denied (curl
 #    exit 7 — a refusal, not a timeout — after an unsandboxed control), a
 #    write outside the store denied with no file left, and a read of the
-#    operator's deny_read subtree denied. Each is recorded first-hand as a
-#    failed exec.
+#    operator's deny_read subtree and of a file under spawn_root denied (each
+#    pinned to cat's exit 1, with a sandboxed read of an ordinary host file
+#    that succeeds, so the denial is specific and not a deny-everything
+#    sandbox), and a command off the allowlist refused before refexec is
+#    asked. Each denial is recorded first-hand as a failed exec.
+NET_RAN=""
 if curl -sS --max-time 3 -o /dev/null http://1.1.1.1/ 2>/dev/null; then
 	run "spawn:worker/one-wf:exec-run:curl -sS --max-time 3 http://1.1.1.1/"
 	CH="$(field "$(ledger "$RUNID")" spawn child_run_id)"
@@ -384,6 +396,7 @@ if curl -sS --max-time 3 -o /dev/null http://1.1.1.1/ 2>/dev/null; then
 	child_audit "$CH"
 	echo "$CAUDIT" | grep -Eq "exec curl -sS --max-time 3 http://1.1.1.1/ — exit 7 \(runtime\) \[runtime-attested: refexec curl .*; confiner: seatbelt" || fail "the network refusal was not recorded first-hand with curl's could-not-connect exit"
 	echo "direct network denied inside the compartment, recorded first-hand — ok"
+	NET_RAN=1
 else
 	echo "SKIP — the unsandboxed curl could not reach 1.1.1.1, so a sandboxed refusal could not be attributed to the sandbox"
 fi
@@ -394,17 +407,47 @@ child_audit "$CH"
 echo "$CAUDIT" | grep -Eq "exec cp agent-note.txt $WORK/leak — exit [1-9][0-9]* \(runtime\) \[runtime-attested: refexec cp .*; confiner: seatbelt" || fail "the denied write was not recorded first-hand"
 [ ! -e "$WORK/leak" ] || fail "a sandboxed command wrote outside the store"
 echo "write outside the store denied, no file left — ok"
+printf 'open-%s\n' "$NONCE" >"$WORK/open.txt"
+run "spawn:worker/one-wf:exec-run:cat $WORK/open.txt"
+CH="$(field "$(ledger "$RUNID")" spawn child_run_id)"
+[ -n "$CH" ] || fail "no child run id for the positive read control"
+child_audit "$CH"
+echo "$CAUDIT" | grep -Eq "exec cat $WORK/open.txt — exit 0 \(runtime\) \[runtime-attested: refexec cat .*; confiner: seatbelt" || fail "a sandboxed read of an ordinary host file did not succeed, so the denials below could be a deny-everything sandbox"
 [ "$(cat "$DENIED/secret")" = "denied-$$" ] || fail "the unsandboxed control cannot read the deny_read file, so a sandboxed refusal proves nothing"
 run "spawn:worker/one-wf:exec-run:cat $DENIED/secret"
 CH="$(field "$(ledger "$RUNID")" spawn child_run_id)"
 [ -n "$CH" ] || fail "no child run id for the read scenario"
 child_audit "$CH"
-echo "$CAUDIT" | grep -Eq "exec cat $DENIED/secret — exit [1-9][0-9]* \(runtime\) \[runtime-attested: refexec cat .*; confiner: seatbelt" || fail "the denied read was not recorded first-hand"
+echo "$CAUDIT" | grep -Eq "exec cat $DENIED/secret — exit 1 \(runtime\) \[runtime-attested: refexec cat .*; confiner: seatbelt" || fail "the denied read was not recorded first-hand"
 if grep -q "denied-$$" "$(ledger "$CH")" "$(ledger "$RUNID")"; then fail "the deny_read file's content reached a ledger"; fi
 for f in "$WORK"/artifacts/*; do
 	if grep -q "denied-$$" "$f"; then fail "the deny_read file's content reached an artifact"; fi
 done
-echo "read of a deny_read subtree denied, nothing leaked — ok"
+echo "read of a deny_read subtree denied while an ordinary host file reads, nothing leaked — ok"
+# spawn_root is read-denied too: a file there (the child's own exec dir holds
+# its rendered config while it lives; this one is the operator's, removed
+# right after) is refused to the sandboxed command.
+printf 'spawn-%s\n' "$NONCE" >"$SPAWN_ROOT/probe.txt"
+[ "$(cat "$SPAWN_ROOT/probe.txt")" = "spawn-$NONCE" ] || fail "the unsandboxed control cannot read the spawn_root file, so a sandboxed refusal proves nothing"
+run "spawn:worker/one-wf:exec-run:cat $SPAWN_ROOT/probe.txt"
+CH="$(field "$(ledger "$RUNID")" spawn child_run_id)"
+[ -n "$CH" ] || fail "no child run id for the spawn_root read scenario"
+child_audit "$CH"
+echo "$CAUDIT" | grep -Eq "exec cat $SPAWN_ROOT/probe.txt — exit 1 \(runtime\) \[runtime-attested: refexec cat .*; confiner: seatbelt" || fail "the read under spawn_root was not refused first-hand"
+if grep -q "spawn-$NONCE" "$(ledger "$CH")" "$(ledger "$RUNID")"; then fail "the spawn_root file's content reached a ledger"; fi
+rm -f "$SPAWN_ROOT/probe.txt"
+echo "read under spawn_root denied — ok"
+# An off-allowlist command is refused before refexec is asked: the audit says
+# so and refexec started no compartment for it.
+STARTS_BEFORE="$(grep -c 'compartment started.*command=' "$WORK/refspawn.err" || true)"
+[ "$STARTS_BEFORE" -gt 0 ] || fail "refexec started no exec compartment so far, so counting them proves nothing"
+run "spawn:worker/one-wf:exec-run:sh -c id"
+CH="$(field "$(ledger "$RUNID")" spawn child_run_id)"
+[ -n "$CH" ] || fail "no child run id for the off-allowlist scenario"
+child_audit "$CH"
+echo "$CAUDIT" | grep -q "exec sh -c id refused — command is not on the exec allowlist" || fail "the off-allowlist refusal was not rendered"
+[ "$(grep -c 'compartment started.*command=' "$WORK/refspawn.err" || true)" = "$STARTS_BEFORE" ] || fail "refexec was asked to run an off-allowlist command"
+echo "off-allowlist command refused before refexec was asked — ok"
 nothing_left "after the containment runs"
 
 # 3. The set, inspected while a child is alive: the refexec config refspawn
@@ -513,4 +556,8 @@ wait "${PIDS[0]}" >/dev/null 2>&1 || true
 [ ! -S "$SUP_DIR/refspawn.sock" ] || fail "refspawn left its socket behind"
 [ ! -e "$WORK/lead-ws/agent-note.txt" ] || fail "a child's note reached the lead's workspace"
 
-echo "e2e-refspawn-seatbelt: PASS"
+if [ -n "$NET_RAN" ]; then
+	echo "e2e-refspawn-seatbelt: PASS"
+else
+	echo "e2e-refspawn-seatbelt: PASS (the direct-network scenario was SKIPPED: the unsandboxed control could not reach 1.1.1.1)"
+fi
