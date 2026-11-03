@@ -73,6 +73,9 @@ STORE_C="e2e-c-$HEX"
 # A leftover store a crashed instance's reap target (under the reap prefix),
 # and a decoy off it that no reap may touch.
 ORPHAN_STORE="refexec-orphan-$HEX"
+# A store UNDER the reap prefix but stamped with a LIVE instance's owner
+# (podman): the reap must spare it, as it spares that instance's compartment.
+LIVE_STORE="refexec-live-$HEX"
 DECOY_STORE="e2e-decoy-$HEX"
 PIDS=()        # the refexec instances still to stop
 SLEEP_PIDS=()  # compartment processes recorded for cleanup (seatbelt)
@@ -89,7 +92,7 @@ cleanup() {
 	done
 	if [ "$BACKEND" = podman ]; then
 		podman ps -aq --filter 'name=^refexec-' | xargs -r podman rm -f >/dev/null 2>&1 || true
-		for v in "$STORE_A" "$STORE_B" "$STORE_C" "$ORPHAN_STORE" "$DECOY_STORE"; do
+		for v in "$STORE_A" "$STORE_B" "$STORE_C" "$ORPHAN_STORE" "$LIVE_STORE" "$DECOY_STORE"; do
 			podman volume rm -f "$v" >/dev/null 2>&1 || true
 		done
 	fi
@@ -286,6 +289,17 @@ done
 store_present "$STORE_A" || fail "A's store is missing before B starts"
 echo "A has $A_SESSION and C has $C_SESSION in flight, each stamped with its owner's pid — ok"
 
+# A store under the reap prefix stamped with A's LIVE owner label (podman only):
+# B's reap must spare it exactly as it spares A's compartment — otherwise
+# `podman volume rm -f` would stop and remove the container holding it, ending
+# A's run. (Seatbelt spares a live store through its compartment's PID record,
+# covered by A's own store above; podman has no such record, hence the label.)
+if [ "$BACKEND" = podman ]; then
+	A_OWNER_LABEL="$(podman inspect --format '{{index .Config.Labels "agenthof.owner"}}' "$A_SESSION")"
+	[ -n "$A_OWNER_LABEL" ] || fail "could not read A's owner label from its compartment"
+	podman volume create --label "agenthof.owner=$A_OWNER_LABEL" "$LIVE_STORE" >/dev/null
+fi
+
 # --- 2. C crashes: its owner is gone, its compartment is left behind.
 kill -9 "$C_PID"
 wait "$C_PID" >/dev/null 2>&1 || true
@@ -332,6 +346,10 @@ if [ "$BACKEND" = seatbelt ]; then
 fi
 if store_present "$ORPHAN_STORE"; then fail "B did not reap the leftover store under the reap prefix"; fi
 store_present "$DECOY_STORE" || fail "B's reap removed a store off the reap prefix"
+if [ "$BACKEND" = podman ]; then
+	store_present "$LIVE_STORE" || fail "B's reap removed a store under the prefix that a live instance (A, $A_PID) owns"
+	grep -Eq "msg=\"leaving a store another running instance owns\" store=$LIVE_STORE owner_pid=$A_PID" "$B_ERR" || fail "B did not log leaving the live-owner store $LIVE_STORE"
+fi
 grep -Eq "msg=\"reaping leftover compartment\" compartment=$C_SESSION" "$B_ERR" || fail "B did not log reaping C's compartment"
 echo "B's startup reap spared A's live $A_SESSION and reaped C's orphaned $C_SESSION — ok"
 

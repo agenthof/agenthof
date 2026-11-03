@@ -308,12 +308,20 @@ func (c *podmanCompartment) Remove(context.Context) error {
 	return rmErr
 }
 
-// CreateStore creates a named volume.
+// CreateStore creates a named volume, stamped with this instance's owner so a
+// later Reap can tell a leftover (its owner is gone) from the live child store
+// of another running instance and spare the latter — the same owner stamp the
+// compartments carry. An instance whose own owner is unknown refuses, exactly
+// as Launch does: a store it cannot stamp is one a sweep cannot tell from a
+// leftover.
 func (p *Podman) CreateStore(ctx context.Context, name string) error {
+	if p.ownerErr != nil {
+		return p.ownerErr
+	}
 	if !ValidStoreName(name) {
 		return fmt.Errorf("confiner: %q is not a legal store name", name)
 	}
-	_, err := p.output(ctx, 30*time.Second, "volume", "create", name)
+	_, err := p.output(ctx, 30*time.Second, "volume", "create", "--label", ownerLabel+"="+p.owner.String(), name)
 	return err
 }
 
@@ -341,13 +349,18 @@ func (p *Podman) RemoveStore(ctx context.Context, name string, force bool) error
 // separated; a container with no such label lists as its name alone.
 const psOwnerFormat = `{{.Names}} {{index .Labels "` + ownerLabel + `"}}`
 
-// Reap removes the LEFTOVER containers whose name starts with prefix, and
-// every volume under it: what a previous run left when it died with
-// compartments in flight. A container's owner label names the process that
-// ran it; a container whose owner is still running and is not the caller is
-// another instance's compartment in flight, not a leftover, and is left
-// alone. One whose owner is gone, is the caller itself (sweeping its own
-// leftovers on the way out) or is unknown (no label) is removed. The engine
+// volOwnerFormat is psOwnerFormat for volumes: each store's name and its owner
+// label; a store with no such label (a leftover from before stamps, or a stray)
+// lists as its name alone.
+const volOwnerFormat = `{{.Name}} {{index .Labels "` + ownerLabel + `"}}`
+
+// Reap removes the LEFTOVER containers whose name starts with prefix, and the
+// leftover stores (volumes) under it: what a previous run left when it died
+// with compartments in flight. An owner label names the process that made it;
+// a container OR store whose owner is still running and is not the caller is
+// another instance's, in flight, not a leftover, and is left alone. One whose
+// owner is gone, is the caller itself (sweeping its own leftovers on the way
+// out) or is unknown (no label) is removed. The engine
 // is local (Probe), so the owner is a process on this host. A failed listing
 // is returned (the caller decides whether to refuse or warn); a leftover that
 // cannot be removed is logged and does not stop the sweep.
@@ -380,11 +393,28 @@ func (p *Podman) Reap(ctx context.Context, prefix string) error {
 			}
 		}
 	}
-	if out, err := p.output(ctx, 30*time.Second, "volume", "ls", "-q", "--filter", filter); err != nil {
+	if out, err := p.output(ctx, 30*time.Second, "volume", "ls", "--filter", filter, "--format", volOwnerFormat); err != nil {
 		errs = append(errs, err)
 	} else {
-		for _, name := range strings.Fields(string(out)) {
-			p.cfg.Logger.Info("reaping leftover volume", "volume", name)
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			name := fields[0]
+			var owner ownerRef
+			if len(fields) > 1 {
+				owner, _ = parseOwner(fields[1])
+			}
+			// A store a still-running instance owns is its child's live
+			// workspace, not a leftover: volume rm -f below would stop and
+			// remove the container that mounts it, ending that instance's run —
+			// the very guarantee the container sweep above keeps.
+			if !owner.reapableBy(p.owner) {
+				p.cfg.Logger.Info("leaving a store another running instance owns", "store", name, "owner_pid", owner.pid)
+				continue
+			}
+			p.cfg.Logger.Info("reaping leftover store", "store", name)
 			// -f, unlike an ordered teardown: a leftover may still be mounted by
 			// a container nothing here names, and nothing is left running to
 			// release it.

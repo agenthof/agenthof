@@ -241,8 +241,12 @@ are host processes.
   can see a transient `spawn compartment unavailable` refusal if the cap is
   sized exactly to one generation. Size it above the peak concurrent set.
 - Run **one refspawn per podman user** (under Seatbelt, per `store_root` and
-  `pid_dir`). Reaping matches leftovers by the `agenthof-spawn-` name prefix
-  across the whole podman user (or the whole `store_root` / `pid_dir`), so
-  two refspawn instances sharing one would reap each other's live children.
+  `pid_dir`) — the supported topology. The start-up reap matches leftovers by
+  the `agenthof-spawn-` name prefix across the whole namespace, but it spares
+  the compartments, and (on podman) the stores, that a still-running sibling
+  owns, so a concurrent sibling's live children survive it. Stay
+  one-per-namespace all the same: under Seatbelt a store is spared only while a
+  live agent compartment's record names it, leaving a narrow window around a
+  child's store creation and its exec-only phase.
 - A child always gets a fresh, empty workspace. Handing a child a shared or
   persistent workspace is not supported.
