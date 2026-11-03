@@ -1,10 +1,10 @@
 # Agenthof — maintainer convenience targets. Testing and the hermetic e2es are
 # plain `go` and `scripts/*.sh` (see CONTRIBUTING.md and .github/workflows). This
-# file holds installing the binaries and the real-backend containment proofs —
-# the combined podman run (Linux/Lima) and the macOS Seatbelt run — run by
-# judgment on a developer machine, never by CI.
+# file holds installing the binaries and the real-backend proofs — the combined
+# podman containment run (Linux/Lima), the macOS Seatbelt run, and the Rekor v1
+# anchoring run (Linux/Lima) — run by judgment on a developer machine, never by CI.
 .DEFAULT_GOAL := help
-.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt
+.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor
 
 GO ?= go
 UNAME_S ?= $(shell uname -s)
@@ -22,6 +22,11 @@ help:
 	@echo "    The real-backend macOS Seatbelt proof (scripts/e2e-refexec-seatbelt.sh):"
 	@echo "    first-hand exec under sandbox-exec — direct network denied, writes scoped,"
 	@echo "    off-allowlist refused, ledger verified. macOS only (self-cleans)."
+	@echo "make acceptance-rekor [KEEP=1]"
+	@echo "    The real-backend anchoring proof against a REAL Rekor v1 log (scripts/e2e-rekor.sh):"
+	@echo "    the audit anchor / verify command path over a podman-compose Rekor stack."
+	@echo "    Linux: runs natively (needs rootless podman + podman-compose). macOS: inside the"
+	@echo "    Lima VM (started if needed). KEEP=1 leaves the stack and files for inspection."
 
 install:
 	$(GO) install ./cmd/agenthof
@@ -55,4 +60,19 @@ ifeq ($(UNAME_S),Darwin)
 	scripts/e2e-refexec-seatbelt.sh
 else
 	@echo "make acceptance-seatbelt: the Seatbelt backend is macOS-only — run on a Mac (unsupported host $(UNAME_S))"; exit 1
+endif
+
+# The Rekor v1 anchoring proof drives the binary's anchor command path (audit
+# anchor / verify) against a REAL transparency log (deploy/rekor/docker-compose.yml)
+# over podman-compose. Linux/Lima like the podman combined run above, and like it
+# local/by-judgment, never CI.
+acceptance-rekor:
+ifeq ($(UNAME_S),Linux)
+	@command -v podman >/dev/null || { echo "make acceptance-rekor: podman is not installed (rootless podman + podman-compose are required)"; exit 1; }
+	scripts/e2e-rekor.sh $(KEEP_FLAG)
+else ifeq ($(UNAME_S),Darwin)
+	deploy/lima/lima.sh up
+	deploy/lima/lima.sh e2e rekor $(KEEP_FLAG)
+else
+	@echo "make acceptance-rekor: unsupported host $(UNAME_S) — run scripts/e2e-rekor.sh on a Linux host with rootless podman + podman-compose"; exit 1
 endif
