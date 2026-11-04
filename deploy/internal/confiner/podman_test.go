@@ -41,7 +41,8 @@ func TestMain(m *testing.M) {
 //	<name>.pid         the pid of that container's "process"
 //	ctr/<name>         a marker for each running container (what `ps` lists);
 //	                   its content is the container's owner label value, if any
-//	vol/<name>         a directory per volume (what `volume ls` lists)
+//	vol/<name>         one entry per volume (what `volume ls` lists); for a
+//	                   volume create --label, its content is the owner label value
 //	mounted-<volume>   marks a volume as in use, so `volume rm` without -f fails
 func testRoot() string { return os.Getenv("CONFINER_TEST_ROOT") }
 
@@ -98,7 +99,18 @@ func fakePodman(args []string) int {
 		name := args[len(args)-1]
 		switch args[1] {
 		case "create":
-			if err := os.MkdirAll(filepath.Join(testRoot(), "vol", name), 0o755); err != nil {
+			owner := ""
+			for i, a := range args {
+				if a == "--label" && i+1 < len(args) {
+					if v, ok := strings.CutPrefix(args[i+1], ownerLabel+"="); ok {
+						owner = v
+					}
+				}
+			}
+			if err := os.MkdirAll(filepath.Join(testRoot(), "vol"), 0o755); err != nil {
+				return 125
+			}
+			if err := os.WriteFile(filepath.Join(testRoot(), "vol", name), []byte(owner), 0o600); err != nil {
 				return 125
 			}
 			return 0
@@ -112,7 +124,7 @@ func fakePodman(args []string) int {
 			_ = os.RemoveAll(filepath.Join(testRoot(), "vol", name))
 			return 0
 		case "ls":
-			return listPrefix(filepath.Join(testRoot(), "vol"), filterPrefix(args), false)
+			return listPrefix(filepath.Join(testRoot(), "vol"), filterPrefix(args), slices.Contains(args, "--format"))
 		}
 	}
 	return 125
@@ -459,6 +471,11 @@ func TestPodmanStoreAndReap(t *testing.T) {
 	if err := p.CreateStore(ctx, "S"); err != nil {
 		t.Fatal(err)
 	}
+	// CreateStore must stamp the store with this instance's owner, or a later
+	// reap cannot tell it from a leftover (the sweep below relies on the label).
+	if log := readLog(t, root); len(log) != 1 || log[0] != "volume create --label "+ownerLabel+"="+p.owner.String()+" S" {
+		t.Fatalf("CreateStore did not stamp the store with its owner: %q", log)
+	}
 	if err := os.WriteFile(filepath.Join(root, "mounted-S"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +524,7 @@ func TestPodmanStoreAndReap(t *testing.T) {
 	ps := "ps -a --filter name=^agenthof-spawn- --format " + psOwnerFormat
 	want := []string{
 		ps, "rm -f agenthof-spawn-a", "rm -f agenthof-spawn-b", "rm -f agenthof-spawn-dead", "rm -f agenthof-spawn-self",
-		"volume ls -q --filter name=^agenthof-spawn-", "volume rm -f agenthof-spawn-v",
+		"volume ls --filter name=^agenthof-spawn- --format " + volOwnerFormat, "volume rm -f agenthof-spawn-v",
 	}
 	if log := readLog(t, root); !slices.Equal(log, want) {
 		t.Fatalf("%q", log)
@@ -524,7 +541,7 @@ func TestPodmanStoreAndReap(t *testing.T) {
 	if err := p.Reap(ctx, "agenthof-spawn-"); err != nil {
 		t.Fatal(err)
 	}
-	if log := readLog(t, root); !slices.Equal(log, []string{ps, "rm -f agenthof-spawn-sibling", "volume ls -q --filter name=^agenthof-spawn-"}) {
+	if log := readLog(t, root); !slices.Equal(log, []string{ps, "rm -f agenthof-spawn-sibling", "volume ls --filter name=^agenthof-spawn- --format " + volOwnerFormat}) {
 		t.Fatalf("after the sibling exited: %q", log)
 	}
 
@@ -534,6 +551,40 @@ func TestPodmanStoreAndReap(t *testing.T) {
 	t.Setenv("CONFINER_TEST_PS_FAIL", "1")
 	if err := p.Reap(ctx, "agenthof-spawn-"); err == nil || !strings.Contains(err.Error(), "ps") {
 		t.Fatalf("a failed ps must be returned: %v", err)
+	}
+}
+
+// A store volume stamped with a running sibling's owner is left in place by a
+// reap: podman volume rm -f would stop and remove the container mounting it,
+// ending that sibling's child run. A gone-owner or unstamped store is a
+// leftover and is reaped. (The container sweep already spares the live
+// sibling's compartment; the volume sweep must not undo that.)
+func TestPodmanReapSparesLiveOwnerVolume(t *testing.T) {
+	ctx := context.Background()
+	p, root := newTestPodman(t)
+	sibling, _ := startSiblingProcess(t)
+	if err := os.MkdirAll(filepath.Join(root, "vol"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, owner := range map[string]string{
+		"agenthof-spawn-live-work":  sibling.String(), // a running sibling's child store
+		"agenthof-spawn-dead-work":  "2000000000-1",   // a gone owner's leftover
+		"agenthof-spawn-plain-work": "",               // unstamped (pre-owner-stamp)
+	} {
+		if err := os.WriteFile(filepath.Join(root, "vol", name), []byte(owner), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.Reap(ctx, "agenthof-spawn-"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "vol/agenthof-spawn-live-work")); err != nil {
+		t.Fatalf("a running sibling's store was reaped: %v", err)
+	}
+	for _, gone := range []string{"agenthof-spawn-dead-work", "agenthof-spawn-plain-work"} {
+		if _, err := os.Stat(filepath.Join(root, "vol", gone)); !os.IsNotExist(err) {
+			t.Fatalf("leftover store %s survived the reap (err=%v)", gone, err)
+		}
 	}
 }
 
