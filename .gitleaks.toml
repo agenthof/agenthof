@@ -13,3 +13,10 @@ paths = [
   '''internal/config/signingkey_test\.go''',    # the Ed25519 golden seed 00..1f as PKCS#8 PEM — a published test vector pinning the key-file format, never a credential
   '''internal/sink/testdata/sigv4/.*''',         # AWS's published SigV4 test-suite vectors (AKIDEXAMPLE + the documented example STS token); offline signing fixtures, never credentials
 ]
+regexes = [
+  # An Ed25519 PUBLIC key that briefly appeared as the `trusted_signers` example
+  # in docs/reference/config.md (history only — the current doc uses a
+  # <placeholder>). A public key, never a secret; kept here because gitleaks
+  # scans full history.
+  '''11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=''',
+]
