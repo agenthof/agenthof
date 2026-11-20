@@ -56,7 +56,7 @@ type Signature struct {
 // what it asks to be granted. Requests are proposals, never grants.
 type AgenthofExt struct {
 	Artifact  string               `json:"artifact"`  // digest-pinned image reference
-	Interface string               `json:"interface"` // how the agent is driven (informational)
+	Interface string               `json:"interface"` // how the agent is driven; enroll accepts only "a2a"
 	Tools     []config.ToolGrant   `json:"tools"`
 	Exec      []string             `json:"exec"`
 	Model     string               `json:"model"`

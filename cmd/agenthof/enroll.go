@@ -518,6 +518,16 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return enrollRefusal(stderr, "%s", origin.Clean(err.Error()))
 	}
+	if def.Model == "" {
+		// No model requested: the model door falls back to the gateway's
+		// default, so the agent gets it. Disclose that implicit grant and
+		// record it with the rest of what the card is enrolled for.
+		if dm := instCfg.Gateway.Defaults.Model; dm != "" {
+			requested = append(requested, fmt.Sprintf("model %s (gateway default; not requested)", dm))
+		} else {
+			requested = append(requested, "no model (none requested and no gateway default is configured)")
+		}
+	}
 	if len(requested) > control.MaxEnrollRequested {
 		return enrollRefusal(stderr, "the card requests %d capabilities; the most one enrollment records is %d", len(requested), control.MaxEnrollRequested)
 	}
@@ -633,7 +643,7 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stdout, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
 	_, _ = fmt.Fprintf(stdout, "next, by hand (granting a trusted agent the right to launch untrusted code is your edit to make):\n")
 	_, _ = fmt.Fprintf(stdout, "  1. in the trusted orchestrator's agent file, add:\n       may_spawn:\n         - role: %q\n           workflow: %q\n", *name, *name)
-	_, _ = fmt.Fprintf(stdout, "  2. in the spawn supervisor's config, add under images: (a podman image reference; under seatbelt, the absolute path of the program with this content hash)\n       %q: %q\n", *name, ext.Artifact)
+	_, _ = fmt.Fprintf(stdout, "  2. in the spawn supervisor's config, add under images: (a podman image reference)\n       %q: %q\n", *name, ext.Artifact)
 	_, _ = fmt.Fprintf(stdout, "  3. review, then: agenthof apply --config %s\n", *cfgDir)
 	return 0
 }

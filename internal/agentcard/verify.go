@@ -21,7 +21,8 @@ type Anchor struct {
 const signatureAlg = "EdDSA"
 
 // keyMaterialHeaders are header parameters that would let a card supply or
-// point to its own verification key; their presence is a hard error.
+// point to its own verification key; a signature entry carrying one is
+// skipped (never trusted), and the card verifies only if another entry does.
 var keyMaterialHeaders = []string{"jku", "jwk", "x5u", "x5c"}
 
 // Verify checks that at least one of the card's signatures is a valid

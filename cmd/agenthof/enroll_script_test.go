@@ -79,6 +79,8 @@ func cmdMkCard(ts *testscript.TestScript, neg bool, args []string) {
 	}
 	switch variant {
 	case "good", "swap", "jku", "algnone":
+	case "nomodel":
+		delete(params, "model")
 	case "wildcard":
 		params["tools"] = []any{map[string]any{"resource": "code-search", "tools": []string{"*"}, "mode": "read-only"}}
 	case "spawn":

@@ -17,7 +17,7 @@ func goodEnroll() *control.Enroll {
 	return &control.Enroll{
 		CardSHA256: enrollDigest,
 		Artifact:   "ghcr.io/example/coder@sha256:" + enrollDigest,
-		Requested:  []string{"tool:search", "model:claude"},
+		Requested:  []string{"tool:search", "fast"},
 		SignerKID:  "kid-1",
 		Files:      []control.EnrollFile{{Path: "agents/coder.yaml", SHA256: enrollDigest}},
 	}

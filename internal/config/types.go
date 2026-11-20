@@ -35,7 +35,7 @@ type AgentDef struct {
 // container image and the identity of the agent card it was enrolled from.
 type Provenance struct {
 	Image       string `yaml:"image"`        // digest-pinned image reference (name@sha256:...)
-	CardSHA256  string `yaml:"card_sha256"`  // SHA-256 of the agent card as enrolled
+	CardSHA256  string `yaml:"card_sha256"`  // SHA-256 of the JCS-canonical card body with its signatures removed (not of the card file; sha256sum will not match)
 	CardVersion string `yaml:"card_version"` // the card's declared version
 }
 

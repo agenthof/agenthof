@@ -134,11 +134,11 @@ type EnrollFile struct {
 
 // Enroll is what an "enroll" record says about a governed-agent enrollment.
 type Enroll struct {
-	CardSHA256 string       `json:"card_sha256"` // lowercase hex sha256 of the agent card
-	Artifact   string       `json:"artifact"`    // the artifact the card names
-	Requested  []string     `json:"requested"`   // capabilities the card requested
-	SignerKID  string       `json:"signer_kid"`  // key id of the card's signer
-	Files      []EnrollFile `json:"files"`       // config files the enrollment wrote
+	CardSHA256 string       `json:"card_sha256"`         // lowercase hex SignedDigest: sha256 of the JCS-canonical card with signatures removed, not of the card file
+	Artifact   string       `json:"artifact"`            // the artifact the card names
+	Requested  []string     `json:"requested,omitempty"` // capabilities the card requested
+	SignerKID  string       `json:"signer_kid"`          // key id of the card's signer
+	Files      []EnrollFile `json:"files,omitempty"`     // config files the enrollment wrote
 }
 
 // Seal is what a "seal" record says about the segment it closes. head_seq and
