@@ -266,7 +266,7 @@ See [`docs/demo.md`](docs/demo.md) for the full walkthrough.
   bounded and linked to its parent.
 - [`docs/lifecycle-enroll.md`](docs/lifecycle-enroll.md) — the life of an
   enrolled agent: a signed third-party card verified, disclosed, consented to,
-  and written as spawn-only, contained config.
+  and written as a spawn-only agent that runs only contained.
 - [`docs/control-plane-lifecycle.md`](docs/control-plane-lifecycle.md) — the
   life of a control action: apply, the kill switch, the control ledger, and
   the life of an anchor that pins its head to a transparency log.
