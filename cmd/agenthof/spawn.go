@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -30,6 +31,13 @@ const reasonCompartmentUnavailable = "spawn compartment unavailable"
 // refused the set because the artifact an agent would run is not one its
 // enrollment consented to: a binding refusal, not an outage.
 const reasonArtifactRefused = "spawn artifact refused"
+
+// reasonArtifactNotConsented is the fixed, ledgered reason when the gateway's
+// own admission check finds that a provenance agent's measured artifact is
+// absent or is not one of its consented forms. Distinct from
+// reasonArtifactRefused (the supervisor refused) and
+// reasonCompartmentUnavailable.
+const reasonArtifactNotConsented = "spawn artifact not consented"
 
 // reasonChildRefusedByPolicy is the fixed reason the parent's spawn event and
 // the door's answer carry when the engine refuses the child at its registry
@@ -253,7 +261,8 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 		return rungateway.SpawnResult{Status: "refused", Reason: reasonCompartmentUnavailable}, nil
 	}
 	childID := engine.NewRunID()
-	lease, err := d.sup.Provision(ctx, childID, distinctStepAgents(wf), nil)
+	agents := distinctStepAgents(wf)
+	lease, err := d.sup.Provision(ctx, childID, agents, d.expectedArtifacts(agents))
 	if errors.Is(err, refspawn.ErrArtifactRefused) {
 		logger.Warn("spawn refused", "reason", "artifact binding refused", "child_run", childID)
 		return rungateway.SpawnResult{Status: "refused", Reason: reasonArtifactRefused}, nil
@@ -268,6 +277,14 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 	if err := checkPlacement(mountedDir, lease); err != nil {
 		logger.Error("spawn refused", "reason", err.Error(), "child_run", childID) // our own fixed text, no path
 		return rungateway.SpawnResult{Status: "refused", Reason: reasonCompartmentUnavailable}, nil
+	}
+	// The trust anchor: whatever the supervisor said or omitted, a provenance
+	// agent runs only if its measured artifact is one it consented to.
+	// Provisioned stays true — a compartment set was consumed — so the
+	// refusal counts against max_total_spawns.
+	if evidence, ok := d.admitArtifacts(agents, lease); !ok {
+		logger.Warn("spawn refused", "reason", "measured artifact not consented", "child_run", childID)
+		return rungateway.SpawnResult{Status: "refused", Reason: reasonArtifactNotConsented, Provisioned: true, ChildArtifact: evidence}, nil
 	}
 	// The child runs until the parent step's context ends — or until the
 	// supervisor ends the set (a compartment died): a child with nothing to
@@ -287,6 +304,94 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 	opts.RunID = childID
 	opts.NewGateway = childGateway{deps: d, socketDir: lease.ChildDir, execURL: config.UnixScheme + lease.ExecSocket}.newGateway
 	return d.runChild(childCtx, childRole, childWorkflow, input, parent, exec, opts, true, lease.Tier, lease.TierOpts, childArtifacts(lease.Ran))
+}
+
+// consentedForms returns the artifact forms a provenance agent consented to
+// at enrollment, digest-only: an oci-image form (the image's sha256 digest)
+// and/or a host-program form (its builds' content hashes). Nil for an agent
+// with no provenance.
+func consentedForms(a config.AgentDef) []refspawn.ExpectedArtifact {
+	if a.Provenance == nil {
+		return nil
+	}
+	var out []refspawn.ExpectedArtifact
+	if dg := a.Provenance.ImageDigest(); dg != "" {
+		out = append(out, refspawn.ExpectedArtifact{Kind: "oci-image", Values: []string{dg}})
+	}
+	if a.Provenance.Program != "" && len(a.Provenance.Builds) > 0 {
+		hashes := make([]string, 0, len(a.Provenance.Builds))
+		for _, b := range a.Provenance.Builds {
+			hashes = append(hashes, b.SHA256)
+		}
+		out = append(out, refspawn.ExpectedArtifact{Kind: "host-program", Values: hashes})
+	}
+	return out
+}
+
+// expectedArtifacts is what the supervisor is asked to enforce: each
+// provenance agent's consented forms (nil when no agent has any).
+func (d *runDeps) expectedArtifacts(agents []string) map[string][]refspawn.ExpectedArtifact {
+	var out map[string][]refspawn.ExpectedArtifact
+	for _, name := range agents {
+		def, ok := d.reg.Agent(name)
+		if !ok {
+			continue
+		}
+		if forms := consentedForms(def); len(forms) > 0 {
+			if out == nil {
+				out = map[string][]refspawn.ExpectedArtifact{}
+			}
+			out[name] = forms
+		}
+	}
+	return out
+}
+
+// ranConsented reports whether a measured artifact of the given kind shares
+// a value with a consented form of the same kind (exact string compare).
+func ranConsented(kind string, ran []string, forms []refspawn.ExpectedArtifact) bool {
+	for _, f := range forms {
+		if f.Kind != kind {
+			continue
+		}
+		for _, v := range f.Values {
+			if slices.Contains(ran, v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// admitArtifacts is the gateway's own check, independent of what was sent to
+// the supervisor (provenance is read fresh from the registry): every
+// spawn-only agent must have a measured artifact that shares a value with a
+// consented form of the same kind. One failure refuses the whole set; the
+// evidence is the measured artifact of each failing agent that had one. A
+// supervisor that echoes the consented value back as a fake measurement
+// defeats this check — it guards a lenient or older supervisor and a wrongly
+// mapped image, not a lying one.
+func (d *runDeps) admitArtifacts(agents []string, lease *refspawn.Lease) (map[string]engine.ChildArtifactRef, bool) {
+	admitted := true
+	var evidence map[string]engine.ChildArtifactRef
+	for _, name := range agents {
+		def, ok := d.reg.Agent(name)
+		if !ok || !def.SpawnOnly() {
+			continue
+		}
+		kind, values, measured := lease.RanArtifact(name)
+		if measured && ranConsented(kind, values, consentedForms(def)) {
+			continue
+		}
+		admitted = false
+		if measured {
+			if evidence == nil {
+				evidence = map[string]engine.ChildArtifactRef{}
+			}
+			evidence[name] = engine.ChildArtifactRef{Kind: kind, Values: values}
+		}
+	}
+	return evidence, admitted
 }
 
 // childArtifacts converts what the supervisor measured each child agent's

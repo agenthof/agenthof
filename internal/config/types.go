@@ -73,6 +73,16 @@ func (p Provenance) HasWellFormedForm() bool {
 	return true
 }
 
+// ImageDigest returns the "sha256:<hex>" digest of the digest-pinned image
+// form, or "" when there is none (no image, or one not digest-pinned).
+func (p Provenance) ImageDigest() string {
+	if !isDigestPinned(p.Image) {
+		return ""
+	}
+	_, digest, _ := strings.Cut(p.Image, "@")
+	return digest
+}
+
 // isSHA256Ref reports whether s is "sha256:" followed by 64 lowercase hex.
 // (Mirrors the agent-card check; config cannot import agentcard.)
 func isSHA256Ref(s string) bool {
