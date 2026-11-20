@@ -233,11 +233,11 @@ func TestRenderTextChildArtifactTag(t *testing.T) {
 	r := Result{Events: []Record{{
 		Time: time.Unix(0, 0).UTC(), Source: "run", Kind: "spawn", Invoker: Invoker{Subject: "dana", Method: "asserted"},
 		ChildArtifact: map[string]ArtifactRef{
-			"writer":   {Kind: "image-digest", Values: []string{"sha256:aa", "sha256:bb"}},
-			"analyser": {Kind: "program-hash", Values: []string{"sha256:cc"}},
+			"writer":   {Kind: "oci-image", Values: []string{"sha256:aa", "sha256:bb"}},
+			"analyser": {Kind: "host-program", Values: []string{"sha256:cc"}},
 		},
 	}}}
-	const want = "[child-artifact=analyser:program-hash:sha256:cc;writer:image-digest:sha256:aa,sha256:bb]"
+	const want = "[child-artifact=analyser:host-program:sha256:cc;writer:oci-image:sha256:aa,sha256:bb]"
 	for i := 0; i < 20; i++ {
 		if out := RenderText(r); !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)

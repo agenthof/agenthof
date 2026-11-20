@@ -518,10 +518,10 @@ func TestRenderSpawnChildArtifact(t *testing.T) {
 		return engine.Event{Type: "spawn", Status: status, ChildRole: "worker", ChildWorkflow: "child-wf", ChildRunID: "r-child", Depth: 1, OutputSHA: "0123456789abcdef", Reason: "boom", ChildConfiner: tier, ChildArtifact: art}
 	}
 	art := map[string]engine.ChildArtifactRef{
-		"writer":   {Kind: "image-digest", Values: []string{"sha256:bb", "sha256:aa"}},
-		"analyser": {Kind: "program-hash", Values: []string{"sha256:cc"}},
+		"writer":   {Kind: "oci-image", Values: []string{"sha256:bb", "sha256:aa"}},
+		"analyser": {Kind: "host-program", Values: []string{"sha256:cc"}},
 	}
-	const note = " [child-artifact (runtime-reported, not proof): analyser=program-hash:sha256:cc; writer=image-digest:sha256:bb,sha256:aa]\n"
+	const note = " [child-artifact (runtime-reported, not proof): analyser=host-program:sha256:cc; writer=oci-image:sha256:bb,sha256:aa]\n"
 
 	cases := []struct{ status, want string }{
 		{"succeeded", "artifact 01234567" + note},
@@ -536,6 +536,13 @@ func TestRenderSpawnChildArtifact(t *testing.T) {
 	// With a confiner too: confiner first, artifact after.
 	if out := render(spawn("succeeded", "wsl2", art)); !strings.Contains(out, "[child-confiner: wsl2]"+note) {
 		t.Errorf("confiner then artifact expected:\n%s", out)
+	}
+	// Full-length measured values render intact (origin.Clean must not cap them).
+	full := "sha256:" + strings.Repeat("ab", 32)
+	ref := "registry.example.com/team/agent-image@" + full
+	fullArt := map[string]engine.ChildArtifactRef{"writer": {Kind: "oci-image", Values: []string{full, ref}}}
+	if out := render(spawn("succeeded", "", fullArt)); !strings.Contains(out, "writer=oci-image:"+full+","+ref+"]") {
+		t.Errorf("full-length values truncated:\n%s", out)
 	}
 	// Deterministic across renders (map iteration order).
 	first := render(spawn("succeeded", "", art))

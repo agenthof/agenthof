@@ -37,16 +37,24 @@ func TestNormalizeMapping(t *testing.T) {
 	}
 }
 
-// TestNormalizeRunOutcome checks that Record.Outcome is derived only from
-// the event types that carry a genuine run-level outcome, and never leaks
-// e.Status's other meanings (e.g. bounced_back's target step name) into it.
 func TestNormalizeRunChildArtifact(t *testing.T) {
+	// A full-length measured value (a bare sha256 digest, and a longer
+	// name@digest ref) must survive origin.Clean intact.
+	full := "sha256:" + strings.Repeat("ab", 32)
+	ref := "registry.example.com/team/agent-image@" + full
+	long := normalizeRun(engine.Event{Type: "spawn", ChildArtifact: map[string]engine.ChildArtifactRef{
+		"writer": {Kind: "oci-image", Values: []string{full, ref}},
+	}}, 0)
+	if v := long.ChildArtifact["writer"].Values; len(v) != 2 || v[0] != full || v[1] != ref {
+		t.Fatalf("full-length values truncated: %q", v)
+	}
+
 	e := engine.Event{Type: "spawn", Status: "succeeded", ChildArtifact: map[string]engine.ChildArtifactRef{
-		"writer": {Kind: "image-digest", Values: []string{"sha256:aa", "sha256:bb"}},
+		"writer": {Kind: "oci-image", Values: []string{"sha256:aa", "sha256:bb"}},
 	}}
 	r := normalizeRun(e, 0)
 	got, ok := r.ChildArtifact["writer"]
-	if !ok || got.Kind != "image-digest" || len(got.Values) != 2 || got.Values[1] != "sha256:bb" {
+	if !ok || got.Kind != "oci-image" || len(got.Values) != 2 || got.Values[1] != "sha256:bb" {
 		t.Fatalf("ChildArtifact = %+v", r.ChildArtifact)
 	}
 	if normalizeRun(engine.Event{Type: "spawn"}, 0).ChildArtifact != nil {
@@ -58,6 +66,9 @@ func TestNormalizeRunChildArtifact(t *testing.T) {
 	}
 }
 
+// TestNormalizeRunOutcome checks that Record.Outcome is derived only from
+// the event types that carry a genuine run-level outcome, and never leaks
+// e.Status's other meanings (e.g. bounced_back's target step name) into it.
 func TestNormalizeRunOutcome(t *testing.T) {
 	cases := []struct {
 		name string
