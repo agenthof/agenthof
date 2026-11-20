@@ -185,10 +185,10 @@ func New(endpoint string, logger *slog.Logger) (*Client, error) {
 
 // Provision asks the supervisor for childRunID's set — one compartment per
 // name in agents — and returns once every socket in the answer is up. Any
-// failure is ErrUnavailable — except a binding refusal, which is
-// ErrArtifactRefused: the socket's directory not private, the
+// failure is ErrUnavailable — the socket's directory not private, the
 // supervisor unreachable, a refusal, the caller's context ending, or an
-// answer that is not the pinned shape. On success the returned Lease holds
+// answer that is not the pinned shape — except the supervisor's dedicated
+// binding refusal, which is ErrArtifactRefused. On success the returned Lease holds
 // the body open; the caller MUST Release it when the child is over.
 func (c *Client) Provision(ctx context.Context, childRunID string, agents []string, expected map[string][]ExpectedArtifact) (*Lease, error) {
 	logger := c.logger.With("child_run", childRunID)

@@ -387,6 +387,18 @@ func TestSpawnWithoutSupervisorIsRefusedUnprovisioned(t *testing.T) {
 	}
 }
 
+func TestSpawnBindingRefusalHasItsOwnReason(t *testing.T) {
+	stub := &stubProvisioner{err: refspawn.ErrArtifactRefused}
+	deps := buildDeps(t, spawnTestConfig(), t.TempDir(), stub)
+	res, err := deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
+	if err != nil || res.Status != "refused" || res.Reason != reasonArtifactRefused || res.ChildRunID != "" || res.Provisioned {
+		t.Fatalf("res=%+v err=%v, want the distinct binding-refusal reason", res, err)
+	}
+	if reasonArtifactRefused == reasonCompartmentUnavailable {
+		t.Fatal("the binding refusal must be distinguishable from an outage")
+	}
+}
+
 func TestSpawnProvisionFailureIsRefusedUnprovisioned(t *testing.T) {
 	stub := &stubProvisioner{err: refspawn.ErrUnavailable}
 	deps := buildDeps(t, spawnTestConfig(), t.TempDir(), stub)

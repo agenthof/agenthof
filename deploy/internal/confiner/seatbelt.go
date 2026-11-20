@@ -467,8 +467,10 @@ const hostProgramKind = "host-program"
 // returns abs unchanged. Otherwise the program is resolved through symlinks
 // and the resolved file is hashed, and that same resolved path is what the
 // caller execs, so the hashed file is the exec'd file. Nothing is copied. A
-// hash outside the consented set, a program that cannot be read, or an exp of
-// any other kind refuses with ErrArtifactMismatch before anything is started:
+// hash outside the consented set, or an exp of any other kind, refuses with
+// ErrArtifactMismatch, and a program that cannot be resolved or read with
+// ErrDidNotLaunch (an operator-config gap, not a mismatch), before anything is
+// started:
 // an unbound program is never run when a binding was asked for.
 //
 // The honest limits (the binding is weaker than the podman image digest):
@@ -494,16 +496,16 @@ func bindHostProgram(abs string, exp *ExpectedArtifact) (path, hash string, err 
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", "", fmt.Errorf("%w: resolve %s: %v", ErrArtifactMismatch, abs, err)
+		return "", "", fmt.Errorf("%w: resolve %s: %v", ErrDidNotLaunch, abs, err)
 	}
 	f, err := os.Open(resolved)
 	if err != nil {
-		return "", "", fmt.Errorf("%w: read %s: %v", ErrArtifactMismatch, resolved, err)
+		return "", "", fmt.Errorf("%w: read %s: %v", ErrDidNotLaunch, resolved, err)
 	}
 	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return "", "", fmt.Errorf("%w: read %s: %v", ErrArtifactMismatch, resolved, err)
+		return "", "", fmt.Errorf("%w: read %s: %v", ErrDidNotLaunch, resolved, err)
 	}
 	hash = "sha256:" + hex.EncodeToString(h.Sum(nil))
 	if !slices.Contains(exp.Values, hash) {

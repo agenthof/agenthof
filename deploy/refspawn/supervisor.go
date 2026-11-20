@@ -274,6 +274,14 @@ func (s *supervisor) handleProvision(w http.ResponseWriter, req *http.Request) {
 		expected[a] = exp
 		names = append(names, compartmentName(body.ChildRunID, a))
 	}
+	// An expected entry keyed by a name that is not a requested agent is a
+	// keying bug upstream; refuse it rather than launch the agents unbound.
+	for a := range body.Expected {
+		if !seen[a] {
+			http.Error(w, "refspawn: expected names an agent that was not requested", http.StatusBadRequest)
+			return
+		}
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "refspawn: streaming unsupported", http.StatusInternalServerError)

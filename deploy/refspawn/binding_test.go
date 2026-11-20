@@ -224,3 +224,63 @@ func TestMissingImageStaysForbidden(t *testing.T) {
 		t.Fatalf("an agent with no image: code = %d, want 403 (not the binding status)", code)
 	}
 }
+
+func TestExpectedFormsOfTheTierKindAreUnioned(t *testing.T) {
+	_, srv, bc := bindSupervisor(t, confiner.TierPodman, "a")
+	v2 := "sha256:" + strings.Repeat("ee", 32)
+	code, resp, _ := provisionExpected(t, srv, "r-0a0b0c0d", []string{"a"}, map[string][]wireExpected{
+		"a": {{Kind: "oci-image", Values: []string{testHash}}, {Kind: "oci-image", Values: []string{v2}}, {Kind: "host-program", Values: []string{"sha256:" + strings.Repeat("11", 32)}}},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("code = %d", code)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	bc.mu.Lock()
+	got := bc.expected[compartmentName("r-0a0b0c0d", "a")]
+	bc.mu.Unlock()
+	if got == nil || got.Kind != "oci-image" || len(got.Values) != 2 || got.Values[0] != testHash || got.Values[1] != v2 {
+		t.Fatalf("Spec.Expected = %+v, want both oci-image values and no host-program one", got)
+	}
+}
+
+func TestEmptyOrNullFormListIsRefused(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty list": `{"child_run_id":"r-0a0b0c0d","agents":["a"],"expected":{"a":[]}}`,
+		"null":       `{"child_run_id":"r-0a0b0c0d","agents":["a"],"expected":{"a":null}}`,
+	} {
+		s, srv, bc := bindSupervisor(t, confiner.TierPodman, "a")
+		resp, err := srv.Client().Post(srv.URL+"/provision", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnprocessableEntity {
+			t.Fatalf("%s: code = %d, want 422 (an entry that is present binds to nothing)", name, resp.StatusCode)
+		}
+		bc.mu.Lock()
+		launched := len(bc.expected)
+		bc.mu.Unlock()
+		s.mu.Lock()
+		used := s.used
+		s.mu.Unlock()
+		if launched != 0 || used != 0 {
+			t.Fatalf("%s: launched=%d used=%d, want nothing started", name, launched, used)
+		}
+	}
+}
+
+func TestExpectedForANonRequestedAgentIsBadRequest(t *testing.T) {
+	_, srv, bc := bindSupervisor(t, confiner.TierPodman, "a")
+	code, _, _ := provisionExpected(t, srv, "r-0a0b0c0d", []string{"a"}, map[string][]wireExpected{
+		"a":     {{Kind: "oci-image", Values: []string{testHash}}},
+		"other": {{Kind: "oci-image", Values: []string{testHash}}},
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.expected) != 0 {
+		t.Fatal("nothing may launch when expected is keyed by a name that was not requested")
+	}
+}

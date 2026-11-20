@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+var ranHash = "sha256:" + strings.Repeat("ab", 32)
 
 // fakeSupervisor serves the provision wire contract on a Unix socket in a
 // private (0700) directory, as refspawn would. mode picks the answer; a
@@ -63,6 +66,30 @@ func (f *fakeSupervisor) serve(w http.ResponseWriter, r *http.Request) {
 		"exec_socket":   "/tmp/sp/r-child-exec/refexec.sock",
 	}
 	switch f.mode {
+	case "status-422", "status-403", "status-409", "status-500", "status-502", "status-503":
+		code, _ := strconv.Atoi(strings.TrimPrefix(f.mode, "status-"))
+		http.Error(w, "refspawn: secret supervisor text", code)
+		return
+	case "ran-ok":
+		line["ran"] = map[string]any{"a": map[string]any{"kind": "oci-image", "values": []string{ranHash}}}
+	case "ran-extra-agent":
+		line["ran"] = map[string]any{"ghost": map[string]any{"kind": "oci-image", "values": []string{ranHash}}}
+	case "ran-upper-hex":
+		line["ran"] = map[string]any{"a": map[string]any{"kind": "oci-image", "values": []string{"sha256:" + strings.Repeat("AB", 32)}}}
+	case "ran-short-hash":
+		line["ran"] = map[string]any{"a": map[string]any{"kind": "oci-image", "values": []string{"sha256:" + strings.Repeat("ab", 31)}}}
+	case "ran-no-prefix":
+		line["ran"] = map[string]any{"a": map[string]any{"kind": "oci-image", "values": []string{strings.Repeat("ab", 32)}}}
+	case "ran-bad-kind":
+		line["ran"] = map[string]any{"a": map[string]any{"kind": "Oci Image", "values": []string{ranHash}}}
+	case "ran-empty-values":
+		line["ran"] = map[string]any{"a": map[string]any{"kind": "oci-image", "values": []string{}}}
+	case "ran-too-many":
+		vals := make([]string, 65)
+		for i := range vals {
+			vals[i] = ranHash
+		}
+		line["ran"] = map[string]any{"a": map[string]any{"kind": "oci-image", "values": vals}}
 	case "refuse":
 		http.Error(w, "refspawn: compartment cap reached", http.StatusServiceUnavailable)
 		return
@@ -330,4 +357,89 @@ func TestNewLeaseWatchesTheBody(t *testing.T) {
 		t.Fatal("Done must close at body EOF")
 	}
 	l.Release() // closing an already-ended body is fine
+}
+
+func TestProvisionRequestCarriesExpectedPerAgent(t *testing.T) {
+	f := newFakeSupervisor(t, "ok")
+	exp := map[string][]ExpectedArtifact{
+		"a": {{Kind: "oci-image", Values: []string{ranHash}}, {Kind: "host-program", Values: []string{ranHash}}},
+	}
+	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"}, exp)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer lease.Release()
+	f.mu.Lock()
+	body := f.gotBody
+	f.mu.Unlock()
+	if !strings.Contains(body, `"expected":{"a":[{"kind":"oci-image","values":["`+ranHash+`"]},{"kind":"host-program","values":["`+ranHash+`"]}]}`) {
+		t.Fatalf("expected is not on the wire in the pinned shape: %s", body)
+	}
+}
+
+func TestProvisionRequestOmitsExpectedWhenNil(t *testing.T) {
+	f := newFakeSupervisor(t, "ok")
+	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"}, nil)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer lease.Release()
+	f.mu.Lock()
+	body := f.gotBody
+	f.mu.Unlock()
+	if strings.Contains(body, "expected") {
+		t.Fatalf("a nil expected must omit the key: %s", body)
+	}
+}
+
+func TestProvisionBindingStatusIsItsOwnSentinel(t *testing.T) {
+	f := newFakeSupervisor(t, "status-422")
+	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a"}, nil)
+	if !errors.Is(err, ErrArtifactRefused) || lease != nil {
+		t.Fatalf("err=%v lease=%v, want ErrArtifactRefused and no lease", err, lease)
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Fatal("a binding refusal must not be ErrUnavailable")
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("the supervisor's text must not ride on the error: %v", err)
+	}
+}
+
+func TestProvisionOtherRefusalsStayUnavailable(t *testing.T) {
+	for _, mode := range []string{"status-403", "status-409", "status-500", "status-502", "status-503"} {
+		f := newFakeSupervisor(t, mode)
+		lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a"}, nil)
+		if !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrArtifactRefused) || lease != nil {
+			t.Fatalf("%s: err=%v lease=%v, want ErrUnavailable and not the binding sentinel", mode, err, lease)
+		}
+	}
+}
+
+func TestProvisionSurfacesMeasuredRan(t *testing.T) {
+	f := newFakeSupervisor(t, "ran-ok")
+	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"}, nil)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer lease.Release()
+	kind, vals, ok := lease.RanArtifact("a")
+	if !ok || kind != "oci-image" || len(vals) != 1 || vals[0] != ranHash {
+		t.Fatalf("RanArtifact(a) = %q %v %v", kind, vals, ok)
+	}
+	if _, _, ok := lease.RanArtifact("b"); ok {
+		t.Fatal("RanArtifact(b): an agent that measured nothing must report ok=false")
+	}
+}
+
+func TestProvisionMalformedRanIsUnavailable(t *testing.T) {
+	for _, mode := range []string{"ran-extra-agent", "ran-upper-hex", "ran-short-hash", "ran-no-prefix", "ran-bad-kind", "ran-empty-values", "ran-too-many"} {
+		f := newFakeSupervisor(t, mode)
+		lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"}, nil)
+		if !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrArtifactRefused) || lease != nil {
+			t.Fatalf("%s: err=%v lease=%v, want ErrUnavailable and no lease", mode, err, lease)
+		}
+		// The rejected answer's body was closed: the supervisor sees the hang-up.
+		waitFor(t, mode+": the supervisor to see the hang-up", func() bool { held, _ := f.counts(); return held == 0 })
+	}
 }

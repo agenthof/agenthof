@@ -231,10 +231,9 @@ func TestSeatbeltHostProgramUnreadableFailsClosed(t *testing.T) {
 			if c != nil || err == nil {
 				t.Fatalf("Launch = %v, %v; want a refusal", c, err)
 			}
-			// A missing or dangling program is refused earlier, as did-not-launch;
-			// the unreadable one must be a mismatch. Either way nothing ran.
-			if name == "unreadable" && !errors.Is(err, ErrArtifactMismatch) {
-				t.Fatalf("unreadable: err = %v, want ErrArtifactMismatch", err)
+			// An I/O failure is did-not-launch, never a mismatch: nothing ran.
+			if !errors.Is(err, ErrDidNotLaunch) || errors.Is(err, ErrArtifactMismatch) {
+				t.Fatalf("%s: err = %v, want ErrDidNotLaunch and not ErrArtifactMismatch", name, err)
 			}
 			mustNotExist(t, marker)
 			if ents, _ := os.ReadDir(s.cfg.PIDDir); len(ents) != 0 {

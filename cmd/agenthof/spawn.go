@@ -26,6 +26,11 @@ import (
 // agent reach the runtime directly. Fail-closed: such a child never runs.
 const reasonCompartmentUnavailable = "spawn compartment unavailable"
 
+// reasonArtifactRefused is the fixed, ledgered reason when the supervisor
+// refused the set because the artifact an agent would run is not one its
+// enrollment consented to: a binding refusal, not an outage.
+const reasonArtifactRefused = "spawn artifact refused"
+
 // reasonChildRefusedByPolicy is the fixed reason the parent's spawn event and
 // the door's answer carry when the engine refuses the child at its registry
 // gate (RBAC, role/workflow ownership, an unknown role). It classifies the
@@ -249,6 +254,10 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 	}
 	childID := engine.NewRunID()
 	lease, err := d.sup.Provision(ctx, childID, distinctStepAgents(wf), nil)
+	if errors.Is(err, refspawn.ErrArtifactRefused) {
+		logger.Warn("spawn refused", "reason", "artifact binding refused", "child_run", childID)
+		return rungateway.SpawnResult{Status: "refused", Reason: reasonArtifactRefused}, nil
+	}
 	if err != nil {
 		// The client already logged the failure by class; the ledger gets
 		// the fixed reason and nothing of the supervisor's text.
