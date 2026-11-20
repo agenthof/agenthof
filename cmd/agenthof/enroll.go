@@ -58,7 +58,14 @@ const maxEnrollName = 64
 
 // enrollArtifactRE is a pinned artifact reference: <ref>@sha256:<64 hex>, no
 // whitespace. A tag-only reference moves under the operator; a digest does not.
-var enrollArtifactRE = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
+var enrollArtifactRE = regexp.MustCompile(`^[A-Za-z0-9._:/+-]+@sha256:[0-9a-f]{64}$`)
+
+// enrollVersionRE is the grammar of the card version recorded in provenance
+// and the written description: conservative, so it can never read as prose.
+var enrollVersionRE = regexp.MustCompile(`^[A-Za-z0-9._+-]{0,64}$`)
+
+// enrollAppend records the success event; a variable so a test can fail it.
+var enrollAppend = control.Append
 
 // acceptRE is --accept's grammar, and the form the card digest is printed in.
 var acceptRE = regexp.MustCompile(`^sha256:([0-9a-f]{64})$`)
@@ -128,18 +135,19 @@ func fetchCard(source string, client *http.Client) ([]byte, error) {
 	if strings.Contains(source, "://") {
 		return fetchCardURL(source, client)
 	}
-	fi, err := os.Stat(source)
+	f, err := os.Open(source)
+	if err != nil {
+		return nil, fmt.Errorf("read card: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	// Judge the handle we opened, not the path: no check-then-open window.
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("read card: %w", err)
 	}
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("card source %q is not a regular file", origin.Clean(source))
 	}
-	f, err := os.Open(source)
-	if err != nil {
-		return nil, fmt.Errorf("read card: %w", err)
-	}
-	defer func() { _ = f.Close() }()
 	return readCardBody(f)
 }
 
@@ -163,7 +171,7 @@ func fetchCardURL(source string, client *http.Client) ([]byte, error) {
 			return errors.New("refusing a redirect to another host")
 		}
 		if len(via) > maxEnrollRedirects {
-			return errors.New("refusing a redirect chain longer than 3")
+			return fmt.Errorf("refusing a redirect chain longer than %d", maxEnrollRedirects)
 		}
 		return nil
 	}
@@ -359,6 +367,7 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 	record := func(outcome string, reason *control.Reason, payload *control.Enroll, code int) int {
 		head, err := control.Append(*controlLog, control.Event{
 			Action:     "enroll",
+			Agent:      *name,
 			Outcome:    outcome,
 			Reason:     reason,
 			Invoker:    inv,
@@ -495,11 +504,8 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 	if !enrollArtifactRE.MatchString(ext.Artifact) || len(ext.Artifact) > control.MaxEnrollArtifactLen {
 		return enrollRefusal(stderr, "the card's artifact %q is not pinned to a digest (want <ref>@sha256:<64 hex>)", origin.Clean(ext.Artifact))
 	}
-	if len(card.Version) > maxEnrollVersionLen {
-		return enrollRefusal(stderr, "the card's version is longer than %d characters", maxEnrollVersionLen)
-	}
-	if err := cleanCardString("version", card.Version); err != nil {
-		return enrollRefusal(stderr, "%v", err)
+	if !enrollVersionRE.MatchString(card.Version) {
+		return enrollRefusal(stderr, "the card's version must be at most %d characters of A-Z a-z 0-9 . _ + -", maxEnrollVersionLen)
 	}
 	tools, models := map[string]bool{}, map[string]bool{}
 	for id := range instCfg.Gateway.Tools {
@@ -603,8 +609,9 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 		return enrollRefusal(stderr, "%v; nothing written", err)
 	}
 	payload.Files = written
-	head, err := control.Append(*controlLog, control.Event{
+	head, err := enrollAppend(*controlLog, control.Event{
 		Action:     "enroll",
+		Agent:      *name,
 		Outcome:    "success",
 		Invoker:    inv,
 		AssertedAs: assertedAs,
@@ -612,7 +619,10 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 		Enroll:     payload,
 	})
 	if err != nil {
-		// Never leave an enrollment the ledger does not know of.
+		// Best effort: remove what this run created so a refused record
+		// leaves no unrecorded enrollment. A crash between the write and the
+		// append, or a failed removal, can still leave files the ledger does
+		// not know of; that is bounded because apply is its own recorded act.
 		for _, f := range written {
 			_ = os.Remove(filepath.Join(*cfgDir, filepath.FromSlash(f.Path)))
 		}
@@ -622,8 +632,8 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stdout, "enrolled %q: %d files created under %s\n", *name, len(written), *cfgDir)
 	_, _ = fmt.Fprintf(stdout, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
 	_, _ = fmt.Fprintf(stdout, "next, by hand (granting a trusted agent the right to launch untrusted code is your edit to make):\n")
-	_, _ = fmt.Fprintf(stdout, "  1. in the trusted orchestrator's agent file, add:\n       may_spawn:\n         - role: %s\n           workflow: %s\n", *name, *name)
-	_, _ = fmt.Fprintf(stdout, "  2. in the spawn supervisor's config, add under images: (a podman image reference; under seatbelt, the absolute path of the program with this content hash)\n       %s: %s\n", *name, ext.Artifact)
+	_, _ = fmt.Fprintf(stdout, "  1. in the trusted orchestrator's agent file, add:\n       may_spawn:\n         - role: %q\n           workflow: %q\n", *name, *name)
+	_, _ = fmt.Fprintf(stdout, "  2. in the spawn supervisor's config, add under images: (a podman image reference; under seatbelt, the absolute path of the program with this content hash)\n       %q: %q\n", *name, ext.Artifact)
 	_, _ = fmt.Fprintf(stdout, "  3. review, then: agenthof apply --config %s\n", *cfgDir)
 	return 0
 }
