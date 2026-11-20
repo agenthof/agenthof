@@ -467,7 +467,7 @@ and groups are used outside of `apply`).
 ### `control`
 
 Optional. The control-plane operations this role's `allowed_groups` members
-may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor`, `seal` — the nine fixed
+may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor`, `seal`, `enroll` — the ten fixed
 operations, named individually. There is no wildcard spelling and no
 operation is granted by omission — the one implication is that `apply`
 includes `pull`; nothing else is implied: a role with no `control` key (or `control:`
