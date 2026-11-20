@@ -804,70 +804,17 @@ echo "isolation: one workspace per child, shared by that child's agents, fresh p
 #     half is the gateway's one trusted signer. The enrolled agent's name is
 #     also the supervisor's images: key, which spawn_config already maps to
 #     the host echo-agent — the entry enroll's step 2 prints for the operator.
-mkdir -p "$WORK/cardsign"
-cat >"$WORK/cardsign/main.go" <<'GO'
-package main
+#     The signer and the enroll steps are shared with the real-backend runs
+#     (scripts/enroll-lib.sh).
+# shellcheck source=scripts/enroll-lib.sh
+. "$ROOT/scripts/enroll-lib.sh"
+enroll_build_signer
+SIGNER_KEY="$(enroll_card "$WORK/card.json" oci "$ENROLL_ARTIFACT_HEX")"
 
-import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"os"
-)
-
-// Writes the signed card to os.Args[1] (artifact digest os.Args[2]) and
-// prints the public key, base64, a gateway trusts.
-func main() {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	body := map[string]any{
-		"name":    "Enrolled Echo",
-		"version": "1.0.0",
-		"capabilities": map[string]any{"extensions": []any{map[string]any{
-			"uri": "https://agenthof.dev/ext/agent/v1",
-			"params": map[string]any{
-				"artifact":  "ghcr.io/acme/echo@sha256:" + os.Args[2],
-				"interface": "a2a",
-				"model":     "fast",
-			},
-		}}},
-	}
-	enc := base64.RawURLEncoding
-	canon, err := json.Marshal(body) // compact, sorted keys: already canonical for these values
-	if err != nil {
-		panic(err)
-	}
-	hdr, err := json.Marshal(map[string]any{"alg": "EdDSA", "kid": "curator"})
-	if err != nil {
-		panic(err)
-	}
-	p := enc.EncodeToString(hdr)
-	sig := enc.EncodeToString(ed25519.Sign(priv, []byte(p+"."+enc.EncodeToString(canon))))
-	body["signatures"] = []any{map[string]any{"protected": p, "signature": sig}}
-	out, err := json.Marshal(body)
-	if err != nil {
-		panic(err)
-	}
-	if err := os.WriteFile(os.Args[1], out, 0o644); err != nil {
-		panic(err)
-	}
-	fmt.Print(base64.StdEncoding.EncodeToString(pub))
-}
-GO
-go build -o "$WORK/cardsign/cardsign" "$WORK/cardsign/main.go"
-SIGNER_KEY="$("$WORK/cardsign/cardsign" "$WORK/card.json" "$ENROLL_ARTIFACT_HEX")"
-{ [ -s "$WORK/card.json" ] && [ -n "$SIGNER_KEY" ]; } || fail "the signer produced no card or key"
-
-write_config "$WORK/cfg-enroll" "$CAPS
-trusted_signers:
-  - {kid: curator, key: $SIGNER_KEY}" "$CHILD_RESPAWNS"
-# The orchestrator's role may enroll: the one control action enroll asks for.
-sed -i.bak 's/^control: \[apply\]$/control: [apply, enroll]/' "$WORK/cfg-enroll/roles/lead.yaml" && rm -f "$WORK/cfg-enroll/roles/lead.yaml.bak"
-grep -qx 'control: \[apply, enroll\]' "$WORK/cfg-enroll/roles/lead.yaml" || fail "the lead role was not granted enroll"
+write_config "$WORK/cfg-enroll" "$CAPS" "$CHILD_RESPAWNS"
+# The signer is the gateway's one trusted signer; the orchestrator's role may
+# enroll: the one control action enroll asks for.
+enroll_trust "$WORK/cfg-enroll" "$SIGNER_KEY"
 "$WORK/agenthof" apply --config "$WORK/cfg-enroll" --control-log "$WORK/control.jsonl" --as ci --groups devs >/dev/null || fail "apply of the enrollment config failed"
 ENROLL_ARGS=(--config "$WORK/cfg-enroll" --control-log "$WORK/control.jsonl" --as ci --groups devs)
 
@@ -904,7 +851,7 @@ grep '"action":"enroll"' "$WORK/control.jsonl" | grep -q '"outcome":"success"' |
 # The operator's by-hand edit the output asked for: the trusted orchestrator
 # may spawn the enrolled agent, and only by this edit. The supervisor's
 # images: entry for it is in spawn_config above.
-printf '  - role: enrolled\n    workflow: enrolled\n' >>"$WORK/cfg-enroll/agents/lead.yaml"
+enroll_allow_spawn "$WORK/cfg-enroll/agents/lead.yaml" enrolled
 
 # apply, then the orchestrator spawns it: the spawned run succeeds, linked
 # both ways, under the same invoker, in the compartment the supervisor made.
@@ -933,9 +880,9 @@ printf '%s\n' "$ENR_MEASURED" | grep -q "sha256:$ENROLL_ARTIFACT_HEX" || { echo 
 # provision with the binding reason, not the compartment reason: no child
 # run, no compartment left, and the refusal burns no total (the three spawns
 # after it still fit under max_total_spawns 3).
-TAMPERED="$("$WORK/agenthof" enroll "$WORK/card.json" --name tampered --role lead "${ENROLL_ARGS[@]}" --accept "$ENROLL_DIGEST")" || fail "enroll of the tampered agent failed"
+enroll_agent "$WORK/card.json" tampered "$WORK/cfg-enroll"; TAMPERED="$ENROLL_OUT"
 OUTS+=("$TAMPERED")
-printf '  - role: tampered\n    workflow: tampered\n' >>"$WORK/cfg-enroll/agents/lead.yaml"
+enroll_allow_spawn "$WORK/cfg-enroll/agents/lead.yaml" tampered
 BEFORE="$(provisioned_count)"
 BEFORE_BOUND="$(binding_refused_count)"
 run "$WORK/cfg-enroll" lead lead-wf "spawn:tampered/tampered:t-$NONCE; spawn:enrolled/enrolled:e1; spawn:enrolled/enrolled:e2; spawn:enrolled/enrolled:e3"

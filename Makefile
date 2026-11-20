@@ -1,10 +1,11 @@
 # Agenthof — maintainer convenience targets. Testing and the hermetic e2es are
 # plain `go` and `scripts/*.sh` (see CONTRIBUTING.md and .github/workflows). This
 # file holds installing the binaries and the real-backend proofs — the combined
-# podman containment run (Linux/Lima), the macOS Seatbelt run, and the Rekor v1
-# anchoring run (Linux/Lima) — run by judgment on a developer machine, never by CI.
+# podman containment run (Linux/Lima), the macOS Seatbelt run, the enrolled-agent
+# artifact binding runs (podman and Seatbelt), and the Rekor v1 anchoring run
+# (Linux/Lima) — run by judgment on a developer machine, never by CI.
 .DEFAULT_GOAL := help
-.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor
+.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-enroll
 
 GO ?= go
 UNAME_S ?= $(shell uname -s)
@@ -22,6 +23,12 @@ help:
 	@echo "    The real-backend macOS Seatbelt proof (scripts/e2e-refexec-seatbelt.sh):"
 	@echo "    first-hand exec under sandbox-exec — direct network denied, writes scoped,"
 	@echo "    off-allowlist refused, ledger verified. macOS only (self-cleans)."
+	@echo "make acceptance-enroll"
+	@echo "    The enrolled-agent artifact binding on the REAL backends: a signed card's consented"
+	@echo "    image digest (podman) or program hash (Seatbelt) is bound at spawn — bound success,"
+	@echo "    repointed artifact refused, nothing of it run (scripts/e2e-refspawn.sh,"
+	@echo "    scripts/e2e-refspawn-seatbelt.sh). Linux: podman natively. macOS: podman inside the"
+	@echo "    Lima VM (started if needed; it runs the tree mounted at /agenthof) and Seatbelt natively."
 	@echo "make acceptance-rekor [KEEP=1]"
 	@echo "    The real-backend anchoring proof against a REAL Rekor v1 log (scripts/e2e-rekor.sh):"
 	@echo "    the audit anchor / verify command path over a podman-compose Rekor stack."
@@ -60,6 +67,24 @@ ifeq ($(UNAME_S),Darwin)
 	scripts/e2e-refexec-seatbelt.sh
 else
 	@echo "make acceptance-seatbelt: the Seatbelt backend is macOS-only — run on a Mac (unsupported host $(UNAME_S))"; exit 1
+endif
+
+# The artifact binding proof: an enrolled agent's spawn is bound to the digest or
+# program hash its signed card consented to, on the real runtime (podman) and the
+# real sandbox launch (Seatbelt). Each script covers the scenarios of its own
+# backend; on Linux only podman applies, on macOS podman runs in the Lima VM and
+# Seatbelt natively. Like the runs above, local/by-judgment, never CI.
+acceptance-enroll:
+ifeq ($(UNAME_S),Linux)
+	@command -v podman >/dev/null || { echo "make acceptance-enroll: podman is not installed (rootless podman is required)"; exit 1; }
+	scripts/e2e-refspawn.sh
+else ifeq ($(UNAME_S),Darwin)
+	@command -v sandbox-exec >/dev/null || { echo "make acceptance-enroll: sandbox-exec not found (macOS required)"; exit 1; }
+	deploy/lima/lima.sh up
+	deploy/lima/lima.sh e2e refspawn
+	scripts/e2e-refspawn-seatbelt.sh
+else
+	@echo "make acceptance-enroll: unsupported host $(UNAME_S) — run scripts/e2e-refspawn.sh on a Linux host with rootless podman"; exit 1
 endif
 
 # The Rekor v1 anchoring proof drives the binary's anchor command path (audit

@@ -31,7 +31,11 @@
 # in use, so the supervisor's non-forced removal is refused and the store
 # survives instead of being pulled out from under the command. A refspawn
 # config carrying a podman-only key, or missing store_root, is refused before
-# anything starts. Requires macOS with sandbox-exec (skips cleanly anywhere
+# anything starts. An enrolled agent is bound to the program hash its signed
+# host-program card consented to: the spawn records the hash this script
+# computed itself, a repointed program with other bytes is refused with the
+# binding reason and never runs, and an OCI-only card is refused as having no
+# form this tier can check (scripts/enroll-lib.sh signs and enrolls). Requires macOS with sandbox-exec (skips cleanly anywhere
 # else), go, curl and python3. Run from the repo root.
 set -euo pipefail
 
@@ -103,6 +107,8 @@ mode_of() { python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode &
 unset AGENTHOF_TOKEN || true
 # shellcheck source=scripts/acceptance-lib.sh
 . "$ROOT/scripts/acceptance-lib.sh"   # field, count, bound, out_of
+# shellcheck source=scripts/enroll-lib.sh
+. "$ROOT/scripts/enroll-lib.sh"       # the card signer and the enroll steps
 
 # Build everything BEFORE anything starts: the compartments' wall clocks must
 # not pay for a cold build. No image is involved: the sandbox runs the host's
@@ -111,6 +117,10 @@ go build -o "$WORK/agenthof" ./cmd/agenthof
 go build -o "$WORK/refexec" ./deploy/refexec
 go build -o "$WORK/refspawn" ./deploy/refspawn
 go build -o "$WORK/echo-agent" ./examples/echo-agent
+# A runnable variant of the same program with different bytes (a stripped
+# link): the program an operator "repointed" an enrolled agent at. Both sit
+# directly under $WORK, outside every read-denied root.
+go build -ldflags='-s -w' -o "$WORK/echo-agent-variant" ./examples/echo-agent
 
 # --- refspawn's config: the seatbelt backend on this run's private dirs.
 # The child agents run the echo-agent by absolute path; refexec.image is
@@ -128,6 +138,9 @@ deny_read: ["$DENIED"]
 images:
   writer: $WORK/echo-agent
   reader: $WORK/echo-agent
+  enrolled: $WORK/echo-agent
+  tampered: $WORK/echo-agent-variant
+  ociagent: $WORK/echo-agent
 timeout: 5m
 ready_timeout: 60s
 limits:
@@ -549,7 +562,112 @@ kill -9 "$SLEEP_PID" >/dev/null 2>&1 || true
 [ -z "$(ls -A "$SPAWN_ROOT")" ] || { ls -la "$SPAWN_ROOT"; fail "the spawn root is not empty after the in-use teardown"; }
 echo "in-use teardown: the store survived a refused non-forced removal while a command still ran on it — ok"
 
-# 5. The supervisor shuts down cleanly and the lead's workspace never saw a
+# 5. Artifact binding, on the real hash and the real sandbox launch. A signed
+#    host-program card consents to the content hash of the echo-agent binary
+#    this script computes itself; the agent is enrolled and mapped to that
+#    program, and the spawn runs it (bound: the ledger records the measured
+#    hash, equal to the independently computed one). The same card enrolled for
+#    an agent the operator mapped to a DIFFERENT, runnable program is refused
+#    before anything of it runs, with the binding reason. A card that carries
+#    only an OCI form is refused on this tier too (it has nothing this tier can
+#    check), under the same ledger reason but a different supervisor record.
+# The in-use teardown above left its store and PID records on purpose, and the
+# orphaned command is ended: the operator's cleanup of that one orphan, so the
+# nothing-left checks below answer for this section's runs alone.
+rm -rf "$STORE_ROOT"/agenthof-spawn-* "$PID_DIR"/*.pid
+R_ARTIFACT="spawn artifact refused"
+S_MISMATCH="artifact to run is not a consented one"
+S_NOFORM="no expected form for this tier's artifact kind"
+case "$S_MISMATCH" in *"$S_NOFORM"*) fail "the two binding refusals share a record, so no assertion below could tell them apart" ;; esac
+case "$S_NOFORM" in *"$S_MISMATCH"*) fail "the two binding refusals share a record, so no assertion below could tell them apart" ;; esac
+# One supervisor log carries every run, so sup_mark remembers where it ends
+# now and sup_tail leaves just what the run since then wrote.
+SUP_AT=0
+sup_mark() { SUP_AT="$(wc -l <"$WORK/refspawn.err" | tr -d ' ')"; }
+sup_tail() { tail -n "+$((SUP_AT + 1))" "$WORK/refspawn.err" >"$WORK/sup-tail.err"; }
+sha_of() { printf 'sha256:%s' "$(shasum -a 256 "$1" | awk '{print $1}')"; }
+HASH="$(sha_of "$WORK/echo-agent")"
+VARIANT_HASH="$(sha_of "$WORK/echo-agent-variant")"
+case "$HASH" in sha256:????????????????????????????????????????????????????????????????) ;; *) fail "the computed program hash is not sha256:<64 hex>: $HASH" ;; esac
+[ "$HASH" != "$VARIANT_HASH" ] || fail "the variant program has the consented bytes, so refusing it would prove nothing"
+[ -x "$WORK/echo-agent-variant" ] || fail "the variant program is not runnable"
+
+enroll_build_signer
+SIGNER_KEY="$(enroll_card "$WORK/card-host.json" host "$HASH")"
+OCI_HEX="$(printf '%064d' 0 | tr 0 a)"
+enroll_card "$WORK/card-oci.json" oci "$OCI_HEX" >/dev/null
+enroll_trust "$WORK/config" "$SIGNER_KEY"
+ENROLL_ARGS=(--config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups spawn-users)
+# enroll is authorized against the INSTALLED configuration, so install the
+# one that trusts the signer and lets the lead role enroll first.
+"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups spawn-users >/dev/null || fail "apply of the enrollment config failed"
+enroll_agent "$WORK/card-host.json" enrolled "$WORK/config"
+printf '%s\n' "$ENROLL_OUT" | grep -q 'seatbelt (program "acme-echo"' || { echo "$ENROLL_OUT"; fail "enroll did not offer the program mapping for the seatbelt tier"; }
+grep -q "$HASH" "$WORK/config/agents/enrolled.yaml" || fail "the enrolled agent file does not record the consented hash"
+enroll_agent "$WORK/card-host.json" tampered "$WORK/config"
+enroll_agent "$WORK/card-oci.json" ociagent "$WORK/config"
+for a in enrolled tampered ociagent; do enroll_allow_spawn "$WORK/config/agents/lead.yaml" "$a"; done
+"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups spawn-users >/dev/null || fail "apply of the enrolled agents failed"
+
+# Bound: the supervisor measured the program it launched, and the ledger
+# carries that measurement — the hash computed here, not echoed from the card.
+run "spawn:enrolled/enrolled:enr-$NONCE"
+echo "$OUT" | grep -q "finished: succeeded" || fail "the run spawning the enrolled agent did not succeed"
+ENR_PARENT="$RUNID"
+ENR_CHILD="$(field "$(ledger "$ENR_PARENT")" spawn child_run_id succeeded)"
+[ -n "$ENR_CHILD" ] || fail "the spawn of the enrolled agent was not recorded as succeeded"
+parent_artifact "$ENR_PARENT" | grep -q "spawn succeeded $ENR_CHILD enr-$NONCE" || fail "the enrolled child's preview did not reach the parent"
+[ "$(ran_of "$(ledger "$ENR_PARENT")" enrolled)" = "host-program $HASH" ] || { ran_of "$(ledger "$ENR_PARENT")" enrolled; fail "the spawn's child_artifact is not the host-program hash computed here ($HASH)"; }
+echo "$AUDIT" | grep -qF "[child-artifact (runtime-reported, not proof): enrolled=host-program:$HASH]" || fail "audit did not render the measured program hash on the spawn line"
+grep -q "compartment started.*child=$ENR_CHILD.*compartment=agenthof-spawn-$ENR_CHILD-enrolled" "$WORK/refspawn.err" || fail "the enrolled agent did not run in a compartment named for the child"
+[ -z "$(field "$(ledger "$ENR_PARENT")" spawn reason)" ] || fail "the bound spawn recorded a refusal reason"
+nothing_left "after the bound spawn"
+echo "binding: the enrolled spawn ran the consented program and recorded its measured hash ($HASH) — ok"
+
+# Tampered: the same consent, but the operator mapped the agent to a different
+# (runnable) program. Refused with the binding reason, no child run, nothing of
+# it ran; a bound spawn after it in the SAME run still succeeds, which is also
+# the positive control for the supervisor-log absences below.
+sup_mark
+run "spawn:tampered/tampered:t-$NONCE; spawn:enrolled/enrolled:e1-$NONCE"
+sup_tail
+echo "$OUT" | grep -q "finished: succeeded" || fail "the parent step reports the refusal and still finishes"
+TAM="$RUNID"
+[ "$(count "$(ledger "$TAM")" spawn refused)" = 1 ] || fail "expected exactly the tampered spawn refused"
+[ "$(count "$(ledger "$TAM")" spawn succeeded)" = 1 ] || fail "the bound spawn after the refusal did not succeed"
+[ "$(field "$(ledger "$TAM")" spawn reason refused)" = "$R_ARTIFACT" ] || fail "the tampered refusal is not the binding reason"
+[ -z "$(field "$(ledger "$TAM")" spawn child_run_id refused)" ] || fail "a binding refusal must start no child run"
+[ -z "$(field "$(ledger "$TAM")" spawn child_artifact refused)" ] || fail "a refused spawn recorded a measured artifact it never ran"
+grep -qF -- "$S_MISMATCH" "$WORK/sup-tail.err" || { cat "$WORK/sup-tail.err"; fail "the supervisor did not record the hash mismatch"; }
+if grep -qF -- "$S_NOFORM" "$WORK/sup-tail.err"; then fail "a mismatch was recorded as a missing form"; fi
+grep -q "compartment started.*-enrolled" "$WORK/sup-tail.err" || fail "the bound spawn started no compartment, so the absence below would prove nothing"
+if grep -q "compartment started.*-tampered" "$WORK/sup-tail.err"; then fail "a compartment was started for the program with the wrong hash"; fi
+if pgrep -f "echo-agent-variant" >/dev/null 2>&1; then fail "the program with the wrong hash is running"; fi
+echo "$AUDIT" | grep -qF "$R_ARTIFACT" || fail "audit did not render the binding refusal"
+nothing_left "after the tampered refusal"
+echo "binding: a repointed program is refused with the binding reason; nothing of it ran, the bound spawn beside it succeeded — ok"
+
+# OCI-only card on this tier: the consented form is an image digest, which
+# Seatbelt cannot check. Refused before anything starts, under the same ledger
+# reason but the supervisor's own different record.
+sup_mark
+run "spawn:ociagent/ociagent:o-$NONCE; spawn:enrolled/enrolled:e2-$NONCE"
+sup_tail
+echo "$OUT" | grep -q "finished: succeeded" || fail "the parent step reports the refusal and still finishes"
+OCI="$RUNID"
+[ "$(count "$(ledger "$OCI")" spawn refused)" = 1 ] || fail "expected exactly the OCI-only spawn refused"
+[ "$(count "$(ledger "$OCI")" spawn succeeded)" = 1 ] || fail "the bound spawn after the refusal did not succeed"
+[ "$(field "$(ledger "$OCI")" spawn reason refused)" = "$R_ARTIFACT" ] || fail "the OCI-only refusal is not the binding reason"
+[ -z "$(field "$(ledger "$OCI")" spawn child_run_id refused)" ] || fail "a binding refusal must start no child run"
+grep -qF -- "$S_NOFORM" "$WORK/sup-tail.err" || { cat "$WORK/sup-tail.err"; fail "the supervisor did not record the missing host-program form"; }
+grep -q "agent=ociagent" "$WORK/sup-tail.err" || fail "the supervisor's refusal does not name the OCI-only agent"
+if grep -qF -- "$S_MISMATCH" "$WORK/sup-tail.err"; then fail "a missing form was recorded as a hash mismatch"; fi
+grep -q "compartment started.*-enrolled" "$WORK/sup-tail.err" || fail "the bound spawn started no compartment, so the absence below would prove nothing"
+if grep -q "compartment started.*-ociagent" "$WORK/sup-tail.err"; then fail "a compartment was started for the OCI-only agent"; fi
+nothing_left "after the OCI-only refusal"
+echo "binding: an OCI-only card is refused on seatbelt with the binding reason and its own supervisor record, nothing started — ok"
+
+# 6. The supervisor shuts down cleanly and the lead's workspace never saw a
 #    child's files.
 kill "${PIDS[0]}" >/dev/null 2>&1 || true
 wait "${PIDS[0]}" >/dev/null 2>&1 || true
