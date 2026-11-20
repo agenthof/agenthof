@@ -134,11 +134,30 @@ type EnrollFile struct {
 
 // Enroll is what an "enroll" record says about a governed-agent enrollment.
 type Enroll struct {
-	CardSHA256 string       `json:"card_sha256"`         // lowercase hex SignedDigest: sha256 of the JCS-canonical card with signatures removed, not of the card file
-	Artifact   string       `json:"artifact"`            // the artifact the card names
-	Requested  []string     `json:"requested,omitempty"` // capabilities the card requested
-	SignerKID  string       `json:"signer_kid"`          // key id of the card's signer
-	Files      []EnrollFile `json:"files,omitempty"`     // config files the enrollment wrote
+	CardSHA256 string `json:"card_sha256"`        // lowercase hex SignedDigest: sha256 of the JCS-canonical card with signatures removed, not of the card file
+	Artifact   string `json:"artifact,omitempty"` // the OCI image the card names; empty for a host-program-only card
+	// HostProgram is the host-program artifact form the card names: a logical
+	// program id and its per-platform content hashes. At least one of Artifact
+	// and HostProgram is present. Additive and omitempty (Article VI).
+	HostProgram *EnrollHostProgram `json:"host_program,omitempty"`
+	Requested   []string           `json:"requested,omitempty"` // capabilities the card requested
+	SignerKID   string             `json:"signer_kid"`          // key id of the card's signer
+	Files       []EnrollFile       `json:"files,omitempty"`     // config files the enrollment wrote
+}
+
+// EnrollHostProgram is the host-program form recorded on an enroll event: a
+// logical program id (never a path) and the content hash of each build.
+type EnrollHostProgram struct {
+	Program string            `json:"program"`
+	Builds  []EnrollHostBuild `json:"builds"`
+}
+
+// EnrollHostBuild is one build of an enrolled host program; SHA256 is
+// "sha256:" + 64 lowercase hex.
+type EnrollHostBuild struct {
+	OS     string `json:"os"`
+	Arch   string `json:"arch"`
+	SHA256 string `json:"sha256"`
 }
 
 // Seal is what a "seal" record says about the segment it closes. head_seq and

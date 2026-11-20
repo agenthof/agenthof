@@ -16,11 +16,21 @@ func Map(ext AgenthofExt, name string, tools map[string]bool, models map[string]
 	if len(ext.Spawn) > 0 {
 		return config.AgentDef{}, nil, fmt.Errorf("agent card requests spawn rights (%d targets); a card may not grant may_spawn", len(ext.Spawn))
 	}
-	def := config.AgentDef{
-		Name:       name,
-		Provenance: &config.Provenance{Image: ext.Artifact},
+	prov := &config.Provenance{Image: ext.Artifact}
+	var requested []string
+	if ext.Artifact != "" {
+		requested = append(requested, "image "+ext.Artifact)
 	}
-	requested := []string{"image " + ext.Artifact}
+	if hp := ext.HostProgram; hp != nil {
+		prov.Program = hp.Program
+		for _, b := range hp.Builds {
+			prov.Builds = append(prov.Builds, config.HostBuild{OS: b.OS, Arch: b.Arch, SHA256: b.SHA256})
+			// One line per build keeps each under the recorded per-line cap
+			// however many platforms the card lists.
+			requested = append(requested, fmt.Sprintf("host program %s %s/%s %s", hp.Program, b.OS, b.Arch, b.SHA256))
+		}
+	}
+	def := config.AgentDef{Name: name, Provenance: prov}
 
 	for _, g := range ext.Tools {
 		if len(g.Tools) == 0 {

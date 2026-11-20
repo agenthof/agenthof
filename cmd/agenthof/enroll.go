@@ -501,7 +501,13 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 	if ext.Interface != enrollInterface {
 		return enrollRefusal(stderr, "the card's interface %q is not supported; want %q", origin.Clean(ext.Interface), enrollInterface)
 	}
-	if !enrollArtifactRE.MatchString(ext.Artifact) || len(ext.Artifact) > control.MaxEnrollArtifactLen {
+	// Each artifact form present is judged on its own; the card parse has
+	// already refused a card naming neither. The host-program form's shape is
+	// checked there and again when the event is recorded.
+	if ext.Artifact == "" && ext.HostProgram == nil {
+		return enrollRefusal(stderr, "the card names no artifact: it needs an image, a host program, or both")
+	}
+	if ext.Artifact != "" && (!enrollArtifactRE.MatchString(ext.Artifact) || len(ext.Artifact) > control.MaxEnrollArtifactLen) {
 		return enrollRefusal(stderr, "the card's artifact %q is not pinned to a digest (want <ref>@sha256:<64 hex>)", origin.Clean(ext.Artifact))
 	}
 	if !enrollVersionRE.MatchString(card.Version) {
@@ -575,12 +581,26 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 		Requested:  requested,
 		SignerKID:  kid,
 	}
+	if hp := ext.HostProgram; hp != nil {
+		payload.HostProgram = &control.EnrollHostProgram{Program: hp.Program}
+		for _, b := range hp.Builds {
+			payload.HostProgram.Builds = append(payload.HostProgram.Builds, control.EnrollHostBuild{OS: b.OS, Arch: b.Arch, SHA256: b.SHA256})
+		}
+	}
 
 	// Disclose.
 	_, _ = fmt.Fprintf(stdout, "enroll: proposed spawn-only agent %q\n", *name)
 	_, _ = fmt.Fprintf(stdout, "card digest: sha256:%s\n", digest)
 	_, _ = fmt.Fprintf(stdout, "signed by:   %s\n", origin.Clean(kid))
-	_, _ = fmt.Fprintf(stdout, "artifact:    %s (recorded; not yet enforced at launch)\n", ext.Artifact)
+	if ext.Artifact != "" {
+		_, _ = fmt.Fprintf(stdout, "artifact:    %s (recorded; not yet enforced at launch)\n", ext.Artifact)
+	}
+	if hp := ext.HostProgram; hp != nil {
+		_, _ = fmt.Fprintf(stdout, "program:     %s (a logical id, not a path; recorded; not yet enforced at launch)\n", origin.Clean(hp.Program))
+		for _, b := range hp.Builds {
+			_, _ = fmt.Fprintf(stdout, "  build %s/%s %s\n", origin.Clean(b.OS), origin.Clean(b.Arch), origin.Clean(b.SHA256))
+		}
+	}
 	_, _ = fmt.Fprintln(stdout, "requested:")
 	for _, r := range requested {
 		_, _ = fmt.Fprintf(stdout, "  - %s\n", r)
@@ -643,7 +663,16 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stdout, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
 	_, _ = fmt.Fprintf(stdout, "next, by hand (granting a trusted agent the right to launch untrusted code is your edit to make):\n")
 	_, _ = fmt.Fprintf(stdout, "  1. in the trusted orchestrator's agent file, add:\n       may_spawn:\n         - role: %q\n           workflow: %q\n", *name, *name)
-	_, _ = fmt.Fprintf(stdout, "  2. in the spawn supervisor's config, add under images: (a podman image reference)\n       %q: %q\n", *name, ext.Artifact)
+	_, _ = fmt.Fprintf(stdout, "  2. in the spawn supervisor's config, add under images: (one entry per isolation tier you run)\n")
+	if ext.Artifact != "" {
+		_, _ = fmt.Fprintf(stdout, "       podman (a digest-pinned image reference):\n         %q: %q\n", *name, ext.Artifact)
+	}
+	if hp := ext.HostProgram; hp != nil {
+		_, _ = fmt.Fprintf(stdout, "       seatbelt (program %q: map it to your local path to the executable; its sha256 must be one of):\n", origin.Clean(hp.Program))
+		for _, b := range hp.Builds {
+			_, _ = fmt.Fprintf(stdout, "         %s/%s %s\n", origin.Clean(b.OS), origin.Clean(b.Arch), origin.Clean(b.SHA256))
+		}
+	}
 	_, _ = fmt.Fprintf(stdout, "  3. review, then: agenthof apply --config %s\n", *cfgDir)
 	return 0
 }
