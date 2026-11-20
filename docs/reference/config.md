@@ -777,7 +777,7 @@ trust by default and no way to skip the check.
 ```yaml
 trusted_signers:
   - kid: acme-curator-2026
-    key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
+    key: <base64 of your curator's 32-byte Ed25519 public key>
 ```
 
 ### `defaults` / `defaults.model`

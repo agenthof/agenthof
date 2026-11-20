@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -273,12 +275,15 @@ type enrollRoleYAML struct {
 	AllowedGroups []string `yaml:"allowed_groups"`
 }
 
-// cleanCardString reports whether s survives origin.Clean unchanged: a card
-// string with control characters, invalid UTF-8 or excess length is refused,
-// never silently altered, so the bytes disclosed are the bytes written.
+// cleanCardString refuses a card string that holds invalid UTF-8 or a
+// non-printable rune — exactly the text origin.Clean would drop — rather than
+// silently altering it, so the bytes disclosed are the bytes written. Length
+// is bounded separately, by the caps the ledger itself enforces.
 func cleanCardString(what, s string) error {
-	if origin.Clean(s) != s {
-		return fmt.Errorf("agent card %s holds non-printable text or is too long", what)
+	for _, r := range s {
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			return fmt.Errorf("agent card %s holds non-printable text", what)
+		}
 	}
 	return nil
 }
