@@ -81,17 +81,39 @@ type HostBuild struct {
 	SHA256 string `json:"sha256"` // "sha256:" + 64 lowercase hex
 }
 
-// validate checks the shape of the host-program form.
+// Size caps on the host-program form, judged at parse so an oversized form is
+// refused before the operator is asked to consent. They are at least as strict
+// as the enroll record's caps (internal/control MaxEnrollProgramLen,
+// MaxEnrollBuilds, MaxEnrollBuildFieldLen), and together they keep the
+// disclosure line "host program <id> <os>/<arch> sha256:<64 hex>" (87 bytes
+// besides the three fields) within the record's 256-byte per-entry cap:
+// 128 + 20 + 20 + 87 = 255.
+const (
+	maxHostProgramLen = 128
+	maxHostBuilds     = 32
+	maxHostBuildField = 20
+)
+
+// validate checks the shape and size of the host-program form.
 func (h *HostProgram) validate() error {
 	if h.Program == "" {
 		return errors.New("host-program has no program id")
 	}
+	if len(h.Program) > maxHostProgramLen {
+		return fmt.Errorf("host-program id is over %d bytes", maxHostProgramLen)
+	}
 	if len(h.Builds) == 0 {
 		return errors.New("host-program has no builds")
+	}
+	if len(h.Builds) > maxHostBuilds {
+		return fmt.Errorf("host-program lists %d builds; the most allowed is %d", len(h.Builds), maxHostBuilds)
 	}
 	for i, b := range h.Builds {
 		if b.OS == "" || b.Arch == "" {
 			return fmt.Errorf("host-program build %d needs os and arch", i)
+		}
+		if len(b.OS) > maxHostBuildField || len(b.Arch) > maxHostBuildField {
+			return fmt.Errorf("host-program build %d: os and arch are each limited to %d bytes", i, maxHostBuildField)
 		}
 		if !validSHA256(b.SHA256) {
 			return fmt.Errorf("host-program build %d: sha256 must be sha256:<64 lowercase hex>", i)

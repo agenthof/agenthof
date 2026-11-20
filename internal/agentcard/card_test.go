@@ -177,6 +177,10 @@ func TestExtensionRejectsMalformedHostProgram(t *testing.T) {
 		"wrong algorithm":   build("sha512:" + strings.Repeat("a", 64)),
 		"missing os":        `{"host-program":{"program":"p","builds":[{"arch":"arm64","sha256":"` + hashA + `"}]}}`,
 		"missing arch":      `{"host-program":{"program":"p","builds":[{"os":"darwin","sha256":"` + hashA + `"}]}}`,
+		"long program id":   `{"host-program":{"program":"` + strings.Repeat("p", 129) + `","builds":[{"os":"darwin","arch":"arm64","sha256":"` + hashA + `"}]}}`,
+		"too many builds":   `{"host-program":{"program":"p","builds":[` + strings.TrimSuffix(strings.Repeat(`{"os":"darwin","arch":"arm64","sha256":"`+hashA+`"},`, 33), ",") + `]}}`,
+		"long os":           `{"host-program":{"program":"p","builds":[{"os":"` + strings.Repeat("o", 21) + `","arch":"arm64","sha256":"` + hashA + `"}]}}`,
+		"long arch":         `{"host-program":{"program":"p","builds":[{"os":"darwin","arch":"` + strings.Repeat("a", 21) + `","sha256":"` + hashA + `"}]}}`,
 		"unknown field":     `{"host-program":{"program":"p","bogus":1,"builds":[{"os":"darwin","arch":"arm64","sha256":"` + hashA + `"}]}}`,
 		"unknown build key": `{"host-program":{"program":"p","builds":[{"os":"darwin","arch":"arm64","sha256":"` + hashA + `","x":1}]}}`,
 	} {

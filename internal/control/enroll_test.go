@@ -88,9 +88,18 @@ func TestEnrollShapeRejects(t *testing.T) {
 		"empty program id":      enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Program = "" })),
 		"long program id":       enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Program = long })),
 		"no builds":             enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds = nil })),
-		"empty build os":        enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].OS = "" })),
-		"empty build arch":      enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].Arch = "" })),
-		"bare-hex build hash":   enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].SHA256 = enrollDigest })),
+		"too many builds": enrollEvent(mut(func(e *control.Enroll) {
+			e.HostProgram = hostProg()
+			e.HostProgram.Builds = make([]control.EnrollHostBuild, control.MaxEnrollBuilds+1)
+			for i := range e.HostProgram.Builds {
+				e.HostProgram.Builds[i] = hostProg().Builds[0]
+			}
+		})),
+		"long build os":       enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].OS = long })),
+		"long build arch":     enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].Arch = long })),
+		"empty build os":      enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].OS = "" })),
+		"empty build arch":    enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].Arch = "" })),
+		"bare-hex build hash": enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].SHA256 = enrollDigest })),
 		"uppercase build hash": enrollEvent(mut(func(e *control.Enroll) {
 			e.HostProgram = hostProg()
 			e.HostProgram.Builds[0].SHA256 = "sha256:" + strings.ToUpper(enrollDigest)

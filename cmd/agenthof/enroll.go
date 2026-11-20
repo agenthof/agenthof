@@ -603,7 +603,7 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 	}
 	_, _ = fmt.Fprintln(stdout, "requested:")
 	for _, r := range requested {
-		_, _ = fmt.Fprintf(stdout, "  - %s\n", r)
+		_, _ = fmt.Fprintf(stdout, "  - %s\n", origin.Clean(r))
 	}
 	_, _ = fmt.Fprintf(stdout, "files to create under %s (existing files are never changed):\n", *cfgDir)
 	for _, f := range files {

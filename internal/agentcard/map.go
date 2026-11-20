@@ -25,8 +25,8 @@ func Map(ext AgenthofExt, name string, tools map[string]bool, models map[string]
 		prov.Program = hp.Program
 		for _, b := range hp.Builds {
 			prov.Builds = append(prov.Builds, config.HostBuild{OS: b.OS, Arch: b.Arch, SHA256: b.SHA256})
-			// One line per build keeps each under the recorded per-line cap
-			// however many platforms the card lists.
+			// One line per build. Card parse caps the program id, os and arch
+			// so each line fits the recorded per-entry cap (see card.go).
 			requested = append(requested, fmt.Sprintf("host program %s %s/%s %s", hp.Program, b.OS, b.Arch, b.SHA256))
 		}
 	}
