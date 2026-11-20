@@ -225,7 +225,9 @@ func checkJSONStrings(b []byte) error {
 		if i+4 > len(b) {
 			return 0, false
 		}
-		v, err := strconv.ParseUint(string(b[i:i+4]), 16, 32)
+		// bitSize 16: a \uXXXX escape is exactly one UTF-16 code unit (<= 0xFFFF),
+		// so the parsed value provably fits in a rune without an overflow check.
+		v, err := strconv.ParseUint(string(b[i:i+4]), 16, 16)
 		return rune(v), err == nil
 	}
 	inStr := false
