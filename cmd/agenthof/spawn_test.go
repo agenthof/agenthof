@@ -206,7 +206,7 @@ type stubProvisioner struct {
 	calls int
 }
 
-func (s *stubProvisioner) Provision(context.Context, string, []string) (*refspawn.Lease, error) {
+func (s *stubProvisioner) Provision(context.Context, string, []string, map[string][]refspawn.ExpectedArtifact) (*refspawn.Lease, error) {
 	s.mu.Lock()
 	s.calls++
 	s.mu.Unlock()
@@ -359,7 +359,7 @@ func TestDistinctStepAgents(t *testing.T) {
 
 func TestCheckPlacement(t *testing.T) {
 	lease := func(childDir, execSock string) *refspawn.Lease {
-		return refspawn.NewLease(childDir, map[string]string{"a": childDir + "/a.sock"}, execSock, "", nil, io.NopCloser(strings.NewReader("")))
+		return refspawn.NewLease(childDir, map[string]string{"a": childDir + "/a.sock"}, execSock, "", nil, nil, io.NopCloser(strings.NewReader("")))
 	}
 	for _, c := range []struct {
 		name, rootDir, childDir, execSock string
@@ -461,7 +461,7 @@ func TestSpawnPlacementViolationIsRefused(t *testing.T) {
 	closed := make(chan struct{})
 	stub := &stubProvisioner{lease: refspawn.NewLease(childDir, map[string]string{"child": filepath.Join(childDir, "child.sock")},
 		filepath.Join(childDir, "refexec.sock"), // INSIDE the mounted dir: an agent could dial it directly
-		"", nil, closeNotifier{ReadCloser: pr, closed: closed})}
+		"", nil, nil, closeNotifier{ReadCloser: pr, closed: closed})}
 	deps := buildDeps(t, spawnTestConfig(), t.TempDir(), stub)
 	res, err := deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
 	if err != nil || res.Status != "refused" || res.Reason != reasonCompartmentUnavailable || res.ChildRunID != "" || res.Provisioned {
@@ -509,7 +509,7 @@ func TestSpawnLeaseEndCancelsChild(t *testing.T) {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	pr, pw := io.Pipe()
-	stub := &stubProvisioner{lease: refspawn.NewLease(childDir, map[string]string{"child": filepath.Join(childDir, "child.sock")}, filepath.Join(execDir, "refexec.sock"), "", nil, pr)}
+	stub := &stubProvisioner{lease: refspawn.NewLease(childDir, map[string]string{"child": filepath.Join(childDir, "child.sock")}, filepath.Join(execDir, "refexec.sock"), "", nil, nil, pr)}
 	cfg := spawnTestConfig()
 	cfg.Gateway.StepTimeout = 2 * time.Minute // far longer than this test may take
 	deps := buildDeps(t, cfg, t.TempDir(), stub)
@@ -809,7 +809,7 @@ func TestRunNestedSpawnPlacementChecksTheSpawningChildsSocketDir(t *testing.T) {
 	}
 	answer := refspawn.NewLease(filepath.Join(filepath.Dir(childSocketDir), "r-grandchild"),
 		map[string]string{"child": filepath.Join(childSocketDir, "child.sock")},
-		filepath.Join(nestedExecDir, "refexec.sock"), "", nil, io.NopCloser(strings.NewReader("")))
+		filepath.Join(nestedExecDir, "refexec.sock"), "", nil, nil, io.NopCloser(strings.NewReader("")))
 	if err := checkPlacement(rootSocketDir(t, root), answer); err != nil {
 		t.Fatalf("against the root's dir this answer passes (%v); the refusal above can only come from the child's own dir", err)
 	}

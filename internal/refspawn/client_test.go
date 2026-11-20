@@ -152,7 +152,7 @@ func mustClient(t *testing.T, endpoint string) *Client {
 func TestProvisionReturnsLeaseAtFlushAndHoldsUntilRelease(t *testing.T) {
 	f := newFakeSupervisor(t, "ok")
 	c := mustClient(t, f.url())
-	lease, err := c.Provision(context.Background(), "r-child", []string{"a", "b"})
+	lease, err := c.Provision(context.Background(), "r-child", []string{"a", "b"}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestProvisionReturnsLeaseAtFlushAndHoldsUntilRelease(t *testing.T) {
 
 func TestLeaseDoneClosesWhenSupervisorEndsTheSet(t *testing.T) {
 	f := newFakeSupervisor(t, "die-early")
-	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"})
+	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestLeaseDoneClosesWhenSupervisorEndsTheSet(t *testing.T) {
 
 func TestProvisionRefusalIsUnavailable(t *testing.T) {
 	f := newFakeSupervisor(t, "refuse")
-	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a"})
+	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a"}, nil)
 	if !errors.Is(err, ErrUnavailable) || lease != nil {
 		t.Fatalf("err=%v lease=%v, want ErrUnavailable and no lease", err, lease)
 	}
@@ -215,7 +215,7 @@ func TestProvisionRefusalIsUnavailable(t *testing.T) {
 func TestProvisionMalformedLineIsUnavailable(t *testing.T) {
 	for _, mode := range []string{"malformed", "missing-agent", "relative-exec"} {
 		f := newFakeSupervisor(t, mode)
-		lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"})
+		lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"}, nil)
 		if !errors.Is(err, ErrUnavailable) || lease != nil {
 			t.Fatalf("%s: err=%v lease=%v, want ErrUnavailable and no lease", mode, err, lease)
 		}
@@ -226,7 +226,7 @@ func TestProvisionMalformedLineIsUnavailable(t *testing.T) {
 
 func TestProvisionCarriesTheChildTier(t *testing.T) {
 	f := newFakeSupervisor(t, "tier-seatbelt")
-	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"})
+	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestProvisionCarriesTheChildTier(t *testing.T) {
 	}
 	// An older supervisor names no tier: still a working lease, tier empty.
 	g := newFakeSupervisor(t, "ok")
-	old, err := mustClient(t, g.url()).Provision(context.Background(), "r-child", []string{"a", "b"})
+	old, err := mustClient(t, g.url()).Provision(context.Background(), "r-child", []string{"a", "b"}, nil)
 	if err != nil {
 		t.Fatalf("Provision (older supervisor): %v", err)
 	}
@@ -248,7 +248,7 @@ func TestProvisionCarriesTheChildTier(t *testing.T) {
 
 func TestProvisionUnknownTierIsRecordedVerbatim(t *testing.T) {
 	f := newFakeSupervisor(t, "tier-unknown")
-	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"})
+	lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v (a well-formed tier the client has never heard of is not an error)", err)
 	}
@@ -261,7 +261,7 @@ func TestProvisionUnknownTierIsRecordedVerbatim(t *testing.T) {
 func TestProvisionMalformedTierIsUnavailable(t *testing.T) {
 	for _, mode := range []string{"tier-malformed", "tier-opt-malformed", "tier-opts-many"} {
 		f := newFakeSupervisor(t, mode)
-		lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"})
+		lease, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a", "b"}, nil)
 		if !errors.Is(err, ErrUnavailable) || lease != nil {
 			t.Fatalf("%s: err=%v lease=%v, want ErrUnavailable and no lease", mode, err, lease)
 		}
@@ -276,7 +276,7 @@ func TestProvisionUnreachableIsUnavailable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	c := mustClient(t, "unix://"+filepath.Join(dir, "nobody.sock"))
-	if _, err := c.Provision(context.Background(), "r-child", []string{"a"}); !errors.Is(err, ErrUnavailable) {
+	if _, err := c.Provision(context.Background(), "r-child", []string{"a"}, nil); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
 	}
 }
@@ -286,7 +286,7 @@ func TestProvisionRequiresPrivateSocketDir(t *testing.T) {
 	if err := os.Chmod(f.dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a"}); !errors.Is(err, ErrUnavailable) {
+	if _, err := mustClient(t, f.url()).Provision(context.Background(), "r-child", []string{"a"}, nil); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable: a supervisor behind an open directory is not one only this user could have started", err)
 	}
 	if held, _ := f.counts(); held != 0 {
@@ -299,7 +299,7 @@ func TestProvisionHonorsCallerContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if _, err := mustClient(t, f.url()).Provision(ctx, "r-child", []string{"a"}); !errors.Is(err, ErrUnavailable) {
+	if _, err := mustClient(t, f.url()).Provision(ctx, "r-child", []string{"a"}, nil); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
 	}
 	if time.Since(start) > 3*time.Second {
@@ -317,7 +317,7 @@ func TestNewRejectsNonUnixEndpoint(t *testing.T) {
 
 func TestNewLeaseWatchesTheBody(t *testing.T) {
 	pr, pw := io.Pipe()
-	l := NewLease("/tmp/sp/r-x", map[string]string{"a": "/tmp/sp/r-x/a.sock"}, "/tmp/sp/r-x-exec/refexec.sock", "", nil, pr)
+	l := NewLease("/tmp/sp/r-x", map[string]string{"a": "/tmp/sp/r-x/a.sock"}, "/tmp/sp/r-x-exec/refexec.sock", "", nil, nil, pr)
 	select {
 	case <-l.Done():
 		t.Fatal("Done closed before the body ended")

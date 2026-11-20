@@ -248,7 +248,7 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 		return rungateway.SpawnResult{Status: "refused", Reason: reasonCompartmentUnavailable}, nil
 	}
 	childID := engine.NewRunID()
-	lease, err := d.sup.Provision(ctx, childID, distinctStepAgents(wf))
+	lease, err := d.sup.Provision(ctx, childID, distinctStepAgents(wf), nil)
 	if err != nil {
 		// The client already logged the failure by class; the ledger gets
 		// the fixed reason and nothing of the supervisor's text.
