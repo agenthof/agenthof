@@ -102,7 +102,7 @@ non-zero.
 Knowing who asked is not the same as letting them. Every control action is
 **authorized, default-deny**, from two facts: the invoker's groups and the
 roles in the configuration directory. A role may carry a `control:` grant —
-any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor`, `seal`, named one by one, no wildcard —
+any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor`, `seal`, `enroll`, named one by one, no wildcard —
 and the action is allowed only if some role both names one of the invoker's
 groups in `allowed_groups` **and** lists that operation. Membership and grant,
 never the grant alone. One grant includes another: a grant of `apply`

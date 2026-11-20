@@ -1,0 +1,40 @@
+# A card that requests no model still gets the gateway's default model at the
+# model door. Enrollment discloses that implicit grant and records it with the
+# rest of what was requested.
+
+cardsigner cfg/gateway.yaml
+mkcard nomodel card.json
+carddigest card.json DIGEST
+exec agenthof apply --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+
+exec agenthof enroll card.json --name triage --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stdout 'model fast \(gateway default; not requested\)'
+
+exec agenthof enroll card.json --name triage --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops --accept $DIGEST
+stdout 'enrolled "triage"'
+grep 'model fast \(gateway default; not requested\)' ctl/control.jsonl
+
+-- cfg/gateway.yaml --
+models:
+  fast: {endpoint: http://localhost:4000, model: fast, api_key_env: K}
+defaults:
+  model: fast
+tools:
+  code-search: {kind: mcp, url: https://mcp.example.internal/cs, credential_source: static_env, token_env: T, read_only_tools: [search]}
+-- cfg/agents/orch.yaml --
+name: orch
+endpoint: http://localhost:9
+-- cfg/workflows/main.yaml --
+name: main
+steps:
+  - {name: s, agent: orch}
+-- cfg/roles/admin.yaml --
+name: admin
+workflows: [main]
+allowed_groups: [ops]
+control: [apply, enroll]
+-- cfg/roles/dev.yaml --
+name: dev
+workflows: [main]
+allowed_groups: [devs]
+

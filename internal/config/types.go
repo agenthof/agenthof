@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"slices"
 	"time"
@@ -21,12 +23,25 @@ type AgentDef struct {
 	Instruction string        `yaml:"instruction"`
 	Tools       []ToolGrant   `yaml:"tools"` // each {resource, tools: ["*"] | [a, b], mode: read-only | read-write}
 	Output      string        `yaml:"output"`
-	Execution   string        `yaml:"execution"` // "", or "fronted"; "" means fronted
-	Endpoint    string        `yaml:"endpoint"`  // required: the agent's HTTP endpoint
-	Exec        ExecConfig    `yaml:"exec"`      // fronted only: allowlisted exec, first-hand via a trusted runtime (refexec)
-	MaySpawn    []SpawnTarget `yaml:"may_spawn"` // spawn door: the {role, workflow} child runs this agent may start; empty means none (default-deny)
+	Execution   string        `yaml:"execution"`  // "", or "fronted"; "" means fronted
+	Endpoint    string        `yaml:"endpoint"`   // required, except on a spawn-only agent (which omits it): the agent's HTTP endpoint
+	Exec        ExecConfig    `yaml:"exec"`       // fronted only: allowlisted exec, first-hand via a trusted runtime (refexec)
+	MaySpawn    []SpawnTarget `yaml:"may_spawn"`  // spawn door: the {role, workflow} child runs this agent may start; empty means none (default-deny)
+	Provenance  *Provenance   `yaml:"provenance"` // set for an enrolled third-party agent: where it came from; presence makes it spawn-only
 	SourceFile  string        `yaml:"-"`
 }
+
+// Provenance records where an enrolled agent came from: a single digest-pinned
+// container image and the identity of the agent card it was enrolled from.
+type Provenance struct {
+	Image       string `yaml:"image"`        // digest-pinned image reference (name@sha256:...)
+	CardSHA256  string `yaml:"card_sha256"`  // SHA-256 of the JCS-canonical card body with its signatures removed (not of the card file; sha256sum will not match)
+	CardVersion string `yaml:"card_version"` // the card's declared version
+}
+
+// SpawnOnly reports whether the agent is enrolled (has provenance) and so may
+// run only as a spawned child, never as a root run.
+func (a AgentDef) SpawnOnly() bool { return a.Provenance != nil }
 
 // SpawnTarget is one entry in an agent's `may_spawn:` list: a child run the
 // agent may ask the spawn door to start, named as the role it runs as and
@@ -284,7 +299,7 @@ type RoleDef struct {
 	Workflows     []string `yaml:"workflows"`
 	AllowedGroups []string `yaml:"allowed_groups"`
 	// Control is the role's optional control-plane grant: the operations
-	// (apply, enable, disable, repair, provision, prune, pull, anchor, seal — the fixed set
+	// (apply, enable, disable, repair, provision, prune, pull, anchor, seal, enroll — the fixed set
 	// authz.ControlOps owns) its allowed_groups members may perform. Absent or
 	// null leaves it nil, which
 	// means no control permission; a present-but-empty list decodes to a
@@ -352,6 +367,35 @@ type GatewayConfig struct {
 	// number). Zero means DefaultStepTimeout. A spawned subtree runs under
 	// its invoking step's deadline, so size it for the subtree.
 	StepTimeout time.Duration `yaml:"step_timeout"`
+	// TrustedSigners are the curator keys `agenthof enroll` trusts to sign
+	// an agent card. The list lives in governed config, so adding a signer
+	// is an applied, hashed, recorded act. Empty means enroll refuses every
+	// card: there is no trust by default.
+	TrustedSigners []TrustedSigner `yaml:"trusted_signers"`
+}
+
+// TrustedSigner is one curator signing key: the kid a card signature names
+// and the key that must verify it.
+type TrustedSigner struct {
+	KID string `yaml:"kid"` // the key id a card signature names; unique, at most MaxSignerKIDLen bytes
+	Key string `yaml:"key"` // the Ed25519 public key: the raw 32 bytes, standard base64 (44 characters)
+}
+
+// MaxSignerKIDLen bounds a trusted signer's kid; it matches the cap the
+// control ledger puts on a recorded signer id.
+const MaxSignerKIDLen = 128
+
+// PublicKey decodes Key: standard base64 of exactly the 32 raw bytes of an
+// Ed25519 public key.
+func (s TrustedSigner) PublicKey() (ed25519.PublicKey, error) {
+	raw, err := base64.StdEncoding.DecodeString(s.Key)
+	if err != nil {
+		return nil, fmt.Errorf("key is not standard base64: %w", err)
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("key is %d bytes; an Ed25519 public key is %d", len(raw), ed25519.PublicKeySize)
+	}
+	return ed25519.PublicKey(raw), nil
 }
 
 // EffectiveStepTimeout is StepTimeout, or DefaultStepTimeout when unset.

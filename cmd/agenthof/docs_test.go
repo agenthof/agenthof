@@ -51,7 +51,7 @@ func TestConfigReferenceDocumentsInvestigateAnchors(t *testing.T) {
 // TestConfigReferenceDocumentsSeal fails when docs/reference/config.md stops
 // documenting sealing: the audit seal row with --if-larger-than, the segment
 // and manifest names and that they never end in .jsonl, the standing
-// older-binary rule, nine control operations with seal among them, the
+// older-binary rule, ten control operations with seal among them, the
 // verify exit 8 row, the banned words absent and "self-contained" absent from
 // the segment wording; docs/concepts.md no longer says nothing seals the log.
 func TestConfigReferenceDocumentsSeal(t *testing.T) {
@@ -75,7 +75,7 @@ func TestConfigReferenceDocumentsSeal(t *testing.T) {
 		"`control.jsonl.segments`",
 		"never ends in `.jsonl`",
 		"upgrade every binary that shares the control root before the first seal, and never run an older one against it afterwards",
-		"`anchor`, `seal` — the nine fixed operations",
+		"`anchor`, `seal`, `enroll` — the ten fixed operations",
 		"| `8` | **Rotation not completed**",
 		"rotation_incomplete",
 		"`broken` covers a set fault",

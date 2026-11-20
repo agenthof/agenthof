@@ -33,6 +33,7 @@ type DecodedEvent struct {
 	Detail      string           `json:"detail,omitempty"`
 	Anchor      *Anchor          `json:"anchor,omitempty"`
 	Seal        *Seal            `json:"seal,omitempty"`
+	Enroll      *Enroll          `json:"enroll,omitempty"`
 }
 
 // Decode unmarshals a single control/1 log line into a DecodedEvent.

@@ -920,3 +920,29 @@ func TestRunDepsOptionsCarryOriginToChildren(t *testing.T) {
 		t.Fatalf("a CLI run has no origin, got %+v", got)
 	}
 }
+
+func TestPreparedRunAdmitRefusesSpawnOnlyRootSynchronously(t *testing.T) {
+	cfg := spawnTestConfig()
+	cfg.Agents = append(cfg.Agents, config.AgentDef{Name: "vendor", Model: "fast", SourceFile: "v",
+		Provenance: &config.Provenance{Image: "r.example/a@sha256:" + strings.Repeat("a", 64), CardSHA256: strings.Repeat("b", 64), CardVersion: "1"}})
+	cfg.Workflows = append(cfg.Workflows, config.WorkflowDef{Name: "vendor-wf", SourceFile: "w",
+		Steps: []config.Step{{Name: "v", Agent: "vendor"}}})
+	cfg.Roles[0].Workflows = append(cfg.Roles[0].Workflows, "vendor-wf")
+	reg, errs := registry.Build(cfg)
+	if reg == nil {
+		t.Fatal(errs)
+	}
+	p := preparedRun{deps: &runDeps{cfg: cfg, reg: reg}}
+	role := cfg.Roles[0].Name
+	inv := identity.Static("dev@x")
+	if reason, ok := p.Admit(role, "vendor-wf", inv); ok || !strings.Contains(reason, "spawn-only") {
+		t.Fatalf("a served root run of a spawn-only workflow must be refused synchronously: %q %v", reason, ok)
+	}
+	if reason, ok := p.Admit(role, cfg.Roles[0].Workflows[0], inv); !ok {
+		t.Fatalf("an ordinary workflow must still be admitted: %q", reason)
+	}
+	// The child spawn path (engine.Admit) must not carry the root-only gate.
+	if reason, ok := engine.Admit(reg, role, "vendor-wf", inv); !ok {
+		t.Fatalf("engine.Admit must still admit it, since children pass through it: %q", reason)
+	}
+}

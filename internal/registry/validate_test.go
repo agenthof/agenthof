@@ -817,7 +817,7 @@ func TestValidateControlGrants(t *testing.T) {
 // from the gate; a role that grants the two new operations validates.
 func TestValidateControlMessagesDeriveFromControlOps(t *testing.T) {
 	want := "(" + strings.Join(authz.ControlOps, ", ") + ")"
-	if want != "(apply, enable, disable, repair, provision, prune, pull, anchor, seal)" {
+	if want != "(apply, enable, disable, repair, provision, prune, pull, anchor, seal, enroll)" {
 		t.Fatalf("ControlOps = %v", authz.ControlOps)
 	}
 	msgFor := func(role config.RoleDef, code string) string {
@@ -868,5 +868,36 @@ func TestValidateAbsentControlIsFine(t *testing.T) {
 		if c[code] != 0 {
 			t.Fatalf("unexpected %s on a role with no control key: %v", code, c)
 		}
+	}
+}
+
+func TestValidateSpawnOnly(t *testing.T) {
+	prov := &config.Provenance{Image: "r.example/a@sha256:" + strings.Repeat("a", 64), CardSHA256: strings.Repeat("b", 64), CardVersion: "1"}
+
+	cfg := baseCfg()
+	cfg.Agents[0].Provenance = prov
+	cfg.Agents[0].Endpoint = ""
+	if c := codes(Validate(cfg)); len(c) != 0 {
+		t.Fatalf("spawn-only agent with no endpoint and no exec must be valid: %v", c)
+	}
+
+	cfg = baseCfg()
+	cfg.Agents[0].Provenance = prov
+	if c := codes(Validate(cfg)); c["spawn-only-endpoint"] != 1 || c["bad-endpoint"] != 0 || c["fronted-needs-endpoint"] != 0 {
+		t.Fatalf("spawn-only with endpoint must be spawn-only-endpoint: %v", c)
+	}
+
+	cfg = baseCfg()
+	cfg.Agents[0].Provenance = prov
+	cfg.Agents[0].Endpoint = ""
+	cfg.Agents[0].Exec = config.ExecConfig{URL: "unix:///run/x.sock"}
+	if c := codes(Validate(cfg)); c["spawn-only-exec"] != 1 || c["fronted-needs-endpoint"] != 0 {
+		t.Fatalf("spawn-only with exec must be spawn-only-exec only: %v", c)
+	}
+
+	cfg = baseCfg()
+	cfg.Agents[0].Endpoint = ""
+	if c := codes(Validate(cfg)); c["fronted-needs-endpoint"] != 1 {
+		t.Fatalf("non-spawn-only without endpoint must still be fronted-needs-endpoint: %v", c)
 	}
 }

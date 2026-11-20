@@ -159,6 +159,7 @@ images:
   child: $WORK/echo-agent
   writer: $WORK/echo-agent
   reader: $WORK/echo-agent
+  enrolled: $WORK/echo-agent
 EOF
 	cat <<EOF
 timeout: 10m
@@ -775,7 +776,206 @@ echo "$PROBE_ART" | grep -qx "agent-note.txt" || { echo "$PROBE_ART"; fail "the 
 nothing_left "after the isolation runs"
 echo "isolation: one workspace per child, shared by that child's agents, fresh per child, invisible to the parent — ok"
 
-# 12. Nothing that must not leak did. An absence proves something only where
+# 12. Enrollment: a curator-signed card becomes a spawn-only agent through the
+#     REAL binary — enroll, apply, a trusted orchestrator spawns it and the
+#     child run succeeds, linked to its parent — and the same agent is
+#     REFUSED as a root run on BOTH ways in: `run` on the command line, and a
+#     POST to the serve plane. Each refusal provisions nothing.
+#
+#     The card is signed here by a throwaway Ed25519 key (stdlib only, the
+#     JWS shape the card verifier takes: a compact-sorted-keys body signed
+#     under an EdDSA protected header naming the signer's kid); its public
+#     half is the gateway's one trusted signer. The enrolled agent's name is
+#     also the supervisor's images: key, which spawn_config already maps to
+#     the host echo-agent — the entry enroll's step 2 prints for the operator.
+mkdir -p "$WORK/cardsign"
+cat >"$WORK/cardsign/main.go" <<'GO'
+package main
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+// Writes the signed card to os.Args[1] (artifact digest os.Args[2]) and
+// prints the public key, base64, a gateway trusts.
+func main() {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	body := map[string]any{
+		"name":    "Enrolled Echo",
+		"version": "1.0.0",
+		"capabilities": map[string]any{"extensions": []any{map[string]any{
+			"uri": "https://agenthof.dev/ext/agent/v1",
+			"params": map[string]any{
+				"artifact":  "ghcr.io/acme/echo@sha256:" + os.Args[2],
+				"interface": "a2a",
+				"model":     "fast",
+			},
+		}}},
+	}
+	enc := base64.RawURLEncoding
+	canon, err := json.Marshal(body) // compact, sorted keys: already canonical for these values
+	if err != nil {
+		panic(err)
+	}
+	hdr, err := json.Marshal(map[string]any{"alg": "EdDSA", "kid": "curator"})
+	if err != nil {
+		panic(err)
+	}
+	p := enc.EncodeToString(hdr)
+	sig := enc.EncodeToString(ed25519.Sign(priv, []byte(p+"."+enc.EncodeToString(canon))))
+	body["signatures"] = []any{map[string]any{"protected": p, "signature": sig}}
+	out, err := json.Marshal(body)
+	if err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(os.Args[1], out, 0o644); err != nil {
+		panic(err)
+	}
+	fmt.Print(base64.StdEncoding.EncodeToString(pub))
+}
+GO
+go build -o "$WORK/cardsign/cardsign" "$WORK/cardsign/main.go"
+ENROLL_ARTIFACT_HEX="$(printf '%064d' 0 | tr 0 a)"
+SIGNER_KEY="$("$WORK/cardsign/cardsign" "$WORK/card.json" "$ENROLL_ARTIFACT_HEX")"
+{ [ -s "$WORK/card.json" ] && [ -n "$SIGNER_KEY" ]; } || fail "the signer produced no card or key"
+
+write_config "$WORK/cfg-enroll" "$CAPS
+trusted_signers:
+  - {kid: curator, key: $SIGNER_KEY}" "$CHILD_RESPAWNS"
+# The orchestrator's role may enroll: the one control action enroll asks for.
+sed -i.bak 's/^control: \[apply\]$/control: [apply, enroll]/' "$WORK/cfg-enroll/roles/lead.yaml" && rm -f "$WORK/cfg-enroll/roles/lead.yaml.bak"
+grep -qx 'control: \[apply, enroll\]' "$WORK/cfg-enroll/roles/lead.yaml" || fail "the lead role was not granted enroll"
+"$WORK/agenthof" apply --config "$WORK/cfg-enroll" --control-log "$WORK/control.jsonl" --as ci --groups devs >/dev/null || fail "apply of the enrollment config failed"
+ENROLL_ARGS=(--config "$WORK/cfg-enroll" --control-log "$WORK/control.jsonl" --as ci --groups devs)
+
+# Without --accept nothing is written; the printed digest is what consent names.
+PROPOSAL="$("$WORK/agenthof" enroll "$WORK/card.json" --name enrolled --role lead "${ENROLL_ARGS[@]}")" || fail "enroll without --accept failed"
+OUTS+=("$PROPOSAL")
+ENROLL_DIGEST="$(printf '%s\n' "$PROPOSAL" | sed -n 's/^card digest: //p')"
+[ -n "$ENROLL_DIGEST" ] || { echo "$PROPOSAL"; fail "enroll disclosed no card digest"; }
+printf '%s\n' "$PROPOSAL" | grep -q "^signed by:   curator$" || fail "enroll did not name the trusted signer"
+[ ! -e "$WORK/cfg-enroll/agents/enrolled.yaml" ] || fail "enroll wrote a file without --accept"
+
+# A digest that is not the card's is refused and writes nothing.
+if "$WORK/agenthof" enroll "$WORK/card.json" --name enrolled --role lead "${ENROLL_ARGS[@]}" --accept "sha256:$(printf '%064d' 0)" >"$WORK/enroll-bad.out" 2>&1; then
+	fail "enroll accepted a digest that is not the card's"
+fi
+[ -s "$WORK/enroll-bad.out" ] || fail "a declined enroll said nothing"
+[ ! -e "$WORK/cfg-enroll/agents/enrolled.yaml" ] || fail "a declined enroll wrote a file"
+
+ENROLLED="$("$WORK/agenthof" enroll "$WORK/card.json" --name enrolled --role lead "${ENROLL_ARGS[@]}" --accept "$ENROLL_DIGEST")" || fail "enroll --accept failed"
+OUTS+=("$ENROLLED")
+printf '%s\n' "$ENROLLED" | grep -q 'enrolled "enrolled": 3 files created' || { echo "$ENROLLED"; fail "enroll did not report three files"; }
+for f in agents workflows roles; do
+	[ -s "$WORK/cfg-enroll/$f/enrolled.yaml" ] || fail "enroll wrote no $f/enrolled.yaml"
+done
+grep -q "card_sha256: ${ENROLL_DIGEST#sha256:}" "$WORK/cfg-enroll/agents/enrolled.yaml" || fail "the agent file does not record the card digest"
+if grep -q "may_spawn" "$WORK/cfg-enroll/agents/enrolled.yaml"; then fail "an enrolled agent was granted may_spawn"; fi
+printf '%s\n' "$ENROLLED" | grep -q 'role: "enrolled"' || fail "enroll did not print the may_spawn line"
+printf '%s\n' "$ENROLLED" | grep -q '"enrolled": "ghcr.io/acme/echo@sha256:' || fail "enroll did not print the images: line"
+ENROLL_AUDIT="$("$WORK/agenthof" audit control --control-log "$WORK/control.jsonl")"
+echo "$ENROLL_AUDIT" | grep -q "agent enrolled enrolled (card ${ENROLL_DIGEST#sha256:})" || { echo "$ENROLL_AUDIT"; fail "the control audit does not name the enrolled agent and its card"; }
+grep -q '"action":"enroll"' "$WORK/control.jsonl" || fail "no enroll event in the control ledger"
+grep '"action":"enroll"' "$WORK/control.jsonl" | grep -q '"outcome":"success"' || fail "the enroll event is not a success"
+
+# The operator's by-hand edit the output asked for: the trusted orchestrator
+# may spawn the enrolled agent, and only by this edit. The supervisor's
+# images: entry for it is in spawn_config above.
+printf '  - role: enrolled\n    workflow: enrolled\n' >>"$WORK/cfg-enroll/agents/lead.yaml"
+
+# apply, then the orchestrator spawns it: the spawned run succeeds, linked
+# both ways, under the same invoker, in the compartment the supervisor made.
+run "$WORK/cfg-enroll" lead lead-wf "spawn:enrolled/enrolled:enr-$NONCE"
+echo "$OUT" | grep -q "finished: succeeded" || fail "the run spawning the enrolled agent did not succeed"
+ENR_PARENT="$RUNID"
+ENR_CHILD="$(field "$(ledger "$ENR_PARENT")" spawn child_run_id succeeded)"
+[ -n "$ENR_CHILD" ] || fail "the spawn of the enrolled agent was not recorded as succeeded"
+grep -q "\"parent_run_id\":\"$ENR_PARENT\"" "$(ledger "$ENR_CHILD")" || fail "the enrolled child does not name its parent"
+[ "$(field "$(ledger "$ENR_CHILD")" workflow_finished status)" = succeeded ] || fail "the enrolled child did not finish succeeded"
+grep -q '"subject":"dana@example.com"' "$(ledger "$ENR_CHILD")" || fail "the enrolled child is not attributed to the same human"
+ENR_ART="$(parent_artifact "$ENR_PARENT")"
+echo "$ENR_ART" | grep -q "spawn succeeded $ENR_CHILD enr-$NONCE" || fail "the enrolled child's preview did not reach the parent"
+grep -q "compartment started.*child=$ENR_CHILD.*compartment=agenthof-spawn-$ENR_CHILD-enrolled" "$WORK/refspawn.err" || fail "the enrolled agent did not run in a compartment named for the child"
+no_reason "$(ledger "$ENR_PARENT")"
+nothing_left "after the enrolled spawn"
+
+# Root-run refusal, way 1: the command line. Refused with the spawn-only
+# reason, recorded as a run of its own, nothing provisioned, no step started.
+R_SPAWNONLY='agent "enrolled" is spawn-only and may run only as a spawned child'
+BEFORE="$(provisioned_count)"
+run "$WORK/cfg-enroll" enrolled enrolled "x"
+echo "$OUT" | grep -qF "$R_SPAWNONLY" || fail "run of the enrolled workflow at root was not refused as spawn-only"
+echo "$OUT" | grep -q "refused" || fail "the root run of the enrolled workflow was not reported refused"
+ENR_CLI="$RUNID"
+[ "$(count "$(ledger "$ENR_CLI")" run_refused)" = 1 ] || fail "the refused root run has no run_refused event"
+[ "$(field "$(ledger "$ENR_CLI")" run_refused reason)" = "$R_SPAWNONLY" ] || fail "the root refusal is not the spawn-only reason"
+if grep -q '"type":"workflow_started"\|"type":"step_' "$(ledger "$ENR_CLI")"; then fail "a refused root run started a workflow or step"; fi
+[ "$(provisioned_count)" = "$BEFORE" ] || fail "a refused root run provisioned a set"
+
+# Root-run refusal, way 2: the serve plane. A stand-in issuer mints the
+# caller's token; the POST is refused synchronously with the same reason, and
+# a positive control through the same server and token shows the refusal is
+# the policy's and not the server's or the caller's groups failing.
+go build -o "$WORK/obo-idp" ./examples/obo-idp
+SERVE_IDP_PORT="$(free_port)"
+SERVE_PORT="$(free_port)"
+OBO_IDP_CLIENT_SECRET="serve-idp-secret-$NONCE" "$WORK/obo-idp" -addr "127.0.0.1:$SERVE_IDP_PORT" -client-id unused \
+	-client-secret-env OBO_IDP_CLIENT_SECRET -audiences "https://unused.example" 2>"$WORK/serve-idp.err" &
+PIDS+=($!)
+wait_port "$SERVE_IDP_PORT" "the serve stand-in issuer"
+AGENTHOF_OIDC_ISSUER="http://127.0.0.1:$SERVE_IDP_PORT" AGENTHOF_OIDC_CLIENT_ID=agenthof \
+	"$WORK/agenthof" serve --addr "127.0.0.1:$SERVE_PORT" --control-log "$WORK/control.jsonl" \
+	--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" 2>"$WORK/serve.err" &
+SERVE_PID=$!
+PIDS+=("$SERVE_PID")
+wait_port "$SERVE_PORT" "agenthof serve"
+BEFORE="$(provisioned_count)"
+python3 - "http://127.0.0.1:$SERVE_IDP_PORT" "http://127.0.0.1:$SERVE_PORT" "$R_SPAWNONLY" >"$WORK/serve-post.out" <<'PY' || { cat "$WORK/serve-post.out" "$WORK/serve.err"; fail "the serve POST of the enrolled workflow was not refused as spawn-only"; }
+import json, sys, urllib.error, urllib.request
+idp, srv, want = sys.argv[1:4]
+def call(url, body, token=None):
+    h = {"Content-Type": "application/json"}
+    if token:
+        h["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=h)
+    try:
+        r = urllib.request.urlopen(req)
+        return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+_, tok = call(idp + "/mint", {"sub": "u-dana", "email": "dana@example.com", "aud": "agenthof", "groups": ["devs"]})
+token = tok["token"]
+code, body = call(srv + "/v1/runs", {"role": "enrolled", "workflow": "enrolled", "input": "x"}, token)
+print("refused-post", code, body.get("run_id", ""), body)
+assert code == 403 and body.get("status") == "refused" and body.get("reason") == want, "enrolled root run was not refused"
+assert body.get("run_id"), "the refusal is not a run with an id"
+code, body = call(srv + "/v1/runs", {"role": "lead", "workflow": "lead-wf", "input": "write:serve-ok"}, token)
+print("control-post", code, body)
+assert code == 202 and body.get("run_id"), "the control run through the same server and token was not accepted"
+PY
+cat "$WORK/serve-post.out"
+SERVE_REFUSED="$(sed -n 's/^refused-post 403 \(r-[0-9a-f]*\) .*/\1/p' "$WORK/serve-post.out")"
+[ -n "$SERVE_REFUSED" ] || fail "the serve refusal named no run id"
+[ "$(count "$(ledger "$SERVE_REFUSED")" run_refused)" = 1 ] || fail "the serve-refused run has no run_refused event"
+[ "$(field "$(ledger "$SERVE_REFUSED")" run_refused reason)" = "$R_SPAWNONLY" ] || fail "the serve ledger's refusal is not the spawn-only reason"
+if grep -q '"type":"workflow_started"\|"type":"step_' "$(ledger "$SERVE_REFUSED")"; then fail "a refused served run started a workflow or step"; fi
+# Let the control run finish before the server goes: it spawns nothing, so
+# nothing was provisioned for either served run.
+sleep 2
+kill "$SERVE_PID" >/dev/null 2>&1 || true
+wait "$SERVE_PID" >/dev/null 2>&1 || true
+[ "$(provisioned_count)" = "$BEFORE" ] || fail "a served run provisioned a set"
+echo "enrollment: signed card enrolled, applied and spawned (child linked to parent); the same agent refused as a root run from the CLI and from serve, nothing provisioned — ok"
+
+# 13. Nothing that must not leak did. An absence proves something only where
 #     the places searched are populated and the same search finds what IS
 #     there, so a positive control runs through the identical grep first.
 [ "$(find "$WORK/logs" -name '*.jsonl' | wc -l | tr -d ' ')" -ge 25 ] || fail "fewer ledgers than runs, so the leak checks would search an incomplete tree"

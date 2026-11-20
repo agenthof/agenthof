@@ -86,7 +86,7 @@ func TestControlAllows(t *testing.T) {
 }
 
 func TestControlOpsFixedSet(t *testing.T) {
-	for _, op := range []string{"apply", "enable", "disable", "repair", "provision", "prune", "pull", "anchor", "seal"} {
+	for _, op := range []string{"apply", "enable", "disable", "repair", "provision", "prune", "pull", "anchor", "seal", "enroll"} {
 		if !KnownControlOp(op) {
 			t.Fatalf("%q must be a control op", op)
 		}
@@ -138,8 +138,20 @@ func TestControlAllowsSeal(t *testing.T) {
 	if ControlAllows([]config.RoleDef{{Name: "pub", AllowedGroups: []string{"*"}, Control: []string{"seal"}}}, inv, "seal") {
 		t.Fatal("a public role grants no control operation")
 	}
-	if ControlOps[len(ControlOps)-1] != "seal" || len(ControlOps) != 9 {
-		t.Fatalf("seal is the ninth and last operation: %v", ControlOps)
+	if ControlOps[len(ControlOps)-1] != "enroll" || len(ControlOps) != 10 {
+		t.Fatalf("enroll is the tenth and last operation: %v", ControlOps)
+	}
+}
+
+// TestControlAllowsEnroll: enroll is granted by name to a member, and no other
+// operation implies it.
+func TestControlAllowsEnroll(t *testing.T) {
+	inv := identity.Invoker{Subject: "dana@example.com", Groups: []string{"platform-eng"}}
+	if !ControlAllows([]config.RoleDef{{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"enroll"}}}, inv, "enroll") {
+		t.Fatal("membership AND grant must allow enroll")
+	}
+	if ControlAllows([]config.RoleDef{{Name: "ops", AllowedGroups: []string{"platform-eng"}, Control: []string{"apply", "seal"}}}, inv, "enroll") {
+		t.Fatal("apply and seal do not imply enroll")
 	}
 }
 

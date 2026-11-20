@@ -172,6 +172,14 @@ The governed core is real and runnable today:
   the host kernel and sit below any VM, and Seatbelt is the weaker of the
   two — host-readable, with no resource caps and best-effort process
   teardown.
+- **Enrolling a governed agent from a signed card** — `agenthof enroll` installs
+  a third-party agent from an A2A agent card signed by a signer you trust. It
+  shows what the card requests and the exact files it would create, writes
+  nothing until you accept that card's digest, and records the enrollment on
+  the control ledger. The agent comes in spawn-only, with a dedicated role and
+  workflow, and only what your gateway already defines can be granted: a
+  request is a proposal, never a grant. The card's image digest is recorded but
+  not yet enforced at launch.
 - **Served runs and a read API** — `agenthof serve` hosts concurrent
   governed runs behind an HTTP API where every call carries the human's
   own OIDC token: start a run, poll it, read its ledger with an honest

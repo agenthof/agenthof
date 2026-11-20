@@ -62,6 +62,7 @@ func TestMain(m *testing.M) {
 	}
 	testscript.Main(m, map[string]func(){
 		"agenthof": func() {
+			trustCardServer()
 			os.Exit(dispatch(os.Args[1:], os.Stdout, os.Stderr))
 		},
 	})
@@ -154,6 +155,7 @@ func TestScript(t *testing.T) {
 			fake := anchortest.NewRekorV1()
 			e.Defer(fake.Close)
 			e.Values[rekorKey{}] = fake
+			e.Values[enrollKey{}] = &enrollState{}
 			e.Setenv("REKOR_URL", fake.URL)
 			if err := copyDir(filepath.Join("..", "..", "examples", "config"),
 				filepath.Join(e.WorkDir, "examples", "config")); err != nil {
@@ -177,6 +179,13 @@ func TestScript(t *testing.T) {
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			// lastrun <log-dir>: finds the single newest run log and exports
 			// its run id (filename minus .jsonl) as $RUNID for later exec lines.
+			"cardsigner": cmdCardSigner,
+			"mkcard":     cmdMkCard,
+			"carddigest": cmdCardDigest,
+			"cardserve":  cmdCardServe,
+			"snapshot":   cmdSnapshot,
+			"unchanged":  cmdUnchanged,
+			"cpdir":      cmdCpDir,
 			"lastrun": func(ts *testscript.TestScript, neg bool, args []string) {
 				if len(args) != 1 {
 					ts.Fatalf("usage: lastrun <log-dir>")

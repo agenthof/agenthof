@@ -34,9 +34,18 @@ not present in `examples/config/` — they exist to show a rule from
 | Tools | `tools` | list of tool grants ({resource, tools} or {resource, mode} objects) | no | none |
 | Output | `output` | string | no | — |
 | Execution | `execution` | string | no | `fronted` |
-| Endpoint | `endpoint` | string | yes | — |
+| Endpoint | `endpoint` | string | yes (omitted on spawn-only agents) | — |
 | Exec | `exec` | object | no | none |
 | MaySpawn | `may_spawn` | list of `{role, workflow}` objects | no | none (the agent spawns nothing) |
+| Provenance | `provenance` | object (`image`, `card_sha256`, `card_version`) | no | none (not an enrolled agent) |
+
+`provenance` records where an enrolled third-party agent came from: `image` is
+a single digest-pinned image reference (`name@sha256:...`), `card_sha256` is
+the SHA-256 of the card's canonical body with its `signatures` removed (not of the card file, so `sha256sum` will not match it), and `card_version` is the version
+the card declares. An agent that carries a `provenance` block is spawn-only:
+it runs only as a spawned child, never as a root run (a root run of a
+workflow naming it is refused), and the validator rejects an `endpoint`
+(`spawn-only-endpoint`) or `exec` (`spawn-only-exec`) on it.
 
 ### `name`
 
@@ -155,8 +164,9 @@ fronted and an endpoint"). Any other value is rejected with `bad-execution`
 
 ### `endpoint`
 
-Required; per the comment on `AgentDef.Endpoint`, "the agent's HTTP
-endpoint". `apply` rejects an empty endpoint with `fronted-needs-endpoint`.
+Required, except on spawn-only agents (those with a `provenance` block),
+which must omit it; per the comment on `AgentDef.Endpoint`, "the agent's HTTP
+endpoint" (omitted on a spawn-only agent). `apply` rejects an empty endpoint with `fronted-needs-endpoint`.
 The message is "agents are fronted and must declare an endpoint (the
 contained tier was removed)" when `execution` is empty, and "fronted agents
 must have an endpoint" when `execution` is `fronted`. A non-empty endpoint
@@ -457,7 +467,7 @@ and groups are used outside of `apply`).
 ### `control`
 
 Optional. The control-plane operations this role's `allowed_groups` members
-may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor`, `seal` — the nine fixed
+may perform: any of `apply`, `enable`, `disable`, `repair`, `provision`, `prune`, `pull`, `anchor`, `seal`, `enroll` — the ten fixed
 operations, named individually. There is no wildcard spelling and no
 operation is granted by omission — the one implication is that `apply`
 includes `pull`; nothing else is implied: a role with no `control` key (or `control:`
@@ -527,6 +537,7 @@ budget_usd_month: 20
 | SpawnSupervisor | `spawn_supervisor` | string (`unix://<absolute socket path>`) | yes when any agent declares `may_spawn`; otherwise optional (a malformed value is still rejected) | — |
 | Spawn | `spawn` | object (`max_depth`, `max_parallel`, `max_total_spawns`, `reject_cycles`) | yes when any agent declares `may_spawn`; otherwise optional (a malformed value is still rejected) | — |
 | StepTimeout | `step_timeout` | duration string | no | `5m` |
+| TrustedSigners | `trusted_signers` | list of `{kid, key}` objects | yes for `agenthof enroll`; otherwise optional | none (enroll refuses every card) |
 
 `ModelRoute` fields:
 
@@ -748,6 +759,27 @@ to the agent's endpoint, one knob. A spawned child runs under the step that
 asked for it, so a whole subtree shares the invoking step's deadline: size
 `step_timeout` for the subtree, not for one step.
 
+### `trusted_signers`
+
+Optional list of the curator keys `agenthof enroll` trusts to sign an agent
+card. Each entry is an object with two required string fields:
+
+- `kid`: the key id a card signature names. 1 to 128 printable ASCII
+  characters, no spaces; unique in the list.
+- `key`: the Ed25519 public key, the raw 32 bytes in standard base64
+  (44 characters).
+
+`apply` rejects a malformed entry with `bad-trusted-signer`. `enroll` reads
+the list from the installed configuration, so adding a signer is an applied,
+recorded act. With no signers `enroll` refuses every card; there is no
+trust by default and no way to skip the check.
+
+```yaml
+trusted_signers:
+  - kid: acme-curator-2026
+    key: <base64 of your curator's 32-byte Ed25519 public key>
+```
+
 ### `defaults` / `defaults.model`
 
 `defaults` is a nested object holding one field, `model` (optional string).
@@ -880,6 +912,7 @@ authorized against no role, permitted for any identity the host resolves (see
 | `agenthof audit restore control [--control-log <path>] [--config <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--segment N]... [--integrity <path>] [--sink-timeout <dur>] [--rebuild --log-id <id>]` | `--control-log`, `--config`, `--as`, `--groups`, `--token`, `--segment`, `--integrity`, `--sink-timeout`, `--rebuild`, `--log-id` |
 | `agenthof audit anchor [--control-log <path>] [--run <run-id> \| --pending [--limit <n>]] [--log-dir <dir>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--timeout <dur>]` | `--control-log`, `--run`, `--pending`, `--limit`, `--log-dir`, `--as`, `--groups`, `--token`, `--timeout` |
 | `agenthof audit seal [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--if-larger-than <size>] [--sink-timeout <dur>]` | `--control-log`, `--as`, `--groups`, `--token`, `--if-larger-than`, `--sink-timeout` |
+| `agenthof enroll <card file\|https URL> --name <name> --role <role> [--accept sha256:<hex>] [--config <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--name`, `--role`, `--accept`, `--config`, `--control-log`, `--as`, `--groups`, `--token` |
 | `agenthof gateway provision [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>] [--admin-base <url>]` | `--control-log`, `--as`, `--groups`, `--token`, `--admin-base` |
 | `agenthof runs prune --older-than <duration> [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]` | `--older-than`, `--log-dir`, `--artifact-dir`, `--control-log`, `--as`, `--groups`, `--token` |
 | `agenthof investigate [--since <dur\|ts>] [--until <dur\|ts>] [--invoker <id>] [--agent <name>] [--outcome <value>] [--run <run-id>] [--config-hash <sha256:…>] [--json] [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>]` | `--since`, `--until`, `--invoker`, `--agent`, `--outcome`, `--run`, `--config-hash`, `--json`, `--log-dir`, `--control-log`, `--anchor-key` |
@@ -1434,6 +1467,14 @@ default is `2m` for `audit seal` and `audit restore control` and `60s` for
 | `0` | Success — config validated, or the agent's enabled bit flipped; a `success` event was recorded |
 | `1` | The attempt was rejected, refused, or errored — including a caller no role grants the operation (`refused`, reason `not_authorized`), an installed pointer the control ledger does not record as its last install (`refused`, reason `not_on_record`; the text names the last recorded install, or that there is none, and `config vouch` as the remedy), or an installed snapshot whose bytes do not hash as its pointer (`error`, reason `io_error`; the hatch names `installed/current`) — (a `rejected`/`refused`/`error` event was recorded); or the control ledger itself is torn or broken, in which case nothing is recorded and the command names the `agenthof audit repair control` invocation to run; or (`registry enable\|disable` only) the flip itself landed — the re-installed snapshot's pointer moved — but the append that would record it then failed — printed as `state changed; event NOT recorded` (once something is installed, `audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run and every control action is refused — recorded, `configuration not on record` — until `config vouch` puts the flipped snapshot on record, agent still disabled; a bootstrap-era flip has edited the directory instead, moved no pointer, and nothing flags it; if hashing the directory fails after that edit, the same `state changed; event NOT recorded` line is printed); or (`apply` only) the snapshot was installed and the pointer switched but the append that would record it then failed — printed as `installed; event NOT recorded` (`audit control` / `audit verify control` then report the pointer as not matching the last recorded install, and `run`/`serve` refuse every run and every control action — a re-apply included — is refused, recorded, `configuration not on record`, until `config vouch`); or (`--if-installed`) the precondition did not hold, printed and **not** recorded (checked after the vouch, so on an unvouched pointer the `not_on_record` refusal comes first); or another process holds the installed-configuration writer lock (`another agenthof process holds the installed-configuration lock; retry`), not recorded; or a control ledger whose seal is not yet rotated (`rotation_incomplete`: nothing recorded; the host's operator runs `agenthof audit seal`; `serve` answers `500`); or (`--server`) any answer other than installed, and every transport error |
 | `2` | Usage error — bad flags, or `--token` given without `AGENTHOF_OIDC_ISSUER` set; `--if-installed` not `sha256:<hex>` or `none`; `--server` without a token or without `--if-installed`; `--bundle` without `--server` |
+
+`agenthof enroll` installs a third-party agent from a signed A2A agent card, in two steps. `enroll <source> --name <n> --role <r>` verifies the card against the gateway's `trusted_signers`, then **discloses** the proposed agent, what the card requested, and the exact files it would create, and writes and records nothing. `enroll <source> ... --accept sha256:<digest>` re-fetches and re-verifies the card and, only if it is the same signed content, creates three new files under `--config` (an agent, a workflow and a dedicated role; an existing file is never overwritten) and records the enrollment on the control ledger. The digest is the SHA-256 of the card's canonical body with its `signatures` removed, so `sha256sum card.json` will not match it and a re-signed or re-formatted card keeps the same digest. The caller needs the `enroll` control grant. The agent is spawn-only: enroll does not edit any existing file, so it prints the `may_spawn` and spawn-supervisor `images:` lines for you to add by hand, then `agenthof apply`. What a card requests is a proposal, never a grant: only tools and a model the installed gateway already defines are accepted, and a card that requests a wildcard tool grant, a spawn, or an unknown tool is refused. A card with no `model` gets the gateway's `defaults.model` at the model door; enroll discloses and records that default. `--role` names an installed role; the new role copies that role's `allowed_groups` as a snapshot, which later edits to the source role do not follow. The card's artifact (a digest-pinned image reference) is recorded but **not yet enforced at launch**.
+
+| Exit | Meaning |
+|---|---|
+| `0` | Inspected (nothing written), or enrolled and recorded |
+| `1` | Refused or errored: a caller no role grants `enroll` (`not_authorized`), a card that fails verification (`signature_failure`), a card or request that fails the checks above, an `--accept` digest that does not match the card (`consent_declined`, recorded, nothing written), the installed configuration changing while enrolling, or an enrollment that could not be recorded (the new files are removed) |
+| `2` | Usage error: bad flags, or a missing source, `--name` or `--role` |
 
 `agenthof config vouch` (local only; it appends to the control ledger beside which the snapshot is installed):
 
