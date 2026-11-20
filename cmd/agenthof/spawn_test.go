@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -60,6 +61,9 @@ type fakeSupervisor struct {
 	// mounted into the compartments doing the asking but is nothing special
 	// to the root.
 	nestExecInFirstChild bool
+	// ran, when set, is the measured artifact the fake reports per agent on
+	// the answer line (what a real supervisor measured the compartment to run).
+	ran map[string]map[string]any
 
 	mu            sync.Mutex
 	provisions    [][]string // the agents asked for, per provision
@@ -139,7 +143,11 @@ func (f *fakeSupervisor) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
-	line, _ := json.Marshal(map[string]any{"child_dir": childDir, "agent_sockets": sockets, "exec_socket": execSock, "tier": "podman"})
+	answer := map[string]any{"child_dir": childDir, "agent_sockets": sockets, "exec_socket": execSock, "tier": "podman"}
+	if f.ran != nil {
+		answer["ran"] = f.ran
+	}
+	line, _ := json.Marshal(answer)
 	_, _ = w.Write(append(line, '\n'))
 	w.(http.Flusher).Flush()
 	<-r.Context().Done() // the gateway released the lease
@@ -206,7 +214,7 @@ type stubProvisioner struct {
 	calls int
 }
 
-func (s *stubProvisioner) Provision(context.Context, string, []string) (*refspawn.Lease, error) {
+func (s *stubProvisioner) Provision(context.Context, string, []string, map[string][]refspawn.ExpectedArtifact) (*refspawn.Lease, error) {
 	s.mu.Lock()
 	s.calls++
 	s.mu.Unlock()
@@ -359,7 +367,7 @@ func TestDistinctStepAgents(t *testing.T) {
 
 func TestCheckPlacement(t *testing.T) {
 	lease := func(childDir, execSock string) *refspawn.Lease {
-		return refspawn.NewLease(childDir, map[string]string{"a": childDir + "/a.sock"}, execSock, "", nil, io.NopCloser(strings.NewReader("")))
+		return refspawn.NewLease(childDir, map[string]string{"a": childDir + "/a.sock"}, execSock, "", nil, nil, io.NopCloser(strings.NewReader("")))
 	}
 	for _, c := range []struct {
 		name, rootDir, childDir, execSock string
@@ -384,6 +392,18 @@ func TestSpawnWithoutSupervisorIsRefusedUnprovisioned(t *testing.T) {
 	res, err := deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
 	if err != nil || res.Status != "refused" || res.Reason != reasonCompartmentUnavailable || res.ChildRunID != "" || res.Provisioned {
 		t.Fatalf("res=%+v err=%v, want the fixed fail-closed refusal, no child, nothing provisioned", res, err)
+	}
+}
+
+func TestSpawnBindingRefusalHasItsOwnReason(t *testing.T) {
+	stub := &stubProvisioner{err: refspawn.ErrArtifactRefused}
+	deps := buildDeps(t, spawnTestConfig(), t.TempDir(), stub)
+	res, err := deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
+	if err != nil || res.Status != "refused" || res.Reason != reasonArtifactRefused || res.ChildRunID != "" || res.Provisioned {
+		t.Fatalf("res=%+v err=%v, want the distinct binding-refusal reason", res, err)
+	}
+	if reasonArtifactRefused == reasonCompartmentUnavailable {
+		t.Fatal("the binding refusal must be distinguishable from an outage")
 	}
 }
 
@@ -461,7 +481,7 @@ func TestSpawnPlacementViolationIsRefused(t *testing.T) {
 	closed := make(chan struct{})
 	stub := &stubProvisioner{lease: refspawn.NewLease(childDir, map[string]string{"child": filepath.Join(childDir, "child.sock")},
 		filepath.Join(childDir, "refexec.sock"), // INSIDE the mounted dir: an agent could dial it directly
-		"", nil, closeNotifier{ReadCloser: pr, closed: closed})}
+		"", nil, nil, closeNotifier{ReadCloser: pr, closed: closed})}
 	deps := buildDeps(t, spawnTestConfig(), t.TempDir(), stub)
 	res, err := deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
 	if err != nil || res.Status != "refused" || res.Reason != reasonCompartmentUnavailable || res.ChildRunID != "" || res.Provisioned {
@@ -509,7 +529,7 @@ func TestSpawnLeaseEndCancelsChild(t *testing.T) {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	pr, pw := io.Pipe()
-	stub := &stubProvisioner{lease: refspawn.NewLease(childDir, map[string]string{"child": filepath.Join(childDir, "child.sock")}, filepath.Join(execDir, "refexec.sock"), "", nil, pr)}
+	stub := &stubProvisioner{lease: refspawn.NewLease(childDir, map[string]string{"child": filepath.Join(childDir, "child.sock")}, filepath.Join(execDir, "refexec.sock"), "", nil, nil, pr)}
 	cfg := spawnTestConfig()
 	cfg.Gateway.StepTimeout = 2 * time.Minute // far longer than this test may take
 	deps := buildDeps(t, cfg, t.TempDir(), stub)
@@ -603,6 +623,24 @@ func TestSpawnRecordsTheLeaseTierOnTheParentEvent(t *testing.T) {
 			t.Fatalf("res=%+v err=%v, want an internal failure that still carries the lease's tier", res, err)
 		}
 	})
+}
+
+// The artifact the supervisor measured the child's compartment to run comes
+// back on a succeeded outcome so the parent's spawn event can record it
+// verbatim; a spawn whose supervisor measured none carries none.
+func TestSpawnCarriesTheMeasuredRanArtifact(t *testing.T) {
+	deps, fake := liveDeps(t, spawnTestConfig(), t.TempDir())
+	fake.ran = map[string]map[string]any{"child": {"kind": "image-digest", "values": []string{"sha256:" + strings.Repeat("a", 64), "sha256:" + strings.Repeat("b", 64)}}}
+	res, err := deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
+	want := map[string]engine.ChildArtifactRef{"child": {Kind: "image-digest", Values: []string{"sha256:" + strings.Repeat("a", 64), "sha256:" + strings.Repeat("b", 64)}}}
+	if err != nil || res.Status != "succeeded" || !reflect.DeepEqual(res.ChildArtifact, want) {
+		t.Fatalf("res=%+v err=%v, want a succeeded child carrying %v", res, err, want)
+	}
+	deps, _ = liveDeps(t, spawnTestConfig(), t.TempDir())
+	res, err = deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
+	if err != nil || res.ChildArtifact != nil {
+		t.Fatalf("res=%+v err=%v, want no child_artifact when nothing was measured", res, err)
+	}
 }
 
 func TestSpawnProvisionsDistinctStepAgentsAndReleases(t *testing.T) {
@@ -809,7 +847,7 @@ func TestRunNestedSpawnPlacementChecksTheSpawningChildsSocketDir(t *testing.T) {
 	}
 	answer := refspawn.NewLease(filepath.Join(filepath.Dir(childSocketDir), "r-grandchild"),
 		map[string]string{"child": filepath.Join(childSocketDir, "child.sock")},
-		filepath.Join(nestedExecDir, "refexec.sock"), "", nil, io.NopCloser(strings.NewReader("")))
+		filepath.Join(nestedExecDir, "refexec.sock"), "", nil, nil, io.NopCloser(strings.NewReader("")))
 	if err := checkPlacement(rootSocketDir(t, root), answer); err != nil {
 		t.Fatalf("against the root's dir this answer passes (%v); the refusal above can only come from the child's own dir", err)
 	}

@@ -46,6 +46,10 @@ type SpawnResult struct {
 	Provisioned       bool
 	ChildConfiner     string
 	ChildConfinerOpts []string
+	// ChildArtifact is, per child agent, the artifact its compartment was
+	// measured to run (nil when none was measured); it rides on the parent's
+	// spawn event of a provisioned child, whatever its outcome.
+	ChildArtifact map[string]engine.ChildArtifactRef
 }
 
 // Spawner runs one governed child run on the door's behalf and returns when
@@ -183,7 +187,7 @@ func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, age
 			logger.Error("spawn did not complete", "child_run", res.ChildRunID, "class", errClass(err))
 			appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: "failed", Reason: reasonSpawnIncomplete,
 				ChildRunID: res.ChildRunID, ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth, Binding: bind,
-				ChildConfiner: res.ChildConfiner, ChildConfinerOpts: res.ChildConfinerOpts})
+				ChildConfiner: res.ChildConfiner, ChildConfinerOpts: res.ChildConfinerOpts, ChildArtifact: res.ChildArtifact})
 			http.Error(w, reasonSpawnIncomplete, http.StatusBadGateway)
 			return
 		}
@@ -202,7 +206,8 @@ func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, age
 		appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: status, Reason: reason,
 			ChildRunID: res.ChildRunID, ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth,
 			OutputSHA: res.OutputSHA, Binding: bind,
-			ChildConfiner: res.ChildConfiner, ChildConfinerOpts: res.ChildConfinerOpts})
+			ChildConfiner: res.ChildConfiner, ChildConfinerOpts: res.ChildConfinerOpts,
+			ChildArtifact: res.ChildArtifact})
 		code := http.StatusOK
 		if status == "refused" {
 			code = http.StatusForbidden

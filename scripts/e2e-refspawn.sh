@@ -14,7 +14,12 @@
 # refexec socket, and has no network; an agent with no image is refused
 # before anything starts; the supervisor's compartment cap refuses a set
 # that will not fit; and after the parent finishes no container, volume,
-# directory or refexec process the supervisor made is left. The two ways a
+# directory or refexec process the supervisor made is left. An enrolled agent
+# is bound to the image digest its signed card consented to: the spawn runs the
+# consented image by ID and records podman's own digest set, and the same
+# consent with the mapping repointed at a different real image is refused with
+# the binding reason and creates no container (scripts/enroll-lib.sh signs and
+# enrolls). The two ways a
 # set is refused share one ledger reason on purpose, so they are told apart
 # by the distinct record the supervisor writes for each, over only the lines
 # that run produced. Requires rootless podman, go and python3. Run from the
@@ -61,6 +66,8 @@ cleanup() {
 }
 trap cleanup EXIT
 unset AGENTHOF_TOKEN || true
+# shellcheck source=scripts/enroll-lib.sh
+. "$ROOT/scripts/enroll-lib.sh"   # the card signer and the enroll steps
 
 # Build and pull everything BEFORE anything starts: the compartments' wall
 # clocks must not pay for a cold build or a pull. refspawn and refexec run
@@ -84,6 +91,8 @@ spawn_root: $SPAWN_ROOT
 images:
   writer: $IMAGE
   reader: $IMAGE_B
+  enrolled: $IMAGE
+  tampered: $IMAGE_B
 timeout: 5m
 ready_timeout: 60s
 limits:
@@ -426,6 +435,97 @@ sup_tail
 sole_refusal "$S_CAP" "$S_NO_IMAGE"
 nothing_left "after the refusals"
 echo "fail-closed: no image and the compartment cap both refuse before anything starts, each under its own record — ok"
+
+# 6. Artifact binding, on the real runtime's own digests. A signed card
+#    consents to the manifest digest podman itself reports for the locally
+#    built refbox image (never pushed, so there is no registry digest to lean
+#    on); the agent is enrolled and mapped to that image, and the spawn runs
+#    it BY ITS IMAGE ID (bound: the ledger records the digest set podman
+#    reports, which carries the consented digest). The same consent, with the
+#    operator's mapping repointed at a DIFFERENT real image (the same recipe
+#    under another label, so another digest), is refused with the binding
+#    reason, and no container of it is ever created.
+R_ARTIFACT="spawn artifact refused"
+S_MISMATCH="artifact to run is not a consented one"
+digest_set() { # $1 = image: every digest podman associates with it, one per line, sorted
+	podman image inspect --format '{{.Digest}}{{range .RepoDigests}} {{.}}{{end}}' "$1" | tr ' ' '\n' | sed 's/^.*@//' | grep -E '^sha256:[0-9a-f]{64}$' | sort -u
+}
+image_id() { podman image inspect --format '{{.Id}}' "$1" | sed 's/^sha256://'; }
+DIGEST="$(podman image inspect --format '{{.Digest}}' "$IMAGE")"
+DIGEST_B="$(podman image inspect --format '{{.Digest}}' "$IMAGE_B")"
+case "$DIGEST" in sha256:????????????????????????????????????????????????????????????????) ;; *) fail "podman reports no manifest digest for the locally built $IMAGE (got: $DIGEST), so there is nothing real to consent to" ;; esac
+[ "$DIGEST" != "$DIGEST_B" ] || fail "the two real images share one digest, so refusing one for the other would prove nothing"
+SET="$(digest_set "$IMAGE")"
+printf '%s\n' "$SET" | grep -qx "$DIGEST" || fail "the image's digest set does not carry its own manifest digest"
+
+enroll_build_signer
+SIGNER_KEY="$(enroll_card "$WORK/card.json" oci "${DIGEST#sha256:}")"
+enroll_trust "$WORK/config" "$SIGNER_KEY"
+ENROLL_ARGS=(--config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups refbox-users)
+# enroll is authorized against the INSTALLED configuration, so install the
+# one that trusts the signer and lets the lead role enroll first.
+"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups refbox-users >/dev/null || fail "apply of the enrollment config failed"
+enroll_agent "$WORK/card.json" enrolled "$WORK/config"
+printf '%s\n' "$ENROLL_OUT" | grep -q '"enrolled": "ghcr.io/acme/echo@sha256:' || { echo "$ENROLL_OUT"; fail "enroll did not print the images: line"; }
+grep -q "${DIGEST#sha256:}" "$WORK/config/agents/enrolled.yaml" || fail "the enrolled agent file does not record the consented digest"
+enroll_agent "$WORK/card.json" tampered "$WORK/config"
+for a in enrolled tampered; do enroll_allow_spawn "$WORK/config/agents/lead.yaml" "$a"; done
+"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups refbox-users >/dev/null || fail "apply of the enrolled agents failed"
+
+# Bound, inspected while the child is alive: its container runs the image ID
+# podman reported for the consented image, not a ref a retag could repoint.
+"$WORK/agenthof" run lead lead-wf --input "spawn:enrolled/enrolled:sleep:20" --as ci --groups refbox-users --config "$WORK/config" --control-log "$WORK/control.jsonl" --log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts" >"$WORK/alive.out" 2>>"$WORK/agenthof.err" &
+ALIVE=$!
+for i in $(seq 1 60); do
+	ENR="$(podman ps --format '{{.Names}}' --filter 'name=^agenthof-spawn-.*-enrolled$' | head -1)"
+	[ -n "$ENR" ] && break
+	[ "$i" = 60 ] && fail "no enrolled compartment appeared"
+	sleep 0.5
+done
+WANT_ID="$(image_id "$IMAGE")"
+[ "$(podman inspect "$ENR" --format '{{.Image}}' | sed 's/^sha256://')" = "$WANT_ID" ] || fail "the enrolled compartment runs $(podman inspect "$ENR" --format '{{.Image}}'), not the image ID of the consented image ($WANT_ID)"
+[ "$(podman inspect "$ENR" --format '{{.Image}}' | sed 's/^sha256://')" != "$(image_id "$IMAGE_B")" ] || fail "the two real images share one ID, so the ID comparison above proved nothing"
+echo "enrolled compartment $ENR: image ID $WANT_ID, ImageName $(podman inspect "$ENR" --format '{{.ImageName}}')"
+wait "$ALIVE" || true
+ALIVE=""
+grep -q "finished: succeeded" "$WORK/alive.out" || { cat "$WORK/alive.out"; fail "the inspected enrolled run did not succeed"; }
+nothing_left "after the inspected enrolled run"
+
+run "spawn:enrolled/enrolled:enr-$NONCE"
+echo "$OUT" | grep -q "finished: succeeded" || { cat "$WORK/refspawn.err"; fail "the run spawning the enrolled agent did not succeed"; }
+ENR_PARENT="$RUNID"
+ENR_CHILD="$(field "$(ledger "$ENR_PARENT")" spawn child_run_id succeeded)"
+[ -n "$ENR_CHILD" ] || fail "the spawn of the enrolled agent was not recorded as succeeded"
+parent_artifact "$ENR_PARENT" | grep -q "spawn succeeded $ENR_CHILD enr-$NONCE" || fail "the enrolled child's preview did not reach the parent"
+RAN="$(ran_of "$(ledger "$ENR_PARENT")" enrolled)"
+[ "$(printf '%s\n' "$RAN" | awk '{print $1}')" = oci-image ] || fail "the measured artifact is not an oci-image: $RAN"
+[ "$(printf '%s\n' "$RAN" | cut -d' ' -f2- | tr ' ' '\n' | sort -u)" = "$SET" ] || { echo "$RAN"; fail "the recorded digest set is not the set podman reports for the image"; }
+printf '%s\n' "$RAN" | tr ' ' '\n' | grep -qx "$DIGEST" || fail "the recorded set does not carry the consented digest"
+echo "$AUDIT" | grep -qF "enrolled=oci-image:" || fail "audit did not render the measured image digests on the spawn line"
+[ -z "$(field "$(ledger "$ENR_PARENT")" spawn reason)" ] || fail "the bound spawn recorded a refusal reason"
+nothing_left "after the bound spawn"
+echo "binding: the enrolled spawn ran the consented image by ID and recorded podman's own digest set ($DIGEST) — ok"
+
+# Tampered: the same consent, the mapping repointed at a different real image.
+# Refused at provision with the binding reason, no child run, and no container
+# of it ever created; a bound spawn after it in the SAME run still succeeds,
+# which is also the positive control for the absences below.
+sup_mark
+run "spawn:tampered/tampered:t-$NONCE; spawn:enrolled/enrolled:e1-$NONCE"
+sup_tail
+echo "$OUT" | grep -q "finished: succeeded" || fail "the parent step reports the refusal and still finishes"
+TAM="$RUNID"
+[ "$(count "$(ledger "$TAM")" spawn refused)" = 1 ] || fail "expected exactly the tampered spawn refused"
+[ "$(count "$(ledger "$TAM")" spawn succeeded)" = 1 ] || fail "the bound spawn after the refusal did not succeed"
+[ "$(field "$(ledger "$TAM")" spawn reason refused)" = "$R_ARTIFACT" ] || fail "the tampered refusal is not the binding reason"
+[ -z "$(field "$(ledger "$TAM")" spawn child_run_id refused)" ] || fail "a binding refusal must start no child run"
+grep -qF -- "$S_MISMATCH" "$WORK/sup-tail.err" || { cat "$WORK/sup-tail.err"; fail "the supervisor did not record the digest mismatch"; }
+grep -q "compartment started.*-enrolled" "$WORK/sup-tail.err" || fail "the bound spawn started no compartment, so the absence below would prove nothing"
+if grep -q "compartment started.*-tampered" "$WORK/sup-tail.err"; then fail "a compartment was started for the image with the wrong digest"; fi
+echo "$AUDIT" | grep -qF "$R_ARTIFACT" || fail "audit did not render the binding refusal"
+nothing_left "after the tampered refusal"
+[ -z "$(podman ps -aq --filter 'name=-tampered$')" ] || { podman ps -a; fail "a container of the image with the wrong digest exists"; }
+echo "binding: a repointed image is refused with the binding reason; no container of it was created, the bound spawn beside it succeeded — ok"
 
 # The root compartment is unchanged by all of this: its own mounts only.
 ROOT_MOUNTS="$(podman inspect "$LEAD" --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}')"

@@ -50,6 +50,10 @@ func Validate(cfg config.Config) []ValidationError {
 			// An enrolled agent runs only as a spawned, confiner-contained
 			// child; it has no endpoint to dial and no
 			// exec door. Either would give it a way to run uncontained.
+			if !a.Provenance.HasWellFormedForm() {
+				add(a.SourceFile, a.Name, "bad-provenance",
+					"provenance must carry a well-formed artifact: a digest-pinned image (name@sha256:<64 hex>) or a host program with an id and at least one build {os, arch, sha256:<64 hex>}")
+			}
 			if a.Endpoint != "" {
 				add(a.SourceFile, a.Name, "spawn-only-endpoint",
 					"a spawn-only agent (one with provenance) runs only as a spawned child and must not declare an endpoint")

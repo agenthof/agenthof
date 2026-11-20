@@ -104,3 +104,54 @@ func TestMapRejectsUnresolved(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func hostExt() *HostProgram {
+	return &HostProgram{Program: "acme-triage", Builds: []HostBuild{
+		{OS: "darwin", Arch: "arm64", SHA256: "sha256:" + strings.Repeat("a", 64)},
+		{OS: "linux", Arch: "amd64", SHA256: "sha256:" + strings.Repeat("b", 64)},
+	}}
+}
+
+func TestMapProgramOnlyCard(t *testing.T) {
+	e := goodExt()
+	e.Artifact = ""
+	e.HostProgram = hostExt()
+	def, req, err := Map(e, "triage", knownTools, knownModels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := def.Provenance
+	if p == nil || p.Image != "" || p.Program != "acme-triage" || len(p.Builds) != 2 ||
+		p.Builds[1] != (config.HostBuild{OS: "linux", Arch: "amd64", SHA256: "sha256:" + strings.Repeat("b", 64)}) {
+		t.Fatalf("program-only provenance wrong: %+v", p)
+	}
+	for _, r := range req {
+		if strings.HasPrefix(r, "image") {
+			t.Fatalf("a program-only card must not disclose an image: %v", req)
+		}
+	}
+	if req[0] != "host program acme-triage darwin/arm64 sha256:"+strings.Repeat("a", 64) ||
+		req[1] != "host program acme-triage linux/amd64 sha256:"+strings.Repeat("b", 64) {
+		t.Fatalf("program disclosure wrong: %q", req)
+	}
+}
+
+func TestMapBothForms(t *testing.T) {
+	e := goodExt()
+	e.HostProgram = hostExt()
+	def, req, err := Map(e, "triage", knownTools, knownModels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := def.Provenance
+	if p.Image != e.Artifact || p.Program != "acme-triage" || len(p.Builds) != 2 {
+		t.Fatalf("both forms must map: %+v", p)
+	}
+	if !strings.HasPrefix(req[0], "image ") || !strings.HasPrefix(req[1], "host program ") {
+		t.Fatalf("both forms disclosed in order: %v", req)
+	}
+	e.HostProgram.Builds[0].OS = "mutated"
+	if p.Builds[0].OS != "darwin" {
+		t.Fatal("Map must copy the builds")
+	}
+}

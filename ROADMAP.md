@@ -178,8 +178,11 @@ The governed core is real and runnable today:
   nothing until you accept that card's digest, and records the enrollment on
   the control ledger. The agent comes in spawn-only, with a dedicated role and
   workflow, and only what your gateway already defines can be granted: a
-  request is a proposal, never a grant. The card's image digest is recorded but
-  not yet enforced at launch.
+  request is a proposal, never a grant. The artifact the card pins (an image
+  digest or a host program's content hashes) is enforced at launch: the
+  confiner refuses a compartment that is not the consented artifact, the
+  gateway refuses to admit a mismatch, and the receipt records the measured
+  artifact (runtime-reported, not proof).
 - **Served runs and a read API** — `agenthof serve` hosts concurrent
   governed runs behind an HTTP API where every call carries the human's
   own OIDC token: start a run, poll it, read its ledger with an honest

@@ -76,7 +76,12 @@ by the user refspawn runs as, and it must not be under Agenthof's
 it dials.
 
 `images` maps each agent name to the program its compartment runs — an
-image under podman, an absolute executable path under Seatbelt. A child
+image under podman, an absolute executable path under Seatbelt. For an
+enrolled (provenance) agent the mapped program must resolve to the artifact
+the agent consented to: under podman the image's digest set must contain the
+consented digest; under Seatbelt the program's content hash must be one of
+the consented build hashes. Otherwise the launch is refused (see
+[The request](#the-request)). A child
 workflow that names an agent not listed is refused before anything starts,
 and Agenthof records the refusal. refspawn checks every entry against the
 backend at start and refuses to serve if one is not runnable. Under podman,
@@ -150,22 +155,38 @@ Seatbelt is the weaker tier, honestly:
 
 ## The request
 
-`POST /provision` with `{"child_run_id": "...", "agents": ["a", "b"]}`.
+`POST /provision` with `{"child_run_id": "...", "agents": ["a", "b"],
+"expected": {"a": [{"kind": "...", "values": ["..."]}]}}`. `expected` is
+per agent, every artifact form that agent consented to, and is omitted when
+no agent in the set is enrolled.
 refspawn reserves the slots (`max_compartments` counts agent compartments
 across every live child; a set that will not fit is refused whole), starts
 the set, and answers `200` with one JSON line
-`{"child_dir", "agent_sockets", "exec_socket", "tier", "tier_opts"}` once
+`{"child_dir", "agent_sockets", "exec_socket", "tier", "tier_opts", "ran"}` once
 every socket accepts a connection — `tier` (and any `tier_opts`) naming the
 backend the set runs under, which Agenthof records on the parent's `spawn`
 event. The response body then stays open for as long as the set lives. Agenthof closing it is the teardown request; the body ending on
 refspawn's side means the set is gone.
 
-Any other status is a refusal Agenthof records as
+`ran` is per agent, the artifact the supervisor measured that agent's
+compartment to run (`{kind, values}`), for the agents it measured one; it is
+omitted when none was. Agenthof records it on the parent's `spawn` event as
+runtime-reported evidence, not proof, and checks it again against the
+consented artifact itself rather than trusting the supervisor to have
+enforced `expected`.
+
+A binding refusal — an enrolled agent whose mapped image or program is not
+its consented artifact, or whose consented forms the backend cannot enforce
+— is HTTP `422`, which Agenthof records as `spawn artifact refused`. Any
+other status is a refusal Agenthof records as
 `spawn compartment unavailable`: a malformed request, a run id ending in
 `-exec` (the suffix a child's exec directory reserves), an agent with no
 image, the cap, a child that already has a live set — or whose compartment
 names one holds — a start that failed, or sockets that never answered
 within `ready_timeout`.
+
+See [`docs/lifecycle-enroll.md`](../../docs/lifecycle-enroll.md) for what
+the binding does and does not establish.
 
 ## Teardown, in order
 

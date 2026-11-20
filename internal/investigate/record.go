@@ -44,6 +44,12 @@ type Record struct {
 	ParentRunID string `json:"parent_run_id,omitempty"`
 	Depth       int    `json:"depth,omitempty"`
 
+	// ChildArtifact is, on a spawn record, the artifact each child agent's
+	// compartment was measured to run, as the runtime reported it (recorded
+	// verbatim, origin.Clean'd here): what the runtime said ran, not proof
+	// of it. Absent when none was recorded. Additive and omitempty.
+	ChildArtifact map[string]ArtifactRef `json:"child_artifact,omitempty"`
+
 	// Anchor is what a control "anchor" record says it pinned, and — on a
 	// success record — whether this reader could stand behind it, decided
 	// offline. Absent on every record that is not an anchor. Present on
@@ -56,6 +62,31 @@ type Record struct {
 	// for control events) used only for merge ordering; it is never
 	// serialized.
 	pos int
+}
+
+// ArtifactRef is the investigate/1 view of one agent's reported artifact: a
+// kind and its values, as recorded.
+type ArtifactRef struct {
+	Kind   string   `json:"kind"`
+	Values []string `json:"values"`
+}
+
+// childArtifact copies a spawn event's per-agent artifacts into the record
+// shape, cleaning each string (the ledger's writer may be hostile). Nil when
+// none was recorded.
+func childArtifact(in map[string]engine.ChildArtifactRef) map[string]ArtifactRef {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]ArtifactRef, len(in))
+	for agent, ref := range in {
+		vals := make([]string, len(ref.Values))
+		for i, v := range ref.Values {
+			vals[i] = origin.Clean(v)
+		}
+		out[origin.Clean(agent)] = ArtifactRef{Kind: origin.Clean(ref.Kind), Values: vals}
+	}
+	return out
 }
 
 // normalizeRun maps a run engine.Event into the unified Record shape.
@@ -86,16 +117,17 @@ func normalizeRun(e engine.Event, lineIdx int) Record {
 			Issuer:  e.Binding.Invoker.Issuer,
 			Method:  e.Binding.Invoker.Method,
 		},
-		Role:        e.Binding.Role,
-		Workflow:    e.Binding.Workflow,
-		Agent:       e.Agent,
-		Outcome:     outcome,
-		Reason:      e.Reason,
-		ConfigHash:  e.ConfigHash,
-		ArtifactSHA: e.ArtifactSHA,
-		ParentRunID: e.Binding.ParentRunID,
-		Depth:       e.Binding.Depth,
-		pos:         lineIdx,
+		Role:          e.Binding.Role,
+		Workflow:      e.Binding.Workflow,
+		Agent:         e.Agent,
+		Outcome:       outcome,
+		Reason:        e.Reason,
+		ConfigHash:    e.ConfigHash,
+		ArtifactSHA:   e.ArtifactSHA,
+		ParentRunID:   e.Binding.ParentRunID,
+		Depth:         e.Binding.Depth,
+		ChildArtifact: childArtifact(e.ChildArtifact),
+		pos:           lineIdx,
 	}
 }
 

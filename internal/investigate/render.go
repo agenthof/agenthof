@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -116,6 +117,21 @@ func RenderText(r Result) string {
 		}
 		if e.ParentRunID != "" {
 			tags = append(tags, "parent="+e.ParentRunID)
+		}
+		// A spawn's reported per-agent artifact, agents sorted so the line is
+		// deterministic: what the runtime said ran, not proof of it.
+		if len(e.ChildArtifact) > 0 {
+			agents := make([]string, 0, len(e.ChildArtifact))
+			for a := range e.ChildArtifact {
+				agents = append(agents, a)
+			}
+			sort.Strings(agents)
+			parts := make([]string, len(agents))
+			for i, a := range agents {
+				ref := e.ChildArtifact[a]
+				parts[i] = a + ":" + ref.Kind + ":" + strings.Join(ref.Values, ",")
+			}
+			tags = append(tags, "child-artifact(reported)="+strings.Join(parts, ";"))
 		}
 		// An anchor record's facts and verdict, each present iff recorded:
 		// a failed attempt shows what it tried; a planted success record

@@ -24,7 +24,7 @@ unchanged before cfg ctl/control.jsonl
 
 mkcard noartifact noartifact.json
 ! exec agenthof enroll noartifact.json --name triage --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
-stderr 'has no artifact'
+stderr 'needs at least one artifact form'
 unchanged before cfg ctl/control.jsonl
 
 mkcard unpinned unpinned.json

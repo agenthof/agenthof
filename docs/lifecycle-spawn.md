@@ -76,6 +76,26 @@ Three gates, each recorded when it refuses:
    child gets a ledger of its own with one `run_refused` event carrying its
    parent linkage.
 
+For enrolled agents there are two artifact refusals, each recorded on the
+parent's `spawn` event as `refused`:
+
+- **The supervisor's (the usual one).** A conformant supervisor is told the
+  artifact the agent consented to and refuses to start a compartment that is
+  not it (a tampered image, or a card whose only artifact form the backend
+  cannot enforce, such as an image-only card on Seatbelt). The reason is the
+  fixed `spawn artifact refused`. No set was handed to Agenthof, so no
+  `max_total_spawns` slot is used.
+- **The gateway's own admission check (the backstop).** After provisioning,
+  Agenthof compares the artifact the supervisor reported measuring for each
+  such agent in the child's workflow with the consented artifact, which it
+  takes from its own configuration, not from anything the supervisor
+  returns. A missing or non-matching measurement refuses the whole set. This
+  guards a lenient or older supervisor that provisioned without enforcing.
+  The child is never driven; the reason is the fixed `spawn artifact not
+  consented`, the mismatching measured artifact is recorded as evidence, and
+  because compartments were provisioned the refusal counts against
+  `max_total_spawns`.
+
 There is one refusal that is not recorded: a request that arrives after the
 parent step is already over is answered `503` — the run's ledger may
 already be closed.
@@ -102,6 +122,12 @@ distinct agents its workflow's steps use. The supervisor creates:
 - **one `refexec` process** for the child, bound to the same workspace, so
   the child's first-hand exec runs against the child's files and under the
   same backend.
+
+For an **enrolled agent** (one carrying a `provenance` block, see
+[`lifecycle-enroll.md`](lifecycle-enroll.md#what-is-enforced-today-and-what-is-reserved)),
+the supervisor is also told the artifact the operator consented to and
+**refuses to start** a compartment that is not it (a podman image digest, or
+a Seatbelt program hash), and reports back the artifact it measured.
 
 The supervisor answers only once every socket in the set accepts a
 connection; Agenthof then runs the child's workflow against those sockets.
@@ -227,6 +253,11 @@ Two nodes, one event each, no double counting:
   [`lifecycle-exec.md`](lifecycle-exec.md#the-record)): Seatbelt is a
   shared-kernel OS-sandbox tier, host-readable, with no resource caps and
   best-effort teardown, below the container tier.
+  For an enrolled agent, the spawn event also records the **measured
+  ran-artifact** per child agent (`child_artifact`: its kind and values),
+  and `audit` renders it as a `[child-artifact (runtime-reported, not proof):
+  …]` suffix. That is what the supervisor reported each compartment was
+  launched with, recorded verbatim; it is evidence of what ran, not proof.
 - On the **child**, its own full trail, every event carrying
   `parent_run_id` and `depth` on its binding; its `exec` events carry the
   child's refexec's first-hand account.
@@ -270,6 +301,12 @@ is complete, and there is no runtime check.
   nor in the child's socket directory — is protected between them: one
   agent can read, overwrite, or follow a symlink another left behind, or reach a sibling
   agent's socket. The boundary spawn draws is between runs, not within one.
+- **The artifact binding is bounded by the supervisor's honesty.** The
+  gateway's admission check compares the supervisor's reported measurement
+  with the consented artifact. It catches a lenient, older or misconfigured
+  supervisor; a supervisor that misreports the measurement defeats it. Under
+  Seatbelt the binding covers the launched executable's bytes only, with a
+  hash-then-exec window that is narrowed but not closed.
 - A child always starts on a fresh, empty workspace and hands back only a
   hash and a preview. Handing a child a shared or persistent workspace is
   not supported.

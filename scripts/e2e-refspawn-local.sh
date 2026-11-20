@@ -145,6 +145,15 @@ mkdir -p "$WORK/ws"
 PIDS+=($!)
 wait_port "$AGENT_PORT" "echo-agent"
 
+# The fake engine's image digests, coordinated with what the cards consent
+# to: the enrolled agent's image resolves to the digest its card names; the
+# "tampered" agent consents to that same digest, but its mapped image
+# (a byte-identical copy the operator repointed) resolves to a different one.
+cp "$WORK/echo-agent" "$WORK/echo-agent-tampered"
+ENROLL_ARTIFACT_HEX="$(printf '%064d' 0 | tr 0 a)"
+TAMPER_ARTIFACT_HEX="$(printf '%064d' 0 | tr 0 c)"
+FAKE_IMAGES="$WORK/echo-agent=sha256:$ENROLL_ARTIFACT_HEX;$WORK/echo-agent-tampered=sha256:$TAMPER_ARTIFACT_HEX"
+
 # --- the supervisor stand-in: real refspawn, fake podman. Its "images" are
 # the host echo-agent; its refexec is the refexec stand-in. Config is law
 # here too: a config missing a key is refused before anything starts.
@@ -160,6 +169,7 @@ images:
   writer: $WORK/echo-agent
   reader: $WORK/echo-agent
   enrolled: $WORK/echo-agent
+  tampered: $WORK/echo-agent-tampered
 EOF
 	cat <<EOF
 timeout: 10m
@@ -187,7 +197,7 @@ if REFSPAWN_TEST_VOLROOT="$VOLROOT" "$WORK/refspawn-stub" -refspawn-test-stub -c
 	fail "a refspawn config without images was accepted"
 fi
 grep -q "images is required" "$WORK/check.err" || { cat "$WORK/check.err"; fail "the refusal did not name images"; }
-REFSPAWN_TEST_VOLROOT="$VOLROOT" "$WORK/refspawn-stub" -refspawn-test-stub -config "$WORK/refspawn.yaml" 2>"$WORK/refspawn.err" &
+REFSPAWN_TEST_VOLROOT="$VOLROOT" REFSPAWN_TEST_IMAGES="$FAKE_IMAGES" "$WORK/refspawn-stub" -refspawn-test-stub -config "$WORK/refspawn.yaml" 2>"$WORK/refspawn.err" &
 PIDS+=($!)
 wait_socket "$SUP_DIR/refspawn.sock" "the supervisor socket" "$WORK/refspawn.err"
 [ "$(mode_of "$SUP_DIR/refspawn.sock")" = "0o600" ] || fail "supervisor socket is not mode 0600"
@@ -227,9 +237,12 @@ R_OBO="obo requires a verified invoker token"
 R_RBAC="role \"locked\" requires membership in one of its allowed groups (nobody); the invoker's groups don't qualify"
 R_POLICY="child refused by its access policy"
 R_UNAVAILABLE="spawn compartment unavailable"
-REASONS=("$R_NOT_ALLOWED" "$R_DEPTH" "$R_PARALLEL" "$R_TOTAL" "$R_OBO" "$R_RBAC" "$R_POLICY" "$R_UNAVAILABLE")
-for i in $(seq 0 7); do
-	for j in $(seq 0 7); do
+# The binding refusal: the image the operator mapped is not the digest the
+# card consented to. Distinct from the compartment reason on purpose.
+R_ARTIFACT="spawn artifact refused"
+REASONS=("$R_NOT_ALLOWED" "$R_DEPTH" "$R_PARALLEL" "$R_TOTAL" "$R_OBO" "$R_RBAC" "$R_POLICY" "$R_UNAVAILABLE" "$R_ARTIFACT")
+for i in $(seq 0 8); do
+	for j in $(seq 0 8); do
 		if [ "$i" -lt "$j" ] && [ "${REASONS[$i]}" = "${REASONS[$j]}" ]; then
 			fail "two refusal modes share one reason (${REASONS[$i]}), so no assertion below could tell them apart"
 		fi
@@ -476,6 +489,9 @@ parent_artifact() { # $1 = run id: the full step artifact body
 # provisioned_count: how many sets the supervisor has provisioned so far,
 # from its log; torn_down likewise. Together they prove nothing leaks.
 provisioned_count() { out_of grep -c "set provisioned" "$WORK/refspawn.err"; }
+# binding_refused_count: sets the supervisor started and tore down WITHOUT
+# ever provisioning, because the measured image was not the consented one.
+binding_refused_count() { out_of grep -c "artifact to run is not a consented one" "$WORK/refspawn.err"; }
 torn_down_count() { out_of grep -c "set torn down" "$WORK/refspawn.err"; }
 leftover_volumes() { find "$VOLROOT" -maxdepth 1 -name 'agenthof-spawn-*' -print; }
 # nothing_left: no volume directory, no child directory and no set the
@@ -485,14 +501,14 @@ leftover_volumes() { find "$VOLROOT" -maxdepth 1 -name 'agenthof-spawn-*' -print
 nothing_left() {
 	for i in $(seq 1 60); do
 		if [ -z "$(ls -A "$SPAWN_ROOT")" ] && [ -z "$(leftover_volumes)" ] &&
-			[ "$(provisioned_count)" = "$(torn_down_count)" ]; then
+			[ "$(( $(provisioned_count) + $(binding_refused_count) ))" = "$(torn_down_count)" ]; then
 			return 0
 		fi
 		[ "$i" = 60 ] && break
 		sleep 0.25
 	done
 	ls -la "$SPAWN_ROOT" "$VOLROOT"
-	fail "$1: the supervisor provisioned $(provisioned_count) sets and tore down $(torn_down_count), and something it made is still there"
+	fail "$1: the supervisor provisioned $(provisioned_count) sets (and refused $(binding_refused_count) on binding) and tore down $(torn_down_count), and something it made is still there"
 }
 
 # 1. A parent spawns a child that reports back. The child is a full governed
@@ -788,71 +804,17 @@ echo "isolation: one workspace per child, shared by that child's agents, fresh p
 #     half is the gateway's one trusted signer. The enrolled agent's name is
 #     also the supervisor's images: key, which spawn_config already maps to
 #     the host echo-agent — the entry enroll's step 2 prints for the operator.
-mkdir -p "$WORK/cardsign"
-cat >"$WORK/cardsign/main.go" <<'GO'
-package main
+#     The signer and the enroll steps are shared with the real-backend runs
+#     (scripts/enroll-lib.sh).
+# shellcheck source=scripts/enroll-lib.sh
+. "$ROOT/scripts/enroll-lib.sh"
+enroll_build_signer
+SIGNER_KEY="$(enroll_card "$WORK/card.json" oci "$ENROLL_ARTIFACT_HEX")"
 
-import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"os"
-)
-
-// Writes the signed card to os.Args[1] (artifact digest os.Args[2]) and
-// prints the public key, base64, a gateway trusts.
-func main() {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	body := map[string]any{
-		"name":    "Enrolled Echo",
-		"version": "1.0.0",
-		"capabilities": map[string]any{"extensions": []any{map[string]any{
-			"uri": "https://agenthof.dev/ext/agent/v1",
-			"params": map[string]any{
-				"artifact":  "ghcr.io/acme/echo@sha256:" + os.Args[2],
-				"interface": "a2a",
-				"model":     "fast",
-			},
-		}}},
-	}
-	enc := base64.RawURLEncoding
-	canon, err := json.Marshal(body) // compact, sorted keys: already canonical for these values
-	if err != nil {
-		panic(err)
-	}
-	hdr, err := json.Marshal(map[string]any{"alg": "EdDSA", "kid": "curator"})
-	if err != nil {
-		panic(err)
-	}
-	p := enc.EncodeToString(hdr)
-	sig := enc.EncodeToString(ed25519.Sign(priv, []byte(p+"."+enc.EncodeToString(canon))))
-	body["signatures"] = []any{map[string]any{"protected": p, "signature": sig}}
-	out, err := json.Marshal(body)
-	if err != nil {
-		panic(err)
-	}
-	if err := os.WriteFile(os.Args[1], out, 0o644); err != nil {
-		panic(err)
-	}
-	fmt.Print(base64.StdEncoding.EncodeToString(pub))
-}
-GO
-go build -o "$WORK/cardsign/cardsign" "$WORK/cardsign/main.go"
-ENROLL_ARTIFACT_HEX="$(printf '%064d' 0 | tr 0 a)"
-SIGNER_KEY="$("$WORK/cardsign/cardsign" "$WORK/card.json" "$ENROLL_ARTIFACT_HEX")"
-{ [ -s "$WORK/card.json" ] && [ -n "$SIGNER_KEY" ]; } || fail "the signer produced no card or key"
-
-write_config "$WORK/cfg-enroll" "$CAPS
-trusted_signers:
-  - {kid: curator, key: $SIGNER_KEY}" "$CHILD_RESPAWNS"
-# The orchestrator's role may enroll: the one control action enroll asks for.
-sed -i.bak 's/^control: \[apply\]$/control: [apply, enroll]/' "$WORK/cfg-enroll/roles/lead.yaml" && rm -f "$WORK/cfg-enroll/roles/lead.yaml.bak"
-grep -qx 'control: \[apply, enroll\]' "$WORK/cfg-enroll/roles/lead.yaml" || fail "the lead role was not granted enroll"
+write_config "$WORK/cfg-enroll" "$CAPS" "$CHILD_RESPAWNS"
+# The signer is the gateway's one trusted signer; the orchestrator's role may
+# enroll: the one control action enroll asks for.
+enroll_trust "$WORK/cfg-enroll" "$SIGNER_KEY"
 "$WORK/agenthof" apply --config "$WORK/cfg-enroll" --control-log "$WORK/control.jsonl" --as ci --groups devs >/dev/null || fail "apply of the enrollment config failed"
 ENROLL_ARGS=(--config "$WORK/cfg-enroll" --control-log "$WORK/control.jsonl" --as ci --groups devs)
 
@@ -889,7 +851,7 @@ grep '"action":"enroll"' "$WORK/control.jsonl" | grep -q '"outcome":"success"' |
 # The operator's by-hand edit the output asked for: the trusted orchestrator
 # may spawn the enrolled agent, and only by this edit. The supervisor's
 # images: entry for it is in spawn_config above.
-printf '  - role: enrolled\n    workflow: enrolled\n' >>"$WORK/cfg-enroll/agents/lead.yaml"
+enroll_allow_spawn "$WORK/cfg-enroll/agents/lead.yaml" enrolled
 
 # apply, then the orchestrator spawns it: the spawned run succeeds, linked
 # both ways, under the same invoker, in the compartment the supervisor made.
@@ -906,6 +868,37 @@ echo "$ENR_ART" | grep -q "spawn succeeded $ENR_CHILD enr-$NONCE" || fail "the e
 grep -q "compartment started.*child=$ENR_CHILD.*compartment=agenthof-spawn-$ENR_CHILD-enrolled" "$WORK/refspawn.err" || fail "the enrolled agent did not run in a compartment named for the child"
 no_reason "$(ledger "$ENR_PARENT")"
 nothing_left "after the enrolled spawn"
+# Bound: the compartment was measured, and the measured artifact reached the
+# parent's spawn event: the consented digest is in the set it recorded.
+ENR_MEASURED="$(field "$(ledger "$ENR_PARENT")" spawn child_artifact succeeded)"
+[ -n "$ENR_MEASURED" ] || fail "the enrolled spawn recorded no child_artifact, so nothing proves the image was measured"
+printf '%s\n' "$ENR_MEASURED" | grep -q "oci-image" || { echo "$ENR_MEASURED"; fail "the measured child_artifact is not an oci-image"; }
+printf '%s\n' "$ENR_MEASURED" | grep -q "sha256:$ENROLL_ARTIFACT_HEX" || { echo "$ENR_MEASURED"; fail "the measured child_artifact does not carry the consented digest"; }
+
+# Tampered: a second agent enrolled from the SAME card (so it consents to the
+# same digest), but whose mapped image resolves to a different one. Refused at
+# provision with the binding reason, not the compartment reason: no child
+# run, no compartment left, and the refusal burns no total (the three spawns
+# after it still fit under max_total_spawns 3).
+enroll_agent "$WORK/card.json" tampered "$WORK/cfg-enroll"; TAMPERED="$ENROLL_OUT"
+OUTS+=("$TAMPERED")
+enroll_allow_spawn "$WORK/cfg-enroll/agents/lead.yaml" tampered
+BEFORE="$(provisioned_count)"
+BEFORE_BOUND="$(binding_refused_count)"
+run "$WORK/cfg-enroll" lead lead-wf "spawn:tampered/tampered:t-$NONCE; spawn:enrolled/enrolled:e1; spawn:enrolled/enrolled:e2; spawn:enrolled/enrolled:e3"
+echo "$OUT" | grep -q "finished: succeeded" || fail "the parent step reports the refusal and still finishes"
+TAM="$RUNID"
+[ "$(count "$(ledger "$TAM")" spawn refused)" = 1 ] || fail "expected exactly the tampered spawn refused"
+[ "$(count "$(ledger "$TAM")" spawn succeeded)" = 3 ] || fail "the three bound spawns after the refusal must all fit: the binding refusal must not burn the total"
+[ "$(field "$(ledger "$TAM")" spawn reason refused)" = "$R_ARTIFACT" ] || fail "the tampered refusal is not the binding reason"
+sole_reason "$(ledger "$TAM")" "$R_ARTIFACT"
+[ -z "$(field "$(ledger "$TAM")" spawn child_run_id refused)" ] || fail "a binding refusal must start no child run"
+[ -z "$(field "$(ledger "$TAM")" spawn child_artifact refused)" ] || fail "a refused spawn recorded a measured artifact it never ran"
+[ "$(provisioned_count)" = $((BEFORE + 3)) ] || fail "the tampered set was provisioned, or a bound one was not"
+[ "$(binding_refused_count)" = $((BEFORE_BOUND + 1)) ] || fail "the supervisor did not log exactly one binding refusal"
+echo "$AUDIT" | grep -qF "$R_ARTIFACT" || fail "audit did not render the binding refusal"
+nothing_left "after the tampered refusal"
+echo "binding: the enrolled spawn ran its measured image (child_artifact recorded); a repointed image is refused with the distinct binding reason, no child, no total burned — ok"
 
 # Root-run refusal, way 1: the command line. Refused with the spawn-only
 # reason, recorded as a run of its own, nothing provisioned, no step started.

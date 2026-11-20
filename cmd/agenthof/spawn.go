@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/agentrt"
@@ -25,6 +27,18 @@ import (
 // provision that failed or was refused, or an answer that would have let an
 // agent reach the runtime directly. Fail-closed: such a child never runs.
 const reasonCompartmentUnavailable = "spawn compartment unavailable"
+
+// reasonArtifactRefused is the fixed, ledgered reason when the supervisor
+// refused the set because the artifact an agent would run is not one its
+// enrollment consented to: a binding refusal, not an outage.
+const reasonArtifactRefused = "spawn artifact refused"
+
+// reasonArtifactNotConsented is the fixed, ledgered reason when the gateway's
+// own admission check finds that a provenance agent's measured artifact is
+// absent or is not one of its consented forms. Distinct from
+// reasonArtifactRefused (the supervisor refused) and
+// reasonCompartmentUnavailable.
+const reasonArtifactNotConsented = "spawn artifact not consented"
 
 // reasonChildRefusedByPolicy is the fixed reason the parent's spawn event and
 // the door's answer carry when the engine refuses the child at its registry
@@ -241,14 +255,19 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 		// (unreachable today; impossible rather than merely unreachable).
 		opts := d.options(&parent)
 		opts.NewGateway = nil
-		return d.runChild(ctx, childRole, childWorkflow, input, parent, d.executor(), opts, false, "", nil)
+		return d.runChild(ctx, childRole, childWorkflow, input, parent, d.executor(), opts, false, "", nil, nil)
 	}
 	if d.sup == nil {
 		logger.Warn("spawn refused", "reason", "no compartment supervisor configured")
 		return rungateway.SpawnResult{Status: "refused", Reason: reasonCompartmentUnavailable}, nil
 	}
 	childID := engine.NewRunID()
-	lease, err := d.sup.Provision(ctx, childID, distinctStepAgents(wf))
+	agents := distinctStepAgents(wf)
+	lease, err := d.sup.Provision(ctx, childID, agents, d.expectedArtifacts(agents))
+	if errors.Is(err, refspawn.ErrArtifactRefused) {
+		logger.Warn("spawn refused", "reason", "artifact binding refused", "child_run", childID)
+		return rungateway.SpawnResult{Status: "refused", Reason: reasonArtifactRefused}, nil
+	}
 	if err != nil {
 		// The client already logged the failure by class; the ledger gets
 		// the fixed reason and nothing of the supervisor's text.
@@ -259,6 +278,15 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 	if err := checkPlacement(mountedDir, lease); err != nil {
 		logger.Error("spawn refused", "reason", err.Error(), "child_run", childID) // our own fixed text, no path
 		return rungateway.SpawnResult{Status: "refused", Reason: reasonCompartmentUnavailable}, nil
+	}
+	// The trust anchor: whatever the supervisor said or omitted, a provenance
+	// agent runs only if its measured artifact is one it consented to.
+	// Provisioned stays true — a compartment set was consumed — so the
+	// refusal counts against max_total_spawns.
+	if evidence, failed := d.admitArtifacts(agents, lease); len(failed) > 0 {
+		logger.Warn("spawn refused", "reason", "measured artifact not consented", "child_run", childID, "agents", failed)
+		return rungateway.SpawnResult{Status: "refused", Reason: reasonArtifactNotConsented, Provisioned: true, ChildArtifact: evidence,
+			ChildConfiner: lease.Tier, ChildConfinerOpts: lease.TierOpts}, nil
 	}
 	// The child runs until the parent step's context ends — or until the
 	// supervisor ends the set (a compartment died): a child with nothing to
@@ -277,15 +305,142 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 	opts := d.options(&parent)
 	opts.RunID = childID
 	opts.NewGateway = childGateway{deps: d, socketDir: lease.ChildDir, execURL: config.UnixScheme + lease.ExecSocket}.newGateway
-	return d.runChild(childCtx, childRole, childWorkflow, input, parent, exec, opts, true, lease.Tier, lease.TierOpts)
+	return d.runChild(childCtx, childRole, childWorkflow, input, parent, exec, opts, true, lease.Tier, lease.TierOpts, childArtifacts(lease.Ran))
+}
+
+// consentedForms returns the artifact forms a provenance agent consented to
+// at enrollment, digest-only: an oci-image form (the image's sha256 digest)
+// and/or a host-program form (its builds' content hashes). Nil for an agent
+// with no provenance.
+func consentedForms(a config.AgentDef) []refspawn.ExpectedArtifact {
+	if a.Provenance == nil {
+		return nil
+	}
+	var out []refspawn.ExpectedArtifact
+	if dg := a.Provenance.ImageDigest(); wellFormedSHA256(dg) {
+		out = append(out, refspawn.ExpectedArtifact{Kind: "oci-image", Values: []string{dg}})
+	}
+	if a.Provenance.Program != "" && len(a.Provenance.Builds) > 0 {
+		hashes := make([]string, 0, len(a.Provenance.Builds))
+		for _, b := range a.Provenance.Builds {
+			// Self-sufficient: an empty or malformed value can never match,
+			// whatever the client's own shape gate does.
+			if wellFormedSHA256(b.SHA256) {
+				hashes = append(hashes, b.SHA256)
+			}
+		}
+		if len(hashes) > 0 {
+			out = append(out, refspawn.ExpectedArtifact{Kind: "host-program", Values: hashes})
+		}
+	}
+	return out
+}
+
+// wellFormedSHA256 reports whether v is "sha256:" followed by 64 lowercase hex.
+func wellFormedSHA256(v string) bool {
+	h, ok := strings.CutPrefix(v, "sha256:")
+	if !ok || len(h) != 64 {
+		return false
+	}
+	for _, c := range h {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// expectedArtifacts is what the supervisor is asked to enforce: each
+// provenance agent's consented forms (nil when no agent has any).
+func (d *runDeps) expectedArtifacts(agents []string) map[string][]refspawn.ExpectedArtifact {
+	var out map[string][]refspawn.ExpectedArtifact
+	for _, name := range agents {
+		def, ok := d.reg.Agent(name)
+		if !ok {
+			continue
+		}
+		if forms := consentedForms(def); len(forms) > 0 {
+			if out == nil {
+				out = map[string][]refspawn.ExpectedArtifact{}
+			}
+			out[name] = forms
+		}
+	}
+	return out
+}
+
+// ranConsented reports whether a measured artifact of the given kind shares
+// a value with a consented form of the same kind (exact string compare).
+func ranConsented(kind string, ran []string, forms []refspawn.ExpectedArtifact) bool {
+	for _, f := range forms {
+		if f.Kind != kind {
+			continue
+		}
+		for _, v := range f.Values {
+			if slices.Contains(ran, v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// admitArtifacts is the gateway's own check, independent of what was sent to
+// the supervisor (provenance is read fresh from the registry): every
+// spawn-only agent must have a measured artifact that shares a value with a
+// consented form of the same kind. One failure refuses the whole set; the
+// evidence is the measured artifact of each failing agent that had one. A
+// supervisor that echoes the consented value back as a fake measurement
+// defeats this check — it guards a lenient or older supervisor and a wrongly
+// mapped image, not a lying one.
+func (d *runDeps) admitArtifacts(agents []string, lease *refspawn.Lease) (map[string]engine.ChildArtifactRef, []string) {
+	var evidence map[string]engine.ChildArtifactRef
+	var failed []string
+	for _, name := range agents {
+		def, ok := d.reg.Agent(name)
+		if !ok {
+			// An agent the registry cannot name cannot be vetted: refuse.
+			failed = append(failed, name)
+			continue
+		}
+		if !def.SpawnOnly() {
+			continue
+		}
+		kind, values, measured := lease.RanArtifact(name)
+		if measured && ranConsented(kind, values, consentedForms(def)) {
+			continue
+		}
+		failed = append(failed, name)
+		if measured {
+			if evidence == nil {
+				evidence = map[string]engine.ChildArtifactRef{}
+			}
+			evidence[name] = engine.ChildArtifactRef{Kind: kind, Values: values}
+		}
+	}
+	return evidence, failed
+}
+
+// childArtifacts converts what the supervisor measured each child agent's
+// compartment to run into the engine's ledger shape (nil when none was).
+func childArtifacts(ran map[string]refspawn.RanArtifact) map[string]engine.ChildArtifactRef {
+	if len(ran) == 0 {
+		return nil
+	}
+	out := make(map[string]engine.ChildArtifactRef, len(ran))
+	for agent, r := range ran {
+		out[agent] = engine.ChildArtifactRef{Kind: r.Kind, Values: r.Values}
+	}
+	return out
 }
 
 // runChild runs the engine for a child and maps its outcome onto a
 // SpawnResult. provisioned is what the door counts; tier and tierOpts are the
 // isolation tier the supervisor reported for the child's set (empty when the
 // child was never provisioned), carried onto every outcome so the parent's
-// spawn event records it.
-func (d *runDeps) runChild(ctx context.Context, role, workflow, input string, parent engine.Binding, exec engine.StepExecutor, opts engine.Options, provisioned bool, tier string, tierOpts []string) (rungateway.SpawnResult, error) {
+// spawn event records it. ran is the artifact each child agent was measured
+// to run (nil when none).
+func (d *runDeps) runChild(ctx context.Context, role, workflow, input string, parent engine.Binding, exec engine.StepExecutor, opts engine.Options, provisioned bool, tier string, tierOpts []string, ran map[string]engine.ChildArtifactRef) (rungateway.SpawnResult, error) {
 	res, err := engine.Run(ctx, d.reg, role, workflow, input, parent.Invoker, exec, opts)
 	if err != nil {
 		if res.Status == "refused" && !errors.Is(err, engine.ErrLedgerWrite) {
@@ -299,15 +454,15 @@ func (d *runDeps) runChild(ctx context.Context, role, workflow, input string, pa
 			// carries a filesystem path: it takes the error path below, where
 			// the door records its own fixed "spawn did not complete".
 			return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "refused", Reason: reasonChildRefusedByPolicy, Provisioned: provisioned,
-				ChildConfiner: tier, ChildConfinerOpts: tierOpts}, nil
+				ChildConfiner: tier, ChildConfinerOpts: tierOpts, ChildArtifact: ran}, nil
 		}
 		return rungateway.SpawnResult{ChildRunID: res.RunID, Status: "failed", Provisioned: provisioned,
-			ChildConfiner: tier, ChildConfinerOpts: tierOpts}, err
+			ChildConfiner: tier, ChildConfinerOpts: tierOpts, ChildArtifact: ran}, err
 	}
 	status := res.Status
 	if status == "cancelled" {
 		status = "failed" // the door's vocabulary: a child torn down with its parent did not succeed
 	}
 	return rungateway.SpawnResult{ChildRunID: res.RunID, Status: status, OutputSHA: res.OutputSHA, OutputPreview: res.OutputPreview, Provisioned: provisioned,
-		ChildConfiner: tier, ChildConfinerOpts: tierOpts}, nil
+		ChildConfiner: tier, ChildConfinerOpts: tierOpts, ChildArtifact: ran}, nil
 }

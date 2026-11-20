@@ -23,6 +23,11 @@ func goodEnroll() *control.Enroll {
 	}
 }
 
+func hostProg() *control.EnrollHostProgram {
+	return &control.EnrollHostProgram{Program: "acme-triage", Builds: []control.EnrollHostBuild{
+		{OS: "darwin", Arch: "arm64", SHA256: "sha256:" + enrollDigest}}}
+}
+
 func enrollEvent(e *control.Enroll) control.Event {
 	return control.Event{Action: "enroll", Agent: "coder", Outcome: "success", Enroll: e,
 		Invoker: identity.Static("dana@example.com"), Witness: control.CaptureWitness()}
@@ -77,9 +82,28 @@ func TestEnrollShapeRejects(t *testing.T) {
 	mut := func(f func(*control.Enroll)) *control.Enroll { e := goodEnroll(); f(e); return e }
 	withEvent := func(f func(*control.Event)) control.Event { e := enrollEvent(goodEnroll()); f(&e); return e }
 	cases := map[string]control.Event{
-		"missing payload":            enrollEvent(nil),
-		"bad card digest":            enrollEvent(mut(func(e *control.Enroll) { e.CardSHA256 = "nothex" })),
-		"empty artifact":             enrollEvent(mut(func(e *control.Enroll) { e.Artifact = "" })),
+		"missing payload":       enrollEvent(nil),
+		"bad card digest":       enrollEvent(mut(func(e *control.Enroll) { e.CardSHA256 = "nothex" })),
+		"neither artifact form": enrollEvent(mut(func(e *control.Enroll) { e.Artifact = "" })),
+		"empty program id":      enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Program = "" })),
+		"long program id":       enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Program = long })),
+		"no builds":             enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds = nil })),
+		"too many builds": enrollEvent(mut(func(e *control.Enroll) {
+			e.HostProgram = hostProg()
+			e.HostProgram.Builds = make([]control.EnrollHostBuild, control.MaxEnrollBuilds+1)
+			for i := range e.HostProgram.Builds {
+				e.HostProgram.Builds[i] = hostProg().Builds[0]
+			}
+		})),
+		"long build os":       enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].OS = long })),
+		"long build arch":     enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].Arch = long })),
+		"empty build os":      enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].OS = "" })),
+		"empty build arch":    enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].Arch = "" })),
+		"bare-hex build hash": enrollEvent(mut(func(e *control.Enroll) { e.HostProgram = hostProg(); e.HostProgram.Builds[0].SHA256 = enrollDigest })),
+		"uppercase build hash": enrollEvent(mut(func(e *control.Enroll) {
+			e.HostProgram = hostProg()
+			e.HostProgram.Builds[0].SHA256 = "sha256:" + strings.ToUpper(enrollDigest)
+		})),
 		"long artifact":              enrollEvent(mut(func(e *control.Enroll) { e.Artifact = long })),
 		"long kid":                   enrollEvent(mut(func(e *control.Enroll) { e.SignerKID = long })),
 		"too many requested":         enrollEvent(mut(func(e *control.Enroll) { e.Requested = many })),
@@ -101,5 +125,36 @@ func TestEnrollShapeRejects(t *testing.T) {
 				t.Fatal("a rejected record must not create the ledger")
 			}
 		})
+	}
+}
+
+func TestAppendEnrollHostProgramOnly(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	e := goodEnroll()
+	e.Artifact = ""
+	e.HostProgram = hostProg()
+	if _, err := control.Append(p, enrollEvent(e)); err != nil {
+		t.Fatalf("a host-program-only enroll must validate: %v", err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := control.Decode([]byte(strings.TrimSpace(string(raw))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Enroll == nil || d.Enroll.Artifact != "" || d.Enroll.HostProgram == nil ||
+		d.Enroll.HostProgram.Program != "acme-triage" || len(d.Enroll.HostProgram.Builds) != 1 {
+		t.Fatalf("host program did not round-trip: %+v", d.Enroll)
+	}
+}
+
+func TestAppendEnrollBothForms(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	e := goodEnroll()
+	e.HostProgram = hostProg()
+	if _, err := control.Append(p, enrollEvent(e)); err != nil {
+		t.Fatalf("an enroll naming both forms must validate: %v", err)
 	}
 }

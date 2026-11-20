@@ -39,8 +39,24 @@ type Fake struct {
 	ReapErr   error
 	InUse     map[string]bool // RemoveStore(name, false) is ErrStoreInUse while InUse[name]
 
-	mu  sync.Mutex
-	Ops []string
+	// Ran is what every launched compartment's RanArtifact reports; nil means
+	// "measured nothing" (ok=false). The fake never compares it with Expected.
+	Ran *confiner.ExpectedArtifact
+
+	mu       sync.Mutex
+	Ops      []string
+	launches []*confiner.ExpectedArtifact // Spec.Expected of each Launch, in order
+}
+
+// LastExpected returns the Spec.Expected of the most recent Launch (nil when
+// that launch had none) and whether any Launch happened.
+func (f *Fake) LastExpected() (*confiner.ExpectedArtifact, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.launches) == 0 {
+		return nil, false
+	}
+	return f.launches[len(f.launches)-1], true
 }
 
 var _ confiner.Confiner = (*Fake)(nil)
@@ -131,6 +147,9 @@ func (f *Fake) Reap(_ context.Context, prefix string) error {
 // those names.
 func (f *Fake) Launch(_ context.Context, spec confiner.Spec) (confiner.Compartment, error) {
 	f.record("launch %s", spec.Name)
+	f.mu.Lock()
+	f.launches = append(f.launches, spec.Expected)
+	f.mu.Unlock()
 	if f.LaunchErr != nil {
 		return nil, f.LaunchErr
 	}
@@ -183,7 +202,7 @@ func (f *Fake) Launch(_ context.Context, spec confiner.Spec) (confiner.Compartme
 		return nil, err
 	}
 
-	c := &fakeCompartment{f: f, name: spec.Name, pid: cmd.Process.Pid, done: make(chan struct{})}
+	c := &fakeCompartment{f: f, name: spec.Name, pid: cmd.Process.Pid, ran: f.Ran, done: make(chan struct{})}
 	go func() {
 		waitErr := cmd.Wait()
 		if scratch != "" {
@@ -211,6 +230,7 @@ type fakeCompartment struct {
 	f    *Fake
 	name string
 	pid  int
+	ran  *confiner.ExpectedArtifact
 	done chan struct{}
 	// res and err are written once, before done is closed.
 	res confiner.Result
@@ -230,6 +250,14 @@ func (c *fakeCompartment) Wait(ctx context.Context) (confiner.Result, error) {
 func (c *fakeCompartment) Done() <-chan struct{} { return c.done }
 
 func (c *fakeCompartment) PID() int { return c.pid }
+
+// RanArtifact reports the Fake's Ran, snapshotted at Launch.
+func (c *fakeCompartment) RanArtifact() (string, []string, bool) {
+	if c.ran == nil {
+		return "", nil, false
+	}
+	return c.ran.Kind, slices.Clone(c.ran.Values), true
+}
 
 // Remove kills the whole process group, which unblocks a pending Wait, and
 // returns once the process has been reaped or ctx is done.

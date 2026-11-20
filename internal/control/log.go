@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/identity"
@@ -163,12 +164,15 @@ func checkAnchorShape(e Event) error {
 // caps: honest values come nowhere near them; they bound what a record can
 // carry. An artifact reference conventionally fits in 2048.
 const (
-	MaxEnrollArtifactLen  = 2048
-	MaxEnrollRequested    = 64
-	MaxEnrollRequestedLen = 256
-	MaxEnrollSignerKIDLen = 128
-	MaxEnrollFiles        = 64
-	MaxEnrollPathLen      = 1024
+	MaxEnrollArtifactLen   = 2048
+	MaxEnrollRequested     = 64
+	MaxEnrollRequestedLen  = 256
+	MaxEnrollSignerKIDLen  = 128
+	MaxEnrollFiles         = 64
+	MaxEnrollPathLen       = 1024
+	MaxEnrollProgramLen    = 256
+	MaxEnrollBuilds        = 32
+	MaxEnrollBuildFieldLen = 64
 )
 
 // checkEnrollShape is Append's structural permit for an enroll record,
@@ -196,8 +200,27 @@ func checkEnrollShape(e Event) error {
 	if !anchorHashRE.MatchString(n.CardSHA256) {
 		return fmt.Errorf("control: enroll card_sha256 %q is not a lowercase hex sha256", n.CardSHA256)
 	}
-	if n.Artifact == "" || len(n.Artifact) > MaxEnrollArtifactLen {
+	if n.Artifact == "" && n.HostProgram == nil {
+		return errors.New("control: an enroll must name an artifact, a host program, or both")
+	}
+	if n.Artifact != "" && len(n.Artifact) > MaxEnrollArtifactLen {
 		return fmt.Errorf("control: enroll artifact must be 1 to %d bytes", MaxEnrollArtifactLen)
+	}
+	if hp := n.HostProgram; hp != nil {
+		if hp.Program == "" || len(hp.Program) > MaxEnrollProgramLen {
+			return fmt.Errorf("control: enroll host program id must be 1 to %d bytes", MaxEnrollProgramLen)
+		}
+		if len(hp.Builds) == 0 || len(hp.Builds) > MaxEnrollBuilds {
+			return fmt.Errorf("control: enroll host program must list 1 to %d builds", MaxEnrollBuilds)
+		}
+		for _, b := range hp.Builds {
+			if b.OS == "" || b.Arch == "" || len(b.OS) > MaxEnrollBuildFieldLen || len(b.Arch) > MaxEnrollBuildFieldLen {
+				return fmt.Errorf("control: an enroll host build os and arch must each be 1 to %d bytes", MaxEnrollBuildFieldLen)
+			}
+			if h, ok := strings.CutPrefix(b.SHA256, "sha256:"); !ok || !anchorHashRE.MatchString(h) {
+				return fmt.Errorf("control: enroll host build sha256 %q is not sha256:<64 lowercase hex>", b.SHA256)
+			}
+		}
 	}
 	if len(n.SignerKID) > MaxEnrollSignerKIDLen {
 		return fmt.Errorf("control: enroll signer_kid is %d bytes; the cap is %d", len(n.SignerKID), MaxEnrollSignerKIDLen)

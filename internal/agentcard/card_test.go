@@ -106,3 +106,112 @@ func TestParseRejectsDeepNesting(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+const (
+	hashA = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	hashB = "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+)
+
+func extCard(params string) string {
+	return `{"capabilities":{"extensions":[{"uri":"https://agenthof.dev/ext/agent/v1","params":` + params + `}]}}`
+}
+
+func TestExtensionHostProgramForm(t *testing.T) {
+	hp := `"host-program":{"program":"triage-bot","builds":[{"os":"darwin","arch":"arm64","sha256":"` + hashA + `"},{"os":"darwin","arch":"amd64","sha256":"` + hashB + `"}]}`
+	for name, tc := range map[string]struct {
+		params   string
+		wantOCI  string
+		wantHost bool
+	}{
+		"host-program only": {`{` + hp + `}`, "", true},
+		"both forms":        {`{"artifact":"ghcr.io/acme/t@sha256:abc",` + hp + `}`, "ghcr.io/acme/t@sha256:abc", true},
+		"oci only":          {`{"artifact":"ghcr.io/acme/t@sha256:abc"}`, "ghcr.io/acme/t@sha256:abc", false},
+	} {
+		c, err := Parse([]byte(extCard(tc.params)))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		ext, err := c.Extension()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if ext.Artifact != tc.wantOCI || (ext.HostProgram != nil) != tc.wantHost {
+			t.Fatalf("%s: unexpected ext: %+v", name, ext)
+		}
+		if tc.wantHost {
+			h := ext.HostProgram
+			if h.Program != "triage-bot" || len(h.Builds) != 2 ||
+				h.Builds[0].OS != "darwin" || h.Builds[0].Arch != "arm64" || h.Builds[0].SHA256 != hashA {
+				t.Fatalf("%s: unexpected host-program: %+v", name, h)
+			}
+		}
+	}
+}
+
+func TestExtensionRequiresAnArtifactForm(t *testing.T) {
+	c, err := Parse([]byte(extCard(`{"interface":"a2a"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Extension(); err == nil || !strings.Contains(err.Error(), "at least one artifact") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestExtensionRejectsMalformedHostProgram(t *testing.T) {
+	build := func(h string) string {
+		return `{"host-program":{"program":"p","builds":[{"os":"darwin","arch":"arm64","sha256":"` + h + `"}]}}`
+	}
+	upper := "sha256:" + strings.Repeat("A", 64)
+	for name, params := range map[string]string{
+		"empty object":      `{"host-program":{}}`,
+		"no program":        `{"host-program":{"builds":[{"os":"darwin","arch":"arm64","sha256":"` + hashA + `"}]}}`,
+		"no builds":         `{"host-program":{"program":"p"}}`,
+		"empty builds":      `{"host-program":{"program":"p","builds":[]}}`,
+		"no prefix":         build(strings.TrimPrefix(hashA, "sha256:")),
+		"short":             build("sha256:abc"),
+		"long":              build(hashA + "0"),
+		"uppercase hex":     build(upper),
+		"non-hex":           build("sha256:" + strings.Repeat("g", 64)),
+		"empty hash":        build(""),
+		"wrong algorithm":   build("sha512:" + strings.Repeat("a", 64)),
+		"missing os":        `{"host-program":{"program":"p","builds":[{"arch":"arm64","sha256":"` + hashA + `"}]}}`,
+		"missing arch":      `{"host-program":{"program":"p","builds":[{"os":"darwin","sha256":"` + hashA + `"}]}}`,
+		"long program id":   `{"host-program":{"program":"` + strings.Repeat("p", 129) + `","builds":[{"os":"darwin","arch":"arm64","sha256":"` + hashA + `"}]}}`,
+		"too many builds":   `{"host-program":{"program":"p","builds":[` + strings.TrimSuffix(strings.Repeat(`{"os":"darwin","arch":"arm64","sha256":"`+hashA+`"},`, 33), ",") + `]}}`,
+		"long os":           `{"host-program":{"program":"p","builds":[{"os":"` + strings.Repeat("o", 21) + `","arch":"arm64","sha256":"` + hashA + `"}]}}`,
+		"long arch":         `{"host-program":{"program":"p","builds":[{"os":"darwin","arch":"` + strings.Repeat("a", 21) + `","sha256":"` + hashA + `"}]}}`,
+		"unknown field":     `{"host-program":{"program":"p","bogus":1,"builds":[{"os":"darwin","arch":"arm64","sha256":"` + hashA + `"}]}}`,
+		"unknown build key": `{"host-program":{"program":"p","builds":[{"os":"darwin","arch":"arm64","sha256":"` + hashA + `","x":1}]}}`,
+	} {
+		c, err := Parse([]byte(extCard(params)))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := c.Extension(); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+	// A malformed host-program is refused even when a valid OCI form is present.
+	c, err := Parse([]byte(extCard(`{"artifact":"a@sha256:1","host-program":{"program":"p","builds":[{"os":"darwin","arch":"arm64","sha256":"sha256:abc"}]}}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Extension(); err == nil {
+		t.Error("malformed host-program accepted alongside a valid artifact")
+	}
+}
+
+func TestParseRejectsHostProgramKeyVariants(t *testing.T) {
+	b := `{"os":"darwin","arch":"arm64","sha256":"` + hashA + `"}`
+	for name, params := range map[string]string{
+		"case-variant form": `{"host-program":{"program":"a","builds":[` + b + `]},"Host-Program":{"program":"evil","builds":[` + b + `]}}`,
+		"duplicate program": `{"host-program":{"program":"a","program":"evil","builds":[` + b + `]}}`,
+		"case-variant hash": `{"host-program":{"program":"a","builds":[{"os":"darwin","arch":"arm64","sha256":"` + hashA + `","SHA256":"` + hashB + `"}]}}`,
+		"non-ASCII key":     `{"host-program":{"prógram":"a","builds":[` + b + `]}}`,
+	} {
+		if _, err := Parse([]byte(extCard(params))); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

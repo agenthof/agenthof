@@ -55,12 +55,85 @@ type Signature struct {
 // AgenthofExt is the params of the Agenthof extension: what the agent is and
 // what it asks to be granted. Requests are proposals, never grants.
 type AgenthofExt struct {
-	Artifact  string               `json:"artifact"`  // digest-pinned image reference
-	Interface string               `json:"interface"` // how the agent is driven; enroll accepts only "a2a"
-	Tools     []config.ToolGrant   `json:"tools"`
-	Exec      []string             `json:"exec"`
-	Model     string               `json:"model"`
-	Spawn     []config.SpawnTarget `json:"spawn"`
+	Artifact string `json:"artifact"` // digest-pinned image reference (the OCI image form)
+	// HostProgram is the host-program artifact form: a program bound by
+	// content hash, for tiers that run a host executable rather than an image.
+	HostProgram *HostProgram         `json:"host-program,omitempty"`
+	Interface   string               `json:"interface"` // how the agent is driven; enroll accepts only "a2a"
+	Tools       []config.ToolGrant   `json:"tools"`
+	Exec        []string             `json:"exec"`
+	Model       string               `json:"model"`
+	Spawn       []config.SpawnTarget `json:"spawn"`
+}
+
+// HostProgram names a host executable by a logical id (never a filesystem
+// path) and lists the content hashes of its builds.
+type HostProgram struct {
+	Program string      `json:"program"`
+	Builds  []HostBuild `json:"builds"`
+}
+
+// HostBuild is one build of a host program. OS and Arch label the hash for
+// disclosure; they are not an enforcement key.
+type HostBuild struct {
+	OS     string `json:"os"`
+	Arch   string `json:"arch"`
+	SHA256 string `json:"sha256"` // "sha256:" + 64 lowercase hex
+}
+
+// Size caps on the host-program form, judged at parse so an oversized form is
+// refused before the operator is asked to consent. They are at least as strict
+// as the enroll record's caps (internal/control MaxEnrollProgramLen,
+// MaxEnrollBuilds, MaxEnrollBuildFieldLen), and together they keep the
+// disclosure line "host program <id> <os>/<arch> sha256:<64 hex>" (87 bytes
+// besides the three fields) within the record's 256-byte per-entry cap:
+// 128 + 20 + 20 + 87 = 255.
+const (
+	maxHostProgramLen = 128
+	maxHostBuilds     = 32
+	maxHostBuildField = 20
+)
+
+// validate checks the shape and size of the host-program form.
+func (h *HostProgram) validate() error {
+	if h.Program == "" {
+		return errors.New("host-program has no program id")
+	}
+	if len(h.Program) > maxHostProgramLen {
+		return fmt.Errorf("host-program id is over %d bytes", maxHostProgramLen)
+	}
+	if len(h.Builds) == 0 {
+		return errors.New("host-program has no builds")
+	}
+	if len(h.Builds) > maxHostBuilds {
+		return fmt.Errorf("host-program lists %d builds; the most allowed is %d", len(h.Builds), maxHostBuilds)
+	}
+	for i, b := range h.Builds {
+		if b.OS == "" || b.Arch == "" {
+			return fmt.Errorf("host-program build %d needs os and arch", i)
+		}
+		if len(b.OS) > maxHostBuildField || len(b.Arch) > maxHostBuildField {
+			return fmt.Errorf("host-program build %d: os and arch are each limited to %d bytes", i, maxHostBuildField)
+		}
+		if !validSHA256(b.SHA256) {
+			return fmt.Errorf("host-program build %d: sha256 must be sha256:<64 lowercase hex>", i)
+		}
+	}
+	return nil
+}
+
+func validSHA256(s string) bool {
+	hexPart, ok := strings.CutPrefix(s, "sha256:")
+	if !ok || len(hexPart) != 64 {
+		return false
+	}
+	for i := 0; i < len(hexPart); i++ {
+		c := hexPart[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Raw returns a copy of the exact bytes the card was parsed from.
@@ -120,8 +193,13 @@ func (c *Card) Extension() (AgenthofExt, error) {
 	if err := dec.Decode(&ext); err != nil {
 		return AgenthofExt{}, fmt.Errorf("parse agenthof extension params: %w", err)
 	}
-	if ext.Artifact == "" {
-		return AgenthofExt{}, errors.New("agenthof extension has no artifact")
+	if ext.HostProgram != nil {
+		if err := ext.HostProgram.validate(); err != nil {
+			return AgenthofExt{}, fmt.Errorf("agenthof extension: %w", err)
+		}
+	}
+	if ext.Artifact == "" && ext.HostProgram == nil {
+		return AgenthofExt{}, errors.New("agenthof extension needs at least one artifact form (artifact or host-program)")
 	}
 	return ext, nil
 }

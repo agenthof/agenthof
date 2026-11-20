@@ -519,7 +519,7 @@ func TestSpawnEventCarriesChildConfiner(t *testing.T) {
 		code   int
 	}{
 		{"succeeded", SpawnResult{ChildRunID: "r-child", Status: "succeeded", Provisioned: true, ChildConfiner: "seatbelt", ChildConfinerOpts: []string{"shared-host-scratch"}}, nil, "succeeded", http.StatusOK},
-		{"failed with error", SpawnResult{ChildRunID: "r-child", Status: "failed", Provisioned: true, ChildConfiner: "seatbelt", ChildConfinerOpts: []string{"shared-host-scratch"}}, errors.New("ledger write failed"), "failed", http.StatusBadGateway},
+		{"failed with error", SpawnResult{ChildRunID: "r-child", Status: "failed", Provisioned: true, ChildConfiner: "seatbelt", ChildConfinerOpts: []string{"shared-host-scratch"}, ChildArtifact: map[string]engine.ChildArtifactRef{"child": {Kind: "image-digest", Values: []string{"sha256:aa"}}}}, errors.New("ledger write failed"), "failed", http.StatusBadGateway},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -533,8 +533,35 @@ func TestSpawnEventCarriesChildConfiner(t *testing.T) {
 			if len(ev) != 1 || ev[0].Status != c.status {
 				t.Fatalf("events = %+v", ev)
 			}
+			if c.err != nil && !reflect.DeepEqual(ev[0].ChildArtifact, c.result.ChildArtifact) {
+				t.Fatalf("child_artifact = %v, want %v on the error path", ev[0].ChildArtifact, c.result.ChildArtifact)
+			}
 			if ev[0].ChildConfiner != "seatbelt" || !reflect.DeepEqual(ev[0].ChildConfinerOpts, []string{"shared-host-scratch"}) {
 				t.Fatalf("child_confiner = %q opts = %v, want seatbelt and [shared-host-scratch]", ev[0].ChildConfiner, ev[0].ChildConfinerOpts)
+			}
+		})
+	}
+}
+
+// The artifact the child's compartment was measured to run rides on the
+// parent's spawn event for a provisioned child, verbatim; a spawn that measured
+// none records none.
+func TestSpawnEventCarriesChildArtifact(t *testing.T) {
+	ran := map[string]engine.ChildArtifactRef{"child": {Kind: "image-digest", Values: []string{"sha256:aa"}}}
+	for _, c := range []struct {
+		name string
+		ran  map[string]engine.ChildArtifactRef
+	}{{"measured", ran}, {"none measured", nil}} {
+		t.Run(c.name, func(t *testing.T) {
+			sp := &stubSpawner{result: SpawnResult{ChildRunID: "r-child", Status: "succeeded", Provisioned: true, ChildArtifact: c.ran}}
+			rec := &eventRecorder{}
+			base, token, _ := startSpawnGateway(t, context.Background(), spawnPolicy(3, 2, 4), testBinding(), spawnAgent(workerChild), sp, rec)
+			if code, _ := postSpawn(t, context.Background(), base, token, spawnBody("worker", "child-wf", "x")); code != http.StatusOK {
+				t.Fatalf("code = %d", code)
+			}
+			ev := spawnEvents(rec)
+			if len(ev) != 1 || !reflect.DeepEqual(ev[0].ChildArtifact, c.ran) {
+				t.Fatalf("events = %+v, want child_artifact %v", ev, c.ran)
 			}
 		})
 	}

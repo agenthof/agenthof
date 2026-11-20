@@ -8,12 +8,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -457,6 +459,61 @@ func lookProgram(program string) (string, error) {
 	return abs, nil
 }
 
+// hostProgramKind is the ExpectedArtifact kind this backend enforces.
+const hostProgramKind = "host-program"
+
+// bindHostProgram enforces exp on the program about to be exec'd and returns
+// the program path to exec plus the MEASURED hash. A nil exp binds nothing and
+// returns abs unchanged. Otherwise the program is resolved through symlinks
+// and the resolved file is hashed, and that same resolved path is what the
+// caller execs, so the hashed file is the exec'd file. Nothing is copied. A
+// hash outside the consented set, or an exp of any other kind, refuses with
+// ErrArtifactMismatch, and a program that cannot be resolved or read with
+// ErrDidNotLaunch (an operator-config gap, not a mismatch), before anything is
+// started:
+// an unbound program is never run when a binding was asked for.
+//
+// The honest limits (the binding is weaker than the podman image digest):
+//   - it covers the launched executable's bytes only: not libraries it loads
+//     dynamically, not the interpreter a #! line names, and not host files the
+//     program reads;
+//   - the window between hashing and exec is NOT closed. There is no private
+//     copy; resolving the symlink narrows the window but a writer to the
+//     resolved file can still swap it in that gap;
+//   - argv[0] is not passed separately: sandbox-exec execs the path it is given,
+//     so a bound program runs under its RESOLVED name where an unbound one runs
+//     under the looked-up (link) name. A multi-call binary that dispatches on
+//     the name it was invoked as (busybox, coreutils-style) can behave
+//     differently bound than unbound;
+//   - the logical program id the caller consented to binds nothing at run
+//     time: the path comes from the caller and the hash does the binding.
+func bindHostProgram(abs string, exp *ExpectedArtifact) (path, hash string, err error) {
+	if exp == nil {
+		return abs, "", nil
+	}
+	if exp.Kind != hostProgramKind {
+		return "", "", fmt.Errorf("%w: seatbelt enforces %q, not %q", ErrArtifactMismatch, hostProgramKind, exp.Kind)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", "", fmt.Errorf("%w: resolve %s: %v", ErrDidNotLaunch, abs, err)
+	}
+	f, err := os.Open(resolved)
+	if err != nil {
+		return "", "", fmt.Errorf("%w: read %s: %v", ErrDidNotLaunch, resolved, err)
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", "", fmt.Errorf("%w: read %s: %v", ErrDidNotLaunch, resolved, err)
+	}
+	hash = "sha256:" + hex.EncodeToString(h.Sum(nil))
+	if !slices.Contains(exp.Values, hash) {
+		return "", "", fmt.Errorf("%w: program %s (%s) is not a consented hash", ErrArtifactMismatch, resolved, hash)
+	}
+	return resolved, hash, nil
+}
+
 // Launch starts one compartment: sandbox-exec under the compartment's
 // profile, exec'ing the program in place in its own session, with the store as
 // working directory and WORK, only the named environment (plus TMPDIR when
@@ -484,6 +541,10 @@ func (s *Seatbelt) Launch(ctx context.Context, spec Spec) (Compartment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: program not found or not executable: %v", ErrDidNotLaunch, err)
 	}
+	abs, ranHash, err := bindHostProgram(abs, spec.Expected)
+	if err != nil {
+		return nil, err
+	}
 	store := s.StorePath(spec.Store)
 	if fi, err := os.Stat(store); err != nil || !fi.IsDir() {
 		return nil, fmt.Errorf("confiner: store %q does not exist at %s; Launch never creates it", spec.Store, store)
@@ -507,7 +568,7 @@ func (s *Seatbelt) Launch(ctx context.Context, spec Spec) (Compartment, error) {
 	if err := s.compile(ctx, profile, store); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrDidNotLaunch, err)
 	}
-	c := &seatbeltCompartment{s: s, name: spec.Name, pidFile: s.pidFile(spec.Name), scratch: scratch, done: make(chan struct{})}
+	c := &seatbeltCompartment{s: s, name: spec.Name, pidFile: s.pidFile(spec.Name), scratch: scratch, done: make(chan struct{}), ranHash: ranHash}
 
 	// Claim the name first: a PENDING record (no pid yet) that carries the
 	// owner. From here until the record is completed below, another
@@ -626,6 +687,9 @@ type seatbeltCompartment struct {
 	pidFile string
 	scratch string
 	done    chan struct{}
+	// ranHash is the measured hash of the program file bound at Launch; empty
+	// when no Expected was given.
+	ranHash string
 	// res and err are written once, before done is closed.
 	res Result
 	err error
@@ -676,6 +740,17 @@ func (c *seatbeltCompartment) Done() <-chan struct{} { return c.done }
 // PID is the sandboxed program's own pid: sandbox-exec applies the profile and
 // execs the program in place.
 func (c *seatbeltCompartment) PID() int { return c.pid }
+
+// RanArtifact is the hash Launch measured from the program file, at Launch and
+// before exec, never the consented values. It is not a post-exec attestation:
+// the hash-then-exec window is open (see bindHostProgram). ok is false when no
+// Expected was bound.
+func (c *seatbeltCompartment) RanArtifact() (string, []string, bool) {
+	if c.ranHash == "" {
+		return "", nil, false
+	}
+	return hostProgramKind, []string{c.ranHash}, true
+}
 
 // Remove kills the compartment's session and the descendants the walk can
 // see, removes its PID record and scratch dir, and waits, bounded, for the

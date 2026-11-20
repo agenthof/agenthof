@@ -22,25 +22,89 @@ import (
 )
 
 // Wire contract — pinned by hand with internal/refspawn (never imported
-// across): POST /provision {"child_run_id", "agents": [...]}. A status
-// other than 200, sent before anything is flushed, is a refusal. 200 is
+// across): POST /provision {"child_run_id", "agents": [...], "expected"}.
+// expected maps an agent to every artifact form its enrollment consented to,
+// [{"kind", "values": [...]}]; an agent absent from it is not bound. A status
+// other than 200, sent before anything is flushed, is a refusal; 422 is the
+// dedicated binding refusal (an agent has forms but none of this tier's
+// kind, or the confiner found the artifact to run not among them). 200 is
 // followed by exactly one JSON line {"child_dir", "agent_sockets",
-// "exec_socket", "tier", "tier_opts"} once every socket is dialable; the
-// body then stays open for as long as the set lives and ends when the set
-// is gone. The client closing the body asks for the teardown. tier and
+// "exec_socket", "tier", "tier_opts", "ran"} once every socket is dialable;
+// the body then stays open for as long as the set lives and ends when the
+// set is gone. The client closing the body asks for the teardown. tier and
 // tier_opts name the confinement the set runs under; tier_opts is omitted
-// when there are none.
+// when there are none. ran maps an agent to the artifact its compartment was
+// measured to run, {"kind", "values": [...]}, and is omitted when no agent
+// measured one.
 type provisionRequest struct {
-	ChildRunID string   `json:"child_run_id"`
-	Agents     []string `json:"agents"`
+	ChildRunID string                    `json:"child_run_id"`
+	Agents     []string                  `json:"agents"`
+	Expected   map[string][]wireExpected `json:"expected,omitempty"`
+}
+
+// wireExpected is one consented artifact form on the wire.
+type wireExpected struct {
+	Kind   string   `json:"kind"`
+	Values []string `json:"values"`
+}
+
+// wireRan is one measured artifact on the wire.
+type wireRan struct {
+	Kind   string   `json:"kind"`
+	Values []string `json:"values"`
+}
+
+// Artifact kinds the two real tiers enforce. A tier outside this table has no
+// kind: an agent with consented forms is then refused, never run unbound.
+const (
+	kindOCIImage    = "oci-image"
+	kindHostProgram = "host-program"
+)
+
+func tierKind(t confiner.Tier) string {
+	switch t {
+	case confiner.TierPodman:
+		return kindOCIImage
+	case confiner.TierSeatbelt:
+		return kindHostProgram
+	}
+	return ""
+}
+
+// statusArtifactRefused is the dedicated binding-refusal status; the client
+// keys on it, so it is distinct from every other refusal here.
+const (
+	statusArtifactRefused = http.StatusUnprocessableEntity
+	reasonArtifactRefused = "refspawn: artifact binding refused"
+)
+
+// selectExpected is the form an agent's compartment is bound to: the union of
+// the values of every consented form whose kind is this tier's. nil with
+// ok=true means the agent has no expected entry (not bound); ok=false means
+// it has forms but none of this tier's kind (refuse).
+func selectExpected(forms []wireExpected, present bool, kind string) (*confiner.ExpectedArtifact, bool) {
+	if !present {
+		return nil, true
+	}
+	var vals []string
+	for _, f := range forms {
+		if kind != "" && f.Kind == kind {
+			vals = append(vals, f.Values...)
+		}
+	}
+	if len(vals) == 0 {
+		return nil, false
+	}
+	return &confiner.ExpectedArtifact{Kind: kind, Values: vals}, true
 }
 
 type provisionLine struct {
-	ChildDir     string            `json:"child_dir"`
-	AgentSockets map[string]string `json:"agent_sockets"`
-	ExecSocket   string            `json:"exec_socket"`
-	Tier         string            `json:"tier"`
-	TierOpts     []string          `json:"tier_opts,omitempty"`
+	ChildDir     string             `json:"child_dir"`
+	AgentSockets map[string]string  `json:"agent_sockets"`
+	ExecSocket   string             `json:"exec_socket"`
+	Tier         string             `json:"tier"`
+	TierOpts     []string           `json:"tier_opts,omitempty"`
+	Ran          map[string]wireRan `json:"ran,omitempty"`
 }
 
 const (
@@ -181,6 +245,8 @@ func (s *supervisor) handleProvision(w http.ResponseWriter, req *http.Request) {
 	}
 	seen := map[string]bool{}
 	images := map[string]string{}
+	expected := map[string]*confiner.ExpectedArtifact{}
+	kind := tierKind(s.confiner.Tier())
 	names := make([]string, 0, len(body.Agents))
 	for _, a := range body.Agents {
 		if !nameRE.MatchString(a) || len(a) > maxName || seen[a] {
@@ -196,7 +262,25 @@ func (s *supervisor) handleProvision(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		images[a] = img
+		forms, present := body.Expected[a]
+		exp, ok := selectExpected(forms, present, kind)
+		if !ok {
+			// Fail closed, before anything starts: the agent's enrollment
+			// consented to forms this tier cannot check.
+			s.logger.Warn("provision refused", "child", body.ChildRunID, "reason", "no expected form for this tier's artifact kind", "agent", a, "kind", kind)
+			http.Error(w, reasonArtifactRefused, statusArtifactRefused)
+			return
+		}
+		expected[a] = exp
 		names = append(names, compartmentName(body.ChildRunID, a))
+	}
+	// An expected entry keyed by a name that is not a requested agent is a
+	// keying bug upstream; refuse it rather than launch the agents unbound.
+	for a := range body.Expected {
+		if !seen[a] {
+			http.Error(w, "refspawn: expected names an agent that was not requested", http.StatusBadRequest)
+			return
+		}
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -215,8 +299,14 @@ func (s *supervisor) handleProvision(w http.ResponseWriter, req *http.Request) {
 	}
 	defer s.release(body.ChildRunID, names) // after the teardown below (defers run last-in first-out)
 	set := s.newSet(body.ChildRunID, body.Agents, images)
+	set.expected = expected
 	defer set.teardown()
 	if err := set.start(); err != nil {
+		if errors.Is(err, confiner.ErrArtifactMismatch) {
+			s.logger.Warn("provision refused", "child", set.id, "reason", "artifact to run is not a consented one")
+			http.Error(w, reasonArtifactRefused, statusArtifactRefused)
+			return
+		}
 		s.logger.Error("provision failed", "child", set.id, "error", err)
 		http.Error(w, "refspawn: provision failed", http.StatusBadGateway)
 		return
@@ -249,6 +339,7 @@ type childSet struct {
 	id       string
 	agents   []string
 	images   map[string]string
+	expected map[string]*confiner.ExpectedArtifact // by agent; nil value = not bound
 	store    string
 	childDir string
 	execDir  string
@@ -277,8 +368,21 @@ func (s *supervisor) newSet(id string, agents []string, images map[string]string
 }
 
 func (set *childSet) line() provisionLine {
+	var ran map[string]wireRan
+	for _, a := range set.agents {
+		comp, ok := set.comps[a]
+		if !ok {
+			continue
+		}
+		if kind, values, ok := comp.RanArtifact(); ok {
+			if ran == nil {
+				ran = map[string]wireRan{}
+			}
+			ran[a] = wireRan{Kind: kind, Values: values}
+		}
+	}
 	return provisionLine{ChildDir: set.childDir, AgentSockets: set.sockets, ExecSocket: set.execSock,
-		Tier: string(set.s.confiner.Tier()), TierOpts: set.s.confiner.Opts()}
+		Tier: string(set.s.confiner.Tier()), TierOpts: set.s.confiner.Opts(), Ran: ran}
 }
 
 // start creates the directories and the workspace store, forks the child's
@@ -326,6 +430,7 @@ func (set *childSet) start() error {
 			Name: name, Program: set.images[a], Argv: []string{"-socket", set.sockets[a]},
 			Store: set.store, Paths: []confiner.Path{{Path: set.childDir, RW: true}},
 			Limits: lim, Timeout: set.s.cfg.Timeout, Output: os.Stderr,
+			Expected: set.expected[a],
 		})
 		if err != nil {
 			return fmt.Errorf("start compartment %s: %w", name, err)

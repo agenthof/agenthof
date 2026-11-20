@@ -99,6 +99,21 @@ type Spec struct {
 	// Output is the combined-output sink; nil means capture and cap into
 	// Result.
 	Output io.Writer
+	// Expected, when non-nil, binds the compartment to an artifact: a backend
+	// that enforces it launches the program only if the artifact it measures
+	// is among Expected.Values, and otherwise returns ErrArtifactMismatch from
+	// Launch. nil means no binding (the behavior before this field existed);
+	// refexec leaves it nil.
+	Expected *ExpectedArtifact
+}
+
+// ExpectedArtifact names what a compartment is allowed to run: the artifact
+// Kind (a backend-interpreted label, e.g. an image digest or a host-program
+// hash) and the Values any one of which is acceptable. The set shape lets a
+// caller bind to several acceptable artifacts without a schema change.
+type ExpectedArtifact struct {
+	Kind   string
+	Values []string
 }
 
 // Result is what Wait returns. EnvNames is the environment-variable NAME list
@@ -152,6 +167,12 @@ type Compartment interface {
 	Remove(ctx context.Context) error
 	// PID is the host pid the runtime holds first-hand, for the attestation.
 	PID() int
+	// RanArtifact is the MEASURED artifact of what this compartment actually
+	// launched, available as soon as Launch returns. It is reported
+	// independent of Spec.Expected: a backend that ignores Expected still
+	// reports what it ran. ok is false when the backend measured nothing, in
+	// which case kind and values are zero and no artifact may be attested.
+	RanArtifact() (kind string, values []string, ok bool)
 }
 
 var (
@@ -160,6 +181,10 @@ var (
 	// sandbox-exec's exit 65 or 71. A program may itself exit with such a
 	// code; that ambiguity is accepted.
 	ErrDidNotLaunch = errors.New("confiner: the compartment did not run the command")
+	// ErrArtifactMismatch is returned by Launch when Spec.Expected is set and
+	// the artifact the backend measured is not among its Values. Nothing was
+	// run.
+	ErrArtifactMismatch = errors.New("confiner: the artifact to run is not the expected artifact")
 	// ErrStoreInUse is returned by RemoveStore without force when the store is busy.
 	ErrStoreInUse = errors.New("confiner: store is in use")
 	// ErrEmptyProgram is returned by a container backend for an empty Program.

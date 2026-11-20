@@ -209,17 +209,78 @@ func (p *Podman) runArgs(spec Spec) (args []string, applied []string) {
 	return append(args, spec.Argv...), applied
 }
 
+// ociImageKind is the ExpectedArtifact kind this backend enforces.
+const ociImageKind = "oci-image"
+
+// imageInspectFormat prints the image ID, its manifest digest, then each
+// repo digest, space separated.
+const imageInspectFormat = "{{.Id}} {{.Digest}}{{range .RepoDigests}} {{.}}{{end}}"
+
+var (
+	imageIDRE  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	imageDigRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+)
+
+// bindImage is the synchronous pre-flight for an Expected artifact: it
+// inspects the local image the Program names, and returns its immutable ID and
+// its measured digest set (manifest digest plus the digest part of each repo
+// digest, sorted, deduplicated) only if a consented digest is in that set —
+// digest-only, the repo name is ignored. A missing image is ErrDidNotLaunch
+// (the image-absent path), distinct from ErrArtifactMismatch, which means the
+// image is present and is not the consented one. Anything else is refused.
+func (p *Podman) bindImage(ctx context.Context, spec Spec) (id string, digests []string, err error) {
+	if spec.Expected.Kind != ociImageKind {
+		return "", nil, fmt.Errorf("%w: podman enforces %q, not %q", ErrArtifactMismatch, ociImageKind, spec.Expected.Kind)
+	}
+	out, err := p.output(ctx, 30*time.Second, "image", "inspect", "--format", imageInspectFormat, spec.Program)
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: inspect image %q: %w", ErrDidNotLaunch, spec.Program, err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 || !imageIDRE.MatchString(strings.TrimPrefix(fields[0], "sha256:")) {
+		return "", nil, fmt.Errorf("%w: image %q has no usable id", ErrDidNotLaunch, spec.Program)
+	}
+	id = strings.TrimPrefix(fields[0], "sha256:")
+	for _, f := range fields[1:] {
+		if _, d, ok := strings.Cut(f, "@"); ok {
+			f = d
+		}
+		if imageDigRE.MatchString(f) && !slices.Contains(digests, f) {
+			digests = append(digests, f)
+		}
+	}
+	sort.Strings(digests)
+	for _, want := range spec.Expected.Values {
+		if slices.Contains(digests, want) {
+			return id, digests, nil
+		}
+	}
+	return "", nil, fmt.Errorf("%w: image %q is not a consented digest", ErrArtifactMismatch, spec.Program)
+}
+
 // Launch starts one container. The client is started with exec.Command, not
 // CommandContext: killing the client would leave the container running under
 // conmon, so a runtime ends a compartment with Remove (`podman rm -f`), which
 // the client then exits on its own; WaitDelay bounds how long its pipes are
 // waited for.
-func (p *Podman) Launch(_ context.Context, spec Spec) (Compartment, error) {
+func (p *Podman) Launch(ctx context.Context, spec Spec) (Compartment, error) {
 	if p.ownerErr != nil {
 		return nil, p.ownerErr
 	}
 	if err := p.ValidateProgram(spec.Program); err != nil {
 		return nil, err
+	}
+	var ranKind string
+	var ran []string
+	if spec.Expected != nil {
+		id, digests, err := p.bindImage(ctx, spec)
+		if err != nil {
+			return nil, err
+		}
+		// Run the immutable image ID just inspected, not the mapped ref a
+		// retag could repoint between the check and the run.
+		spec.Program = id
+		ranKind, ran = ociImageKind, digests
 	}
 	args, applied := p.runArgs(spec)
 	name, full := p.argv(args)
@@ -236,7 +297,7 @@ func (p *Podman) Launch(_ context.Context, spec Spec) (Compartment, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("confiner: start podman: %w", err)
 	}
-	c := &podmanCompartment{p: p, name: spec.Name, cmd: cmd, done: make(chan struct{})}
+	c := &podmanCompartment{p: p, name: spec.Name, cmd: cmd, done: make(chan struct{}), ranKind: ranKind, ran: ran}
 	go func() {
 		waitErr := cmd.Wait()
 		var ee *exec.ExitError
@@ -267,6 +328,10 @@ type podmanCompartment struct {
 	name string
 	cmd  *exec.Cmd
 	done chan struct{}
+	// ranKind and ran are the measured artifact (the image's digest set),
+	// fixed before Launch returns; empty when nothing was measured.
+	ranKind string
+	ran     []string
 	// res and err are written once, before done is closed.
 	res Result
 	err error
@@ -286,6 +351,15 @@ func (c *podmanCompartment) Done() <-chan struct{} { return c.done }
 // PID is the podman CLIENT's pid, which the runtime holds first-hand; the
 // container's own process is conmon's child, not ours.
 func (c *podmanCompartment) PID() int { return c.cmd.Process.Pid }
+
+// RanArtifact is the digest set read from the image this compartment runs,
+// never the consented values; ok is false when no Expected was bound.
+func (c *podmanCompartment) RanArtifact() (string, []string, bool) {
+	if c.ranKind == "" {
+		return "", nil, false
+	}
+	return c.ranKind, slices.Clone(c.ran), true
+}
 
 // Remove runs `podman rm -f` under its own bounded context, so a cancelled
 // caller still removes the container. The client then exits on its own; if it

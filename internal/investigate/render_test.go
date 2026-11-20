@@ -229,6 +229,26 @@ func TestRenderTextSmoke(t *testing.T) {
 	}
 }
 
+func TestRenderTextChildArtifactTag(t *testing.T) {
+	r := Result{Events: []Record{{
+		Time: time.Unix(0, 0).UTC(), Source: "run", Kind: "spawn", Invoker: Invoker{Subject: "dana", Method: "asserted"},
+		ChildArtifact: map[string]ArtifactRef{
+			"writer":   {Kind: "oci-image", Values: []string{"sha256:aa", "sha256:bb"}},
+			"analyser": {Kind: "host-program", Values: []string{"sha256:cc"}},
+		},
+	}}}
+	const want = "[child-artifact(reported)=analyser:host-program:sha256:cc;writer:oci-image:sha256:aa,sha256:bb]"
+	for i := 0; i < 20; i++ {
+		if out := RenderText(r); !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	r.Events[0].ChildArtifact = nil
+	if out := RenderText(r); strings.Contains(out, "child-artifact") {
+		t.Fatalf("absent artifact must add nothing:\n%s", out)
+	}
+}
+
 func TestRenderTextNamesTornProblem(t *testing.T) {
 	r := Result{
 		Sources: []Source{mkSource("run", "/logs/r-torn.jsonl", "torn", 1)},
