@@ -507,6 +507,55 @@ func TestRenderSpawnChildConfiner(t *testing.T) {
 	}
 }
 
+func TestRenderSpawnChildArtifact(t *testing.T) {
+	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "lead-role", Workflow: "lead-wf", RunID: "r-parent"}
+	render := func(e engine.Event) string {
+		e.Time = time.Unix(0, 0).UTC()
+		e.Binding = bind
+		return Render([]engine.Event{e}, ledger.Head{Count: 1}, nil, completeness.Check([]engine.Event{e}), "")
+	}
+	spawn := func(status, tier string, art map[string]engine.ChildArtifactRef) engine.Event {
+		return engine.Event{Type: "spawn", Status: status, ChildRole: "worker", ChildWorkflow: "child-wf", ChildRunID: "r-child", Depth: 1, OutputSHA: "0123456789abcdef", Reason: "boom", ChildConfiner: tier, ChildArtifact: art}
+	}
+	art := map[string]engine.ChildArtifactRef{
+		"writer":   {Kind: "image-digest", Values: []string{"sha256:bb", "sha256:aa"}},
+		"analyser": {Kind: "program-hash", Values: []string{"sha256:cc"}},
+	}
+	const note = " [child-artifact (runtime-reported, not proof): analyser=program-hash:sha256:cc; writer=image-digest:sha256:bb,sha256:aa]\n"
+
+	cases := []struct{ status, want string }{
+		{"succeeded", "artifact 01234567" + note},
+		{"failed", "— boom" + note},
+		{"refused", "— boom" + note},
+	}
+	for _, c := range cases {
+		if out := render(spawn(c.status, "", art)); !strings.Contains(out, c.want) {
+			t.Errorf("%s: missing %q in:\n%s", c.status, c.want, out)
+		}
+	}
+	// With a confiner too: confiner first, artifact after.
+	if out := render(spawn("succeeded", "wsl2", art)); !strings.Contains(out, "[child-confiner: wsl2]"+note) {
+		t.Errorf("confiner then artifact expected:\n%s", out)
+	}
+	// Deterministic across renders (map iteration order).
+	first := render(spawn("succeeded", "", art))
+	for i := 0; i < 20; i++ {
+		if render(spawn("succeeded", "", art)) != first {
+			t.Fatal("render is not deterministic")
+		}
+	}
+	// None recorded: the line is unchanged.
+	for _, a := range []map[string]engine.ChildArtifactRef{nil, {}} {
+		out := render(spawn("succeeded", "", a))
+		if strings.Contains(out, "child-artifact") {
+			t.Errorf("no artifact must add nothing:\n%s", out)
+		}
+		if !strings.Contains(out, "— artifact 01234567\n") {
+			t.Errorf("line changed:\n%s", out)
+		}
+	}
+}
+
 func TestRenderPrintsCompletenessAfterIntegrity(t *testing.T) {
 	bind := engine.Binding{Invoker: identity.Static("dana@example.com"), Role: "r", Workflow: "w", RunID: "r-1a2b3c4d"}
 	n := 0

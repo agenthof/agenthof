@@ -3,12 +3,14 @@ package audit
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/agenthof/agenthof/internal/completeness"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/ledger"
+	"github.com/agenthof/agenthof/internal/origin"
 )
 
 // integrityLine renders the "ledger integrity: ..." line shared by both the
@@ -162,13 +164,13 @@ func Render(events []engine.Event, head ledger.Head, verr error, comp completene
 				} else if len(sha) > 8 {
 					sha = sha[:8]
 				}
-				fmt.Fprintf(&sb, "  %s  spawn %s → %s succeeded (depth %d) — artifact %s%s\n", t, target, run, e.Depth, sha, childConfinerNote(e))
+				fmt.Fprintf(&sb, "  %s  spawn %s → %s succeeded (depth %d) — artifact %s%s%s\n", t, target, run, e.Depth, sha, childConfinerNote(e), childArtifactNote(e))
 			case "failed", "refused":
 				reason := e.Reason
 				if reason == "" {
 					reason = "see the child run's ledger"
 				}
-				fmt.Fprintf(&sb, "  %s  spawn %s → %s %s (depth %d) — %s%s\n", t, target, run, e.Status, e.Depth, reason, childConfinerNote(e))
+				fmt.Fprintf(&sb, "  %s  spawn %s → %s %s (depth %d) — %s%s%s\n", t, target, run, e.Status, e.Depth, reason, childConfinerNote(e), childArtifactNote(e))
 			default:
 				fmt.Fprintf(&sb, "  %s  spawn %s → %s %s\n", t, target, run, e.Status)
 			}
@@ -279,6 +281,39 @@ func childConfinerNote(e engine.Event) string {
 		return ""
 	}
 	return " [child-confiner: " + confinerText(e.ChildConfiner, e.ChildConfinerOpts) + "]"
+}
+
+// childArtifactNote renders the artifact each child agent's compartment was
+// measured to run onto a spawn line: empty when none was recorded, otherwise
+// " [child-artifact (runtime-reported, not proof): <agent>=<kind>:<v1>,<v2>; …]",
+// agents in sorted order so the line is deterministic. It is what the runtime
+// reported, recorded verbatim — not evidence the artifact is what the operator
+// consented to, and not a guarantee about what actually ran.
+func childArtifactNote(e engine.Event) string {
+	if len(e.ChildArtifact) == 0 {
+		return ""
+	}
+	agents := make([]string, 0, len(e.ChildArtifact))
+	for a := range e.ChildArtifact {
+		agents = append(agents, a)
+	}
+	sort.Strings(agents)
+	parts := make([]string, 0, len(agents))
+	for _, a := range agents {
+		ref := e.ChildArtifact[a]
+		parts = append(parts, origin.Clean(a)+"="+origin.Clean(ref.Kind)+":"+cleanJoin(ref.Values))
+	}
+	return " [child-artifact (runtime-reported, not proof): " + strings.Join(parts, "; ") + "]"
+}
+
+// cleanJoin comma-joins values in their recorded order, each origin.Clean'd:
+// the ledger's writer may be hostile.
+func cleanJoin(vals []string) string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = origin.Clean(v)
+	}
+	return strings.Join(out, ",")
 }
 
 // confinerText is the shared body of both notes: the tier, " — <grade>" when
