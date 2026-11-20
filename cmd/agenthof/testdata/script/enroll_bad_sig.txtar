@@ -1,0 +1,55 @@
+# A card whose signature does not hold is refused and nothing is written: a
+# body changed after signing, a header that tries to bring its own key (jku),
+# and an unsigned "alg":"none" card.
+
+cardsigner cfg/gateway.yaml
+exec agenthof apply --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+snapshot before cfg ctl/control.jsonl
+
+mkcard swap swap.json
+mkcard jku jku.json
+mkcard algnone none.json
+
+! exec agenthof enroll swap.json --name triage --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stderr 'no signature verifies against a trusted anchor'
+unchanged -dir before cfg ctl/control.jsonl
+! exists cfg/agents/triage.yaml
+
+! exec agenthof enroll jku.json --name triage --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stderr 'keys are never taken from the card|no signature verifies'
+unchanged -dir before cfg ctl/control.jsonl
+! exists cfg/agents/triage.yaml
+
+! exec agenthof enroll none.json --name triage --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stderr 'alg must be|no signature verifies'
+unchanged -dir before cfg ctl/control.jsonl
+! exists cfg/agents/triage.yaml
+
+# each refusal is on the record, with the fixed reason, and none enrolled
+exec agenthof audit control --control-log ctl/control.jsonl
+stdout 'agent triage enrollment refused'
+! stdout 'agent triage enrolled'
+grep -count=3 '"code":"signature_failure"' ctl/control.jsonl
+
+-- cfg/gateway.yaml --
+models:
+  fast: {endpoint: http://localhost:4000, model: fast, api_key_env: K}
+tools:
+  code-search: {kind: mcp, url: https://mcp.example.internal/cs, credential_source: static_env, token_env: T, read_only_tools: [search]}
+-- cfg/agents/orch.yaml --
+name: orch
+endpoint: http://localhost:9
+-- cfg/workflows/main.yaml --
+name: main
+steps:
+  - {name: s, agent: orch}
+-- cfg/roles/admin.yaml --
+name: admin
+workflows: [main]
+allowed_groups: [ops]
+control: [apply, enroll]
+-- cfg/roles/dev.yaml --
+name: dev
+workflows: [main]
+allowed_groups: [devs]
+

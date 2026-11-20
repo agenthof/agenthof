@@ -1,0 +1,63 @@
+# agenthof enroll end to end: a curator-signed card is inspected, accepted by
+# digest, written as three new files, applied, and read back from the audit
+# trail. The same card from a local file and from an https source gives the
+# same result: the source decides nothing.
+
+cardsigner cfg/gateway.yaml
+cpdir cfg cfg2
+mkcard good card.json
+carddigest card.json DIGEST
+
+exec agenthof apply --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+exec agenthof apply --config cfg2 --control-log ctl2/control.jsonl --as ops-user --groups ops
+
+# local file source
+exec agenthof enroll card.json --name triage --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops --accept $DIGEST
+stdout 'enrolled "triage": 3 files created'
+exists cfg/agents/triage.yaml
+exists cfg/workflows/triage.yaml
+exists cfg/roles/triage.yaml
+grep 'card_sha256: ' cfg/agents/triage.yaml
+! grep 'may_spawn' cfg/agents/triage.yaml
+
+# https source: same card, same result
+cardserve card.json CARDURL
+exec agenthof enroll $CARDURL --name triage --role dev --config cfg2 --control-log ctl2/control.jsonl --as ops-user --groups ops --accept $DIGEST
+stdout 'enrolled "triage": 3 files created'
+cmp cfg/agents/triage.yaml cfg2/agents/triage.yaml
+cmp cfg/workflows/triage.yaml cfg2/workflows/triage.yaml
+cmp cfg/roles/triage.yaml cfg2/roles/triage.yaml
+
+# the result applies
+exec agenthof apply --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stdout 'registry ok: 2 agents, 2 workflows, 3 roles'
+
+# the audit trail names the agent and the card digest it was enrolled on
+exec agenthof audit control --control-log ctl/control.jsonl
+stdout 'agent triage enrolled \(card [0-9a-f]{64}\)'
+stdout 'ops-user'
+grep '"action":"enroll"' ctl/control.jsonl
+grep '"outcome":"success"' ctl/control.jsonl
+
+-- cfg/gateway.yaml --
+models:
+  fast: {endpoint: http://localhost:4000, model: fast, api_key_env: K}
+tools:
+  code-search: {kind: mcp, url: https://mcp.example.internal/cs, credential_source: static_env, token_env: T, read_only_tools: [search]}
+-- cfg/agents/orch.yaml --
+name: orch
+endpoint: http://localhost:9
+-- cfg/workflows/main.yaml --
+name: main
+steps:
+  - {name: s, agent: orch}
+-- cfg/roles/admin.yaml --
+name: admin
+workflows: [main]
+allowed_groups: [ops]
+control: [apply, enroll]
+-- cfg/roles/dev.yaml --
+name: dev
+workflows: [main]
+allowed_groups: [devs]
+
