@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/agenthof/agenthof/internal/config"
 )
@@ -108,10 +109,11 @@ func (c *Card) Extension() (AgenthofExt, error) {
 }
 
 // rejectDuplicateKeys walks the token stream and errors on a repeated key in
-// any object; encoding/json would silently keep the last one.
+// any object (compared case-insensitively); encoding/json would silently
+// keep the last one.
 func rejectDuplicateKeys(b []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
-	if err := scanValue(dec); err != nil {
+	if err := scanValue(dec, 0); err != nil {
 		return err
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
@@ -120,7 +122,13 @@ func rejectDuplicateKeys(b []byte) error {
 	return nil
 }
 
-func scanValue(dec *json.Decoder) error {
+// maxDepth bounds JSON nesting so a hostile card cannot exhaust the stack.
+const maxDepth = 64
+
+func scanValue(dec *json.Decoder, depth int) error {
+	if depth > maxDepth {
+		return fmt.Errorf("agent card nests deeper than %d levels", maxDepth)
+	}
 	tok, err := dec.Token()
 	if err != nil {
 		return fmt.Errorf("parse agent card: %w", err)
@@ -138,17 +146,20 @@ func scanValue(dec *json.Decoder) error {
 				return fmt.Errorf("parse agent card: %w", err)
 			}
 			key, _ := kt.(string)
+			// encoding/json matches struct fields case-insensitively, so
+			// keys that differ only in case collide and must be refused.
+			key = strings.ToLower(key)
 			if seen[key] {
 				return fmt.Errorf("agent card has duplicate key %q", key)
 			}
 			seen[key] = true
-			if err := scanValue(dec); err != nil {
+			if err := scanValue(dec, depth+1); err != nil {
 				return err
 			}
 		}
 	case '[':
 		for dec.More() {
-			if err := scanValue(dec); err != nil {
+			if err := scanValue(dec, depth+1); err != nil {
 				return err
 			}
 		}

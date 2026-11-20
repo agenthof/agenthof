@@ -55,6 +55,43 @@ func TestMapRejectsCardSpawn(t *testing.T) {
 	}
 }
 
+func TestMapDisclosesButDoesNotGrantExec(t *testing.T) {
+	e := goodExt()
+	e.Exec = []string{"x"}
+	def, req, err := Map(e, "a", knownTools, knownModels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !def.SpawnOnly() || def.Exec.Declared() {
+		t.Fatalf("exec was granted: %+v", def.Exec)
+	}
+	found := false
+	for _, r := range req {
+		found = found || strings.Contains(r, "not granted")
+	}
+	if !found {
+		t.Fatalf("exec not disclosed: %v", req)
+	}
+}
+
+func TestMapRejectsBadMode(t *testing.T) {
+	for _, mode := range []string{"", "all", "write"} {
+		e := goodExt()
+		e.Tools[0].Mode = mode
+		if _, _, err := Map(e, "a", knownTools, knownModels); err == nil || !strings.Contains(err.Error(), "mode") {
+			t.Errorf("mode %q: got %v", mode, err)
+		}
+	}
+}
+
+func TestMapRejectsEmptyTools(t *testing.T) {
+	e := goodExt()
+	e.Tools[0].Tools = nil
+	if _, _, err := Map(e, "a", knownTools, knownModels); err == nil || !strings.Contains(err.Error(), "no tools") {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestMapRejectsUnresolved(t *testing.T) {
 	e := goodExt()
 	e.Tools[0].Resource = "ghost-res"

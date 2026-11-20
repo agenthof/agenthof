@@ -74,3 +74,21 @@ func TestExtensionRequiresExactlyOne(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRejectsCaseVariantKeys(t *testing.T) {
+	for name, in := range map[string]string{
+		"top level": `{"name":"a","Name":"b"}`,
+		"params":    `{"capabilities":{"extensions":[{"uri":"https://agenthof.dev/ext/agent/v1","params":{"artifact":"good@sha256:1","Artifact":"evil@sha256:2"}}]}}`,
+	} {
+		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), "duplicate") {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
+func TestParseRejectsDeepNesting(t *testing.T) {
+	deep := strings.Repeat("[", 100) + strings.Repeat("]", 100)
+	if _, err := Parse([]byte(`{"x":` + deep + `}`)); err == nil || !strings.Contains(err.Error(), "deeper") {
+		t.Fatalf("got %v", err)
+	}
+}
