@@ -275,7 +275,15 @@ func (p preparedRun) Admit(role, workflow string, inv identity.Invoker) (string,
 	if reason, refused := preRunRefusal(p.deps.cfg, p.deps.reg, workflow, inv); refused {
 		return reason, false
 	}
-	return engine.Admit(p.deps.reg, role, workflow, inv)
+	if reason, ok := engine.Admit(p.deps.reg, role, workflow, inv); !ok {
+		return reason, false
+	}
+	// A served run is always a root run, so a spawn-only agent is refused
+	// here, synchronously, like every other policy refusal.
+	if reason, refused := engine.RefuseSpawnOnlyRoot(p.deps.reg, workflow); refused {
+		return reason, false
+	}
+	return "", true
 }
 
 func (p preparedRun) Run(ctx context.Context, runID, role, workflow, input string, inv identity.Invoker, origin *engine.Origin) (engine.Result, error) {

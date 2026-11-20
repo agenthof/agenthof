@@ -883,7 +883,7 @@ func TestValidateSpawnOnly(t *testing.T) {
 
 	cfg = baseCfg()
 	cfg.Agents[0].Provenance = prov
-	if c := codes(Validate(cfg)); c["spawn-only-endpoint"] != 1 {
+	if c := codes(Validate(cfg)); c["spawn-only-endpoint"] != 1 || c["bad-endpoint"] != 0 || c["fronted-needs-endpoint"] != 0 {
 		t.Fatalf("spawn-only with endpoint must be spawn-only-endpoint: %v", c)
 	}
 

@@ -160,10 +160,8 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 	// in Admit (which also admits children): a spawn-only agent may run only
 	// as a spawned child, never as a root run.
 	if opts.Parent == nil {
-		for _, st := range wf.Steps {
-			if a, ok := reg.Agent(st.Agent); ok && a.SpawnOnly() {
-				return refuse(fmt.Sprintf(reasonSpawnOnlyRoot, a.Name))
-			}
+		if reason, refused := RefuseSpawnOnlyRoot(reg, workflow); refused {
+			return refuse(reason)
 		}
 	}
 

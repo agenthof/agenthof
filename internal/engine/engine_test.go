@@ -518,4 +518,32 @@ func TestRunSpawnOnlyAllowedAsChild(t *testing.T) {
 	if err != nil || res.Status != "succeeded" {
 		t.Fatalf("a spawned spawn-only child must run: status=%q err=%v", res.Status, err)
 	}
+	if len(ex.calls) != 1 {
+		t.Fatalf("the child must execute its step once: %v", ex.calls)
+	}
+}
+
+func TestRunSpawnOnlyLaterStepRefusedAsRoot(t *testing.T) {
+	dir := t.TempDir()
+	ex := &fakeExec{fail: map[string]int{}}
+	cfg := config.Config{
+		Agents: []config.AgentDef{
+			{Name: "planner", Model: "fast", Endpoint: "https://example.test/run", SourceFile: "a"},
+			{Name: "vendor", Model: "fast", SourceFile: "b",
+				Provenance: &config.Provenance{Image: "r.example/a@sha256:" + strings.Repeat("a", 64), CardSHA256: strings.Repeat("b", 64), CardVersion: "1"}},
+		},
+		Workflows: []config.WorkflowDef{{Name: "wf", SourceFile: "w", Steps: []config.Step{
+			{Name: "plan", Agent: "planner"}, {Name: "vend", Agent: "vendor"}}}},
+		Roles:   []config.RoleDef{{Name: "se", Workflows: []string{"wf"}, AllowedGroups: []string{"*"}, SourceFile: "r"}},
+		Gateway: config.GatewayConfig{Models: map[string]config.ModelRoute{"fast": {Endpoint: "https://x/v1", Model: "m", APIKeyEnv: "K"}}},
+	}
+	reg, errs := registry.Build(cfg)
+	if reg == nil {
+		t.Fatal(errs)
+	}
+	res, err := Run(context.Background(), reg, "se", "wf", "x",
+		identity.Static("dev@x"), ex, Options{LogDir: dir, ArtifactDir: filepath.Join(dir, "arts")})
+	if err == nil || res.Status != "refused" || len(ex.calls) != 0 {
+		t.Fatalf("a spawn-only agent at a later step must refuse the root run before any step: status=%q err=%v calls=%v", res.Status, err, ex.calls)
+	}
 }

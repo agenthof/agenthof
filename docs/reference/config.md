@@ -42,10 +42,10 @@ not present in `examples/config/` — they exist to show a rule from
 `provenance` records where an enrolled third-party agent came from: `image` is
 a single digest-pinned image reference (`name@sha256:...`), `card_sha256` is
 the SHA-256 of the agent card as enrolled, and `card_version` is the version
-the card declares. An agent that carries a `provenance` block is spawn-only: it runs only as a
-spawned child, never as a root run (a root run of a workflow naming it is
-refused), and the validator rejects an `endpoint` (`spawn-only-endpoint`) or
-`exec` (`spawn-only-exec`) on it.
+the card declares. An agent that carries a `provenance` block is spawn-only:
+it runs only as a spawned child, never as a root run (a root run of a
+workflow naming it is refused), and the validator rejects an `endpoint`
+(`spawn-only-endpoint`) or `exec` (`spawn-only-exec`) on it.
 
 ### `name`
 
@@ -166,7 +166,7 @@ fronted and an endpoint"). Any other value is rejected with `bad-execution`
 
 Required, except on spawn-only agents (those with a `provenance` block),
 which must omit it; per the comment on `AgentDef.Endpoint`, "the agent's HTTP
-endpoint". `apply` rejects an empty endpoint with `fronted-needs-endpoint`.
+endpoint" (omitted on a spawn-only agent). `apply` rejects an empty endpoint with `fronted-needs-endpoint`.
 The message is "agents are fronted and must declare an endpoint (the
 contained tier was removed)" when `execution` is empty, and "fronted agents
 must have an endpoint" when `execution` is `fronted`. A non-empty endpoint

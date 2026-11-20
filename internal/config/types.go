@@ -22,7 +22,7 @@ type AgentDef struct {
 	Tools       []ToolGrant   `yaml:"tools"` // each {resource, tools: ["*"] | [a, b], mode: read-only | read-write}
 	Output      string        `yaml:"output"`
 	Execution   string        `yaml:"execution"`  // "", or "fronted"; "" means fronted
-	Endpoint    string        `yaml:"endpoint"`   // required: the agent's HTTP endpoint
+	Endpoint    string        `yaml:"endpoint"`   // required, except on a spawn-only agent (which omits it): the agent's HTTP endpoint
 	Exec        ExecConfig    `yaml:"exec"`       // fronted only: allowlisted exec, first-hand via a trusted runtime (refexec)
 	MaySpawn    []SpawnTarget `yaml:"may_spawn"`  // spawn door: the {role, workflow} child runs this agent may start; empty means none (default-deny)
 	Provenance  *Provenance   `yaml:"provenance"` // set for an enrolled third-party agent: where it came from; presence makes it spawn-only

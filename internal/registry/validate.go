@@ -47,8 +47,8 @@ func Validate(cfg config.Config) []ValidationError {
 
 		effectiveExec := a.EffectiveExecution()
 		if a.SpawnOnly() {
-			// An enrolled agent runs only as a spawned child, inside a
-			// --network none compartment; it has no endpoint to dial and no
+			// An enrolled agent runs only as a spawned, confiner-contained
+			// child; it has no endpoint to dial and no
 			// exec door. Either would give it a way to run uncontained.
 			if a.Endpoint != "" {
 				add(a.SourceFile, a.Name, "spawn-only-endpoint",
