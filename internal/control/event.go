@@ -34,6 +34,9 @@ const (
 	// CodeConsentDeclined is the reason an enroll record carries when the
 	// operator declined the enrollment.
 	CodeConsentDeclined = "consent_declined"
+	// CodeSignatureFailure is the reason an enroll record carries when the
+	// agent card's signature did not verify against a trusted signer.
+	CodeSignatureFailure = "signature_failure"
 )
 
 // Reason explains a non-success outcome.

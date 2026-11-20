@@ -48,6 +48,7 @@ Usage:
   agenthof config vouch  [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]  (records the install event the control ledger lacks for the snapshot already at installed/current, after verifying its bytes — the recovery for an unrecorded install; any identity the host resolves, always recorded)
   agenthof registry list --config <dir>
   agenthof registry enable|disable <agent> --config <dir> [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]
+  agenthof enroll <card file|https URL> --name <name> --role <role> [--accept sha256:<hex>] [--config <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]  (verifies a curator-signed agent card against gateway trusted_signers and discloses the spawn-only agent it would add; with --accept <the disclosed digest> it creates the new agent, workflow and role files and records the enrollment; never edits an existing file)
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--control-log <path>] [--verify-key <path>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
   agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--allow-api-bootstrap] [--addr-file <path>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--max-concurrent-runs <n>] [--shutdown-timeout <dur>] [--log-level ...] [--log-format ...]  (AGENTHOF_OIDC_ISSUER required)
   agenthof audit <run-id> [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>] [--server <url>] [--token <jwt>]
@@ -82,6 +83,8 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 		return cmdConfig(argv[1:], stdout)
 	case "registry":
 		return cmdRegistry(argv[1:], stdout)
+	case "enroll":
+		return cmdEnroll(argv[1:], stdout, stderr)
 	case "run":
 		return cmdRun(argv[1:], stdout, stderr)
 	case "audit":
