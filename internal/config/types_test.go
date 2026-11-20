@@ -515,3 +515,31 @@ func TestToolGrantPredicates(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentDefSpawnOnly(t *testing.T) {
+	withProv := `
+name: coder
+endpoint: http://localhost:1
+provenance:
+  image: coder@sha256:0123456789abcdef
+  card_sha256: abc123
+  card_version: "1.2.0"
+`
+	var a AgentDef
+	if err := yaml.Unmarshal([]byte(withProv), &a); err != nil {
+		t.Fatal(err)
+	}
+	if !a.SpawnOnly() || a.Provenance == nil ||
+		a.Provenance.Image != "coder@sha256:0123456789abcdef" ||
+		a.Provenance.CardSHA256 != "abc123" || a.Provenance.CardVersion != "1.2.0" {
+		t.Fatalf("with provenance: %+v", a)
+	}
+
+	var b AgentDef
+	if err := yaml.Unmarshal([]byte("name: plain\nendpoint: http://localhost:1\n"), &b); err != nil {
+		t.Fatal(err)
+	}
+	if b.SpawnOnly() || b.Provenance != nil {
+		t.Fatalf("without provenance: %+v", b)
+	}
+}

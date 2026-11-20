@@ -37,6 +37,12 @@ not present in `examples/config/` — they exist to show a rule from
 | Endpoint | `endpoint` | string | yes | — |
 | Exec | `exec` | object | no | none |
 | MaySpawn | `may_spawn` | list of `{role, workflow}` objects | no | none (the agent spawns nothing) |
+| Provenance | `provenance` | object (`image`, `card_sha256`, `card_version`) | no | none (not an enrolled agent) |
+
+`provenance` records where an enrolled third-party agent came from: `image` is
+a single digest-pinned image reference (`name@sha256:...`), `card_sha256` is
+the SHA-256 of the agent card as enrolled, and `card_version` is the version
+the card declares. An agent that carries a `provenance` block is spawn-only.
 
 ### `name`
 

@@ -21,12 +21,25 @@ type AgentDef struct {
 	Instruction string        `yaml:"instruction"`
 	Tools       []ToolGrant   `yaml:"tools"` // each {resource, tools: ["*"] | [a, b], mode: read-only | read-write}
 	Output      string        `yaml:"output"`
-	Execution   string        `yaml:"execution"` // "", or "fronted"; "" means fronted
-	Endpoint    string        `yaml:"endpoint"`  // required: the agent's HTTP endpoint
-	Exec        ExecConfig    `yaml:"exec"`      // fronted only: allowlisted exec, first-hand via a trusted runtime (refexec)
-	MaySpawn    []SpawnTarget `yaml:"may_spawn"` // spawn door: the {role, workflow} child runs this agent may start; empty means none (default-deny)
+	Execution   string        `yaml:"execution"`  // "", or "fronted"; "" means fronted
+	Endpoint    string        `yaml:"endpoint"`   // required: the agent's HTTP endpoint
+	Exec        ExecConfig    `yaml:"exec"`       // fronted only: allowlisted exec, first-hand via a trusted runtime (refexec)
+	MaySpawn    []SpawnTarget `yaml:"may_spawn"`  // spawn door: the {role, workflow} child runs this agent may start; empty means none (default-deny)
+	Provenance  *Provenance   `yaml:"provenance"` // set for an enrolled third-party agent: where it came from; presence makes it spawn-only
 	SourceFile  string        `yaml:"-"`
 }
+
+// Provenance records where an enrolled agent came from: a single digest-pinned
+// container image and the identity of the agent card it was enrolled from.
+type Provenance struct {
+	Image       string `yaml:"image"`        // digest-pinned image reference (name@sha256:...)
+	CardSHA256  string `yaml:"card_sha256"`  // SHA-256 of the agent card as enrolled
+	CardVersion string `yaml:"card_version"` // the card's declared version
+}
+
+// SpawnOnly reports whether the agent is enrolled (has provenance) and so may
+// run only as a spawned child, never as a root run.
+func (a AgentDef) SpawnOnly() bool { return a.Provenance != nil }
 
 // SpawnTarget is one entry in an agent's `may_spawn:` list: a child run the
 // agent may ask the spawn door to start, named as the role it runs as and
