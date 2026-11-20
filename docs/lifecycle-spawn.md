@@ -76,15 +76,25 @@ Three gates, each recorded when it refuses:
    child gets a ledger of its own with one `run_refused` event carrying its
    parent linkage.
 
-One more check runs after provisioning, for enrolled agents only: **is what
-the supervisor measured one of the artifacts the agent consented to?** Agenthof
-reads the agent's provenance fresh and compares it with the measured artifact
-the supervisor reported for each such agent in the child's workflow. A missing
-or non-matching measurement refuses the whole set: the child is never driven,
-the parent's `spawn` event records `refused` with the fixed reason `spawn
-artifact not consented`, and the measured artifact (when there was one) is
-recorded as evidence. Because compartments were provisioned, this refusal
-counts against `max_total_spawns`.
+For enrolled agents there are two artifact refusals, each recorded on the
+parent's `spawn` event as `refused`:
+
+- **The supervisor's (the usual one).** A conformant supervisor is told the
+  artifact the agent consented to and refuses to start a compartment that is
+  not it (a tampered image, or a card whose only artifact form the backend
+  cannot enforce, such as an image-only card on Seatbelt). The reason is the
+  fixed `spawn artifact refused`. Nothing was provisioned, so no
+  `max_total_spawns` slot is used.
+- **The gateway's own admission check (the backstop).** After provisioning,
+  Agenthof compares the artifact the supervisor reported measuring for each
+  such agent in the child's workflow with the consented artifact, which it
+  takes from its own configuration, not from anything the supervisor
+  returns. A missing or non-matching measurement refuses the whole set. This
+  guards a lenient or older supervisor that provisioned without enforcing.
+  The child is never driven; the reason is the fixed `spawn artifact not
+  consented`, the mismatching measured artifact is recorded as evidence, and
+  because compartments were provisioned the refusal counts against
+  `max_total_spawns`.
 
 There is one refusal that is not recorded: a request that arrives after the
 parent step is already over is answered `503` — the run's ledger may

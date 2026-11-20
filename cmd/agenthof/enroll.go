@@ -593,10 +593,10 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stdout, "card digest: sha256:%s\n", digest)
 	_, _ = fmt.Fprintf(stdout, "signed by:   %s\n", origin.Clean(kid))
 	if ext.Artifact != "" {
-		_, _ = fmt.Fprintf(stdout, "artifact:    %s (recorded; not yet enforced at launch)\n", ext.Artifact)
+		_, _ = fmt.Fprintf(stdout, "artifact:    %s (recorded; enforced at launch: the confiner binds it and the gateway refuses a mismatch)\n", ext.Artifact)
 	}
 	if hp := ext.HostProgram; hp != nil {
-		_, _ = fmt.Fprintf(stdout, "program:     %s (a logical id, not a path; recorded; not yet enforced at launch)\n", origin.Clean(hp.Program))
+		_, _ = fmt.Fprintf(stdout, "program:     %s (a logical id, not a path; recorded; enforced at launch: the confiner binds its hash and the gateway refuses a mismatch)\n", origin.Clean(hp.Program))
 		for _, b := range hp.Builds {
 			_, _ = fmt.Fprintf(stdout, "  build %s/%s %s\n", origin.Clean(b.OS), origin.Clean(b.Arch), origin.Clean(b.SHA256))
 		}

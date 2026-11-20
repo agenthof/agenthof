@@ -73,8 +73,9 @@ verified-authorized call:
    and no way to skip the check. An unsigned card, an untrusted key, or a
    tampered body is a hard refusal. Only on a verified card does Agenthof read
    the extension and the requests.
-4. **Fail fast on the content**: exactly one Agenthof extension, a pinned
-   artifact digest, and a supported interface, or a refusal that names the
+4. **Fail fast on the content**: exactly one Agenthof extension, at least one
+   pinned artifact form (an image digest or a host program's build hashes), and
+   a supported interface, or a refusal that names the
    problem — still before anything is disclosed or written.
 
 ## The two-step consent
@@ -194,13 +195,17 @@ Only what ships is a guarantee.
     consented one.
   - **The gateway refuses to admit** a spawned child whose *measured*
     artifact (what the supervisor reports its compartment was launched with)
-    is not in the consented set. It reads the agent's provenance fresh and
-    does not rely on the supervisor having enforced anything, so the binding
+    is not in the consented set. It takes the consented artifact from its own configuration, not from
+    anything the supervisor returns, and does not rely on the supervisor
+    having enforced anything, so the binding
     holds even against a supervisor that is lenient or predates it. A refused
-    child is never driven, the refusal is recorded on the parent's ledger
-    with a fixed reason, and it counts against `max_total_spawns` because a
-    compartment set was provisioned.
-  - The receipt shows what ran: `audit` and `investigate` print the measured
+    child is never driven. This is the backstop: the usual refusal comes from
+    the confiner (above), recorded with the reason `spawn artifact refused`
+    and nothing provisioned, so no `max_total_spawns` slot is used. The
+    gateway's own refusal is recorded as `spawn artifact not consented`, and
+    because a compartment set was provisioned it does count against
+    `max_total_spawns`.
+  - The receipt records the measured artifact (runtime-reported): `audit` and `investigate` print the measured
     artifact on the spawn line (see [`lifecycle-spawn.md`](lifecycle-spawn.md)).
 - **Both artifact forms are accepted.** `enroll` takes the OCI
   `ref@sha256:…` form and the host-program form (a program id plus
@@ -208,13 +213,14 @@ Only what ships is a guarantee.
   may carry only the host-program form. Podman binds the image digest;
   Seatbelt binds a program hash. An agent can run only on a backend that
   enforces a form it consented to: an enrolled agent that carries only the
-  OCI form is refused on a Seatbelt supervisor.
+  OCI form is refused on a Seatbelt supervisor, and one that carries only a
+  host-program form is refused on podman.
 - **Bound only when the gateway is upgraded.** The binding is enforced
   because the gateway sends the consented artifact and then checks the
   measurement. Against an older supervisor that reports no measurement, an
-  enrolled agent is refused (fail closed). An older gateway sends no
-  consented artifact, so a newer supervisor runs the agent unbound, as it did
-  before this release. Upgrade the gateway to get the binding.
+  enrolled agent is refused (fail closed). A gateway that does not send the
+  consented artifact leaves the supervisor nothing to enforce, so the agent
+  runs unbound. Upgrade the gateway to get the binding.
 - **Reserved:** per-publisher (author) signing of cards, and anything not
   described above, is a later direction, not a guarantee.
 
@@ -233,12 +239,15 @@ The honest limits of the binding:
   `#!` line names, or host files the program reads. The window between
   hashing the file and executing it is narrowed (the resolved file is the one
   executed, with no copy) but not closed: a writer to that file can still
-  swap it in the gap. And a Seatbelt compartment is host-readable and has no
+  swap it in the gap. The program id binds nothing at run time (the path comes
+  from the operator's mapping; only the hash binds), and arguments or scripts
+  the executable loads are not covered. And a Seatbelt compartment is host-readable and has no
   resource caps (below). The podman image-digest binding is the stronger of
   the two.
-- **A digest is not a verdict on the artifact.** Binding proves the run used
-  the artifact you consented to, not that the artifact is benign. The doors
-  still govern everything it does.
+- **A digest is not a verdict on the artifact.** The binding is about *which*
+  artifact was launched, not whether that artifact is safe, and the measured
+  value is runtime-reported, not proof. The doors still govern everything it
+  does.
 
 ## Limits, stated plainly
 
