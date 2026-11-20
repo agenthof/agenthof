@@ -54,11 +54,12 @@ type HostBuild struct {
 
 // HasWellFormedForm reports whether the provenance carries at least one
 // well-formed artifact form: a digest-pinned image, or a host program with an
-// id and at least one valid build. A malformed host-program form (any invalid
-// build) is not well-formed even beside a valid image, so a hand edit cannot
-// leave a half-valid form that later code might trust.
+// id and at least one valid build (every build must be valid). Each form is
+// judged independently; a digest-pinned image alone suffices. A malformed
+// host-program form beside a valid image still passes here, so run-time
+// enforcement must verify the specific form the chosen tier uses.
 func (p Provenance) HasWellFormedForm() bool {
-	if p.Image != "" && isDigestPinned(p.Image) {
+	if isDigestPinned(p.Image) {
 		return true
 	}
 	if p.Program == "" || len(p.Builds) == 0 {
