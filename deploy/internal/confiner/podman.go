@@ -287,6 +287,9 @@ func (c *podmanCompartment) Done() <-chan struct{} { return c.done }
 // container's own process is conmon's child, not ours.
 func (c *podmanCompartment) PID() int { return c.cmd.Process.Pid }
 
+// RanArtifact reports nothing measured yet; image measurement is not built.
+func (c *podmanCompartment) RanArtifact() (string, []string, bool) { return "", nil, false }
+
 // Remove runs `podman rm -f` under its own bounded context, so a cancelled
 // caller still removes the container. The client then exits on its own; if it
 // has not within 10s it is killed. Remove returns once the client has exited.

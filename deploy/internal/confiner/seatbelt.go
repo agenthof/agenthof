@@ -677,6 +677,9 @@ func (c *seatbeltCompartment) Done() <-chan struct{} { return c.done }
 // execs the program in place.
 func (c *seatbeltCompartment) PID() int { return c.pid }
 
+// RanArtifact reports nothing measured yet; program measurement is not built.
+func (c *seatbeltCompartment) RanArtifact() (string, []string, bool) { return "", nil, false }
+
 // Remove kills the compartment's session and the descendants the walk can
 // see, removes its PID record and scratch dir, and waits, bounded, for the
 // exit. A descendant that left the session and whose parent is gone is not
