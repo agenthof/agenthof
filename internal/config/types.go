@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -31,12 +32,69 @@ type AgentDef struct {
 	SourceFile  string        `yaml:"-"`
 }
 
-// Provenance records where an enrolled agent came from: a single digest-pinned
-// container image and the identity of the agent card it was enrolled from.
+// Provenance records where an enrolled agent came from: the artifact it was
+// enrolled with and the identity of the agent card it was enrolled from. The
+// artifact is a digest-pinned container image, a host program bound by content
+// hash, or both; at least one well-formed form is required (see HasWellFormedForm).
 type Provenance struct {
-	Image       string `yaml:"image"`        // digest-pinned image reference (name@sha256:...)
-	CardSHA256  string `yaml:"card_sha256"`  // SHA-256 of the JCS-canonical card body with its signatures removed (not of the card file; sha256sum will not match)
-	CardVersion string `yaml:"card_version"` // the card's declared version
+	Image       string      `yaml:"image,omitempty"`   // optional: digest-pinned image reference (name@sha256:...)
+	Program     string      `yaml:"program,omitempty"` // optional: host-program identifier; goes with Builds
+	Builds      []HostBuild `yaml:"builds,omitempty"`  // host-program builds, one per {os, arch}, each bound by content hash
+	CardSHA256  string      `yaml:"card_sha256"`       // SHA-256 of the JCS-canonical card body with its signatures removed (not of the card file; sha256sum will not match)
+	CardVersion string      `yaml:"card_version"`      // the card's declared version
+}
+
+// HostBuild is one build of a host program: the executable content hash
+// ("sha256:" + 64 lowercase hex) for one operating system and architecture.
+type HostBuild struct {
+	OS     string `yaml:"os"`
+	Arch   string `yaml:"arch"`
+	SHA256 string `yaml:"sha256"`
+}
+
+// HasWellFormedForm reports whether the provenance carries at least one
+// well-formed artifact form: a digest-pinned image, or a host program with an
+// id and at least one valid build. A malformed host-program form (any invalid
+// build) is not well-formed even beside a valid image, so a hand edit cannot
+// leave a half-valid form that later code might trust.
+func (p Provenance) HasWellFormedForm() bool {
+	if p.Image != "" && isDigestPinned(p.Image) {
+		return true
+	}
+	if p.Program == "" || len(p.Builds) == 0 {
+		return false
+	}
+	for _, b := range p.Builds {
+		if b.OS == "" || b.Arch == "" || !isSHA256Ref(b.SHA256) {
+			return false
+		}
+	}
+	return true
+}
+
+// isSHA256Ref reports whether s is "sha256:" followed by 64 lowercase hex.
+// (Mirrors the agent-card check; config cannot import agentcard.)
+func isSHA256Ref(s string) bool {
+	h, ok := strings.CutPrefix(s, "sha256:")
+	return ok && isLowerHex64(h)
+}
+
+// isDigestPinned reports whether ref is "name@sha256:<64 lowercase hex>".
+func isDigestPinned(ref string) bool {
+	name, digest, ok := strings.Cut(ref, "@")
+	return ok && name != "" && isSHA256Ref(digest)
+}
+
+func isLowerHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // SpawnOnly reports whether the agent is enrolled (has provenance) and so may
