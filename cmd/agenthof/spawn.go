@@ -285,7 +285,8 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 	// refusal counts against max_total_spawns.
 	if evidence, failed := d.admitArtifacts(agents, lease); len(failed) > 0 {
 		logger.Warn("spawn refused", "reason", "measured artifact not consented", "child_run", childID, "agents", failed)
-		return rungateway.SpawnResult{Status: "refused", Reason: reasonArtifactNotConsented, Provisioned: true, ChildArtifact: evidence}, nil
+		return rungateway.SpawnResult{Status: "refused", Reason: reasonArtifactNotConsented, Provisioned: true, ChildArtifact: evidence,
+			ChildConfiner: lease.Tier, ChildConfinerOpts: lease.TierOpts}, nil
 	}
 	// The child runs until the parent step's context ends — or until the
 	// supervisor ends the set (a compartment died): a child with nothing to

@@ -131,7 +131,7 @@ func RenderText(r Result) string {
 				ref := e.ChildArtifact[a]
 				parts[i] = a + ":" + ref.Kind + ":" + strings.Join(ref.Values, ",")
 			}
-			tags = append(tags, "child-artifact="+strings.Join(parts, ";"))
+			tags = append(tags, "child-artifact(reported)="+strings.Join(parts, ";"))
 		}
 		// An anchor record's facts and verdict, each present iff recorded:
 		// a failed attempt shows what it tried; a planted success record

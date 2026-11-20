@@ -237,7 +237,7 @@ func TestRenderTextChildArtifactTag(t *testing.T) {
 			"analyser": {Kind: "host-program", Values: []string{"sha256:cc"}},
 		},
 	}}}
-	const want = "[child-artifact=analyser:host-program:sha256:cc;writer:oci-image:sha256:aa,sha256:bb]"
+	const want = "[child-artifact(reported)=analyser:host-program:sha256:cc;writer:oci-image:sha256:aa,sha256:bb]"
 	for i := 0; i < 20; i++ {
 		if out := RenderText(r); !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)

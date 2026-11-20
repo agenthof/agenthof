@@ -201,7 +201,7 @@ Only what ships is a guarantee.
     holds even against a supervisor that is lenient or predates it. A refused
     child is never driven. This is the backstop: the usual refusal comes from
     the confiner (above), recorded with the reason `spawn artifact refused`
-    and nothing provisioned, so no `max_total_spawns` slot is used. The
+    and no set was handed to Agenthof, so no `max_total_spawns` slot is used. The
     gateway's own refusal is recorded as `spawn artifact not consented`, and
     because a compartment set was provisioned it does count against
     `max_total_spawns`.

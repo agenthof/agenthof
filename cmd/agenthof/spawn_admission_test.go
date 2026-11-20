@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/refspawn"
@@ -170,8 +171,14 @@ func TestAdmissionRanInConsentedSetAdmits(t *testing.T) {
 }
 
 func TestAdmissionAbsentRanRefuses(t *testing.T) {
-	res, _, runs := spawnWith(t, "enrolled-wf", []string{"enrolled"}, nil)
+	res, stub, runs := spawnWith(t, "enrolled-wf", []string{"enrolled"}, nil)
 	notDriven(t, res, runs)
+	// The refusal releases the lease: its held body is closed, so Done fires.
+	select {
+	case <-stub.lease.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lease was not released on refusal")
+	}
 	if len(res.ChildArtifact) != 0 {
 		t.Fatalf("nothing was measured, so no evidence: %v", res.ChildArtifact)
 	}

@@ -83,7 +83,7 @@ parent's `spawn` event as `refused`:
   artifact the agent consented to and refuses to start a compartment that is
   not it (a tampered image, or a card whose only artifact form the backend
   cannot enforce, such as an image-only card on Seatbelt). The reason is the
-  fixed `spawn artifact refused`. Nothing was provisioned, so no
+  fixed `spawn artifact refused`. No set was handed to Agenthof, so no
   `max_total_spawns` slot is used.
 - **The gateway's own admission check (the backstop).** After provisioning,
   Agenthof compares the artifact the supervisor reported measuring for each

@@ -142,7 +142,10 @@ over:
   short preview, never the body.
 - `403 {"status": "refused", "reason", "child_run_id"?}` — the target is not
   on your agent's `may_spawn` list, a cap would be exceeded, the child could
-  not be given compartments (`spawn compartment unavailable`), or the child
+  not be given compartments (`spawn compartment unavailable`), an enrolled
+  agent's runtime could not be bound to its consented artifact (`spawn
+  artifact refused`, or `spawn artifact not consented` when the measured
+  artifact does not match), or the child
   was refused at its own registry gate or pre-run gate (then it has a
   `child_run_id` and a ledger). The `reason` is always a fixed, classifying
   string — a registry-gate refusal answers `child refused by its access policy`,
