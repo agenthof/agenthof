@@ -75,6 +75,8 @@ func fakePodman(args []string) int {
 		return 0
 	case "run":
 		return fakeRun(args[1:])
+	case "image":
+		return fakeImageInspect(args[1:])
 	case "rm":
 		name := args[len(args)-1]
 		if b, err := os.ReadFile(filepath.Join(testRoot(), name+".pid")); err == nil {
@@ -128,6 +130,23 @@ func fakePodman(args []string) int {
 		}
 	}
 	return 125
+}
+
+// fakeImageInspect answers `image inspect --format F REF` from
+// CONFINER_TEST_IMAGE = "ref|id|digest|repodigest,repodigest": the line
+// "<id> <digest> <repodigest>..." for that ref, and a podman "image not
+// known" failure (125) for any other.
+func fakeImageInspect(args []string) int {
+	if len(args) < 3 || args[0] != "inspect" || args[1] != "--format" {
+		return 125
+	}
+	f := strings.Split(os.Getenv("CONFINER_TEST_IMAGE"), "|")
+	if len(f) != 4 || f[0] != args[len(args)-1] {
+		fmt.Fprintln(os.Stderr, "Error: "+args[len(args)-1]+": image not known")
+		return 125
+	}
+	fmt.Println(f[1], f[2], strings.Join(strings.Split(f[3], ","), " "))
+	return 0
 }
 
 func filterPrefix(args []string) string {
