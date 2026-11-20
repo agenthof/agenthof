@@ -130,6 +130,17 @@ func label(rec record) string {
 			return "restored a sealed segment from its protected copy"
 		}
 		return "restore " + rec.Outcome
+	case "enroll":
+		// Names the agent and the card digest the decision was made on; the
+		// artifact, signer and files stay in the record for raw readers.
+		agent, digest := origin.Clean(rec.Agent), ""
+		if rec.Enroll != nil {
+			digest = " (card " + origin.Clean(rec.Enroll.CardSHA256) + ")"
+		}
+		if rec.Outcome == "success" {
+			return "agent " + agent + " enrolled" + digest
+		}
+		return "agent " + agent + " enrollment " + rec.Outcome + digest
 	default:
 		return rec.Action
 	}

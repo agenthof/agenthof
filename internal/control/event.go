@@ -31,6 +31,9 @@ const (
 	// could not resolve, a proof over the cap. Recorded, never fatal to the
 	// ledger.
 	CodeAnchorFailed = "anchor_failed"
+	// CodeConsentDeclined is the reason an enroll record carries when the
+	// operator declined the enrollment.
+	CodeConsentDeclined = "consent_declined"
 )
 
 // Reason explains a non-success outcome.
@@ -111,6 +114,28 @@ type Event struct {
 	// against the open chain. A seal installs nothing (no config_hash) and
 	// Installing never accepts it. Additive and omitempty (Article VI).
 	Seal *Seal `json:"seal,omitempty"`
+	// Enroll is the payload of an action "enroll" record: what a governed
+	// agent enrollment recorded — the card digest, the artifact it names, the
+	// capabilities it requested, the signer, and the config files written.
+	// Append admits it only under a structural permit. An enroll authors
+	// config and audits; it installs nothing (no config_hash) and Installing
+	// never accepts it. Additive and omitempty (Article VI).
+	Enroll *Enroll `json:"enroll,omitempty"`
+}
+
+// EnrollFile is one config file an enrollment wrote: its path and digest.
+type EnrollFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+}
+
+// Enroll is what an "enroll" record says about a governed-agent enrollment.
+type Enroll struct {
+	CardSHA256 string       `json:"card_sha256"` // lowercase hex sha256 of the agent card
+	Artifact   string       `json:"artifact"`    // the artifact the card names
+	Requested  []string     `json:"requested"`   // capabilities the card requested
+	SignerKID  string       `json:"signer_kid"`  // key id of the card's signer
+	Files      []EnrollFile `json:"files"`       // config files the enrollment wrote
 }
 
 // Seal is what a "seal" record says about the segment it closes. head_seq and

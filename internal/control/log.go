@@ -51,9 +51,11 @@ type record struct {
 	// Event once the permit below admits it.
 	Anchor *Anchor `json:"anchor,omitempty"`
 	// Seal is the payload of an action "seal" record (control.Seal).
-	Seal  *Seal  `json:"seal,omitempty"`
-	Prev  string `json:"prev"`
-	LogID string `json:"log_id,omitempty"`
+	Seal *Seal `json:"seal,omitempty"`
+	// Enroll is the payload of an action "enroll" record (control.Enroll).
+	Enroll *Enroll `json:"enroll,omitempty"`
+	Prev   string  `json:"prev"`
+	LogID  string  `json:"log_id,omitempty"`
 }
 
 // MaxAnchorProofLen bounds Anchor.Proof on a record: 8192 bytes of standard
@@ -157,6 +159,71 @@ func checkAnchorShape(e Event) error {
 	return nil
 }
 
+// Caps on an enroll record's payload, judged at Append beside the anchor
+// caps: honest values come nowhere near them; they bound what a record can
+// carry. An artifact reference conventionally fits in 2048.
+const (
+	MaxEnrollArtifactLen  = 2048
+	MaxEnrollRequested    = 64
+	MaxEnrollRequestedLen = 256
+	MaxEnrollSignerKIDLen = 128
+	MaxEnrollFiles        = 64
+	MaxEnrollPathLen      = 1024
+)
+
+// checkEnrollShape is Append's structural permit for an enroll record,
+// decidable before the ledger is opened, so a malformed one appends nothing.
+// A success must carry its payload; a refusal (the operator declined) may,
+// and if it does the payload is held to the same bounds. An enroll installs
+// nothing and carries no config_hash.
+func checkEnrollShape(e Event) error {
+	if e.Enroll != nil && e.Action != "enroll" {
+		return fmt.Errorf("control: enroll payload on a %q record", e.Action)
+	}
+	if e.Action != "enroll" {
+		return nil
+	}
+	if e.ConfigHash != "" {
+		return errors.New("control: an enroll installs nothing and carries no config_hash")
+	}
+	n := e.Enroll
+	if n == nil {
+		if e.Outcome == "success" {
+			return errors.New("control: a successful enroll must say what it enrolled")
+		}
+		return nil
+	}
+	if !anchorHashRE.MatchString(n.CardSHA256) {
+		return fmt.Errorf("control: enroll card_sha256 %q is not a lowercase hex sha256", n.CardSHA256)
+	}
+	if n.Artifact == "" || len(n.Artifact) > MaxEnrollArtifactLen {
+		return fmt.Errorf("control: enroll artifact must be 1 to %d bytes", MaxEnrollArtifactLen)
+	}
+	if len(n.SignerKID) > MaxEnrollSignerKIDLen {
+		return fmt.Errorf("control: enroll signer_kid is %d bytes; the cap is %d", len(n.SignerKID), MaxEnrollSignerKIDLen)
+	}
+	if len(n.Requested) > MaxEnrollRequested {
+		return fmt.Errorf("control: enroll requests %d capabilities; the cap is %d", len(n.Requested), MaxEnrollRequested)
+	}
+	for _, r := range n.Requested {
+		if len(r) > MaxEnrollRequestedLen {
+			return fmt.Errorf("control: an enroll requested capability is %d bytes; the cap is %d", len(r), MaxEnrollRequestedLen)
+		}
+	}
+	if len(n.Files) > MaxEnrollFiles {
+		return fmt.Errorf("control: enroll lists %d files; the cap is %d", len(n.Files), MaxEnrollFiles)
+	}
+	for _, f := range n.Files {
+		if f.Path == "" || len(f.Path) > MaxEnrollPathLen {
+			return fmt.Errorf("control: an enroll file path must be 1 to %d bytes", MaxEnrollPathLen)
+		}
+		if !anchorHashRE.MatchString(f.SHA256) {
+			return fmt.Errorf("control: enroll file sha256 %q is not a lowercase hex sha256", f.SHA256)
+		}
+	}
+	return nil
+}
+
 // checkAnchorCoverage is the one permit rule that needs the chain: the
 // covered seq must exist, 1 ≤ Seq ≤ Count, read under the exclusive flock so
 // it holds across any head advance since the caller read the head. A refusal
@@ -189,6 +256,9 @@ func Append(path string, e Event) (ledger.Head, error) {
 		return ledger.Head{}, err
 	}
 	if err := checkRestoreShape(e); err != nil {
+		return ledger.Head{}, err
+	}
+	if err := checkEnrollShape(e); err != nil {
 		return ledger.Head{}, err
 	}
 	if e.Outcome != "success" && e.Reason == nil {
@@ -243,6 +313,7 @@ func appendOn(c *ledger.Chain, view View, e Event) (ledger.Head, []byte, error) 
 		Detail:      origin.Clean(e.Detail),
 		Anchor:      e.Anchor,
 		Seal:        e.Seal,
+		Enroll:      e.Enroll,
 		Prev:        c.Prev(),
 	}
 	if c.Base() == 0 && c.Count() == 0 {
