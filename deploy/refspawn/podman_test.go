@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -211,6 +213,8 @@ func fakePodman(args []string) int {
 		return 125
 	}
 	switch args[0] {
+	case "image":
+		return fakeImageInspect(args[1:])
 	case "run":
 		return fakeRun(args)
 	case "rm":
@@ -270,6 +274,44 @@ func fakePodman(args []string) int {
 	return 125
 }
 
+// fakeImages parses REFSPAWN_TEST_IMAGES, ";"-separated "ref=sha256:<hex>":
+// the manifest digest the fake engine reports for each local image ref. A ref
+// not listed is "not known", like an absent image. The e2e coordinates these
+// digests with the ones its cards consent to.
+func fakeImages() map[string]string {
+	m := map[string]string{}
+	for _, e := range strings.Split(os.Getenv("REFSPAWN_TEST_IMAGES"), ";") {
+		if ref, dig, ok := strings.Cut(e, "="); ok {
+			m[ref] = dig
+		}
+	}
+	return m
+}
+
+// fakeImageID is the deterministic image ID the fake reports for ref.
+func fakeImageID(ref string) string {
+	sum := sha256.Sum256([]byte(ref))
+	return hex.EncodeToString(sum[:])
+}
+
+// fakeImageInspect answers `image inspect --format F REF` with the line
+// "<id> <digest> <repo>@<digest>" (the shape of the format the confiner
+// asks for), or podman's "image not known" failure (125). Launch then runs
+// the immutable ID, which fakeRun maps back to the ref.
+func fakeImageInspect(args []string) int {
+	if len(args) < 3 || args[0] != "inspect" || args[1] != "--format" {
+		return 125
+	}
+	ref := args[len(args)-1]
+	dig, ok := fakeImages()[ref]
+	if !ok {
+		fmt.Fprintln(os.Stderr, "Error: "+ref+": image not known")
+		return 125
+	}
+	fmt.Println(fakeImageID(ref), dig, "example.test/image@"+dig)
+	return 0
+}
+
 func hasFlag(args []string, flag string) bool {
 	for _, a := range args {
 		if a == flag {
@@ -322,6 +364,11 @@ func fakeRun(args []string) int {
 	}
 	if image == "" || name == "" {
 		return 125
+	}
+	for ref := range fakeImages() { // run by the immutable ID inspect reported
+		if image == fakeImageID(ref) {
+			image = ref
+		}
 	}
 	if exe, err := os.Executable(); err == nil && image == exe {
 		argv = append([]string{fakeAgentFlag}, argv...)
