@@ -55,12 +55,63 @@ type Signature struct {
 // AgenthofExt is the params of the Agenthof extension: what the agent is and
 // what it asks to be granted. Requests are proposals, never grants.
 type AgenthofExt struct {
-	Artifact  string               `json:"artifact"`  // digest-pinned image reference
-	Interface string               `json:"interface"` // how the agent is driven; enroll accepts only "a2a"
-	Tools     []config.ToolGrant   `json:"tools"`
-	Exec      []string             `json:"exec"`
-	Model     string               `json:"model"`
-	Spawn     []config.SpawnTarget `json:"spawn"`
+	Artifact string `json:"artifact"` // digest-pinned image reference (the OCI image form)
+	// HostProgram is the host-program artifact form: a program bound by
+	// content hash, for tiers that run a host executable rather than an image.
+	HostProgram *HostProgram         `json:"host-program,omitempty"`
+	Interface   string               `json:"interface"` // how the agent is driven; enroll accepts only "a2a"
+	Tools       []config.ToolGrant   `json:"tools"`
+	Exec        []string             `json:"exec"`
+	Model       string               `json:"model"`
+	Spawn       []config.SpawnTarget `json:"spawn"`
+}
+
+// HostProgram names a host executable by a logical id (never a filesystem
+// path) and lists the content hashes of its builds.
+type HostProgram struct {
+	Program string      `json:"program"`
+	Builds  []HostBuild `json:"builds"`
+}
+
+// HostBuild is one build of a host program. OS and Arch label the hash for
+// disclosure; they are not an enforcement key.
+type HostBuild struct {
+	OS     string `json:"os"`
+	Arch   string `json:"arch"`
+	SHA256 string `json:"sha256"` // "sha256:" + 64 lowercase hex
+}
+
+// validate checks the shape of the host-program form.
+func (h *HostProgram) validate() error {
+	if h.Program == "" {
+		return errors.New("host-program has no program id")
+	}
+	if len(h.Builds) == 0 {
+		return errors.New("host-program has no builds")
+	}
+	for i, b := range h.Builds {
+		if b.OS == "" || b.Arch == "" {
+			return fmt.Errorf("host-program build %d needs os and arch", i)
+		}
+		if !validSHA256(b.SHA256) {
+			return fmt.Errorf("host-program build %d: sha256 must be sha256:<64 lowercase hex>", i)
+		}
+	}
+	return nil
+}
+
+func validSHA256(s string) bool {
+	hexPart, ok := strings.CutPrefix(s, "sha256:")
+	if !ok || len(hexPart) != 64 {
+		return false
+	}
+	for i := 0; i < len(hexPart); i++ {
+		c := hexPart[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Raw returns a copy of the exact bytes the card was parsed from.
@@ -120,8 +171,13 @@ func (c *Card) Extension() (AgenthofExt, error) {
 	if err := dec.Decode(&ext); err != nil {
 		return AgenthofExt{}, fmt.Errorf("parse agenthof extension params: %w", err)
 	}
-	if ext.Artifact == "" {
-		return AgenthofExt{}, errors.New("agenthof extension has no artifact")
+	if ext.HostProgram != nil {
+		if err := ext.HostProgram.validate(); err != nil {
+			return AgenthofExt{}, fmt.Errorf("agenthof extension: %w", err)
+		}
+	}
+	if ext.Artifact == "" && ext.HostProgram == nil {
+		return AgenthofExt{}, errors.New("agenthof extension needs at least one artifact form (artifact or host-program)")
 	}
 	return ext, nil
 }
