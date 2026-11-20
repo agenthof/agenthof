@@ -5,6 +5,8 @@ package agentcard
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,8 +63,24 @@ type AgenthofExt struct {
 	Spawn     []config.SpawnTarget `json:"spawn"`
 }
 
-// Raw returns the exact bytes the card was parsed from.
-func (c *Card) Raw() []byte { return c.raw }
+// Raw returns a copy of the exact bytes the card was parsed from.
+func (c *Card) Raw() []byte { return append([]byte(nil), c.raw...) }
+
+// SignedDigest returns the hex SHA-256 of the JCS-canonical card body with
+// "signatures" removed: the exact content a signature covers. Unlike a digest
+// of Raw, it is the same for every encoding of one signed body. It returns ""
+// if the card was not produced by Parse or cannot be canonicalized.
+func (c *Card) SignedDigest() string {
+	if c == nil || len(c.raw) == 0 {
+		return ""
+	}
+	body, err := signedBody(c.raw)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
 
 // Parse decodes a card, rejecting oversized input, duplicate JSON keys, and
 // trailing data. Signatures are captured, not verified.
@@ -71,7 +89,7 @@ func Parse(b []byte) (*Card, error) {
 		return nil, fmt.Errorf("agent card is %d bytes, over the %d byte limit", len(b), MaxCardBytes)
 	}
 	if err := rejectDuplicateKeys(b); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("agent card: %w", err)
 	}
 	var c Card
 	if err := json.Unmarshal(b, &c); err != nil {
@@ -117,7 +135,7 @@ func rejectDuplicateKeys(b []byte) error {
 		return err
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return errors.New("agent card has trailing data after the JSON value")
+		return errors.New("trailing data after the JSON value")
 	}
 	return nil
 }
@@ -127,11 +145,11 @@ const maxDepth = 64
 
 func scanValue(dec *json.Decoder, depth int) error {
 	if depth > maxDepth {
-		return fmt.Errorf("agent card nests deeper than %d levels", maxDepth)
+		return fmt.Errorf("JSON nests deeper than %d levels", maxDepth)
 	}
 	tok, err := dec.Token()
 	if err != nil {
-		return fmt.Errorf("parse agent card: %w", err)
+		return fmt.Errorf("parse JSON: %w", err)
 	}
 	d, ok := tok.(json.Delim)
 	if !ok {
@@ -143,7 +161,7 @@ func scanValue(dec *json.Decoder, depth int) error {
 		for dec.More() {
 			kt, err := dec.Token()
 			if err != nil {
-				return fmt.Errorf("parse agent card: %w", err)
+				return fmt.Errorf("parse JSON: %w", err)
 			}
 			key, _ := kt.(string)
 			// encoding/json folds keys by Unicode simple folding, which
@@ -152,14 +170,14 @@ func scanValue(dec *json.Decoder, depth int) error {
 			// key is an ASCII identifier; refuse the rest.
 			for i := 0; i < len(key); i++ {
 				if key[i] >= 0x80 {
-					return fmt.Errorf("agent card has non-ASCII key %q", key)
+					return fmt.Errorf("JSON has non-ASCII key %q", key)
 				}
 			}
 			// encoding/json matches struct fields case-insensitively, so
 			// keys that differ only in case collide and must be refused.
 			key = strings.ToLower(key)
 			if seen[key] {
-				return fmt.Errorf("agent card has duplicate key %q", key)
+				return fmt.Errorf("JSON has duplicate key %q", key)
 			}
 			seen[key] = true
 			if err := scanValue(dec, depth+1); err != nil {
@@ -174,7 +192,7 @@ func scanValue(dec *json.Decoder, depth int) error {
 		}
 	}
 	if _, err := dec.Token(); err != nil { // closing delimiter
-		return fmt.Errorf("parse agent card: %w", err)
+		return fmt.Errorf("parse JSON: %w", err)
 	}
 	return nil
 }

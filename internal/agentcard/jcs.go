@@ -7,14 +7,19 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // jcsRaw canonicalizes a JSON document per RFC 8785.
 func jcsRaw(b []byte) ([]byte, error) {
+	if err := checkJSONStrings(b); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	var v any
@@ -45,11 +50,14 @@ func jcsWrite(buf *bytes.Buffer, v any) error {
 	case bool:
 		buf.WriteString(strconv.FormatBool(t))
 	case string:
-		jcsString(buf, t)
+		return jcsString(buf, t)
 	case json.Number:
 		f, err := strconv.ParseFloat(string(t), 64)
 		if err != nil {
 			return fmt.Errorf("canonicalize: number %q: %w", t, err)
+		}
+		if err := checkExactInteger(string(t), f); err != nil {
+			return err
 		}
 		return jcsNumber(buf, f)
 	case float64:
@@ -88,7 +96,9 @@ func jcsWrite(buf *bytes.Buffer, v any) error {
 			if i > 0 {
 				buf.WriteByte(',')
 			}
-			jcsString(buf, m.key)
+			if err := jcsString(buf, m.key); err != nil {
+				return err
+			}
 			buf.WriteByte(':')
 			if err := jcsWrite(buf, t[m.key]); err != nil {
 				return err
@@ -101,7 +111,10 @@ func jcsWrite(buf *bytes.Buffer, v any) error {
 	return nil
 }
 
-func jcsString(buf *bytes.Buffer, s string) {
+func jcsString(buf *bytes.Buffer, s string) error {
+	if !utf8.ValidString(s) {
+		return errors.New("canonicalize: string is not valid UTF-8")
+	}
 	const hex = "0123456789abcdef"
 	buf.WriteByte('"')
 	for _, r := range s {
@@ -129,6 +142,7 @@ func jcsString(buf *bytes.Buffer, s string) {
 		}
 	}
 	buf.WriteByte('"')
+	return nil
 }
 
 // jcsNumber writes f in the ECMAScript Number-to-string form RFC 8785 requires.
@@ -180,6 +194,74 @@ func jcsNumber(buf *bytes.Buffer, f float64) error {
 			buf.WriteByte('+')
 		}
 		buf.WriteString(strconv.Itoa(e))
+	}
+	return nil
+}
+
+// checkExactInteger rejects an integer literal that float64 cannot hold
+// exactly: RFC 8785 numbers are IEEE 754 doubles, so signing such a value
+// would silently canonicalize a rounded one.
+func checkExactInteger(lit string, f float64) error {
+	if strings.ContainsAny(lit, ".eE") {
+		return nil
+	}
+	n, ok := new(big.Int).SetString(lit, 10)
+	if !ok {
+		return fmt.Errorf("canonicalize: number %q", lit)
+	}
+	if new(big.Float).SetInt(n).Cmp(big.NewFloat(f)) != 0 {
+		return fmt.Errorf("canonicalize: integer %s is not exactly representable as a float64", lit)
+	}
+	return nil
+}
+
+// checkJSONStrings rejects what encoding/json would silently repair: invalid
+// UTF-8 and unpaired surrogate escapes (RFC 8785 requires an error).
+func checkJSONStrings(b []byte) error {
+	if !utf8.Valid(b) {
+		return errors.New("canonicalize: input is not valid UTF-8")
+	}
+	hex4 := func(i int) (rune, bool) {
+		if i+4 > len(b) {
+			return 0, false
+		}
+		v, err := strconv.ParseUint(string(b[i:i+4]), 16, 32)
+		return rune(v), err == nil
+	}
+	inStr := false
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if !inStr {
+			inStr = c == '"'
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = false
+		case '\\':
+			i++
+			if i >= len(b) || b[i] != 'u' {
+				continue
+			}
+			r, ok := hex4(i + 1)
+			if !ok {
+				return errors.New("canonicalize: bad unicode escape")
+			}
+			i += 4
+			switch {
+			case utf16.IsSurrogate(r) && r >= 0xdc00:
+				return errors.New("canonicalize: unpaired low surrogate escape")
+			case utf16.IsSurrogate(r):
+				if i+2 >= len(b) || b[i+1] != '\\' || b[i+2] != 'u' {
+					return errors.New("canonicalize: unpaired high surrogate escape")
+				}
+				lo, ok := hex4(i + 3)
+				if !ok || lo < 0xdc00 || lo > 0xdfff {
+					return errors.New("canonicalize: unpaired high surrogate escape")
+				}
+				i += 6
+			}
+		}
 	}
 	return nil
 }

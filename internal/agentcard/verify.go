@@ -31,9 +31,11 @@ var keyMaterialHeaders = []string{"jku", "jwk", "x5u", "x5c"}
 // serialization: the JWS signing input is
 // BASE64URL(protected) "." BASE64URL(canonical card body).
 //
-// It fails closed: no anchors, no signatures, a disallowed alg, a header
-// carrying key material, or no verifying trusted signature is an error. The
-// card must come from Parse, so the bytes verified are the bytes acted on.
+// It fails closed: no anchors, no signatures, or no entry that is EdDSA, by
+// a trusted kid and verifying is an error. Entries that are unusable for any
+// reason (disallowed alg, key-material headers, untrusted kid, bad bytes) are
+// skipped, so entry order does not matter. The card must come from Parse, so
+// the bytes verified are the bytes acted on.
 func Verify(c *Card, anchors []Anchor) (string, error) {
 	if c == nil || len(c.raw) == 0 {
 		return "", errors.New("verify agent card: card was not produced by Parse")
@@ -50,31 +52,47 @@ func Verify(c *Card, anchors []Anchor) (string, error) {
 	}
 	payload := base64.RawURLEncoding.EncodeToString(body)
 
-	for i, s := range c.Signatures {
-		kid, err := checkHeaders(s)
-		if err != nil {
-			return "", fmt.Errorf("verify agent card: signature %d: %w", i, err)
-		}
-		sig, err := base64.RawURLEncoding.Strict().DecodeString(s.Signature)
-		if err != nil || len(sig) != ed25519.SignatureSize {
-			continue
-		}
-		input := []byte(s.Protected + "." + payload)
-		for _, a := range anchors {
-			if a.KID != kid || len(a.Key) != ed25519.PublicKeySize {
-				continue
-			}
-			if ed25519.Verify(a.Key, input, sig) {
-				return kid, nil
-			}
+	// Any-of: each entry stands alone and an unusable one is skipped, never
+	// fatal, so the unsigned signatures list cannot be reordered or padded
+	// to reject a validly signed card. Keys come only from anchors, so
+	// skipping an entry that carries its own key material is safe.
+	for _, s := range c.Signatures {
+		if kid, ok := verifyEntry(s, payload, anchors); ok {
+			return kid, nil
 		}
 	}
 	return "", errors.New("verify agent card: no signature verifies against a trusted anchor")
 }
 
+// verifyEntry reports whether one signature is an EdDSA signature by a
+// trusted anchor over the payload.
+func verifyEntry(s Signature, payload string, anchors []Anchor) (string, bool) {
+	kid, err := checkHeaders(s)
+	if err != nil {
+		return "", false
+	}
+	sig, err := base64.RawURLEncoding.Strict().DecodeString(s.Signature)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return "", false
+	}
+	input := []byte(s.Protected + "." + payload)
+	for _, a := range anchors {
+		if a.KID != kid || len(a.Key) != ed25519.PublicKeySize {
+			continue
+		}
+		if ed25519.Verify(a.Key, input, sig) {
+			return kid, true
+		}
+	}
+	return "", false
+}
+
 // signedBody returns the JCS form of the card with the top-level
 // "signatures" member removed.
 func signedBody(raw []byte) ([]byte, error) {
+	if err := checkJSONStrings(raw); err != nil {
+		return nil, err
+	}
 	var m map[string]any
 	if err := decodeUseNumber(raw, &m); err != nil {
 		return nil, err
@@ -110,6 +128,9 @@ func checkHeaders(s Signature) (string, error) {
 	}
 	if _, ok := hdr["crit"]; ok {
 		return "", errors.New("protected header carries unsupported crit")
+	}
+	if b, ok := hdr["b64"]; ok && string(b) != "true" {
+		return "", errors.New("protected header b64 other than true is unsupported")
 	}
 	var alg string
 	if err := json.Unmarshal(hdr["alg"], &alg); err != nil || alg != signatureAlg {
