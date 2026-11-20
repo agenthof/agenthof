@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"slices"
 	"time"
@@ -365,6 +367,35 @@ type GatewayConfig struct {
 	// number). Zero means DefaultStepTimeout. A spawned subtree runs under
 	// its invoking step's deadline, so size it for the subtree.
 	StepTimeout time.Duration `yaml:"step_timeout"`
+	// TrustedSigners are the curator keys `agenthof enroll` trusts to sign
+	// an agent card. The list lives in governed config, so adding a signer
+	// is an applied, hashed, recorded act. Empty means enroll refuses every
+	// card: there is no trust by default.
+	TrustedSigners []TrustedSigner `yaml:"trusted_signers"`
+}
+
+// TrustedSigner is one curator signing key: the kid a card signature names
+// and the key that must verify it.
+type TrustedSigner struct {
+	KID string `yaml:"kid"` // the key id a card signature names; unique, at most MaxSignerKIDLen bytes
+	Key string `yaml:"key"` // the Ed25519 public key: the raw 32 bytes, standard base64 (44 characters)
+}
+
+// MaxSignerKIDLen bounds a trusted signer's kid; it matches the cap the
+// control ledger puts on a recorded signer id.
+const MaxSignerKIDLen = 128
+
+// PublicKey decodes Key: standard base64 of exactly the 32 raw bytes of an
+// Ed25519 public key.
+func (s TrustedSigner) PublicKey() (ed25519.PublicKey, error) {
+	raw, err := base64.StdEncoding.DecodeString(s.Key)
+	if err != nil {
+		return nil, fmt.Errorf("key is not standard base64: %w", err)
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("key is %d bytes; an Ed25519 public key is %d", len(raw), ed25519.PublicKeySize)
+	}
+	return ed25519.PublicKey(raw), nil
 }
 
 // EffectiveStepTimeout is StepTimeout, or DefaultStepTimeout when unset.

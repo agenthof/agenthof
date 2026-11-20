@@ -515,6 +515,22 @@ func Validate(cfg config.Config) []ValidationError {
 		add("gateway.yaml", "spawn_supervisor", "bad-spawn-supervisor",
 			"spawn_supervisor must not be inside gateway.refbox_socket_dir: that directory is mounted into agent compartments, so an agent could reach the supervisor directly")
 	}
+	signerKIDs := map[string]bool{}
+	for i, ts := range cfg.Gateway.TrustedSigners {
+		id := fmt.Sprintf("trusted_signers[%d]", i)
+		switch {
+		case len(ts.KID) == 0 || len(ts.KID) > config.MaxSignerKIDLen || !printableASCII(ts.KID):
+			add("gateway.yaml", id, "bad-trusted-signer",
+				fmt.Sprintf("trusted_signers kid must be 1 to %d printable ASCII characters, no spaces", config.MaxSignerKIDLen))
+		case signerKIDs[ts.KID]:
+			add("gateway.yaml", id, "bad-trusted-signer", fmt.Sprintf("trusted_signers lists a kid more than once (%q)", ts.KID))
+		default:
+			signerKIDs[ts.KID] = true
+		}
+		if _, err := ts.PublicKey(); err != nil {
+			add("gateway.yaml", id, "bad-trusted-signer", "trusted_signers "+err.Error())
+		}
+	}
 	if cfg.Gateway.StepTimeout != 0 && cfg.Gateway.StepTimeout < time.Second {
 		add("gateway.yaml", "step_timeout", "bad-step-timeout", "step_timeout must be a duration of at least 1s, such as 5m")
 	}
@@ -655,4 +671,15 @@ func InsideDir(dir, parent string) bool {
 		return true
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// printableASCII reports whether s is non-empty printable ASCII with no
+// space: a signer kid is recorded in the ledger and printed verbatim.
+func printableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] <= 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return s != ""
 }

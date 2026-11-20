@@ -537,6 +537,7 @@ budget_usd_month: 20
 | SpawnSupervisor | `spawn_supervisor` | string (`unix://<absolute socket path>`) | yes when any agent declares `may_spawn`; otherwise optional (a malformed value is still rejected) | — |
 | Spawn | `spawn` | object (`max_depth`, `max_parallel`, `max_total_spawns`, `reject_cycles`) | yes when any agent declares `may_spawn`; otherwise optional (a malformed value is still rejected) | — |
 | StepTimeout | `step_timeout` | duration string | no | `5m` |
+| TrustedSigners | `trusted_signers` | list of `{kid, key}` objects | yes for `agenthof enroll`; otherwise optional | none (enroll refuses every card) |
 
 `ModelRoute` fields:
 
@@ -757,6 +758,27 @@ the engine's per-step deadline and the timeout on the request Agenthof makes
 to the agent's endpoint, one knob. A spawned child runs under the step that
 asked for it, so a whole subtree shares the invoking step's deadline: size
 `step_timeout` for the subtree, not for one step.
+
+### `trusted_signers`
+
+Optional list of the curator keys `agenthof enroll` trusts to sign an agent
+card. Each entry is an object with two required string fields:
+
+- `kid`: the key id a card signature names. 1 to 128 printable ASCII
+  characters, no spaces; unique in the list.
+- `key`: the Ed25519 public key, the raw 32 bytes in standard base64
+  (44 characters).
+
+`apply` rejects a malformed entry with `bad-trusted-signer`. `enroll` reads
+the list from the installed configuration, so adding a signer is an applied,
+recorded act. With no signers `enroll` refuses every card; there is no
+trust by default and no way to skip the check.
+
+```yaml
+trusted_signers:
+  - kid: acme-curator-2026
+    key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
+```
 
 ### `defaults` / `defaults.model`
 
