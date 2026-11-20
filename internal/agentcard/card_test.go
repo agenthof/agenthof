@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestParseRejectsNonASCIIKeys(t *testing.T) {
+	// "toolſ" folds to "tools" under encoding/json's matching but not under
+	// strings.ToLower, so any non-ASCII key is refused outright.
+	for _, in := range []string{
+		`{"name":"a","tools":1,"toolſ":2}`,
+		`{"name":"a","K":1}`,
+		`{"nämé":"a"}`,
+	} {
+		if _, err := Parse([]byte(in)); err == nil {
+			t.Fatalf("accepted non-ASCII key in %s", in)
+		}
+	}
+}
+
 const cardJSON = `{
   "name": "Triage Bot",
   "description": "triages tickets",

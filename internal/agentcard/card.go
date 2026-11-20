@@ -1,6 +1,6 @@
 // Package agentcard parses an A2A agent card carrying an Agenthof extension
 // and maps it to a proposed governed agent definition. It does not fetch
-// cards and does not verify their signatures.
+// cards; Verify checks a parsed card's signatures against trusted anchors.
 package agentcard
 
 import (
@@ -146,6 +146,15 @@ func scanValue(dec *json.Decoder, depth int) error {
 				return fmt.Errorf("parse agent card: %w", err)
 			}
 			key, _ := kt.(string)
+			// encoding/json folds keys by Unicode simple folding, which
+			// strings.ToLower does not mirror (U+017F "ſ" matches "s"), so
+			// a non-ASCII key could collide unseen. Every legitimate card
+			// key is an ASCII identifier; refuse the rest.
+			for i := 0; i < len(key); i++ {
+				if key[i] >= 0x80 {
+					return fmt.Errorf("agent card has non-ASCII key %q", key)
+				}
+			}
 			// encoding/json matches struct fields case-insensitively, so
 			// keys that differ only in case collide and must be refused.
 			key = strings.ToLower(key)
