@@ -41,8 +41,9 @@ apply → the enrolled agent spawns, and a root run of it is refused).
 
 An agent card is JSON in the **A2A** shape (the interoperable agent-card
 format), carrying an **Agenthof extension** that declares what the agent is
-and what it needs: the artifact to run (an OCI image reference pinned by
-digest, `ref@sha256:…`), the interface it speaks (`a2a`), and the
+and what it needs: the artifact to run — an OCI image reference pinned by
+digest (`ref@sha256:…`), a **host program** (a program id plus the content
+hashes of its per-platform builds), or both — the interface it speaks (`a2a`), and the
 capabilities it **requests** — tools, a model, and exec commands. The card is
 **signed** (a detached JWS over its canonical bytes). You get it from a
 **card source** you curate: a local file, or an `https` URL. A card is a
@@ -102,7 +103,8 @@ not know of, and those files, like any un-applied config, do nothing until a
 recorded `apply`.
 
 - an **agent** carrying a [`provenance`](reference/config.md) block (the
-  artifact reference, the card digest, the card version). The presence of that
+  artifact — whichever of the image reference and the host-program form the
+  card carried — the card digest, the card version). The presence of that
   block makes the agent **spawn-only** (below).
 - a **workflow** with one step naming it, and a **role** that owns that
   workflow. The role is dedicated to this agent and copies the
@@ -178,17 +180,65 @@ Only what ships is a guarantee.
 
 - **Today:** containment (spawn-only, enforced by `apply` and the engine);
   the verified-signature trust gate; disclosure and byte-bound consent;
-  request-is-not-a-grant; the audit record.
-- **Recorded but not yet enforced at launch:** the artifact **digest**. The
-  card pins `ref@sha256:…` and `enroll` records the digest you consented to,
-  but today Agenthof does **not** yet bind the *running* compartment to that
-  exact artifact — the operator fetches the image and maps it in the
-  supervisor's config, and a later release will make the confiner refuse
-  anything but the consented digest (an image digest under podman, a program
-  content hash under Seatbelt). Until then, treat the recorded digest as
-  provenance you consented to, not proof of what ran.
-- **OCI only, for now:** `enroll` accepts the `ref@sha256:…` artifact form;
-  the Seatbelt program-plus-hash form arrives with the launch-time binding.
+  request-is-not-a-grant; the audit record; and the **artifact binding**
+  (below).
+- **The artifact binding.** The artifact the card pinned and you consented to
+  is the only one an enrolled agent is allowed to run as. Two independent
+  checks enforce it at spawn time:
+  - **The confiner refuses to launch** a compartment whose artifact is not
+    the consented one. Under **podman** it inspects the local image, requires
+    a consented digest to be among that image's digests, and then runs the
+    exact image it inspected (by its immutable image ID, with no pull), so a
+    retag between the check and the run cannot swap it. Under **Seatbelt** it
+    hashes the resolved executable and refuses to run it unless the hash is a
+    consented one.
+  - **The gateway refuses to admit** a spawned child whose *measured*
+    artifact (what the supervisor reports its compartment was launched with)
+    is not in the consented set. It reads the agent's provenance fresh and
+    does not rely on the supervisor having enforced anything, so the binding
+    holds even against a supervisor that is lenient or predates it. A refused
+    child is never driven, the refusal is recorded on the parent's ledger
+    with a fixed reason, and it counts against `max_total_spawns` because a
+    compartment set was provisioned.
+  - The receipt shows what ran: `audit` and `investigate` print the measured
+    artifact on the spawn line (see [`lifecycle-spawn.md`](lifecycle-spawn.md)).
+- **Both artifact forms are accepted.** `enroll` takes the OCI
+  `ref@sha256:…` form and the host-program form (a program id plus
+  per-platform content hashes) and records whichever the card carries; a card
+  may carry only the host-program form. Podman binds the image digest;
+  Seatbelt binds a program hash. An agent can run only on a backend that
+  enforces a form it consented to: an enrolled agent that carries only the
+  OCI form is refused on a Seatbelt supervisor.
+- **Bound only when the gateway is upgraded.** The binding is enforced
+  because the gateway sends the consented artifact and then checks the
+  measurement. Against an older supervisor that reports no measurement, an
+  enrolled agent is refused (fail closed). An older gateway sends no
+  consented artifact, so a newer supervisor runs the agent unbound, as it did
+  before this release. Upgrade the gateway to get the binding.
+- **Reserved:** per-publisher (author) signing of cards, and anything not
+  described above, is a later direction, not a guarantee.
+
+The honest limits of the binding:
+
+- **The measured value is runtime-reported evidence, not proof.** The
+  gateway's check compares what the supervisor reports against what you
+  consented to. A malicious or compromised supervisor that misreports the
+  measurement defeats the gateway check; the gateway guards a lenient,
+  older or misconfigured supervisor (for example a wrongly mapped image),
+  not a lying one. The confiner's own refusal is the stronger of the two for
+  the artifact it launches. Trusting the supervisor remains the operator's
+  deployment choice.
+- **Seatbelt binds the launched executable only.** The program hash covers
+  that file's bytes. It does not cover libraries it loads, the interpreter a
+  `#!` line names, or host files the program reads. The window between
+  hashing the file and executing it is narrowed (the resolved file is the one
+  executed, with no copy) but not closed: a writer to that file can still
+  swap it in the gap. And a Seatbelt compartment is host-readable and has no
+  resource caps (below). The podman image-digest binding is the stronger of
+  the two.
+- **A digest is not a verdict on the artifact.** Binding proves the run used
+  the artifact you consented to, not that the artifact is benign. The doors
+  still govern everything it does.
 
 ## Limits, stated plainly
 
