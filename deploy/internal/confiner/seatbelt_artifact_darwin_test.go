@@ -203,3 +203,60 @@ func TestSeatbeltExpectedOfAnotherKindFailsClosed(t *testing.T) {
 	}
 	mustNotExist(t, filepath.Join(s.StorePath("w"), "ran"))
 }
+
+// A bound program that cannot be read is refused before sandbox-exec runs and
+// leaves no PID record.
+func TestSeatbeltHostProgramUnreadableFailsClosed(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := "sha256:" + strings.Repeat("b", 64)
+	unreadable := writeProgram(t, dir, "unreadable", `true`)
+	if err := os.Chmod(unreadable, 0o100); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(dir, "gone"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	for name, prog := range map[string]string{"unreadable": unreadable, "dangling": dangling, "missing": filepath.Join(dir, "missing")} {
+		t.Run(name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "sandbox-exec-ran")
+			s := newTestSeatbelt(t, func(c *SeatbeltConfig) {
+				c.SandboxExec = writeStub(t, fmt.Sprintf(`touch %q; exit 0`, marker))
+			})
+			mustCreateStore(t, s, "w")
+			c, err := s.Launch(context.Background(), Spec{Name: "refexec-01", Store: "w", Argv: []string{prog}, Expected: hostExpected(h)})
+			if c != nil || err == nil {
+				t.Fatalf("Launch = %v, %v; want a refusal", c, err)
+			}
+			// A missing or dangling program is refused earlier, as did-not-launch;
+			// the unreadable one must be a mismatch. Either way nothing ran.
+			if name == "unreadable" && !errors.Is(err, ErrArtifactMismatch) {
+				t.Fatalf("unreadable: err = %v, want ErrArtifactMismatch", err)
+			}
+			mustNotExist(t, marker)
+			if ents, _ := os.ReadDir(s.cfg.PIDDir); len(ents) != 0 {
+				t.Fatalf("a refused launch left %d PID records", len(ents))
+			}
+		})
+	}
+}
+
+// An empty consented set matches nothing: a bound launch is refused.
+func TestSeatbeltHostProgramEmptyValuesRefused(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "sandbox-exec-ran")
+	s := newTestSeatbelt(t, func(c *SeatbeltConfig) {
+		c.SandboxExec = writeStub(t, fmt.Sprintf(`touch %q; exit 0`, marker))
+	})
+	mustCreateStore(t, s, "w")
+	prog := writeProgram(t, t.TempDir(), "prog", `echo hi > ran`)
+	for _, exp := range []*ExpectedArtifact{hostExpected(), {Kind: "host-program", Values: nil}} {
+		c, err := s.Launch(context.Background(), Spec{Name: "refexec-01", Store: "w", Argv: []string{prog}, Expected: exp})
+		if !errors.Is(err, ErrArtifactMismatch) || c != nil {
+			t.Fatalf("Launch = %v, %v; want ErrArtifactMismatch", c, err)
+		}
+	}
+	mustNotExist(t, marker)
+}

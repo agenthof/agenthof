@@ -478,6 +478,11 @@ const hostProgramKind = "host-program"
 //   - the window between hashing and exec is NOT closed. There is no private
 //     copy; resolving the symlink narrows the window but a writer to the
 //     resolved file can still swap it in that gap;
+//   - argv[0] is not passed separately: sandbox-exec execs the path it is given,
+//     so a bound program runs under its RESOLVED name where an unbound one runs
+//     under the looked-up (link) name. A multi-call binary that dispatches on
+//     the name it was invoked as (busybox, coreutils-style) can behave
+//     differently bound than unbound;
 //   - the logical program id the caller consented to binds nothing at run
 //     time: the path comes from the caller and the hash does the binding.
 func bindHostProgram(abs string, exp *ExpectedArtifact) (path, hash string, err error) {
@@ -734,8 +739,10 @@ func (c *seatbeltCompartment) Done() <-chan struct{} { return c.done }
 // execs the program in place.
 func (c *seatbeltCompartment) PID() int { return c.pid }
 
-// RanArtifact is the hash Launch measured from the program file, never the
-// consented values; ok is false when no Expected was bound.
+// RanArtifact is the hash Launch measured from the program file, at Launch and
+// before exec, never the consented values. It is not a post-exec attestation:
+// the hash-then-exec window is open (see bindHostProgram). ok is false when no
+// Expected was bound.
 func (c *seatbeltCompartment) RanArtifact() (string, []string, bool) {
 	if c.ranHash == "" {
 		return "", nil, false
