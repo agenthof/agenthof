@@ -64,7 +64,8 @@ func cmdCardSigner(ts *testscript.TestScript, neg bool, args []string) {
 // mkcard <variant> <out>: writes a signed A2A card. Variants: good; the
 // signature failures swap (body changed after signing), jku and algnone; and
 // the validly signed but refused wildcard, spawn, notool, noartifact,
-// unpinned and badinterface.
+// unpinned and badinterface; and hostprog, a card carrying only the
+// host-program artifact form.
 func cmdMkCard(ts *testscript.TestScript, neg bool, args []string) {
 	if len(args) != 2 {
 		ts.Fatalf("usage: mkcard <variant> <out>")
@@ -81,6 +82,13 @@ func cmdMkCard(ts *testscript.TestScript, neg bool, args []string) {
 	case "good", "swap", "jku", "algnone":
 	case "nomodel":
 		delete(params, "model")
+	case "hostprog":
+		// program-only: the host-program form with no OCI artifact
+		delete(params, "artifact")
+		params["host-program"] = map[string]any{"program": "acme-triage", "builds": []any{
+			map[string]any{"os": "darwin", "arch": "arm64", "sha256": "sha256:" + strings.Repeat("c", 64)},
+			map[string]any{"os": "linux", "arch": "amd64", "sha256": "sha256:" + strings.Repeat("d", 64)},
+		}}
 	case "wildcard":
 		params["tools"] = []any{map[string]any{"resource": "code-search", "tools": []string{"*"}, "mode": "read-only"}}
 	case "spawn":
