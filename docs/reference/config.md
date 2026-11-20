@@ -34,7 +34,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Tools | `tools` | list of tool grants ({resource, tools} or {resource, mode} objects) | no | none |
 | Output | `output` | string | no | — |
 | Execution | `execution` | string | no | `fronted` |
-| Endpoint | `endpoint` | string | yes | — |
+| Endpoint | `endpoint` | string | yes (omitted on spawn-only agents) | — |
 | Exec | `exec` | object | no | none |
 | MaySpawn | `may_spawn` | list of `{role, workflow}` objects | no | none (the agent spawns nothing) |
 | Provenance | `provenance` | object (`image`, `card_sha256`, `card_version`) | no | none (not an enrolled agent) |
@@ -42,7 +42,10 @@ not present in `examples/config/` — they exist to show a rule from
 `provenance` records where an enrolled third-party agent came from: `image` is
 a single digest-pinned image reference (`name@sha256:...`), `card_sha256` is
 the SHA-256 of the agent card as enrolled, and `card_version` is the version
-the card declares. An agent that carries a `provenance` block is spawn-only.
+the card declares. An agent that carries a `provenance` block is spawn-only: it runs only as a
+spawned child, never as a root run (a root run of a workflow naming it is
+refused), and the validator rejects an `endpoint` (`spawn-only-endpoint`) or
+`exec` (`spawn-only-exec`) on it.
 
 ### `name`
 
@@ -161,7 +164,8 @@ fronted and an endpoint"). Any other value is rejected with `bad-execution`
 
 ### `endpoint`
 
-Required; per the comment on `AgentDef.Endpoint`, "the agent's HTTP
+Required, except on spawn-only agents (those with a `provenance` block),
+which must omit it; per the comment on `AgentDef.Endpoint`, "the agent's HTTP
 endpoint". `apply` rejects an empty endpoint with `fronted-needs-endpoint`.
 The message is "agents are fronted and must declare an endpoint (the
 contained tier was removed)" when `execution` is empty, and "fronted agents

@@ -46,7 +46,19 @@ func Validate(cfg config.Config) []ValidationError {
 		}
 
 		effectiveExec := a.EffectiveExecution()
-		if a.Endpoint == "" {
+		if a.SpawnOnly() {
+			// An enrolled agent runs only as a spawned child, inside a
+			// --network none compartment; it has no endpoint to dial and no
+			// exec door. Either would give it a way to run uncontained.
+			if a.Endpoint != "" {
+				add(a.SourceFile, a.Name, "spawn-only-endpoint",
+					"a spawn-only agent (one with provenance) runs only as a spawned child and must not declare an endpoint")
+			}
+			if a.Exec.Declared() {
+				add(a.SourceFile, a.Name, "spawn-only-exec",
+					"a spawn-only agent (one with provenance) must not declare exec")
+			}
+		} else if a.Endpoint == "" {
 			msg := "fronted agents must have an endpoint"
 			if a.Execution == "" {
 				msg = "agents are fronted and must declare an endpoint (the contained tier was removed)"

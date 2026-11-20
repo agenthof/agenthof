@@ -75,6 +75,11 @@ const defaultMaxBounces = 2
 // (precedent: "tool proxy start failed" for a step whose agent never ran).
 const reasonArtifactStoreWriteFailed = "artifact store write failed"
 
+// reasonSpawnOnlyRoot is the fixed refusal for a root run of a workflow whose
+// step names a spawn-only (enrolled) agent. Such an agent has no endpoint and
+// is contained only as a spawned child, so a root run is refused outright.
+const reasonSpawnOnlyRoot = "agent %q is spawn-only and may run only as a spawned child"
+
 func Run(ctx context.Context, reg *registry.Registry, role, workflow, input string,
 	inv identity.Invoker, exec StepExecutor, opts Options) (Result, error) {
 
@@ -151,6 +156,16 @@ func Run(ctx context.Context, reg *registry.Registry, role, workflow, input stri
 		return refuse(reason)
 	}
 	wf, _ := reg.Workflow(workflow) // Admit just confirmed it exists
+	// Spawn re-enters Run with opts.Parent set, so this gate is on Parent, not
+	// in Admit (which also admits children): a spawn-only agent may run only
+	// as a spawned child, never as a root run.
+	if opts.Parent == nil {
+		for _, st := range wf.Steps {
+			if a, ok := reg.Agent(st.Agent); ok && a.SpawnOnly() {
+				return refuse(fmt.Sprintf(reasonSpawnOnlyRoot, a.Name))
+			}
+		}
+	}
 
 	emit(Event{Type: "workflow_started", ConfigHash: opts.ConfigHash, Origin: opts.Origin, DoorAccounting: DoorAccountingAdmission})
 	logger.Debug("run started", "steps", len(wf.Steps))
