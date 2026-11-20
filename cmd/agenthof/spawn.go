@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/agentrt"
@@ -282,8 +283,8 @@ func (d *runDeps) spawn(ctx context.Context, childRole, childWorkflow, input str
 	// agent runs only if its measured artifact is one it consented to.
 	// Provisioned stays true — a compartment set was consumed — so the
 	// refusal counts against max_total_spawns.
-	if evidence, ok := d.admitArtifacts(agents, lease); !ok {
-		logger.Warn("spawn refused", "reason", "measured artifact not consented", "child_run", childID)
+	if evidence, failed := d.admitArtifacts(agents, lease); len(failed) > 0 {
+		logger.Warn("spawn refused", "reason", "measured artifact not consented", "child_run", childID, "agents", failed)
 		return rungateway.SpawnResult{Status: "refused", Reason: reasonArtifactNotConsented, Provisioned: true, ChildArtifact: evidence}, nil
 	}
 	// The child runs until the parent step's context ends — or until the
@@ -315,17 +316,37 @@ func consentedForms(a config.AgentDef) []refspawn.ExpectedArtifact {
 		return nil
 	}
 	var out []refspawn.ExpectedArtifact
-	if dg := a.Provenance.ImageDigest(); dg != "" {
+	if dg := a.Provenance.ImageDigest(); wellFormedSHA256(dg) {
 		out = append(out, refspawn.ExpectedArtifact{Kind: "oci-image", Values: []string{dg}})
 	}
 	if a.Provenance.Program != "" && len(a.Provenance.Builds) > 0 {
 		hashes := make([]string, 0, len(a.Provenance.Builds))
 		for _, b := range a.Provenance.Builds {
-			hashes = append(hashes, b.SHA256)
+			// Self-sufficient: an empty or malformed value can never match,
+			// whatever the client's own shape gate does.
+			if wellFormedSHA256(b.SHA256) {
+				hashes = append(hashes, b.SHA256)
+			}
 		}
-		out = append(out, refspawn.ExpectedArtifact{Kind: "host-program", Values: hashes})
+		if len(hashes) > 0 {
+			out = append(out, refspawn.ExpectedArtifact{Kind: "host-program", Values: hashes})
+		}
 	}
 	return out
+}
+
+// wellFormedSHA256 reports whether v is "sha256:" followed by 64 lowercase hex.
+func wellFormedSHA256(v string) bool {
+	h, ok := strings.CutPrefix(v, "sha256:")
+	if !ok || len(h) != 64 {
+		return false
+	}
+	for _, c := range h {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // expectedArtifacts is what the supervisor is asked to enforce: each
@@ -371,19 +392,24 @@ func ranConsented(kind string, ran []string, forms []refspawn.ExpectedArtifact) 
 // supervisor that echoes the consented value back as a fake measurement
 // defeats this check — it guards a lenient or older supervisor and a wrongly
 // mapped image, not a lying one.
-func (d *runDeps) admitArtifacts(agents []string, lease *refspawn.Lease) (map[string]engine.ChildArtifactRef, bool) {
-	admitted := true
+func (d *runDeps) admitArtifacts(agents []string, lease *refspawn.Lease) (map[string]engine.ChildArtifactRef, []string) {
 	var evidence map[string]engine.ChildArtifactRef
+	var failed []string
 	for _, name := range agents {
 		def, ok := d.reg.Agent(name)
-		if !ok || !def.SpawnOnly() {
+		if !ok {
+			// An agent the registry cannot name cannot be vetted: refuse.
+			failed = append(failed, name)
+			continue
+		}
+		if !def.SpawnOnly() {
 			continue
 		}
 		kind, values, measured := lease.RanArtifact(name)
 		if measured && ranConsented(kind, values, consentedForms(def)) {
 			continue
 		}
-		admitted = false
+		failed = append(failed, name)
 		if measured {
 			if evidence == nil {
 				evidence = map[string]engine.ChildArtifactRef{}
@@ -391,7 +417,7 @@ func (d *runDeps) admitArtifacts(agents []string, lease *refspawn.Lease) (map[st
 			evidence[name] = engine.ChildArtifactRef{Kind: kind, Values: values}
 		}
 	}
-	return evidence, admitted
+	return evidence, failed
 }
 
 // childArtifacts converts what the supervisor measured each child agent's
