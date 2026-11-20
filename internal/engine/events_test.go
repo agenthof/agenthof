@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -445,6 +446,30 @@ func TestEventConfinerFieldsAreAdditive(t *testing.T) {
 	}
 	if child.ChildConfiner != "microvm" || child.ChildConfinerOpts[0] != "zz-unknown" {
 		t.Fatal("an unknown child tier/token must decode verbatim")
+	}
+}
+
+// child_artifact is additive: absent when empty, and an unknown kind or value
+// round-trips verbatim.
+func TestChildArtifactRoundTrips(t *testing.T) {
+	bare, _ := json.Marshal(Event{Type: "spawn", ChildConfiner: "podman"})
+	if strings.Contains(string(bare), "child_artifact") {
+		t.Fatalf("omitempty violated: %s", bare)
+	}
+	in := Event{Type: "spawn", ChildArtifact: map[string]ChildArtifactRef{"child": {Kind: "zz-kind", Values: []string{"v1", "v2"}}}}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"child_artifact":{"child":{"kind":"zz-kind","values":["v1","v2"]}}`) {
+		t.Fatal(string(b))
+	}
+	var out Event
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(out.ChildArtifact, in.ChildArtifact) {
+		t.Fatalf("round trip = %+v, want %+v", out.ChildArtifact, in.ChildArtifact)
 	}
 }
 

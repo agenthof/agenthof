@@ -43,6 +43,15 @@ func (b Binding) linkedTo(parent *Binding) Binding {
 	return b
 }
 
+// ChildArtifactRef is the artifact a child agent's compartment was measured to
+// run: a kind and its values (for example an image-digest set or a program
+// hash), exactly as the runtime reported them. The engine does not interpret
+// them; they are recorded verbatim.
+type ChildArtifactRef struct {
+	Kind   string   `json:"kind"`
+	Values []string `json:"values"`
+}
+
 // RuntimeAttestation is a trusted operator runtime's first-hand account of
 // one call it served: refbridge's, on a tool_call, or refexec's, on an exec.
 // Names, ids and argv only — never a credential value, never a result or
@@ -97,6 +106,11 @@ type Event struct {
 	Depth             int       `json:"depth,omitempty"`               // set by spawn: the child's depth in the delegation tree (this run's depth + 1)
 	ChildConfiner     string    `json:"child_confiner,omitempty"`      // set by spawn: the isolation tier the child's runtime applied, as it names it; recorded verbatim
 	ChildConfinerOpts []string  `json:"child_confiner_opts,omitempty"` // set by spawn: the per-deployment loosenings the child's backend applied, as tokens; recorded verbatim
+	// ChildArtifact is set by spawn: per child agent, the artifact its
+	// compartment was measured to run, as the runtime reported it and
+	// recorded verbatim (see ChildArtifactRef). Absent for an agent whose
+	// compartment measured none.
+	ChildArtifact map[string]ChildArtifactRef `json:"child_artifact,omitempty"`
 	// DoorCalls is set by step_succeeded and step_failed: how many door
 	// calls the step's gateway ADMITTED — the count the recorded door events
 	// inside this step's window are checked against. A pointer, like

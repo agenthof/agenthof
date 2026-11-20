@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -60,6 +61,9 @@ type fakeSupervisor struct {
 	// mounted into the compartments doing the asking but is nothing special
 	// to the root.
 	nestExecInFirstChild bool
+	// ran, when set, is the measured artifact the fake reports per agent on
+	// the answer line (what a real supervisor measured the compartment to run).
+	ran map[string]map[string]any
 
 	mu            sync.Mutex
 	provisions    [][]string // the agents asked for, per provision
@@ -139,7 +143,11 @@ func (f *fakeSupervisor) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
-	line, _ := json.Marshal(map[string]any{"child_dir": childDir, "agent_sockets": sockets, "exec_socket": execSock, "tier": "podman"})
+	answer := map[string]any{"child_dir": childDir, "agent_sockets": sockets, "exec_socket": execSock, "tier": "podman"}
+	if f.ran != nil {
+		answer["ran"] = f.ran
+	}
+	line, _ := json.Marshal(answer)
 	_, _ = w.Write(append(line, '\n'))
 	w.(http.Flusher).Flush()
 	<-r.Context().Done() // the gateway released the lease
@@ -615,6 +623,24 @@ func TestSpawnRecordsTheLeaseTierOnTheParentEvent(t *testing.T) {
 			t.Fatalf("res=%+v err=%v, want an internal failure that still carries the lease's tier", res, err)
 		}
 	})
+}
+
+// The artifact the supervisor measured the child's compartment to run comes
+// back on a succeeded outcome so the parent's spawn event can record it
+// verbatim; a spawn whose supervisor measured none carries none.
+func TestSpawnCarriesTheMeasuredRanArtifact(t *testing.T) {
+	deps, fake := liveDeps(t, spawnTestConfig(), t.TempDir())
+	fake.ran = map[string]map[string]any{"child": {"kind": "image-digest", "values": []string{"sha256:" + strings.Repeat("a", 64), "sha256:" + strings.Repeat("b", 64)}}}
+	res, err := deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
+	want := map[string]engine.ChildArtifactRef{"child": {Kind: "image-digest", Values: []string{"sha256:" + strings.Repeat("a", 64), "sha256:" + strings.Repeat("b", 64)}}}
+	if err != nil || res.Status != "succeeded" || !reflect.DeepEqual(res.ChildArtifact, want) {
+		t.Fatalf("res=%+v err=%v, want a succeeded child carrying %v", res, err, want)
+	}
+	deps, _ = liveDeps(t, spawnTestConfig(), t.TempDir())
+	res, err = deps.Spawn(context.Background(), "worker", "child-wf", "x", parentBinding())
+	if err != nil || res.ChildArtifact != nil {
+		t.Fatalf("res=%+v err=%v, want no child_artifact when nothing was measured", res, err)
+	}
 }
 
 func TestSpawnProvisionsDistinctStepAgentsAndReleases(t *testing.T) {

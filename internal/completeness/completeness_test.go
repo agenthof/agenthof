@@ -141,6 +141,7 @@ func TestCheckIgnoresConfinerFields(t *testing.T) {
 	spawn := ev("spawn")
 	spawn.ChildConfiner = "zzz"
 	spawn.ChildConfinerOpts = []string{"zzz-opt"}
+	spawn.ChildArtifact = map[string]engine.ChildArtifactRef{"child": {Kind: "zzz-kind", Values: []string{"zzz"}}}
 	events := []engine.Event{started(), stepStart("a"), exec, spawn, stepOK("a", 2), finished("succeeded")}
 	if r := Check(events); r.Verdict != Complete || r.DoorCalls != 2 {
 		t.Fatalf("%+v, want complete with 2 door calls", r)

@@ -540,6 +540,30 @@ func TestSpawnEventCarriesChildConfiner(t *testing.T) {
 	}
 }
 
+// The artifact the child's compartment was measured to run rides on the
+// parent's spawn event for a child that ran, verbatim; a spawn that measured
+// none records none.
+func TestSpawnEventCarriesChildArtifact(t *testing.T) {
+	ran := map[string]engine.ChildArtifactRef{"child": {Kind: "image-digest", Values: []string{"sha256:aa"}}}
+	for _, c := range []struct {
+		name string
+		ran  map[string]engine.ChildArtifactRef
+	}{{"measured", ran}, {"none measured", nil}} {
+		t.Run(c.name, func(t *testing.T) {
+			sp := &stubSpawner{result: SpawnResult{ChildRunID: "r-child", Status: "succeeded", Provisioned: true, ChildArtifact: c.ran}}
+			rec := &eventRecorder{}
+			base, token, _ := startSpawnGateway(t, context.Background(), spawnPolicy(3, 2, 4), testBinding(), spawnAgent(workerChild), sp, rec)
+			if code, _ := postSpawn(t, context.Background(), base, token, spawnBody("worker", "child-wf", "x")); code != http.StatusOK {
+				t.Fatalf("code = %d", code)
+			}
+			ev := spawnEvents(rec)
+			if len(ev) != 1 || !reflect.DeepEqual(ev[0].ChildArtifact, c.ran) {
+				t.Fatalf("events = %+v, want child_artifact %v", ev, c.ran)
+			}
+		})
+	}
+}
+
 func TestSpawnCapsAgentSuppliedNames(t *testing.T) {
 	sp := &stubSpawner{}
 	rec := &eventRecorder{}
