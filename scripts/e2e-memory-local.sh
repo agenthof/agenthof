@@ -253,7 +253,8 @@ echo "persistence: the second run found the first run's upserts — ok"
 
 # 5. The load-bearing rule end to end: an invalid collection carrying canary
 #    arguments fails with the FIXED reason, and no canary byte reaches a ledger,
-#    artifact, or log. Nothing is printed from the canaries.
+#    artifact, or log. The canary is a random non-secret; no_leak fails the
+#    run if it appears anywhere.
 CANARY="canary-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 if OUT4="$(run memory-write "{\"upserts\":[{\"collection\":\"bad/$CANARY\",\"id\":\"id-$CANARY\",\"text\":\"text-$CANARY\",\"vector\":$VEC_A,\"metadata\":{\"k\":\"meta-$CANARY\"}}]}" 2>"$WORK/run4.err")"; then
 	fail "an upsert into an invalid collection did not fail"

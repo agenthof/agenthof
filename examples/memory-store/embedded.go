@@ -45,7 +45,7 @@ type storeRecord struct {
 type embeddedBackend struct {
 	path       string
 	maxEntries int
-	mu         sync.Mutex // serializes this process's operations around the shared file; each takes its own fd, so the flock alone is not the guard here
+	mu         sync.Mutex // queues this process's operations instead of having each block a thread inside flock; the per-operation flock is what excludes other holders
 }
 
 func newEmbeddedBackend(storeFile string, maxEntries int) *embeddedBackend {

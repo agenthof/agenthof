@@ -31,8 +31,9 @@ Both backends return the same result shape. Metadata round-trips as semantic
 JSON, not byte-identical: Qdrant re-serializes it. Invalid UTF-8 in metadata is
 rejected, but some valid JSON metadata still round-trips semantically and not
 byte-identically: lone-surrogate `\uXXXX` escapes, very large numbers such as
-`1e999`, and duplicate keys are stored verbatim by the embedded backend while
-Qdrant normalizes them. Equal cosine scores are ordered by `id` on the embedded
+`1e999`, and duplicate keys are stored verbatim by the embedded backend, while
+Qdrant normalizes or refuses them (a refusal surfaces as the fixed "backend
+unavailable" error). Equal cosine scores are ordered by `id` on the embedded
 backend and are unspecified on Qdrant. The server returns structured MCP
 content only, so a client that reads only the `content` array sees an empty
 payload.

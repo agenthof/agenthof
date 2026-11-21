@@ -252,9 +252,12 @@ func TestMetadataInvalidUTF8Refused(t *testing.T) {
 		t.Fatal("invalid UTF-8 metadata must be refused")
 	}
 	assertFixedString(t, res)
-	if bytes.Contains(resultBytes(t, res), []byte{0xff}) {
-		t.Fatal("argument bytes leaked")
+	if tc, ok := res.Content[0].(*mcp.TextContent); !ok || tc.Text != msgBadMetadata {
+		t.Fatalf("invalid UTF-8 metadata must fail with %q, got %+v", msgBadMetadata, res.Content[0])
 	}
+	// Leak-freedom is the closed-set membership asserted above: the result is
+	// one of the fixed strings, so no argument byte can be in it. (A raw 0xff
+	// check would be vacuous: json.Marshal rewrites invalid UTF-8 to U+FFFD.)
 }
 
 func TestBoundsEnforced(t *testing.T) {

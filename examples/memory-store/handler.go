@@ -223,8 +223,9 @@ func searchHandler(be Backend, l Limits) mcp.ToolHandler {
 
 // registerTools registers memory_upsert and memory_search through the raw
 // AddTool path, so the SDK neither unmarshals nor schema-validates the
-// arguments. The schemas below describe the shape for the model; they carry
-// no constraint keyword the SDK could enforce and echo back.
+// arguments; that, not the schemas, is why the SDK neither validates nor echoes
+// a value. The schemas below describe the shape for the model and carry only
+// type and required, with no pattern or maxLength as a second line of defense.
 func registerTools(server *mcp.Server, be Backend, l Limits) {
 	server.AddTool(&mcp.Tool{
 		Name:        "memory_upsert",

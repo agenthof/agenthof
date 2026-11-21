@@ -8,7 +8,7 @@ import (
 
 // Hit is one search result. The field order is the server's wire shape; the
 // gateway re-serializes the decoded result with keys sorted alphabetically,
-// so a client's preview shows a different order.
+// so the gateway's ledger preview shows a different order.
 type Hit struct {
 	ID       string          `json:"id"`
 	Score    float32         `json:"score"`

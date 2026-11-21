@@ -111,8 +111,12 @@ func TestStrayPositionalArgumentsRejected(t *testing.T) {
 
 func TestEmptyStoreFileRejected(t *testing.T) {
 	for _, v := range []string{"", "  ", "\t"} {
-		if _, err := parseConfig([]string{"-backend", "embedded", "-store-file", v}, &bytes.Buffer{}); err == nil {
+		_, err := parseConfig([]string{"-backend", "embedded", "-store-file", v}, &bytes.Buffer{})
+		if err == nil {
 			t.Fatalf("blank -store-file %q accepted for embedded", v)
+		}
+		if want := "-store-file must not be empty for the embedded backend"; err.Error() != want {
+			t.Fatalf("blank -store-file %q: error %q, want %q", v, err, want)
 		}
 	}
 	if _, err := parseConfig([]string{"-backend", "qdrant", "-qdrant-url", "http://127.0.0.1:6333", "-store-file", ""}, &bytes.Buffer{}); err != nil {
