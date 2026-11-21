@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -1453,13 +1454,15 @@ func TestExecAndToolCallRecordInCallOrder(t *testing.T) {
 // modelUpstream is a stub OpenAI-compatible provider. It records the request
 // the proxy forwarded and answers in one of a few modes.
 type modelUpstream struct {
-	mu      sync.Mutex
-	calls   int
-	auth    string
-	model   string
-	body    []byte
-	headers http.Header
-	mode    string
+	mu       sync.Mutex
+	calls    int
+	auth     string
+	model    string
+	body     []byte
+	headers  http.Header
+	mode     string
+	path     string
+	rawQuery string
 }
 
 func (u *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1473,6 +1476,8 @@ func (u *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u.model = model
 	u.body = body
 	u.headers = r.Header.Clone()
+	u.path = r.URL.Path
+	u.rawQuery = r.URL.RawQuery
 	mode := u.mode
 	u.mu.Unlock()
 
@@ -1502,16 +1507,68 @@ func (u *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(buf.Bytes())
 	case "hang":
 		<-r.Context().Done()
+	case "500":
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"SECRET-UPSTREAM-BODY"}`))
+	case "truncate":
+		// Promise 100 body bytes, send 10, then cut the connection so the
+		// proxy's read of the body fails.
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n0123456789")
+		_ = buf.Flush()
+		_ = conn.Close()
+	case "embed":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"text-embedding-3-small","usage":{"prompt_tokens":8,"total_tokens":8}}`))
+	case "embed-ct":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"text-embedding-3-small","usage":{"prompt_tokens":8,"completion_tokens":0,"total_tokens":8}}`))
+	case "embed-big":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(paddedEmbedBody(maxChatResponse + 1))
+	case "embed-huge":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(paddedEmbedBody(maxEmbeddingsResponse + 1))
+	case "embed-gzip":
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		_, _ = gz.Write([]byte(embedBody))
+		_ = gz.Close()
+		_, _ = w.Write(buf.Bytes())
+	case "embed-nousage":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"text-embedding-3-small"}`))
 	default:
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":0}}`))
 	}
 }
 
+const embedBody = `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"text-embedding-3-small","usage":{"prompt_tokens":8,"total_tokens":8}}`
+
+// paddedEmbedBody is a valid embeddings answer of exactly n bytes.
+func paddedEmbedBody(n int) []byte {
+	const head = `{"pad":"`
+	const tail = `","usage":{"prompt_tokens":8,"total_tokens":8}}`
+	return []byte(head + strings.Repeat("x", n-len(head)-len(tail)) + tail)
+}
+
 func (u *modelUpstream) snapshot() (calls int, auth, model string, body []byte, headers http.Header) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return u.calls, u.auth, u.model, append([]byte(nil), u.body...), u.headers.Clone()
+}
+
+func (u *modelUpstream) target() (path, rawQuery string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.path, u.rawQuery
 }
 
 func startModelGateway(t *testing.T, up *modelUpstream, agent config.AgentDef, keyRoot string) (*Gateway, string, string, *[]engine.Event) {
@@ -2614,5 +2671,285 @@ func TestToolsCallOnClosingIsNeitherCountedNorRecorded(t *testing.T) {
 	p.mu.Unlock()
 	if n := p.Stop(); n != 0 || len(rec.ev) != 0 {
 		t.Fatalf("Stop() = %d, events = %+v; want 0 and none", n, rec.ev)
+	}
+}
+
+// startRoutedGateway is startModelGateway with the whole GatewayConfig
+// supplied by the caller.
+func startRoutedGateway(t *testing.T, gw config.GatewayConfig, agent config.AgentDef, keyRoot string) (*Gateway, string, string, *[]engine.Event) {
+	t.Helper()
+	p := New(gw, keyRoot, broker.StaticEnv{}, nil, "")
+	var mu sync.Mutex
+	var events []engine.Event
+	base, token, err := p.Start(context.Background(), testBinding(), agent, func(e engine.Event) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { p.Stop() })
+	return p, base, token, &events
+}
+
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// postDoor is postModel with a caller-supplied path (and optional query).
+func postDoor(t *testing.T, base, token, pathAndQuery, body string, extra http.Header) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, base+pathAndQuery, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	for k, vs := range extra {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func plannerAgent() config.AgentDef {
+	return config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "planner-model"}
+}
+
+func TestModelProxyRefusalAnswers(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	const denied = "model not allowed\n"
+	notAllowed := func(m string) string { return fmt.Sprintf("model %q is not allowed for this agent", m) }
+
+	cases := []struct {
+		name       string
+		body       string
+		wantReason string
+		wantModel  string
+	}{
+		{"other", `{"model":"other"}`, notAllowed("other"), "other"},
+		{"missing", `{"messages":[]}`, notAllowed(""), ""},
+		{"empty", `{"model":""}`, notAllowed(""), ""},
+		{"non-string", `{"model":42}`, notAllowed(""), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := &modelUpstream{}
+			_, base, token, events := startModelGateway(t, up, plannerAgent(), t.TempDir())
+			resp := postModel(t, base, token, tc.body, nil)
+			code, got := resp.StatusCode, readBody(t, resp)
+			if code != http.StatusForbidden || got != denied {
+				t.Fatalf("answer = %d %q, want 403 %q", code, got, denied)
+			}
+			if calls, _, _, _, _ := up.snapshot(); calls != 0 {
+				t.Fatalf("upstream was called %d times", calls)
+			}
+			if len(*events) != 1 {
+				t.Fatalf("events = %+v", *events)
+			}
+			ev := (*events)[0]
+			if ev.Type != "model_call" || ev.Status != "refused" || ev.Reason != tc.wantReason || ev.Model != tc.wantModel {
+				t.Fatalf("event = %+v", ev)
+			}
+		})
+	}
+
+	t.Run("oversized", func(t *testing.T) {
+		up := &modelUpstream{}
+		_, base, token, events := startModelGateway(t, up, plannerAgent(), t.TempDir())
+		resp := postModel(t, base, token, `{"model":"`+strings.Repeat("é", 300)+`"}`, nil)
+		code, got := resp.StatusCode, readBody(t, resp)
+		if code != http.StatusForbidden || got != denied {
+			t.Fatalf("answer = %d %q, want 403 %q", code, got, denied)
+		}
+		if len(*events) != 1 {
+			t.Fatalf("events = %+v", *events)
+		}
+		ev := (*events)[0]
+		if ev.Type != "model_call" || ev.Status != "refused" {
+			t.Fatalf("event = %+v", ev)
+		}
+		if n := utf8.RuneCountInString(ev.Model); n != 200 {
+			t.Fatalf("recorded model has %d runes, want 200", n)
+		}
+		if ev.Reason != fmt.Sprintf("model %q is not allowed for this agent", ev.Model) {
+			t.Fatalf("reason = %q", ev.Reason)
+		}
+	})
+
+	t.Run("no model and no default", func(t *testing.T) {
+		up := &modelUpstream{}
+		ts := httptest.NewServer(up)
+		t.Cleanup(ts.Close)
+		gw := config.GatewayConfig{Models: map[string]config.ModelRoute{
+			"planner-model": {Endpoint: ts.URL, Model: "gpt-4o", APIKeyEnv: "MODEL_KEY"},
+		}}
+		agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x"}
+		_, base, token, events := startRoutedGateway(t, gw, agent, t.TempDir())
+		resp := postModel(t, base, token, `{"model":"planner-model"}`, nil)
+		code, got := resp.StatusCode, readBody(t, resp)
+		if code != http.StatusForbidden || got != denied {
+			t.Fatalf("answer = %d %q, want 403 %q", code, got, denied)
+		}
+		if calls, _, _, _, _ := up.snapshot(); calls != 0 {
+			t.Fatalf("upstream was called %d times", calls)
+		}
+		if len(*events) != 1 {
+			t.Fatalf("events = %+v", *events)
+		}
+		ev := (*events)[0]
+		if ev.Type != "model_call" || ev.Status != "refused" || ev.Reason != notAllowed("planner-model") {
+			t.Fatalf("event = %+v", ev)
+		}
+	})
+}
+
+func TestModelProxyUnroutedModelFails(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: "ghost"}
+	_, base, token, events := startModelGateway(t, up, agent, t.TempDir())
+
+	resp := postModel(t, base, token, `{"model":"ghost"}`, nil)
+	code, got := resp.StatusCode, readBody(t, resp)
+	if code != http.StatusBadGateway || got != "model route not resolved\n" {
+		t.Fatalf("answer = %d %q", code, got)
+	}
+	if calls, _, _, _, _ := up.snapshot(); calls != 0 {
+		t.Fatalf("upstream was called %d times", calls)
+	}
+	if len(*events) != 1 {
+		t.Fatalf("events = %+v", *events)
+	}
+	ev := (*events)[0]
+	if ev.Type != "model_call" || ev.Status != "failed" || ev.Reason != "model route not resolved" || ev.Model != "ghost" {
+		t.Fatalf("event = %+v", ev)
+	}
+}
+
+func TestModelProxyRecordsLongConfiguredModelWhole(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	long := strings.Repeat("m", 300)
+	up := &modelUpstream{}
+	ts := httptest.NewServer(up)
+	t.Cleanup(ts.Close)
+	gw := config.GatewayConfig{Models: map[string]config.ModelRoute{
+		long: {Endpoint: ts.URL, Model: "gpt-4o", APIKeyEnv: "MODEL_KEY"},
+	}}
+	agent := config.AgentDef{Name: "planner", Execution: "fronted", Endpoint: "https://x", Model: long}
+	_, base, token, events := startRoutedGateway(t, gw, agent, t.TempDir())
+
+	resp := postModel(t, base, token, `{"model":"`+long+`"}`, nil)
+	code := resp.StatusCode
+	_ = readBody(t, resp)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if len(*events) != 1 {
+		t.Fatalf("events = %+v", *events)
+	}
+	ev := (*events)[0]
+	if ev.Type != "model_call" || ev.Status != "succeeded" {
+		t.Fatalf("event = %+v", ev)
+	}
+	if utf8.RuneCountInString(ev.Model) != 300 || ev.Model != long {
+		t.Fatalf("recorded model has %d runes, want the full 300", utf8.RuneCountInString(ev.Model))
+	}
+}
+
+func TestModelProxyUpstreamErrorStatus(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{mode: "500"}
+	_, base, token, events := startModelGateway(t, up, plannerAgent(), t.TempDir())
+
+	resp := postModel(t, base, token, `{"model":"planner-model"}`, nil)
+	code := resp.StatusCode
+	_ = readBody(t, resp)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 relayed", code)
+	}
+	if len(*events) != 1 {
+		t.Fatalf("events = %+v", *events)
+	}
+	ev := (*events)[0]
+	if ev.Type != "model_call" || ev.Status != "refused" || ev.Reason != "upstream 500 Internal Server Error" {
+		t.Fatalf("event = %+v", ev)
+	}
+	raw, _ := json.Marshal(*events)
+	if strings.Contains(string(raw), "SECRET-UPSTREAM-BODY") {
+		t.Fatalf("upstream body leaked into the ledger: %s", raw)
+	}
+}
+
+func TestModelProxyTruncatedUpstreamBodyFails(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{mode: "truncate"}
+	_, base, token, events := startModelGateway(t, up, plannerAgent(), t.TempDir())
+
+	resp := postModel(t, base, token, `{"model":"planner-model"}`, nil)
+	code, got := resp.StatusCode, readBody(t, resp)
+	if code != http.StatusBadGateway || got != "upstream error\n" {
+		t.Fatalf("answer = %d %q", code, got)
+	}
+	if len(*events) != 1 {
+		t.Fatalf("events = %+v", *events)
+	}
+	ev := (*events)[0]
+	if ev.Type != "model_call" || ev.Status != "failed" || ev.Reason != "upstream read failed" {
+		t.Fatalf("event = %+v", ev)
+	}
+}
+
+func TestModelProxyJoinsEndpointPathAndDropsQuery(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{}
+	ts := httptest.NewServer(up)
+	t.Cleanup(ts.Close)
+	gw := config.GatewayConfig{Models: map[string]config.ModelRoute{
+		"planner-model": {Endpoint: ts.URL + "/base", Model: "gpt-4o", APIKeyEnv: "MODEL_KEY"},
+	}}
+	_, base, token, events := startRoutedGateway(t, gw, plannerAgent(), t.TempDir())
+
+	resp := postDoor(t, base, token, "v1/chat/completions?api-version=1&key=q-secret", `{"model":"planner-model"}`, nil)
+	code := resp.StatusCode
+	_ = readBody(t, resp)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if path, query := up.target(); path != "/base/v1/chat/completions" || query != "" {
+		t.Fatalf("upstream target = %q, %q; want /base/v1/chat/completions and no query", path, query)
+	}
+	if len(*events) != 1 || (*events)[0].Type != "model_call" {
+		t.Fatalf("events = %+v", *events)
+	}
+}
+
+func TestModelProxyDropsAgentAcceptEncoding(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	up := &modelUpstream{}
+	_, base, token, events := startModelGateway(t, up, plannerAgent(), t.TempDir())
+
+	extra := http.Header{}
+	extra.Set("Accept-Encoding", "br")
+	resp := postModel(t, base, token, `{"model":"planner-model"}`, extra)
+	_ = readBody(t, resp)
+	_, _, _, _, hdr := up.snapshot()
+	if got := hdr.Get("Accept-Encoding"); got == "br" {
+		t.Fatalf("upstream saw the agent's Accept-Encoding %q", got)
+	}
+	if len(*events) != 1 || (*events)[0].Type != "model_call" {
+		t.Fatalf("events = %+v", *events)
 	}
 }

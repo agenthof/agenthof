@@ -1,12 +1,17 @@
 # The life of a model call
 
-One chat completion, from the moment a fronted agent asks until the ledger
-line that records it. This is the model door. For the run it happens inside,
+One chat completion or embeddings call, from the moment a fronted agent asks
+until the ledger line that records it. This is the model door. It serves two
+routes, `POST /v1/chat/completions` and `POST /v1/embeddings`; the diagram below
+shows the chat route, and the embeddings route differs only where noted. For the run it happens inside,
 see [`lifecycle.md`](lifecycle.md). For the YAML, see
 [`reference/config.md`](reference/config.md#models). For the executable proof —
 the fronted call, the injected provider key, and the rendered `model_call`
 audit line — see the testscript
-[`cmd/agenthof/testdata/script/door_model.txtar`](../cmd/agenthof/testdata/script/door_model.txtar).
+[`cmd/agenthof/testdata/script/door_model.txtar`](../cmd/agenthof/testdata/script/door_model.txtar)
+for chat and
+[`cmd/agenthof/testdata/script/door_embeddings.txtar`](../cmd/agenthof/testdata/script/door_embeddings.txtar)
+for embeddings.
 
 ```
   agent                         Agenthof                         provider
@@ -44,6 +49,13 @@ that name equals the agent's effective model: `model` on the agent, or
 `gateway.defaults.model` when the agent's `model` is empty. Anything else is
 `403` and a `model_call` with status `refused`. The provider is not called.
 
+The embeddings route is authorized against the agent's `embedding_model` only.
+When it is unset the call is `403`, a `model_call` `refused` with reason
+`embeddings not allowed for this agent`, and the provider is not called. There
+is no fallback to `model` or `gateway.defaults.model`: an agent that may chat
+may not embed unless it declares an embedding model. The embedding model is an
+ordinary entry in `gateway.models`.
+
 On a match, Agenthof resolves the logical name to a route: a provider
 endpoint, a provider model name, and a key.
 
@@ -63,6 +75,11 @@ endpoint, a provider model name, and a key.
 Agenthof does not itself cap spend. The upstream gateway does, and only on
 the budgeted path.
 
+Both routes share one code path for key injection, model rewrite and header
+stripping. The route's path is appended to the endpoint's, so an endpoint
+`https://host/base` is called at `/base/v1/embeddings` (or
+`/base/v1/chat/completions`); any query string on the agent's request is dropped.
+
 The outbound request's `model` is rewritten to the provider model. Its
 `Authorization` is `Bearer <provider key>`. The run token is not that key.
 Every `X-Agenthof-*` header and any `Cookie` are stripped before the request
@@ -75,13 +92,21 @@ A `model_call` event names the agent, the **logical** model, and a status.
 It does not contain the prompt or the completion — not the text, and not a
 hash of either.
 
+An embeddings call is recorded as a `model_call` too, not a new event kind. Its
+model is the embedding model's logical name. It carries `prompt_tokens` and
+never `completion_tokens`, and `audit` prints it as
+`model <name> — <N> prompt tokens`, with no completion clause (a chat call whose
+provider sent no completion count renders the same prompt-only line). Neither the input
+text nor the returned vector is recorded, nor a hash of either.
+
 | Response | `model_call` |
 | --- | --- |
-| non-streaming 2xx | `succeeded`, with `prompt_tokens` and `completion_tokens` when the body carries `usage` (a present 0 is distinct from absent) |
+| non-streaming 2xx | `succeeded`, with `prompt_tokens` and `completion_tokens` when the body carries `usage` (a present 0 is distinct from absent). On the embeddings route only `prompt_tokens` is recorded |
 | `text/event-stream` | `started`. The stream is relayed. Token counts are not captured |
 | HTTP 429 | `refused`, reason `budget`. The status is relayed to the agent |
 | other non-2xx | `refused`, reason `upstream <code> <status text>` (e.g. `upstream 500 Internal Server Error`). The upstream's own body/reason phrase is not copied into the event |
-| body over 10 MiB | `failed`, reason `upstream response too large`, and the agent sees 502 |
+| `text/event-stream` on the embeddings route | `failed`, reason `unexpected streaming response`, and the agent sees 502. Nothing is relayed |
+| body over the route's cap (10 MiB chat, 32 MiB embeddings) | `failed`, reason `upstream response too large`, and the agent sees 502. A large embeddings batch can exceed the cap after the provider has already charged for it: batch smaller, or request `encoding_format: "base64"` |
 | logical name not allowed | `refused`, and the provider is not called |
 | no route for that name | `failed`, reason `model route not resolved`, and the agent sees 502 |
 | the call never completes (provider unreachable, DNS/timeout, or the response is cut off) | `failed`, reason `model call did not complete`, and the agent sees 502 |
@@ -100,8 +125,15 @@ Streamed calls are recorded without token usage. Reading usage off the
 stream is reserved. Non-streaming calls record usage when the provider
 sends it.
 
-An agent may use exactly its one declared model. A per-role list of models
-is reserved. OAuth-protected model providers are reserved; today the key is
+Every upstream 429 is recorded as reason `budget`, including a plain rate
+limit; batch embedding loops meet rate limits more often than chat does. On a
+budgeted role the role key is sent to the endpoint of **every** route the agent
+calls, so all of that role's routes must point at the gateway that issued the
+key. An unbudgeted role's embeddings are unbudgeted, like its chat calls.
+
+An agent may use exactly its one declared chat model and its one declared
+embedding model. A per-role list of models is reserved. An enrolled agent
+cannot embed today. OAuth-protected model providers are reserved; today the key is
 the per-role upstream key or the env key named on the route.
 
 `examples/model-agent` is an optional agent that makes this one call. The

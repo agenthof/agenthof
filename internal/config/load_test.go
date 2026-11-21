@@ -65,3 +65,22 @@ func TestLoadDirMissingRoot(t *testing.T) {
 		t.Fatal("missing root must error")
 	}
 }
+
+func TestLoadAgentEmbeddingModel(t *testing.T) {
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"set", "name: a\nmodel: fast\nembedding_model: embed\n", "embed"},
+		{"absent", "name: a\nmodel: fast\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeCfg(t, root, "agents/a.yaml", tc.yaml)
+			cfg, errs := LoadDir(root)
+			if len(errs) != 0 {
+				t.Fatalf("errs: %v", errs)
+			}
+			if len(cfg.Agents) != 1 || cfg.Agents[0].EmbeddingModel != tc.want {
+				t.Fatalf("EmbeddingModel = %+v, want %q", cfg.Agents, tc.want)
+			}
+		})
+	}
+}

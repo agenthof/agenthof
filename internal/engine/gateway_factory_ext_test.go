@@ -230,6 +230,27 @@ func postModel(ctx context.Context, url, token string) error {
 	return nil
 }
 
+func postEmbed(ctx context.Context, url, token string) error {
+	body := `{"model":"embed","input":"hi"}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url+"v1/embeddings", strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return errStatus(resp.StatusCode, string(b))
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
 type statusErr struct {
 	code int
 	body string

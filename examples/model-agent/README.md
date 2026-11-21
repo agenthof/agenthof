@@ -24,5 +24,10 @@ Point the agent's `endpoint` at this process (`-addr`, default
 calls: it only reaches the model door because the run hands it the proxy
 coordinates. A process that calls the provider directly is outside this door.
 
+With `-embed`, the agent makes an embeddings call instead: it sends the step
+input to `<proxy URL>v1/embeddings` and returns `embedded: <N> dimensions`,
+where N is the length of the returned vector. The agent must have
+`embedding_model` set to the name passed as `-model`.
+
 Streamed token counts are not recorded. Budgets are enforced by the
 upstream gateway via the per-role key, not by Agenthof itself.

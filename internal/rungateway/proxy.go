@@ -379,7 +379,9 @@ func (p *Gateway) Start(ctx context.Context, bind engine.Binding, agent config.A
 	p.registerDoor(mux, "/exec/authorize", p.execAssertedHandler(bind, agent, appendEvent))
 	p.registerDoor(mux, "/exec/attest", p.execAssertedHandler(bind, agent, appendEvent))
 	p.registerDoor(mux, "/exec/run", p.execRunHandler(bind, agent, appendEvent, logger))
-	p.registerDoor(mux, "/v1/chat/completions", p.modelHandler(bind, agent, appendEvent, logger))
+	for _, rt := range p.v1Routes() {
+		p.registerDoor(mux, rt.path, p.modelDoor(rt, bind, agent, appendEvent, logger))
+	}
 	p.registerDoor(mux, "/spawn", p.spawnHandler(stepCtx, bind, agent, appendEvent, logger))
 	handler := authMiddleware(mux, token)
 
@@ -917,14 +919,69 @@ func resultErrorText(result *mcp.CallToolResult) string {
 	return capRunes(text, 200)
 }
 
-// modelHandler is the OpenAI-compatible door on the per-run listener. The
-// agent authenticates with the run token; the proxy authorizes the logical
+// v1Route describes one OpenAI-compatible route on the model door. The zero
+// value of every optional field is the chat route's behavior.
+type v1Route struct {
+	path        string                       // the mux pattern, and the path joined onto the route's endpoint
+	allowed     func(config.AgentDef) string // the one logical model this agent may name here; "" means none
+	responseCap int                          // largest upstream body buffered, in bytes
+
+	denyUnset       string // ledger reason and HTTP body when allowed is ""; "" answers as a model mismatch
+	promptUsageOnly bool   // true: completion_tokens is never recorded, whatever the upstream sends
+	refuseStreaming bool   // true: a text/event-stream answer is recorded failed and not relayed
+}
+
+const (
+	maxModelName    = 200 // runes of a refused, agent-supplied model name that may enter the ledger or a log
+	maxChatResponse = 10 << 20
+
+	reasonEmbeddingsNotAllowed = "embeddings not allowed for this agent"
+	maxEmbeddingsResponse      = 32 << 20
+	reasonUnexpectedStream     = "unexpected streaming response"
+)
+
+// chatRoute is POST /v1/chat/completions: the agent may name its own model, or
+// the configured default when it has none.
+func (p *Gateway) chatRoute() v1Route {
+	return v1Route{
+		path: "/v1/chat/completions",
+		allowed: func(agent config.AgentDef) string {
+			if agent.Model != "" {
+				return agent.Model
+			}
+			return p.gwcfg.Defaults.Model
+		},
+		responseCap: maxChatResponse,
+	}
+}
+
+// embeddingsRoute is POST /v1/embeddings: the agent may name only its
+// embedding_model. There is no fallback to defaults.model or the chat model, so
+// an agent with none configured is refused for every request.
+func (p *Gateway) embeddingsRoute() v1Route {
+	return v1Route{
+		path:            "/v1/embeddings",
+		allowed:         func(agent config.AgentDef) string { return agent.EmbeddingModel },
+		responseCap:     maxEmbeddingsResponse,
+		denyUnset:       reasonEmbeddingsNotAllowed,
+		promptUsageOnly: true,
+		refuseStreaming: true,
+	}
+}
+
+// v1Routes lists every route the model door serves.
+func (p *Gateway) v1Routes() []v1Route {
+	return []v1Route{p.chatRoute(), p.embeddingsRoute()}
+}
+
+// modelDoor serves one OpenAI-compatible /v1/* route on the per-run listener.
+// The agent authenticates with the run token; the proxy authorizes the logical
 // model, injects the per-role provider key, and never forwards the run token
 // or any X-Agenthof-* header. The whole call runs under the admission hold
 // registerDoor took; every admitted call appends exactly one event, including
 // one still in flight when Stop runs (Stop cuts the connection, which cancels
 // the outbound request and lands in ErrorHandler).
-func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) doorHandler {
+func (p *Gateway) modelDoor(rt v1Route, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) doorHandler {
 	return func(w http.ResponseWriter, r *http.Request, body []byte) {
 		var logical string
 		refuse := func(reason string, code int) {
@@ -950,16 +1007,26 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 			_ = json.Unmarshal(raw, &logical) // non-string "model" leaves logical "", matching the old .(string) assertion
 		}
 
-		effective := agent.Model
-		if effective == "" {
-			effective = p.gwcfg.Defaults.Model
+		// logical is agent-supplied and, until it passes the checks below,
+		// unvalidated — cap it before it enters the ledger or a log (same bound
+		// as hashResult / resultErrorText) so an oversized "model" value can't
+		// bloat the event. Both refusals that record it share this one capped
+		// copy; nothing past authorization changes, so a configured name is
+		// recorded whole.
+		echoed := capRunes(logical, maxModelName)
+		allowed := rt.allowed(agent)
+		// An empty allowed name means the route is not granted to this agent. It
+		// is refused before any comparison, so an empty or absent request model
+		// can never equal it, and before Resolve, which maps "" to
+		// defaults.model.
+		if allowed == "" && rt.denyUnset != "" {
+			logger.Warn("model call refused", "reason", rt.denyUnset)
+			logical = echoed
+			refuse(rt.denyUnset, http.StatusForbidden)
+			return
 		}
-		if logical == "" || logical != effective {
-			// logical is agent-supplied and, on this path, unvalidated — cap it
-			// before it enters the ledger (same 200-rune bound as hashResult /
-			// resultErrorText) so an oversized "model" value can't bloat the
-			// event.
-			echoed := capRunes(logical, 200)
+		// refuseModel is the one answer to a model the agent may not name here.
+		refuseModel := func() {
 			logger.Warn("model call refused", "model", echoed)
 			logical = echoed
 			appendEvent(engine.Event{
@@ -968,6 +1035,9 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				Model:  echoed, Binding: bind,
 			})
 			http.Error(w, "model not allowed", http.StatusForbidden)
+		}
+		if allowed == "" || logical == "" || logical != allowed {
+			refuseModel()
 			return
 		}
 
@@ -975,6 +1045,9 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 		// (".", per main), not --config. Reading from --config would miss
 		// provisioned keys and fall back to the unbudgeted env key.
 		roleKey := gateway.LoadRoleKey(p.keyRoot, bind.Role)
+		// Resolve maps an empty name to defaults.model, so it must never be
+		// reached with one; the admission checks above guarantee logical is
+		// non-empty.
 		route, err := gateway.Resolve(p.gwcfg, logical, roleKey)
 		if err != nil {
 			// Resolve's error names an env VARIABLE, never a value, but the
@@ -1015,8 +1088,6 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 			return io.NopCloser(bytes.NewReader(newBody)), nil
 		}
 
-		const maxResp = 10 << 20
-
 		// recorded tracks whether this request already appended a model_call
 		// event from inside ModifyResponse before returning an error from it.
 		// ReverseProxy calls ErrorHandler both when RoundTrip itself fails
@@ -1038,7 +1109,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.Out.URL.Scheme, pr.Out.URL.Host = target.Scheme, target.Host
 				pr.Out.Host = target.Host
-				pr.Out.URL.Path = singleJoiningSlash(target.Path, "/v1/chat/completions")
+				pr.Out.URL.Path = singleJoiningSlash(target.Path, rt.path)
 				pr.Out.URL.RawQuery = ""
 				pr.Out.Header.Set("Authorization", "Bearer "+route.APIKey)
 				for k := range pr.Out.Header {
@@ -1054,7 +1125,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				// Accept-Encoding at all. The agent's own HTTP client sets
 				// one; forwarding it verbatim would leave ModifyResponse
 				// reading raw compressed bytes, so parseUsage would silently
-				// fail and the 10 MiB cap would measure compressed size.
+				// fail and the route's response cap would measure compressed size.
 				pr.Out.Header.Del("Accept-Encoding")
 			},
 			ModifyResponse: func(resp *http.Response) error {
@@ -1074,13 +1145,26 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 					return nil
 				}
 				if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+					if rt.refuseStreaming {
+						// This route has no streamed form: close the body
+						// unread, record the one failed event, and return an
+						// error so ErrorHandler answers 502 without recording
+						// again (recorded is set by record).
+						_ = resp.Body.Close()
+						logger.Error("model upstream answered with a stream", "model", logical)
+						record(engine.Event{
+							Type: "model_call", Agent: agent.Name, Status: "failed",
+							Reason: reasonUnexpectedStream, Model: logical, Binding: bind,
+						})
+						return errors.New(reasonUnexpectedStream)
+					}
 					record(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "started",
 						Model: logical, Binding: bind,
 					})
 					return nil
 				}
-				rb, err := io.ReadAll(io.LimitReader(resp.Body, maxResp+1))
+				rb, err := io.ReadAll(io.LimitReader(resp.Body, int64(rt.responseCap)+1))
 				_ = resp.Body.Close()
 				if err != nil {
 					logger.Error("model upstream read failed", "model", logical, "class", errClass(err))
@@ -1090,7 +1174,7 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 					})
 					return err
 				}
-				if len(rb) > maxResp {
+				if len(rb) > rt.responseCap {
 					logger.Error("model upstream response too large", "model", logical)
 					record(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "failed",
@@ -1102,6 +1186,9 @@ func (p *Gateway) modelHandler(bind engine.Binding, agent config.AgentDef, appen
 				resp.ContentLength = int64(len(rb))
 				resp.Header.Set("Content-Length", strconv.Itoa(len(rb)))
 				pt, ct := parseUsage(rb)
+				if rt.promptUsageOnly {
+					ct = nil
+				}
 				logger.Debug("model call routed", "model", logical)
 				record(engine.Event{
 					Type: "model_call", Agent: agent.Name, Status: "succeeded",

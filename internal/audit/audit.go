@@ -126,14 +126,16 @@ func Render(events []engine.Event, head ledger.Head, verr error, comp completene
 			case "started":
 				fmt.Fprintf(&sb, "  %s  model %s — streaming (usage not captured)\n", t, e.Model)
 			case "succeeded":
-				pt, ct := "?", "?"
+				pt := "?"
 				if e.PromptTokens != nil {
 					pt = strconv.Itoa(*e.PromptTokens)
 				}
-				if e.CompletionTokens != nil {
-					ct = strconv.Itoa(*e.CompletionTokens)
+				if e.CompletionTokens == nil {
+					// A prompt-only call (embeddings) has no completion count to show.
+					fmt.Fprintf(&sb, "  %s  model %s — %s prompt tokens\n", t, e.Model, pt)
+					break
 				}
-				fmt.Fprintf(&sb, "  %s  model %s — %s prompt / %s completion tokens\n", t, e.Model, pt, ct)
+				fmt.Fprintf(&sb, "  %s  model %s — %s prompt / %d completion tokens\n", t, e.Model, pt, *e.CompletionTokens)
 			default:
 				fmt.Fprintf(&sb, "  %s  model %s %s\n", t, e.Model, e.Status)
 			}

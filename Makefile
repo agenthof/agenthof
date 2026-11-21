@@ -2,10 +2,10 @@
 # plain `go` and `scripts/*.sh` (see CONTRIBUTING.md and .github/workflows). This
 # file holds installing the binaries and the real-backend proofs — the combined
 # podman containment run (Linux/Lima), the macOS Seatbelt run, the enrolled-agent
-# artifact binding runs (podman and Seatbelt), and the Rekor v1 anchoring run
-# (Linux/Lima) — run by judgment on a developer machine, never by CI.
+# artifact binding runs (podman and Seatbelt), the Rekor v1 anchoring run
+# and the embeddings run against a real embeddings server (both Linux/Lima) — run by judgment on a developer machine, never by CI.
 .DEFAULT_GOAL := help
-.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-enroll
+.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-enroll
 
 GO ?= go
 UNAME_S ?= $(shell uname -s)
@@ -34,6 +34,11 @@ help:
 	@echo "    the audit anchor / verify command path over a podman-compose Rekor stack."
 	@echo "    Linux: runs natively (needs rootless podman + podman-compose). macOS: inside the"
 	@echo "    Lima VM (started if needed). KEEP=1 leaves the stack and files for inspection."
+	@echo "make acceptance-embeddings [KEEP=1]"
+	@echo "    The real-backend embeddings proof against a REAL OpenAI-compatible embeddings server"
+	@echo "    (scripts/e2e-embeddings.sh): a governed embed, a mismatched-model refusal and a"
+	@echo "    no-grant refusal, no external key. Linux: runs natively (needs rootless podman)."
+	@echo "    macOS: inside the Lima VM (started if needed). KEEP=1 leaves the server and files."
 
 install:
 	$(GO) install ./cmd/agenthof
@@ -100,4 +105,18 @@ else ifeq ($(UNAME_S),Darwin)
 	deploy/lima/lima.sh e2e rekor $(KEEP_FLAG)
 else
 	@echo "make acceptance-rekor: unsupported host $(UNAME_S) — run scripts/e2e-rekor.sh on a Linux host with rootless podman + podman-compose"; exit 1
+endif
+
+# The embeddings proof drives a governed embed through the model door against a REAL
+# OpenAI-compatible embeddings server (a pinned container, no external key). Linux/Lima
+# like the runs above, and like them local/by-judgment, never CI.
+acceptance-embeddings:
+ifeq ($(UNAME_S),Linux)
+	@command -v podman >/dev/null || { echo "make acceptance-embeddings: podman is not installed (rootless podman is required)"; exit 1; }
+	scripts/e2e-embeddings.sh $(KEEP_FLAG)
+else ifeq ($(UNAME_S),Darwin)
+	deploy/lima/lima.sh up
+	deploy/lima/lima.sh e2e embeddings $(KEEP_FLAG)
+else
+	@echo "make acceptance-embeddings: unsupported host $(UNAME_S) — run scripts/e2e-embeddings.sh on a Linux host with rootless podman"; exit 1
 endif

@@ -71,7 +71,8 @@ Two proxy-URL forms are handled:
   placeholder.
 
 The agent is pinned to the chat-completions route (`use_responses_api=False`):
-the gateway serves only `/v1/chat/completions`.
+the gateway serves `/v1/chat/completions` and `/v1/embeddings`, and the
+Responses API is not served.
 
 ## Run it
 

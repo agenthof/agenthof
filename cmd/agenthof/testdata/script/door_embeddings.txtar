@@ -1,0 +1,85 @@
+# The embeddings route of the model door: an agent holding an embedding_model
+# embeds through Agenthof, which injects the provider key, forwards to the
+# provider, and records a model_call with prompt tokens only. Every other
+# pairing of agent and model is refused and recorded.
+
+env AGENTHOF_GATEWAY_KEY=dummy
+
+exec agenthof apply --config config --groups platform-eng
+stdout 'registry ok: 2 agents, 2 workflows, 2 roles'
+
+exec agenthof run se embed-demo --input 'embed:embed' --as tester --config config --log-dir logs --artifact-dir artifacts
+stdout 'finished: succeeded'
+lastrun logs
+exec agenthof audit $RUNID --log-dir logs
+stdout 'model embed — 7 prompt tokens'
+! stdout 'completion tokens'
+stdout 'ledger completeness: complete \(1 door call\(s\) accounted\)'
+grep '"type":"model_call".*"model":"embed"' logs/${RUNID}.jsonl
+grep '"prompt_tokens":7' logs/${RUNID}.jsonl
+! grep 'completion_tokens' logs/${RUNID}.jsonl
+! grep 'embedding_call' logs/${RUNID}.jsonl
+exec agenthof audit verify $RUNID --log-dir logs
+
+# an agent with no embedding_model is refused for a routed embedding model
+! exec agenthof run se plain-demo --input 'embed:embed' --as tester --config config --log-dir logs-plain --artifact-dir artifacts
+stdout 'finished: failed'
+lastrun logs-plain
+exec agenthof audit $RUNID --log-dir logs-plain
+stdout 'model embed refused — embeddings not allowed for this agent'
+grep '"type":"step_failed".*"door_calls":1' logs-plain/${RUNID}.jsonl
+# ...and for 'fast', which is both this agent's chat model and defaults.model
+! exec agenthof run se plain-demo --input 'embed:fast' --as tester --config config --log-dir logs-plain-fast --artifact-dir artifacts
+lastrun logs-plain-fast
+exec agenthof audit $RUNID --log-dir logs-plain-fast
+stdout 'model fast refused — embeddings not allowed for this agent'
+
+# naming the chat model on the embeddings route is refused
+! exec agenthof run se embed-demo --input 'embed:fast' --as tester --config config --log-dir logs-wrong --artifact-dir artifacts
+lastrun logs-wrong
+exec agenthof audit $RUNID --log-dir logs-wrong
+stdout 'model fast refused — model "fast" is not allowed for this agent'
+
+-- config/agents/embedder.yaml --
+name: embedder
+model: fast
+embedding_model: embed
+instruction: embed text
+output: out
+execution: fronted
+-- config/agents/plain.yaml --
+name: plain
+model: fast
+instruction: call the model
+output: out
+execution: fronted
+-- config/workflows/embed-demo.yaml --
+name: embed-demo
+steps:
+  - name: call
+    agent: embedder
+-- config/workflows/plain-demo.yaml --
+name: plain-demo
+steps:
+  - name: call
+    agent: plain
+-- config/roles/se.yaml --
+name: se
+workflows: [embed-demo, plain-demo]
+allowed_groups: ["*"]
+-- config/roles/ops.yaml --
+name: platform-admin
+allowed_groups: [platform-eng]
+control: [apply, enable, disable, repair]
+-- config/gateway.yaml --
+models:
+  fast:
+    endpoint: https://example.test/v1
+    model: upstream-model
+    api_key_env: AGENTHOF_GATEWAY_KEY
+  embed:
+    endpoint: https://example.test/v1
+    model: upstream-embed
+    api_key_env: AGENTHOF_GATEWAY_KEY
+defaults:
+  model: fast

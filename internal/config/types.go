@@ -17,19 +17,23 @@ import (
 const UnixScheme = "unix://"
 
 type AgentDef struct {
-	Name        string        `yaml:"name"`
-	Description string        `yaml:"description"`
-	Enabled     *bool         `yaml:"enabled"` // nil means true
-	Model       string        `yaml:"model"`
-	Instruction string        `yaml:"instruction"`
-	Tools       []ToolGrant   `yaml:"tools"` // each {resource, tools: ["*"] | [a, b], mode: read-only | read-write}
-	Output      string        `yaml:"output"`
-	Execution   string        `yaml:"execution"`  // "", or "fronted"; "" means fronted
-	Endpoint    string        `yaml:"endpoint"`   // required, except on a spawn-only agent (which omits it): the agent's HTTP endpoint
-	Exec        ExecConfig    `yaml:"exec"`       // fronted only: allowlisted exec, first-hand via a trusted runtime (refexec)
-	MaySpawn    []SpawnTarget `yaml:"may_spawn"`  // spawn door: the {role, workflow} child runs this agent may start; empty means none (default-deny)
-	Provenance  *Provenance   `yaml:"provenance"` // set for an enrolled third-party agent: where it came from; presence makes it spawn-only
-	SourceFile  string        `yaml:"-"`
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	Enabled     *bool  `yaml:"enabled"` // nil means true
+	Model       string `yaml:"model"`
+	// EmbeddingModel is the one logical model this agent may send to the
+	// embeddings route; empty means the agent may not embed (no fallback to
+	// Model or defaults.model).
+	EmbeddingModel string        `yaml:"embedding_model,omitempty"`
+	Instruction    string        `yaml:"instruction"`
+	Tools          []ToolGrant   `yaml:"tools"` // each {resource, tools: ["*"] | [a, b], mode: read-only | read-write}
+	Output         string        `yaml:"output"`
+	Execution      string        `yaml:"execution"`  // "", or "fronted"; "" means fronted
+	Endpoint       string        `yaml:"endpoint"`   // required, except on a spawn-only agent (which omits it): the agent's HTTP endpoint
+	Exec           ExecConfig    `yaml:"exec"`       // fronted only: allowlisted exec, first-hand via a trusted runtime (refexec)
+	MaySpawn       []SpawnTarget `yaml:"may_spawn"`  // spawn door: the {role, workflow} child runs this agent may start; empty means none (default-deny)
+	Provenance     *Provenance   `yaml:"provenance"` // set for an enrolled third-party agent: where it came from; presence makes it spawn-only
+	SourceFile     string        `yaml:"-"`
 }
 
 // Provenance records where an enrolled agent came from: the artifact it was

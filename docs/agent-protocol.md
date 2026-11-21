@@ -100,11 +100,23 @@ POST  {proxy-url}v1/chat/completions      # proxy-url already ends in / for TCP
       { "model": "fast", "messages": [ { "role": "user", "content": "..." } ] }
 ```
 
-Read the reply from `choices[0].message.content`. **Only `/v1/chat/completions` is
-served** — other OpenAI paths (`/v1/models`, `/v1/embeddings`, …) are not, so point a
-framework's LLM client at the chat-completions path specifically and set its key to the
-run token. Streamed responses are relayed but recorded without token counts (see
-[`docs/lifecycle-model.md`](lifecycle-model.md)).
+Read the reply from `choices[0].message.content`. Streamed responses are relayed but
+recorded without token counts (see [`docs/lifecycle-model.md`](lifecycle-model.md)).
+
+An agent with an `embedding_model` can also embed text:
+
+```
+POST  {proxy-url}v1/embeddings
+      Authorization: Bearer {run-token}
+      { "model": "<logical embedding model>", "input": "..." }
+```
+
+Read the vector from `data[0].embedding`. The name must be the agent's
+`embedding_model`; an agent with none gets `403` (there is no fallback to its chat
+model) and a `refused` `model_call`. **Only `/v1/chat/completions` and
+`/v1/embeddings` are served** — other OpenAI paths (`/v1/models`, the Responses API, …)
+are not, so point a framework's LLM client at one of those two paths specifically and
+set its key to the run token.
 
 ### Tool door — MCP over the gateway
 
@@ -194,5 +206,5 @@ a current guarantee. See [`docs/lifecycle.md`](lifecycle.md).
 ## What is stable
 
 The step request/response shape, the two gateway headers, and the model
-(`/v1/chat/completions`), tool (MCP), exec (`/exec/*`) and spawn (`/spawn`) paths are
+(`/v1/chat/completions`, `/v1/embeddings`), tool (MCP), exec (`/exec/*`) and spawn (`/spawn`) paths are
 the wire contract — write to them, not to any internal detail.
