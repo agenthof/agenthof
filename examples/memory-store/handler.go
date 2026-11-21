@@ -14,6 +14,18 @@ import (
 // Limits are the handler-enforced bounds on a call's arguments.
 type Limits struct {
 	MaxK, MaxTextBytes, MaxVectorDim, MaxMetadataBytes int
+	// Collections is an optional allowlist. When non-empty, a call naming a
+	// collection outside it is refused; when empty, any valid name is allowed.
+	Collections map[string]struct{}
+}
+
+// collectionAllowed reports whether a call may address the collection.
+func (l Limits) collectionAllowed(name string) bool {
+	if len(l.Collections) == 0 {
+		return true
+	}
+	_, ok := l.Collections[name]
+	return ok
 }
 
 // DefaultLimits are the bounds the server runs with.
@@ -29,6 +41,7 @@ const maxCallerIDBytes = 256
 const (
 	msgBadArguments   = "invalid arguments"
 	msgBadCollection  = "collection must match [A-Za-z0-9_-]{1,64}"
+	msgNotAllowed     = "collection is not served by this store"
 	msgBadVector      = "vector must be a non-empty array of finite numbers with a non-zero norm, within the dimension limit"
 	msgBadMetadata    = "metadata must be a JSON object"
 	msgBadText        = "text must be non-empty and within the size limit"
@@ -46,7 +59,7 @@ const (
 // fixedErrorStrings enumerates the closed set, for tests that assert an error
 // result carries nothing but one of these.
 var fixedErrorStrings = []string{
-	msgBadArguments, msgBadCollection, msgBadVector, msgBadMetadata, msgBadMetaSize, msgBadText,
+	msgBadArguments, msgBadCollection, msgNotAllowed, msgBadVector, msgBadMetadata, msgBadMetaSize, msgBadText,
 	msgBadID, msgBadK, msgDimension, msgCollection, msgEntryCap, msgStoreCorrupt,
 	msgUnavailable, msgInternalFailed,
 }
@@ -155,6 +168,8 @@ func upsertHandler(be Backend, l Limits) mcp.ToolHandler {
 		switch {
 		case !collectionRe.MatchString(a.Collection):
 			return fail(msgBadCollection), nil
+		case !l.collectionAllowed(a.Collection):
+			return fail(msgNotAllowed), nil
 		case !validVector(a.Vector, l):
 			return fail(msgBadVector), nil
 		case !validMetadata(a.Metadata):
@@ -186,6 +201,8 @@ func searchHandler(be Backend, l Limits) mcp.ToolHandler {
 		switch {
 		case !collectionRe.MatchString(a.Collection):
 			return fail(msgBadCollection), nil
+		case !l.collectionAllowed(a.Collection):
+			return fail(msgNotAllowed), nil
 		case !validVector(a.Vector, l):
 			return fail(msgBadVector), nil
 		case a.K < 1 || a.K > l.MaxK:
