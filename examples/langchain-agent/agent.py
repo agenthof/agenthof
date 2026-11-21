@@ -275,8 +275,9 @@ def make_llm(proxy_url, run_token, model, timeout=REQUEST_TIMEOUT):
         "model": model,         # the LOGICAL name; anything else is refused with 403
         "max_retries": 0,
         "timeout": timeout,
-        # The gateway serves only /v1/chat/completions. Never let the SDK
-        # choose the Responses API (a silent 404 otherwise).
+        # The gateway serves /v1/chat/completions and /v1/embeddings; the
+        # Responses API is still not served. Never let the SDK choose it
+        # (a silent 404 otherwise).
         "use_responses_api": False,
     }
     if client is not None:

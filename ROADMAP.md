@@ -64,7 +64,9 @@ The governed core is real and runnable today:
   way out, and each call is a `model_call`. Non-streaming calls record token
   counts. A provisioned role key lets the upstream gateway enforce
   `budget_usd_month`. Streamed calls are recorded without token counts.
-  Agenthof does not itself cap spend.
+  Agenthof does not itself cap spend. An agent with a declared
+  `embedding_model` can also call `/v1/embeddings` through the same door,
+  recorded as a `model_call` with prompt tokens.
 - **Retention** — `runs prune` ships in the core, not behind a paywall; it is authorized against the installed roles' `prune`
   grant and recorded in the control ledger.
 - **Auditable control plane** — *who applied config* and *who flipped the

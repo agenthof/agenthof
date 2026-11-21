@@ -201,7 +201,8 @@ supervisor provisioned for that child, whatever this field names. See
 
 Every fronted step receives `X-Agenthof-Proxy-URL` and
 `X-Agenthof-Run-Token`, whether or not the agent declares `tools` or `exec`.
-The model door is `POST <proxy URL>v1/chat/completions` with that run token.
+The model door is `POST <proxy URL>v1/chat/completions` (and, for an agent with an
+`embedding_model`, `POST <proxy URL>v1/embeddings`) with that run token.
 An agent uses the doors it needs and ignores the rest. See
 [`lifecycle-model.md`](../lifecycle-model.md).
 
@@ -654,11 +655,14 @@ variable, never a credential value.
 
 A map from a logical model name to a `ModelRoute`. `apply` accepts the map
 and does not validate its keys or the contents of each entry (`endpoint`,
-`model`, `api_key_env`). The model door reads it on each chat completion.
+`model`, `api_key_env`). The model door reads it on each chat completion and each embeddings call. An
+embedding model is an ordinary entry in this map.
 
 The agent sends the logical name. Agenthof rewrites the outbound `model` to
 the route's `model` and sends the call to the route's `endpoint`
-(`POST /v1/chat/completions`). The key is the role's provisioned key when
+(`POST /v1/chat/completions`, or `POST /v1/embeddings` for an embeddings call;
+the route's path is appended to the endpoint's, so an endpoint ending `/base` is
+called at `/base/v1/embeddings`). The key is the role's provisioned key when
 `.agenthof/keys/<role>.key` exists in the working directory — the same
 directory `gateway provision` writes — and otherwise the value of
 `api_key_env`. The run token is not forwarded. See
@@ -682,7 +686,7 @@ loopback port, and the proxy URL stays `http://127.0.0.1:<port>/`. When set,
 each fronted step's gateway listens on a Unix domain socket in this directory
 instead, and the proxy URL is `unix://` plus that socket's path. The value
 after `unix://` is the socket path only; the HTTP routes stay fixed (`/`,
-`/exec/run`, `/v1/chat/completions`, `/spawn`; the retired `/exec/authorize` and
+`/exec/run`, `/v1/chat/completions`, `/v1/embeddings`, `/spawn`; the retired `/exec/authorize` and
 `/exec/attest` answer only a recorded refusal). The run token
 still travels in the `Authorization` header. The value must be an absolute
 path (`bad-refbox-socket-dir` otherwise): it is mounted into agent
