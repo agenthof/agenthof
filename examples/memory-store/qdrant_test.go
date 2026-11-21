@@ -24,6 +24,8 @@ type qdrantStub struct {
 	rootBody      string
 	collectionCfg string
 	searchStatus  int
+	getStatus     int    // collection GET status, default 200
+	getBody       string // full collection GET body override
 	searchBody    string
 	srv           *httptest.Server
 }
@@ -34,6 +36,7 @@ func newQdrantStub(t *testing.T) *qdrantStub {
 		rootBody:      `{"title":"qdrant - vector search engine","version":"1.12.0"}`,
 		collectionCfg: `{"size":3,"distance":"Cosine"}`,
 		searchStatus:  200,
+		getStatus:     200,
 		searchBody:    `{"result":{"points":[]}}`,
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +56,11 @@ func newQdrantStub(t *testing.T) *qdrantStub {
 		case r.Method == http.MethodPut:
 			_, _ = io.WriteString(w, `{"result":true}`)
 		case r.Method == http.MethodGet:
+			w.WriteHeader(s.getStatus)
+			if s.getBody != "" {
+				_, _ = io.WriteString(w, s.getBody)
+				return
+			}
 			_, _ = io.WriteString(w, `{"result":{"config":{"params":{"vectors":`+s.collectionCfg+`}}}}`)
 		}
 	}))
@@ -322,5 +330,149 @@ func TestQdrantSendsAPIKey(t *testing.T) {
 	defer mu.Unlock()
 	if got != "sekret" {
 		t.Fatalf("api-key header %q", got)
+	}
+}
+
+func TestQdrantSearchVerifiesUncachedCollection(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"dot":   `{"size":3,"distance":"Dot"}`,
+		"named": `{"dense":{"size":3,"distance":"Cosine"}}`,
+	} {
+		s := newQdrantStub(t)
+		s.collectionCfg = cfg
+		b, _ := newQdrantBackend(s.srv.URL, "")
+		if _, err := b.Search(context.Background(), "c", []float32{1, 0, 0}, 1); !errors.Is(err, ErrCollectionConfig) {
+			t.Fatalf("%s: got %v, want ErrCollectionConfig", name, err)
+		}
+		if _, ok := s.find("POST", "/points/query"); ok {
+			t.Fatalf("%s: queried an unverified collection", name)
+		}
+	}
+	s := newQdrantStub(t)
+	s.getStatus = 404
+	b, _ := newQdrantBackend(s.srv.URL, "")
+	hits, err := b.Search(context.Background(), "missing", []float32{1, 0, 0}, 1)
+	if err != nil || len(hits) != 0 {
+		t.Fatalf("missing: hits=%v err=%v", hits, err)
+	}
+	if _, ok := s.find("POST", "/points/query"); ok {
+		t.Fatal("queried a missing collection")
+	}
+	// A verified Search is cached: the second call does not re-read.
+	s2 := newQdrantStub(t)
+	b2, _ := newQdrantBackend(s2.srv.URL, "")
+	for i := 0; i < 2; i++ {
+		if _, err := b2.Search(context.Background(), "c", []float32{1, 0, 0}, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s2.count("GET", "/collections/c") != 1 {
+		t.Fatal("search verification not cached")
+	}
+	if _, err := b2.Search(context.Background(), "c", []float32{1, 0}, 1); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("dim: got %v", err)
+	}
+}
+
+func TestQdrantRejectsMultivectorDatatypeSparse(t *testing.T) {
+	cases := map[string]string{
+		"multivector": `{"result":{"config":{"params":{"vectors":{"size":3,"distance":"Cosine","multivector_config":{"comparator":"max_sim"}}}}}}`,
+		"uint8":       `{"result":{"config":{"params":{"vectors":{"size":3,"distance":"Cosine","datatype":"uint8"}}}}}`,
+		"sparse":      `{"result":{"config":{"params":{"vectors":{"size":3,"distance":"Cosine"},"sparse_vectors":{"s":{}}}}}}`,
+	}
+	for name, body := range cases {
+		s := newQdrantStub(t)
+		s.getBody = body
+		b, _ := newQdrantBackend(s.srv.URL, "")
+		if err := upsertOne(b, "c"); !errors.Is(err, ErrCollectionConfig) {
+			t.Fatalf("%s: got %v, want ErrCollectionConfig", name, err)
+		}
+	}
+	s := newQdrantStub(t)
+	s.getBody = `{"result":{"config":{"params":{"vectors":{"size":3,"distance":"Cosine","datatype":"float32"}}}}}`
+	b, _ := newQdrantBackend(s.srv.URL, "")
+	if err := upsertOne(b, "c"); err != nil {
+		t.Fatalf("float32 datatype refused: %v", err)
+	}
+}
+
+func TestQdrantUpsert404EvictsVerification(t *testing.T) {
+	var mu sync.Mutex
+	gone, gets := false, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.URL.Path == "/":
+			_, _ = io.WriteString(w, `{"title":"qdrant"}`)
+		case r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/points") && gone:
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == "GET":
+			gets++
+			_, _ = io.WriteString(w, `{"result":{"config":{"params":{"vectors":{"size":3,"distance":"Cosine"}}}}}`)
+		default:
+			_, _ = io.WriteString(w, `{"result":{}}`)
+		}
+	}))
+	defer srv.Close()
+	b, _ := newQdrantBackend(srv.URL, "")
+	if err := upsertOne(b, "c"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gone = true
+	mu.Unlock()
+	if err := upsertOne(b, "c"); !errors.Is(err, ErrBackendUnavailable) {
+		t.Fatalf("got %v", err)
+	}
+	mu.Lock()
+	gone = false
+	mu.Unlock()
+	if err := upsertOne(b, "c"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gets != 2 {
+		t.Fatalf("collection read %d times, want 2 (re-verified after 404)", gets)
+	}
+}
+
+func TestQdrantNoProxy(t *testing.T) {
+	b, _ := newQdrantBackend("http://127.0.0.1:6333", "")
+	tr, ok := b.client.Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil {
+		t.Fatal("transport must have Proxy == nil")
+	}
+	if b.client.CheckRedirect == nil {
+		t.Fatal("redirects must be refused")
+	}
+}
+
+func TestQdrantSearchSends(t *testing.T) {
+	s := newQdrantStub(t)
+	b, _ := newQdrantBackend(s.srv.URL, "")
+	if _, err := b.Search(context.Background(), "c", []float32{0.5, 0.25, 1}, 4); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := s.find("POST", "/points/query")
+	var body struct {
+		Query []float32 `json:"query"`
+	}
+	if err := json.Unmarshal([]byte(req.Body), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Query) != 3 || body.Query[0] != 0.5 || body.Query[1] != 0.25 || body.Query[2] != 1 {
+		t.Fatalf("query vector: %s", req.Body)
+	}
+}
+
+func TestQdrantSearchBadDimensionResponse(t *testing.T) {
+	s := newQdrantStub(t)
+	s.searchStatus = 400
+	s.searchBody = `{"status":{"error":"Wrong input: Vector dimension error: expected dim: 3, got 2"}}`
+	b, _ := newQdrantBackend(s.srv.URL, "")
+	if _, err := b.Search(context.Background(), "c", []float32{1, 0, 0}, 1); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("got %v", err)
 	}
 }

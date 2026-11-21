@@ -18,8 +18,9 @@ import (
 const qdrantMaxBody = 16 << 20
 
 // qdrantBackend talks to a Qdrant service over its REST API using only the
-// standard library. The image is pinned as: current-stable qdrant/qdrant,
-// digest resolved in scripts/e2e-memory.sh (the Query API needs Qdrant >= 1.10).
+// standard library. Target image: current-stable qdrant/qdrant; the concrete
+// @sha256 and resolved version are pinned by the memory acceptance script added
+// in a later task (the Query API needs Qdrant >= 1.10).
 //
 // The client never uses a proxy and never follows a redirect, so a configured
 // base URL cannot be bounced to another host. No response body is ever
@@ -158,22 +159,39 @@ func (b *qdrantBackend) ensureCollection(ctx context.Context, collection string,
 	if status != http.StatusOK && !exists {
 		return ErrBackendUnavailable
 	}
-	status, data, err = b.do(ctx, http.MethodGet, collectionPath(collection), nil)
+	size, found, err := b.readCollection(ctx, collection)
 	if err != nil {
 		return err
 	}
-	if status != http.StatusOK {
+	if !found {
 		return ErrBackendUnavailable
-	}
-	size, err := verifyCollection(data)
-	if err != nil {
-		return err
 	}
 	if size != dim {
 		return ErrDimensionMismatch
 	}
-	b.verified[collection] = size
 	return nil
+}
+
+// readCollection reads the collection back, verifies it, and caches its
+// vector size. found is false when the collection does not exist.
+// Callers hold b.mu.
+func (b *qdrantBackend) readCollection(ctx context.Context, collection string) (size int, found bool, err error) {
+	status, data, err := b.do(ctx, http.MethodGet, collectionPath(collection), nil)
+	if err != nil {
+		return 0, false, err
+	}
+	if status == http.StatusNotFound {
+		return 0, false, nil
+	}
+	if status != http.StatusOK {
+		return 0, false, ErrBackendUnavailable
+	}
+	size, err = verifyCollection(data)
+	if err != nil {
+		return 0, false, err
+	}
+	b.verified[collection] = size
+	return size, true, nil
 }
 
 // verifyCollection accepts exactly one unnamed dense Cosine vector and
@@ -200,6 +218,15 @@ func verifyCollection(data []byte) (int, error) {
 	rawDist, hasDist := p.Vectors["distance"]
 	if !hasSize || !hasDist {
 		return 0, ErrCollectionConfig // named or multi-vector layout
+	}
+	if _, multi := p.Vectors["multivector_config"]; multi {
+		return 0, ErrCollectionConfig
+	}
+	if rawType, ok := p.Vectors["datatype"]; ok {
+		var dt string
+		if json.Unmarshal(rawType, &dt) != nil || !strings.EqualFold(dt, "float32") {
+			return 0, ErrCollectionConfig
+		}
 	}
 	var size int
 	var dist string
@@ -238,6 +265,9 @@ func (b *qdrantBackend) Upsert(ctx context.Context, collection, id, callerID str
 	if err != nil {
 		return err
 	}
+	if status == http.StatusNotFound {
+		delete(b.verified, collection) // deleted out of band: re-verify next call
+	}
 	if status == http.StatusBadRequest && bytes.Contains(bytes.ToLower(data), []byte("dimension")) {
 		return ErrDimensionMismatch
 	}
@@ -253,6 +283,19 @@ func (b *qdrantBackend) Search(ctx context.Context, collection string, vec []flo
 	if err := b.probe(ctx); err != nil {
 		return nil, err
 	}
+	size, ok := b.verified[collection]
+	if !ok {
+		var found bool
+		var err error
+		if size, found, err = b.readCollection(ctx, collection); err != nil {
+			return nil, err
+		} else if !found {
+			return nil, nil
+		}
+	}
+	if size != len(vec) {
+		return nil, ErrDimensionMismatch
+	}
 	status, data, err := b.do(ctx, http.MethodPost, collectionPath(collection)+"/points/query",
 		map[string]any{
 			"query":        vec,
@@ -265,6 +308,7 @@ func (b *qdrantBackend) Search(ctx context.Context, collection string, vec []flo
 	}
 	switch {
 	case status == http.StatusNotFound:
+		delete(b.verified, collection)
 		return nil, nil
 	case status == http.StatusBadRequest && bytes.Contains(bytes.ToLower(data), []byte("dimension")):
 		return nil, ErrDimensionMismatch
