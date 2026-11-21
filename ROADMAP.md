@@ -67,6 +67,14 @@ The governed core is real and runnable today:
   Agenthof does not itself cap spend. An agent with a declared
   `embedding_model` can also call `/v1/embeddings` through the same door,
   recorded as a `model_call` with prompt tokens.
+- **Reference vector-store MCP** — `examples/memory-store` is a stdio MCP server
+  (`memory_upsert`, `memory_search`) over an embedded file-backed index or
+  Qdrant, fronted by `deploy/refbridge` and governed like any other tool
+  resource: per-tool grants, a read-only search-only mode, and a first-hand
+  attested `tool_call` per operation. It is a reference payload — bring your
+  own vector-store MCP in production — and its README states the limits
+  plainly (macOS file readability, a bounded result preview in the ledger,
+  per-tool rather than per-collection authorization).
 - **Retention** — `runs prune` ships in the core, not behind a paywall; it is authorized against the installed roles' `prune`
   grant and recorded in the control ledger.
 - **Auditable control plane** — *who applied config* and *who flipped the
