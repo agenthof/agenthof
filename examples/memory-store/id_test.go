@@ -31,6 +31,19 @@ func TestDeriveIDDeterministic(t *testing.T) {
 	}
 }
 
+// A golden value pins the namespace and the algorithm: changing either
+// silently re-keys every stored chunk.
+func TestDeriveIDGolden(t *testing.T) {
+	got, err := deriveID("meetings", "chunk-7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "03d8a7bb-84ea-50e6-8012-300d582bd09d"
+	if got != want {
+		t.Fatalf("deriveID(meetings, chunk-7) = %s, want %s", got, want)
+	}
+}
+
 func TestDeriveIDCollectionScoped(t *testing.T) {
 	a, _ := deriveID("meetings", "chunk-7")
 	b, _ := deriveID("notes", "chunk-7")

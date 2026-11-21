@@ -13,11 +13,11 @@ import (
 
 // Limits are the handler-enforced bounds on a call's arguments.
 type Limits struct {
-	MaxK, MaxTextBytes, MaxVectorDim int
+	MaxK, MaxTextBytes, MaxVectorDim, MaxMetadataBytes int
 }
 
 // DefaultLimits are the bounds the server runs with.
-var DefaultLimits = Limits{MaxK: 64, MaxTextBytes: 16384, MaxVectorDim: 4096}
+var DefaultLimits = Limits{MaxK: 64, MaxTextBytes: 16384, MaxVectorDim: 4096, MaxMetadataBytes: 16384}
 
 const maxCallerIDBytes = 256
 
@@ -31,7 +31,8 @@ const (
 	msgBadCollection  = "collection must match [A-Za-z0-9_-]{1,64}"
 	msgBadVector      = "vector must be a non-empty array of finite numbers with a non-zero norm, within the dimension limit"
 	msgBadMetadata    = "metadata must be a JSON object"
-	msgBadText        = "text exceeds the size limit"
+	msgBadText        = "text must be non-empty and within the size limit"
+	msgBadMetaSize    = "metadata exceeds the size limit"
 	msgBadID          = "id exceeds the size limit"
 	msgBadK           = "k must be between 1 and the maximum"
 	msgDimension      = "vector dimension does not match the collection"
@@ -45,7 +46,7 @@ const (
 // fixedErrorStrings enumerates the closed set, for tests that assert an error
 // result carries nothing but one of these.
 var fixedErrorStrings = []string{
-	msgBadArguments, msgBadCollection, msgBadVector, msgBadMetadata, msgBadText,
+	msgBadArguments, msgBadCollection, msgBadVector, msgBadMetadata, msgBadMetaSize, msgBadText,
 	msgBadID, msgBadK, msgDimension, msgCollection, msgEntryCap, msgStoreCorrupt,
 	msgUnavailable, msgInternalFailed,
 }
@@ -123,9 +124,19 @@ func validVector(v []float32, l Limits) bool {
 	return ok && norm > 0
 }
 
-func validMetadata(m json.RawMessage, l Limits) bool {
+func validMetadata(m json.RawMessage) bool {
 	m = bytes.TrimSpace(m)
-	return len(m) > 0 && len(m) <= l.MaxTextBytes && m[0] == '{' && json.Valid(m)
+	return len(m) > 0 && m[0] == '{' && json.Valid(m)
+}
+
+// structured marshals the result inside the handler, so an encoding failure
+// becomes a fixed message here instead of the SDK's error text later.
+func structured(v any) *mcp.CallToolResult {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fail(msgInternalFailed)
+	}
+	return &mcp.CallToolResult{StructuredContent: json.RawMessage(b)}
 }
 
 func decodeArgs(req *mcp.CallToolRequest, into any) bool {
@@ -146,9 +157,11 @@ func upsertHandler(be Backend, l Limits) mcp.ToolHandler {
 			return fail(msgBadCollection), nil
 		case !validVector(a.Vector, l):
 			return fail(msgBadVector), nil
-		case !validMetadata(a.Metadata, l):
+		case !validMetadata(a.Metadata):
 			return fail(msgBadMetadata), nil
-		case len(a.Text) > l.MaxTextBytes:
+		case len(bytes.TrimSpace(a.Metadata)) > l.MaxMetadataBytes:
+			return fail(msgBadMetaSize), nil
+		case a.Text == "" || len(a.Text) > l.MaxTextBytes:
 			return fail(msgBadText), nil
 		case len(a.ID) > maxCallerIDBytes:
 			return fail(msgBadID), nil
@@ -157,10 +170,10 @@ func upsertHandler(be Backend, l Limits) mcp.ToolHandler {
 		if err != nil {
 			return fail(msgInternalFailed), nil
 		}
-		if err := be.Upsert(ctx, a.Collection, id, a.Vector, a.Text, bytes.TrimSpace(a.Metadata)); err != nil {
+		if err := be.Upsert(ctx, a.Collection, id, a.ID, a.Vector, a.Text, bytes.TrimSpace(a.Metadata)); err != nil {
 			return backendFailure(err), nil
 		}
-		return &mcp.CallToolResult{StructuredContent: upsertResult{ID: id}}, nil
+		return structured(upsertResult{ID: id}), nil
 	}
 }
 
@@ -185,7 +198,7 @@ func searchHandler(be Backend, l Limits) mcp.ToolHandler {
 		if hits == nil {
 			hits = []Hit{}
 		}
-		return &mcp.CallToolResult{StructuredContent: searchResult{Results: hits}}, nil
+		return structured(searchResult{Results: hits}), nil
 	}
 }
 

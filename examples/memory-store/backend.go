@@ -20,7 +20,10 @@ type Hit struct {
 // below (possibly wrapped); the handler maps them to fixed messages and never
 // forwards a backend error's text to the caller.
 type Backend interface {
-	Upsert(ctx context.Context, collection, id string, vec []float32, text string, meta json.RawMessage) error
+	// id is the derived UUID; callerID is the caller's original id, or "" when
+	// none was sent. Backends persist callerID as its own field, never inside
+	// the caller's metadata.
+	Upsert(ctx context.Context, collection, id, callerID string, vec []float32, text string, meta json.RawMessage) error
 	Search(ctx context.Context, collection string, vec []float32, k int) ([]Hit, error)
 }
 
