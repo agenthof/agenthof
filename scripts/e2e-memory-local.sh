@@ -5,11 +5,11 @@
 # (serving its step endpoint on a Unix socket) runs JSON scripts through the
 # tool door as two agents: an upserting agent with a read-write grant and a
 # search-only agent with a read-only grant. Asserts: an upsert then a search
-# returns the nearest chunk first with a 4-decimal score; the ledger carries
+# returns the nearest chunk first (not the first inserted) with exact scores; the ledger carries
 # refbridge-attested tool_call events (argv, pid, environment NAMES) with
 # integrity verified and completeness complete; the search-only agent's
 # memory_upsert is refused as "tool is not available to this run" and records
-# no tool_call; a SECOND, separate run's search finds the first run's upserts;
+# a refused tool_call with no resource or attestation; a SECOND, separate run's search finds the first run's upserts;
 # and the credential value is in no ledger, artifact, or log. Requires go and
 # python3. Runs on macOS and Linux.
 set -euo pipefail
@@ -45,7 +45,7 @@ fail() {
 no_leak() {
 	local value="$1"
 	shift
-	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK/bridge.err" "$WORK/agent.err" "$WORK/control.jsonl"; then
+	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK/bridge.err" "$WORK/agent.err" "$WORK/control.jsonl" "$WORK/run1.err" "$WORK/run3.err" "$STORE_DIR"; then
 		fail "$* reached the ledger, an artifact, or a process log"
 	fi
 	if printf '%s\n' "${OUT1:-}" "${AUDIT1:-}" "${OUT2:-}" "${AUDIT2:-}" "${OUT3:-}" "${AUDIT3:-}" | grep -qF -- "$value"; then
@@ -167,13 +167,15 @@ run() { # $1 = workflow, $2 = step input JSON
 }
 audit() { "$WORK/agenthof" audit "$1" --log-dir "$WORK/logs" --control-log "$WORK/control.jsonl"; }
 
-# Synthetic 3-d vectors: chunk A is nearest the query, chunk B is orthogonal.
+# Synthetic 3-d vectors. A is inserted first, B second, and the query is B
+# itself: the nearest chunk is NOT the first inserted, so only a real cosine
+# ranking returns B then A. The scores are exact: 1.0000 and 0.0000.
 VEC_A='[1,0,0]'
 VEC_B='[0,1,0]'
-QUERY='[0.9,0.1,0]'
+QUERY='[0,1,0]'
 
 # 1. Upsert two chunks then search, in ONE session of the upserting agent.
-OUT1="$(run memory-write "{\"upserts\":[{\"collection\":\"notes\",\"text\":\"chunk-a $NONCE\",\"vector\":$VEC_A,\"metadata\":{}},{\"collection\":\"notes\",\"text\":\"chunk-b $NONCE\",\"vector\":$VEC_B,\"metadata\":{}}],\"searches\":[{\"collection\":\"notes\",\"vector\":$QUERY,\"k\":2}]}")"
+OUT1="$(run memory-write "{\"upserts\":[{\"collection\":\"notes\",\"text\":\"chunk-a $NONCE\",\"vector\":$VEC_A,\"metadata\":{}},{\"collection\":\"notes\",\"text\":\"chunk-b $NONCE\",\"vector\":$VEC_B,\"metadata\":{}}],\"searches\":[{\"collection\":\"notes\",\"vector\":$QUERY,\"k\":2}]}" 2>"$WORK/run1.err")"
 echo "$OUT1"
 echo "$OUT1" | grep -q "finished: succeeded" || fail "memory-write did not succeed"
 RUNID1="$(runid_of "$OUT1")"
@@ -195,7 +197,7 @@ ATTESTED="\\[runtime-attested: refbridge $(ere_escape "$WORK/memory-store") -bac
 [ "$(echo "$AUDIT1" | grep -Ec "tool memory_search — args [0-9a-f]{8} \(static_env\) $ATTESTED")" = 1 ] || fail "audit does not render the attested memory_search call"
 
 # The artifact is content-addressed; find the one holding the upserted lines.
-ART1="$(grep -rlE '^upserted ' "$WORK/artifacts" | head -n1)"
+ART1="$(grep -rlE '^upserted ' "$WORK/artifacts" | head -n1 || true)"
 [ -n "$ART1" ] || fail "no artifact from the upsert run"
 [ "$(grep -Ec '^upserted [^ ]+$' "$ART1")" = 2 ] || fail "want two 'upserted <id>' lines"
 [ "$(grep -Ec '^hit [^ ]+ -?[0-9]+\.[0-9]{4}$' "$ART1")" = 2 ] || fail "want two 'hit <id> <score>' lines with 4-decimal scores"
@@ -203,15 +205,12 @@ ID_A="$(sed -n '1s/^upserted //p' "$ART1")"
 ID_B="$(sed -n '2s/^upserted //p' "$ART1")"
 { [ -n "$ID_A" ] && [ -n "$ID_B" ] && [ "$ID_A" != "$ID_B" ]; } || fail "upserted ids are missing or not distinct"
 HITS="$(grep '^hit ' "$ART1")"
-[ "$(echo "$HITS" | sed -n '1p' | cut -d' ' -f2)" = "$ID_A" ] || fail "the nearest chunk is not first"
-[ "$(echo "$HITS" | sed -n '2p' | cut -d' ' -f2)" = "$ID_B" ] || fail "the farther chunk is not second"
-S1="$(echo "$HITS" | sed -n '1p' | cut -d' ' -f3)"
-S2="$(echo "$HITS" | sed -n '2p' | cut -d' ' -f3)"
-python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)' "$S1" "$S2" || fail "scores are not in descending order"
+[ "$HITS" = "$(printf 'hit %s 1.0000\nhit %s 0.0000' "$ID_B" "$ID_A")" ] || fail "want exactly the nearest chunk (the second inserted) first at 1.0000, then the other at 0.0000"
 echo "upsert + search: nearest chunk first, attested tool_call lines — ok"
 
 # 3. The search-only agent cannot reach the mutating tool: refused, and no
-#    tool_call is recorded for it (and nothing is written to the store).
+#    resource or attestation is recorded on the refused tool_call (and nothing
+#    is written to the store).
 if OUT2="$(run memory-read "{\"upserts\":[{\"collection\":\"notes\",\"text\":\"forbidden $NONCE\",\"vector\":$VEC_A,\"metadata\":{}}]}" 2>&1)"; then
 	fail "the search-only agent's memory_upsert was not refused"
 fi
@@ -225,12 +224,13 @@ echo "$AUDIT2" | grep -q "ledger integrity: verified" || fail "refused run ledge
 echo "$AUDIT2" | grep -q "ledger completeness: complete (" || fail "refused run ledger does not account for itself"
 echo "$AUDIT2" | grep -q "tool memory_upsert refused — tool is not available to this run" || fail "memory_upsert was not refused with the read-only reason"
 if grep -q '"runtime_attestation"' "$WORK/logs/$RUNID2.jsonl"; then fail "the refused call recorded an attested tool_call"; fi
+if grep -q '"resources_touched"' "$WORK/logs/$RUNID2.jsonl"; then fail "the refused call recorded a touched resource"; fi
 if echo "$AUDIT2" | grep -Eq "tool memory_upsert — args"; then fail "the refused memory_upsert recorded a tool_call"; fi
-echo "read-only grant: memory_upsert refused, nothing recorded — ok"
+echo "read-only grant: memory_upsert refused; no resource or attestation recorded — ok"
 
 # 4. Persistence across SEPARATE runs: the search-only agent, in a new run,
 #    finds the first run's upserts (and not the refused one).
-OUT3="$(run memory-read "{\"searches\":[{\"collection\":\"notes\",\"vector\":$VEC_A,\"k\":5}]}")"
+OUT3="$(run memory-read "{\"searches\":[{\"collection\":\"notes\",\"vector\":$VEC_A,\"k\":5}]}" 2>"$WORK/run3.err")"
 echo "$OUT3"
 echo "$OUT3" | grep -q "finished: succeeded" || fail "the second read run did not succeed"
 RUNID3="$(runid_of "$OUT3")"
@@ -252,6 +252,7 @@ echo "persistence: the second run found the first run's upserts — ok"
 
 # 5. The credential is nowhere in any ledger, artifact, or log.
 no_leak "$MEMORY_TOKEN" "the memory credential value"
+no_leak "not-for-the-child-$NONCE" "the non-allowlisted variable's value"
 if grep -q "LEAKED_SECRET" "$WORK/bridge.err"; then fail "a non-allowlisted variable leaked into the bridge log"; fi
 
 echo "e2e-memory-local: PASS"
