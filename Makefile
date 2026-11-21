@@ -2,9 +2,10 @@
 # plain `go` and `scripts/*.sh` (see CONTRIBUTING.md and .github/workflows). This
 # file holds installing the binaries and the real-backend proofs — the combined
 # podman containment run (Linux/Lima), the macOS Seatbelt run, the enrolled-agent
-# artifact binding runs (podman and Seatbelt), the Rekor v1 anchoring run
-# the embeddings run against a real embeddings server (both Linux/Lima)
-# and the memory-store run against a real Qdrant (Linux/Lima, plus Seatbelt on macOS) — run by judgment on a developer machine, never by CI.
+# artifact binding runs (podman and Seatbelt), the Rekor v1 anchoring run, the
+# embeddings run against a real embeddings server (both Linux/Lima), and the
+# memory-store run against a real Qdrant (Linux/Lima, plus Seatbelt on macOS) —
+# run by judgment on a developer machine, never by CI.
 .DEFAULT_GOAL := help
 .PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-memory acceptance-enroll
 

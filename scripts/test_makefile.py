@@ -96,6 +96,13 @@ class MakefileTest(unittest.TestCase):
         self.assertNotIn("deploy/lima", res.stdout)
         self.assertFalse(any(l.strip().startswith("scripts/e2e-memory.sh") for l in res.stdout.splitlines()), res.stdout)
 
+    def test_every_script_a_recipe_runs_directly_is_executable(self):
+        import os
+        import re
+        text = (REPO / "Makefile").read_text()
+        for rel in sorted(set(re.findall(r"^\t(?:@)?(scripts/[\w./-]+\.sh)\b", text, re.M))):
+            self.assertTrue(os.access(REPO / rel, os.X_OK), rel + " is run directly by a Makefile recipe but is not executable")
+
     def test_help_is_the_default_goal(self):
         res = make_n()
         self.assertEqual(res.returncode, 0, res.stderr)

@@ -11,8 +11,9 @@
 #   1. a memory-agent with a read-write grant upserts five known 4-d vectors
 #      (caller ids, so each id is a derived UUID) and searches the nearest 3:
 #      the ledger carries refbridge-attested tool_call events and completes;
-#   2. a search-only agent's memory_upsert is refused ("tool is not available
-#      to this run"), recording no resource and no attestation;
+#   2. a tool outside the search-only agent's read-only grant (memory_upsert) is
+#      refused and recorded ("tool is not available to this run"), with no
+#      resource and no attestation, and the forbidden record does not land;
 #   3. the bridge (and so the store process) is RESTARTED, and a search from a
 #      separate run still finds the data — for the embedded backend the file on
 #      disk, for Qdrant the server's collection;
@@ -276,8 +277,16 @@ EOF
 	grep '^hit ' "$art1" | sed 's/^hit //' >"$BASE/$name.ids"
 	sed -n 's/^upserted //p' "$art1" >"$BASE/$name.upserted"
 	echo "$name: upsert + search: nearest three in order with exact scores — ok"
+	if [ "$name" = qdrant ]; then
+		# Observe Qdrant first-hand: the five points are on the server itself.
+		local counted
+		counted="$(curl -fsS -X POST "$QDRANT_URL/collections/seam/points/count" -H 'Content-Type: application/json' -d '{"exact":true}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["count"])')" \
+			|| fail "qdrant: could not read the point count from the server"
+		[ "$counted" = 5 ] || fail "qdrant: the server holds $counted points in 'seam', want 5"
+		echo "qdrant: the server itself holds 5 points — ok"
+	fi
 
-	# b. the search-only agent's upsert is refused; nothing is recorded as run.
+	# b. a tool outside the read-only grant is refused and recorded; nothing is run.
 	local out2 id2 ledger2
 	if out2="$(run memory-reader "{\"upserts\":[{\"collection\":\"seam\",\"text\":\"forbidden $NONCE\",\"vector\":[0,0,1,0],\"metadata\":{}}]}" 2>&1)"; then
 		fail "$name: the search-only agent's memory_upsert was not refused"
@@ -288,6 +297,7 @@ EOF
 	[ -n "$id2" ] || fail "$name: no run id for the refused run"
 	check_audit "$id2" "refused run"
 	grep -q "tool memory_upsert refused — tool is not available to this run" <<<"$AUDIT_OUT" || fail "$name: memory_upsert was not refused with the read-only reason"
+	if grep -Eq "tool memory_upsert — args" <<<"$AUDIT_OUT"; then fail "$name: the refused memory_upsert recorded a tool_call"; fi
 	ledger2="$logs/$id2.jsonl"
 	if grep -q '"runtime_attestation"' "$ledger2"; then fail "$name: the refused call recorded an attested tool_call"; fi
 	if grep -q '"resources_touched"' "$ledger2"; then fail "$name: the refused call recorded a touched resource"; fi
@@ -318,8 +328,27 @@ EOF
 	[ "$(grep '^hit ' "$art3" | sed 's/^hit //')" = "$(cat "$BASE/$name.ids")" ] || fail "$name: the post-restart search differs from the original"
 	echo "$name: persistence: the restarted store returns the same top three — ok"
 
-	# d. the credential is in no ledger, artifact, or log.
-	if grep -rqF -- "$MEMORY_TOKEN" "$logs" "$arts" "$ctl" "$ldir/bridge.err" "$ldir/agent.err" "$ldir/run1.err" "$ldir/run3.err" "$store"; then
+	# c2. the forbidden record did not land: a wide search finds exactly the five.
+	local out4 id4 art4=""
+	out4="$(run memory-reader "{\"searches\":[{\"collection\":\"seam\",\"vector\":[0,0,1,0],\"k\":10}]}" 2>"$ldir/run4.err")" || {
+		cat "$ldir/run4.err" "$ldir/bridge.err" || true
+		fail "$name: the wide search failed"
+	}
+	echo "$out4"
+	id4="$(runid_of "$out4")"
+	[ -n "$id4" ] || fail "$name: no run id for the wide search"
+	for f in "$arts"/*; do
+		[ "$f" != "$art1" ] && [ "$f" != "$art3" ] && grep -q '^hit ' "$f" && art4="$f"
+	done
+	[ -n "$art4" ] || fail "$name: no artifact from the wide search"
+	[ "$(grep -c '^hit ' "$art4")" = 5 ] || fail "$name: the store holds $(grep -c '^hit ' "$art4") records, want 5 (a refused write landed?)"
+	echo "$name: the refused write left no record (five records in the store) — ok"
+
+	# d. the credential is in no ledger, artifact, or log, nor in any run output.
+	if printf '%s\n' "$out1" "$out2" "$out3" "$out4" | grep -qF -- "$MEMORY_TOKEN"; then
+		fail "$name: the credential value reached agenthof's output"
+	fi
+	if grep -rqF -- "$MEMORY_TOKEN" "$logs" "$arts" "$ctl" "$ldir/bridge.err" "$ldir/agent.err" "$ldir/run1.err" "$ldir/run3.err" "$ldir/run4.err" "$store"; then
 		fail "$name: the credential value reached a ledger, artifact, log, or the store"
 	fi
 	echo "$name: the credential value is in no ledger, artifact, or log — ok"
