@@ -5,9 +5,12 @@ speaks MCP over stdio and exposes two tools:
 
 - `memory_upsert` — store a text chunk with its embedding vector and JSON
   metadata in a collection (`collection`, `text`, `vector`, `metadata`, and an
-  optional stable `id`; re-upserting the same `id` in a collection overwrites).
+  optional stable `id`). The stored and returned id is always a derived UUID:
+  a deterministic UUIDv5 of the collection and your `id` when you pass one, so
+  re-indexing the same chunk overwrites it, otherwise a random UUID. Your
+  original `id` is not returned.
 - `memory_search` — return the `k` stored chunks nearest to a query vector
-  (`collection`, `vector`, `k`), each as `{id, score, text, metadata}`.
+  (`collection`, `vector`, `k`), each as `{id, score, text, metadata}` (`id` being the derived UUID above).
 
 It is a **reference payload**, not a product. A production operator brings their
 own vector-store MCP server. The `memory_*` tool names are this server's
@@ -61,7 +64,7 @@ command: ["/opt/memory-store/memory-store", "-backend", "embedded",
 credential:
   env: MEMORY_TOKEN
   materialization: env-at-spawn
-env_passthrough: []
+env_passthrough: []   # for a keyed Qdrant, also list the -qdrant-auth variable here
 egress:
   allow: []          # for -backend qdrant, list the Qdrant host:port here
 sessions:
@@ -83,7 +86,7 @@ tools:
     read_only_tools: [memory_search]
 ```
 
-`runtime: refbridge` makes the bridge attest first-hand, on every call, what it
+`runtime: refbridge` makes the bridge attest first-hand, on every call that returns a result, what it
 ran (argv, pid, environment names); the ledger records that on the `tool_call`
 event.
 
@@ -111,7 +114,11 @@ read-only hint does not decide this; the operator's list does.
 Every `memory_upsert` and `memory_search` is a `tool_call` in the run's ledger.
 The bridge's credential never reaches the agent, and the server never uses it
 for Qdrant: Qdrant authentication comes only from the variable named by
-`-qdrant-auth`, read by the server process the bridge starts.
+`-qdrant-auth`, read by the server process the bridge starts. The bridge
+builds that process's environment only from `env_passthrough` plus the
+credential, so for a keyed Qdrant the variable named by `-qdrant-auth` must
+also be listed in the bridge's `env_passthrough`; otherwise no API key is sent
+and calls fail as "backend unavailable".
 
 ## Honest limits
 
@@ -128,20 +135,22 @@ both the refspawn config and any standalone refexec config; nothing enforces
 that for you. A natively run Qdrant's storage directory has the same property,
 so on macOS the recommended configuration is Qdrant inside the podman VM, or an
 embedded store in a correctly `deny_read`-protected directory. On podman the
-compartment has `--network none` and mounts only the gateway sockets, so
+compartment has `--network none` and mounts no path to the store, so
 neither the embedded file nor Qdrant is reachable except through the door. On
 macOS, `egress.allow` is declared, not enforced: the bridge runs on the host.
 
 **2. The ledger records a bounded preview of search results.** The tool door
 keeps a prefix of about 200 runes of each tool result. For `memory_search` that
 is the raw result JSON, which leads with the MCP envelope, then each result's
-`id` and `metadata` keys. A retrieved record's text therefore usually falls
-past the cut, but a record with a short id and metadata can bring the start of
+`id` and `metadata` keys (the gateway re-serializes the decoded result with
+keys in alphabetical order, so the preview order is id, metadata, score, text,
+not the server's struct order). A retrieved record's text therefore usually falls
+past the cut, but a record with short metadata can bring the start of
 a field into the prefix. So the ledger holds a bounded preview that may include
 the start of a retrieved record; it is neither "the text is logged" nor "never
 logged". It is your own audit ledger, whose evidence is limited and
-tamper-evident, not tamper-proof. Failed calls never echo agent-supplied
-values: the server returns errors that carry none of the argument's bytes.
+tamper-evident, not tamper-proof. The server's own error results are fixed strings that carry none of the
+argument's bytes.
 
 **3. Authorization is per tool, not per collection.** Any agent granted
 `memory_upsert` may write any collection, and any agent granted `memory_search`
@@ -149,8 +158,9 @@ may read any. Anything written is later retrieved as text an agent may act on,
 so treat write access as the sensitive grant. To isolate data, run one
 bridge and one resource per set of collections, each started with its own
 `-collections` list (the value is visible in the attested argv). Two memory
-resources granted to one agent collide on the shared `memory_*` tool names and
-the step is refused, so a given agent sees one memory resource.
+resources granted to one agent expose the same `memory_*` tool names, which
+collide and cause the step to be refused, so grant an agent one memory
+resource.
 
 ## Running it standalone
 
