@@ -55,6 +55,16 @@ class LimaShTest(unittest.TestCase):
         self.assertTrue(any(c.endswith("bash scripts/e2e-acceptance.sh --keep") for c in cmds), cmds)
         self.assertNotIn("podman container prune", "\n".join(calls))
 
+    def test_e2e_embeddings_runs_the_script_and_forwards_keep(self):
+        res, calls = self.lima("e2e", "embeddings")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cmds = self.shell_cmds(calls)
+        self.assertTrue(any(c.endswith("bash scripts/e2e-embeddings.sh") for c in cmds), cmds)
+        res, calls = self.lima("e2e", "embeddings", "--keep")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cmds = self.shell_cmds(calls)
+        self.assertTrue(any(c.endswith("bash scripts/e2e-embeddings.sh --keep") for c in cmds), cmds)
+
     def test_all_ends_with_acceptance(self):
         res, calls = self.lima("e2e", "all")
         self.assertEqual(res.returncode, 0, res.stderr)

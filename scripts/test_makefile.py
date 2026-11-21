@@ -41,10 +41,37 @@ class MakefileTest(unittest.TestCase):
         # the message names the script; the recipe must not RUN it
         self.assertFalse(any(l.strip().startswith("scripts/e2e-acceptance.sh") for l in res.stdout.splitlines()), res.stdout)
 
+    def test_embeddings_darwin_goes_through_lima(self):
+        res = make_n("acceptance-embeddings", "UNAME_S=Darwin")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        lines = [l.strip() for l in res.stdout.splitlines() if l.strip() and not l.startswith("make:")]
+        self.assertEqual(lines, ["deploy/lima/lima.sh up", "deploy/lima/lima.sh e2e embeddings"])
+
+    def test_embeddings_darwin_keep_is_forwarded(self):
+        res = make_n("acceptance-embeddings", "UNAME_S=Darwin", "KEEP=1")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("deploy/lima/lima.sh e2e embeddings --keep", res.stdout)
+
+    def test_embeddings_linux_runs_the_script_natively_behind_a_podman_guard(self):
+        res = make_n("acceptance-embeddings", "UNAME_S=Linux", "KEEP=1")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("command -v podman", res.stdout)
+        self.assertIn("scripts/e2e-embeddings.sh --keep", res.stdout)
+        self.assertNotIn("lima.sh", res.stdout)
+
+    def test_embeddings_unsupported_host_message(self):
+        res = make_n("acceptance-embeddings", "UNAME_S=FreeBSD")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("unsupported host FreeBSD", res.stdout)
+        self.assertIn("exit 1", res.stdout)
+        self.assertNotIn("deploy/lima", res.stdout)
+        self.assertFalse(any(l.strip().startswith("scripts/e2e-embeddings.sh") for l in res.stdout.splitlines()), res.stdout)
+
     def test_help_is_the_default_goal(self):
         res = make_n()
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("acceptance-podman", res.stdout)
+        self.assertIn("acceptance-embeddings", res.stdout)
         self.assertIn("KEEP=1", res.stdout)
 
 
