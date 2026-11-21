@@ -69,6 +69,12 @@ func echoCompatHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if model, ok := strings.CutPrefix(req.Input, "embed:"); ok {
+		if err := stubCallEmbed(r.Header.Get("X-Agenthof-Proxy-URL"), r.Header.Get("X-Agenthof-Run-Token"), model); err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "reason": "model door: " + err.Error()})
+			return
+		}
+	}
 	if tool, ok := strings.CutPrefix(req.Input, "tool:"); ok {
 		proxyURL := r.Header.Get("X-Agenthof-Proxy-URL")
 		token := r.Header.Get("X-Agenthof-Run-Token")
@@ -225,7 +231,7 @@ func stubCallExecRun(proxyURL, token, cmd string) error {
 }
 
 // stubCallModel drives the model door: POST a chat completion through the proxy
-// using the agent's logical model name (which modelHandler requires to match).
+// using the agent's logical model name (which modelDoor requires to match).
 func stubCallModel(proxyURL, token, model string) error {
 	if proxyURL == "" {
 		return fmt.Errorf("no proxy url")
@@ -250,6 +256,33 @@ func stubCallModel(proxyURL, token, model string) error {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("/v1/chat/completions returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// stubCallEmbed drives the embeddings route of the model door: POST an
+// embedding request through the proxy using the given logical model name.
+func stubCallEmbed(proxyURL, token, model string) error {
+	if proxyURL == "" {
+		return fmt.Errorf("no proxy url")
+	}
+	body, err := json.Marshal(map[string]any{"model": model, "input": "demo"})
+	if err != nil {
+		return err
+	}
+	rq, err := http.NewRequest(http.MethodPost, strings.TrimRight(proxyURL, "/")+"/v1/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	rq.Header.Set("Content-Type", "application/json")
+	rq.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(rq)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("/v1/embeddings returned %d", resp.StatusCode)
 	}
 	return nil
 }

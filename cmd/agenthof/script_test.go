@@ -78,10 +78,22 @@ func TestScript(t *testing.T) {
 	// `"model":"upstream-model"` (the provider model the route resolves to). Any
 	// other request → 401, no usage. A door that failed to inject would fail
 	// this check, and the run would not render token counts.
+	// The embeddings route is held to the same two checks against
+	// `upstream-embed`, and answers with prompt tokens only.
 	modelSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/v1/embeddings") {
+			if r.Header.Get("Authorization") != "Bearer dummy" ||
+				!strings.Contains(string(body), `"model":"upstream-embed"`) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"upstream-embed","usage":{"prompt_tokens":7,"total_tokens":7}}`))
 			return
 		}
 		if r.Header.Get("Authorization") != "Bearer dummy" ||
