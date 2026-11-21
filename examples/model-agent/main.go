@@ -1,7 +1,9 @@
 // Command model-agent is an optional fronted agent that makes one model call
 // through Agenthof's model gateway. It reads the per-run proxy URL and run
 // token from the request headers, sends the step input as a chat completion,
-// and returns the reply text as its artifact. It holds no provider key.
+// and returns the reply text as its artifact. With -embed it instead sends the
+// step input to the embeddings door and returns the vector's dimension count.
+// It holds no provider key.
 package main
 
 import (
@@ -11,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +31,7 @@ type stepResponse struct {
 
 type handler struct {
 	model  string
+	embed  bool
 	client *http.Client
 }
 
@@ -48,17 +52,23 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, err := json.Marshal(map[string]any{
+	path := "/v1/chat/completions"
+	body := map[string]any{
 		"model": h.model,
 		"messages": []map[string]string{
 			{"role": "user", "content": step.Input},
 		},
-	})
+	}
+	if h.embed {
+		path = "/v1/embeddings"
+		body = map[string]any{"model": h.model, "input": step.Input}
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		writeJSON(w, stepResponse{Success: false, Reason: "could not build model request"})
 		return
 	}
-	endpoint := strings.TrimRight(proxyURL, "/") + "/v1/chat/completions"
+	endpoint := strings.TrimRight(proxyURL, "/") + path
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		writeJSON(w, stepResponse{Success: false, Reason: "could not build model request"})
@@ -82,6 +92,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, stepResponse{Success: false, Reason: "model proxy response unreadable"})
 		return
 	}
+	if h.embed {
+		writeJSON(w, embedResponse(resp.StatusCode, respBody))
+		return
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		writeJSON(w, stepResponse{Success: false, Reason: "model proxy returned " + resp.Status})
 		return
@@ -100,6 +114,23 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, stepResponse{Artifact: parsed.Choices[0].Message.Content, Success: true})
 }
 
+// embedResponse turns the embeddings door's answer into the step result: the
+// artifact reports only the vector's dimension count.
+func embedResponse(status int, body []byte) stepResponse {
+	if status < 200 || status >= 300 {
+		return stepResponse{Success: false, Reason: "embeddings door returned " + strconv.Itoa(status)}
+	}
+	var parsed struct {
+		Data []struct {
+			Embedding []float64 `json:"embedding"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil || len(parsed.Data) == 0 || len(parsed.Data[0].Embedding) == 0 {
+		return stepResponse{Success: false, Reason: "embeddings reply carried no vector"}
+	}
+	return stepResponse{Artifact: "embedded: " + strconv.Itoa(len(parsed.Data[0].Embedding)) + " dimensions", Success: true}
+}
+
 func writeJSON(w http.ResponseWriter, resp stepResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -108,8 +139,9 @@ func writeJSON(w http.ResponseWriter, resp stepResponse) {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8081", "listen address")
 	model := flag.String("model", "fast", "logical model name declared for this agent")
+	embed := flag.Bool("embed", false, "make an embeddings call instead of a chat call")
 	flag.Parse()
-	h := &handler{model: *model, client: &http.Client{Timeout: 5 * time.Minute}}
+	h := &handler{model: *model, embed: *embed, client: &http.Client{Timeout: 5 * time.Minute}}
 	http.Handle("/", h)
 	log.Printf("model-agent listening on %s, logical model %s", *addr, *model)
 	log.Fatal(http.ListenAndServe(*addr, nil))
