@@ -81,10 +81,61 @@ func TestCollectionsFlagParsing(t *testing.T) {
 	if len(c.limits.Collections) != 2 || !c.limits.collectionAllowed("a") || !c.limits.collectionAllowed("b") || c.limits.collectionAllowed("c") {
 		t.Fatalf("allowlist: %v", c.limits.Collections)
 	}
-	for _, bad := range []string{"a,,b", "a,b c", "a,"} {
-		if _, err := parseConfig([]string{"-collections", bad}, &bytes.Buffer{}); err == nil {
+	// A whitespace-only value must fail closed, never mean allow-any.
+	for _, bad := range []string{"a,,b", "a,b c", "a,", " ", "\t", ", "} {
+		if _, err := parseConfig([]string{"-collections", bad, "-store-file", "s.json"}, &bytes.Buffer{}); err == nil {
 			t.Fatalf("%q accepted", bad)
 		}
+	}
+	c, err = parseConfig([]string{"-collections", "", "-store-file", "s.json"}, &bytes.Buffer{})
+	if err != nil || len(c.limits.Collections) != 0 {
+		t.Fatalf("empty -collections must allow any: %v", err)
+	}
+}
+
+func TestStrayPositionalArgumentsRejected(t *testing.T) {
+	// flag stops at the first non-flag token; without the check this would
+	// start with an empty allowlist and an in-process default backend.
+	var errOut bytes.Buffer
+	_, err := parseConfig([]string{"stray", "-collections", "a", "-store-file", "s.json"}, &errOut)
+	if err == nil {
+		t.Fatal("stray positional argument accepted")
+	}
+	if strings.Contains(err.Error(), "stray") || strings.Contains(err.Error(), "-collections") {
+		t.Fatalf("error echoes the argument: %q", err)
+	}
+	if _, err := parseConfig([]string{"-store-file", "s.json", "--", "x"}, &errOut); err == nil {
+		t.Fatal("trailing positional argument accepted")
+	}
+}
+
+func TestEmptyStoreFileRejected(t *testing.T) {
+	if _, err := parseConfig([]string{"-backend", "embedded", "-store-file", ""}, &bytes.Buffer{}); err == nil {
+		t.Fatal("empty -store-file accepted for embedded")
+	}
+	if _, err := parseConfig([]string{"-backend", "qdrant", "-qdrant-url", "http://127.0.0.1:6333", "-store-file", ""}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("qdrant must ignore -store-file: %v", err)
+	}
+}
+
+func TestCredentialEnvNeverReachesQdrantAuth(t *testing.T) {
+	c, err := parseConfig([]string{"-backend", "qdrant", "-qdrant-url", "http://127.0.0.1:6333", "-credential-env", "PLACEHOLDER_BEARER"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, ok := c.backend.(*qdrantBackend)
+	if !ok {
+		t.Fatalf("got %T", c.backend)
+	}
+	if q.authEnv != "" {
+		t.Fatalf("qdrant auth env = %q, want empty", q.authEnv)
+	}
+	c, err = parseConfig([]string{"-backend", "qdrant", "-qdrant-url", "http://127.0.0.1:6333", "-credential-env", "X", "-qdrant-auth", "QKEY"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.backend.(*qdrantBackend).authEnv; got != "QKEY" {
+		t.Fatalf("qdrant auth env = %q, want QKEY", got)
 	}
 }
 
@@ -105,14 +156,14 @@ func TestCollectionsAllowlist(t *testing.T) {
 		return callWith(t, be, l, tool, args)
 	}
 	for _, tc := range []struct{ tool, args string }{
-		{"memory_upsert", up("c")},
-		{"memory_search", se("c")},
+		{"memory_upsert", up("offlistname")},
+		{"memory_search", se("offlistname")},
 	} {
 		isErr, text := run(tc.tool, tc.args)
 		if !isErr || text != msgNotAllowed {
 			t.Fatalf("%s off-list: isErr=%v text=%q", tc.tool, isErr, text)
 		}
-		if strings.Contains(text, `"c"`) {
+		if strings.Contains(text, "offlistname") {
 			t.Fatal("collection echoed")
 		}
 	}

@@ -25,6 +25,11 @@ func newServer(be Backend, limits Limits) *mcp.Server {
 	return server
 }
 
+// flagError marks an error the flag package has already reported on stderr.
+type flagError struct{ error }
+
+func (e flagError) Unwrap() error { return e.error }
+
 type config struct {
 	backend     Backend
 	backendName string
@@ -34,7 +39,9 @@ type config struct {
 // parseCollections turns a comma-separated list into an allowlist. Empty input
 // yields nil (allow any); a malformed element is an error.
 func parseCollections(csv string) (map[string]struct{}, error) {
-	if strings.TrimSpace(csv) == "" {
+	// Only the exact empty string means "allow any": a whitespace-only value
+	// is an entry that fails the name check, so a malformed flag fails closed.
+	if csv == "" {
 		return nil, nil
 	}
 	out := map[string]struct{}{}
@@ -53,6 +60,9 @@ func parseCollections(csv string) (map[string]struct{}, error) {
 func buildBackend(name, storeFile, qdrantURL, qdrantAuth string, maxEntries int) (Backend, error) {
 	switch name {
 	case "embedded":
+		if storeFile == "" {
+			return nil, errors.New("-store-file must not be empty for the embedded backend")
+		}
 		if maxEntries < 1 {
 			return nil, errors.New("-max-entries must be at least 1")
 		}
@@ -77,7 +87,12 @@ func parseConfig(args []string, stderr io.Writer) (*config, error) {
 	_ = fs.String("credential-env", "", "name of the environment variable carrying the caller's placeholder bearer; not used for Qdrant auth")
 	maxEntries := fs.Int("max-entries", embeddedMaxEntries, "embedded backend: maximum records across all collections")
 	if err := fs.Parse(args); err != nil {
-		return nil, err
+		return nil, flagError{err}
+	}
+	// flag stops at the first non-flag token; any flag after it would be
+	// silently dropped, including -collections, so refuse the whole line.
+	if fs.NArg() != 0 {
+		return nil, fmt.Errorf("unexpected positional arguments (%d); all options are flags", fs.NArg())
 	}
 	allow, err := parseCollections(*collections)
 	if err != nil {
@@ -107,7 +122,10 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)
 		}
-		_, _ = fmt.Fprintln(os.Stderr, "memory-store:", err)
+		var fe flagError
+		if !errors.As(err, &fe) {
+			_, _ = fmt.Fprintln(os.Stderr, "memory-store:", err)
+		}
 		os.Exit(2)
 	}
 	banner(os.Stderr, cfg)
