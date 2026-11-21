@@ -928,6 +928,7 @@ type v1Route struct {
 
 	denyUnset       string // ledger reason and HTTP body when allowed is ""; "" answers as a model mismatch
 	promptUsageOnly bool   // true: completion_tokens is never recorded, whatever the upstream sends
+	refuseStreaming bool   // true: a text/event-stream answer is recorded failed and not relayed
 }
 
 const (
@@ -936,6 +937,7 @@ const (
 
 	reasonEmbeddingsNotAllowed = "embeddings not allowed for this agent"
 	maxEmbeddingsResponse      = 32 << 20
+	reasonUnexpectedStream     = "unexpected streaming response"
 )
 
 // chatRoute is POST /v1/chat/completions: the agent may name its own model, or
@@ -963,6 +965,7 @@ func (p *Gateway) embeddingsRoute() v1Route {
 		responseCap:     maxEmbeddingsResponse,
 		denyUnset:       reasonEmbeddingsNotAllowed,
 		promptUsageOnly: true,
+		refuseStreaming: true,
 	}
 }
 
@@ -1142,6 +1145,19 @@ func (p *Gateway) modelDoor(rt v1Route, bind engine.Binding, agent config.AgentD
 					return nil
 				}
 				if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+					if rt.refuseStreaming {
+						// This route has no streamed form: close the body
+						// unread, record the one failed event, and return an
+						// error so ErrorHandler answers 502 without recording
+						// again (recorded is set by record).
+						_ = resp.Body.Close()
+						logger.Error("model upstream answered with a stream", "model", logical)
+						record(engine.Event{
+							Type: "model_call", Agent: agent.Name, Status: "failed",
+							Reason: reasonUnexpectedStream, Model: logical, Binding: bind,
+						})
+						return errors.New(reasonUnexpectedStream)
+					}
 					record(engine.Event{
 						Type: "model_call", Agent: agent.Name, Status: "started",
 						Model: logical, Binding: bind,

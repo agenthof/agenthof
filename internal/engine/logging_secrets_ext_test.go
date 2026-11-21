@@ -255,6 +255,16 @@ func model401(w http.ResponseWriter, _ *http.Request) {
 	http.Error(w, "invalid api key "+providerKey, http.StatusUnauthorized) // an upstream that echoes the key back
 }
 
+func embedOK(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"usage":{"prompt_tokens":1,"total_tokens":1}}`)
+}
+
+func embedStream(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	_, _ = io.WriteString(w, "data: {}\n\n")
+}
+
 func modelHuge(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	chunk := bytes.Repeat([]byte("x"), 1<<20)
@@ -290,7 +300,7 @@ func ccTool(url, tokenURL string) config.ToolResource {
 type doorScenario struct {
 	name       string
 	gateway    config.GatewayConfig
-	agent      config.AgentDef // Model / Tools / Exec only; the rest is filled in
+	agent      config.AgentDef // Model / EmbeddingModel / Tools / Exec only; the rest is filled in
 	call       func(ctx context.Context, url, token string) error
 	wantStatus string
 	// wantLine is the log line that proves THIS scenario's branch was
@@ -336,6 +346,13 @@ func TestOperationalLogCarriesNoSecret(t *testing.T) {
 	modelRoute := func(endpoint string) config.GatewayConfig {
 		return config.GatewayConfig{Models: map[string]config.ModelRoute{"fast": {Endpoint: endpoint, Model: "gpt-test", APIKeyEnv: "MODEL_KEY"}}}
 	}
+	embedRoute := func(endpoint string) config.GatewayConfig {
+		return config.GatewayConfig{Models: map[string]config.ModelRoute{
+			"fast":  {Endpoint: endpoint, Model: "gpt-test", APIKeyEnv: "MODEL_KEY"},
+			"embed": {Endpoint: endpoint, Model: "embed-test", APIKeyEnv: "MODEL_KEY"},
+		}}
+	}
+	embedAgent := config.AgentDef{Model: "fast", EmbeddingModel: "embed"}
 	toolCfg := func(res config.ToolResource) config.GatewayConfig {
 		return config.GatewayConfig{Tools: map[string]config.ToolResource{"up": res}}
 	}
@@ -347,6 +364,10 @@ func TestOperationalLogCarriesNoSecret(t *testing.T) {
 		{name: "model upstream 401 echoing the key", gateway: modelRoute(modelUpstream(t, model401).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model upstream returned error status"},
 		{name: "model upstream connection refused with query secret", gateway: modelRoute("http://" + refusedAddr + "/v1?key=" + querySecret), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model call did not complete"},
 		{name: "model upstream oversized body", gateway: modelRoute(modelUpstream(t, modelHuge).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model upstream response too large"},
+		{name: "embeddings success", gateway: embedRoute(modelUpstream(t, embedOK).URL), agent: embedAgent, call: postEmbed, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "model call routed"},
+		{name: "embeddings upstream 401 echoing the key", gateway: embedRoute(modelUpstream(t, model401).URL), agent: embedAgent, call: postEmbed, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model upstream returned error status"},
+		{name: "embeddings upstream connection refused with query secret", gateway: embedRoute("http://" + refusedAddr + "/v1?key=" + querySecret), agent: embedAgent, call: postEmbed, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model call did not complete"},
+		{name: "embeddings upstream answers with a stream", gateway: embedRoute(modelUpstream(t, embedStream).URL), agent: embedAgent, call: postEmbed, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model upstream answered with a stream"},
 		{name: "tool static bearer success", gateway: toolCfg(staticTool(stubMCP(t, toolBearer).URL)), agent: toolGrant, call: callEcho, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "tool call routed"},
 		{name: "tool upstream rejects credential", gateway: toolCfg(staticTool(stubMCP(t, "somethingelse").URL)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "tool call reported error"},
 		{name: "tool upstream connection refused with query secret", gateway: toolCfg(staticTool("http://" + refusedAddr + "/?key=" + querySecret)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineConnect},

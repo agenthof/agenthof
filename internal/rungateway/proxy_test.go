@@ -1527,6 +1527,20 @@ func (u *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "embed-ct":
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"text-embedding-3-small","usage":{"prompt_tokens":8,"completion_tokens":0,"total_tokens":8}}`))
+	case "embed-big":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(paddedEmbedBody(maxChatResponse + 1))
+	case "embed-huge":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(paddedEmbedBody(maxEmbeddingsResponse + 1))
+	case "embed-gzip":
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		_, _ = gz.Write([]byte(embedBody))
+		_ = gz.Close()
+		_, _ = w.Write(buf.Bytes())
 	case "embed-nousage":
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"text-embedding-3-small"}`))
@@ -1534,6 +1548,15 @@ func (u *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":0}}`))
 	}
+}
+
+const embedBody = `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"text-embedding-3-small","usage":{"prompt_tokens":8,"total_tokens":8}}`
+
+// paddedEmbedBody is a valid embeddings answer of exactly n bytes.
+func paddedEmbedBody(n int) []byte {
+	const head = `{"pad":"`
+	const tail = `","usage":{"prompt_tokens":8,"total_tokens":8}}`
+	return []byte(head + strings.Repeat("x", n-len(head)-len(tail)) + tail)
 }
 
 func (u *modelUpstream) snapshot() (calls int, auth, model string, body []byte, headers http.Header) {
