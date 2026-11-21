@@ -97,9 +97,9 @@ type Event struct {
 	ExitCode          *int      `json:"exit_code,omitempty"`           // set by exec: pointer so 0 (success) is distinct from absent
 	OutputSHA         string    `json:"output_sha,omitempty"`          // set by exec: the runtime's sha256 of the output it returned (on a historical attested event, the hash the agent reported); set by spawn: sha256 of the child's final artifact; never the output or the artifact
 	Mode              string    `json:"mode,omitempty"`                // set by exec: "runtime" (a declared runtime ran it first-hand; see RuntimeAttestation). Ledgers written before exec became first-hand only carry "attested" (the agent's own report); the field is read and rendered verbatim
-	Model             string    `json:"model,omitempty"`               // set by model_call: the logical model requested
-	PromptTokens      *int      `json:"prompt_tokens,omitempty"`       // set by model_call (non-streaming): usage
-	CompletionTokens  *int      `json:"completion_tokens,omitempty"`   // set by model_call (non-streaming): usage
+	Model             string    `json:"model,omitempty"`               // set by model_call: the logical model requested, on a chat or an embeddings call
+	PromptTokens      *int      `json:"prompt_tokens,omitempty"`       // set by model_call: usage, for a non-streaming chat call and for an embeddings call
+	CompletionTokens  *int      `json:"completion_tokens,omitempty"`   // set by model_call: usage, for a non-streaming chat call only; never set for an embeddings call
 	ChildRunID        string    `json:"child_run_id,omitempty"`        // set by spawn: the child run this event links to, whenever one was started (absent when the door refused before starting one)
 	ChildRole         string    `json:"child_role,omitempty"`          // set by spawn: the role the child ran, or was asked to run, as
 	ChildWorkflow     string    `json:"child_workflow,omitempty"`      // set by spawn: the child's workflow

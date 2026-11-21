@@ -925,11 +925,17 @@ type v1Route struct {
 	path        string                       // the mux pattern, and the path joined onto the route's endpoint
 	allowed     func(config.AgentDef) string // the one logical model this agent may name here; "" means none
 	responseCap int                          // largest upstream body buffered, in bytes
+
+	denyUnset       string // ledger reason and HTTP body when allowed is ""; "" answers as a model mismatch
+	promptUsageOnly bool   // true: completion_tokens is never recorded, whatever the upstream sends
 }
 
 const (
 	maxModelName    = 200 // runes of a refused, agent-supplied model name that may enter the ledger or a log
 	maxChatResponse = 10 << 20
+
+	reasonEmbeddingsNotAllowed = "embeddings not allowed for this agent"
+	maxEmbeddingsResponse      = 32 << 20
 )
 
 // chatRoute is POST /v1/chat/completions: the agent may name its own model, or
@@ -947,9 +953,22 @@ func (p *Gateway) chatRoute() v1Route {
 	}
 }
 
+// embeddingsRoute is POST /v1/embeddings: the agent may name only its
+// embedding_model. There is no fallback to defaults.model or the chat model, so
+// an agent with none configured is refused for every request.
+func (p *Gateway) embeddingsRoute() v1Route {
+	return v1Route{
+		path:            "/v1/embeddings",
+		allowed:         func(agent config.AgentDef) string { return agent.EmbeddingModel },
+		responseCap:     maxEmbeddingsResponse,
+		denyUnset:       reasonEmbeddingsNotAllowed,
+		promptUsageOnly: true,
+	}
+}
+
 // v1Routes lists every route the model door serves.
 func (p *Gateway) v1Routes() []v1Route {
-	return []v1Route{p.chatRoute()}
+	return []v1Route{p.chatRoute(), p.embeddingsRoute()}
 }
 
 // modelDoor serves one OpenAI-compatible /v1/* route on the per-run listener.
@@ -985,13 +1004,26 @@ func (p *Gateway) modelDoor(rt v1Route, bind engine.Binding, agent config.AgentD
 			_ = json.Unmarshal(raw, &logical) // non-string "model" leaves logical "", matching the old .(string) assertion
 		}
 
+		// logical is agent-supplied and, until it passes the checks below,
+		// unvalidated — cap it before it enters the ledger or a log (same bound
+		// as hashResult / resultErrorText) so an oversized "model" value can't
+		// bloat the event. Both refusals that record it share this one capped
+		// copy; nothing past authorization changes, so a configured name is
+		// recorded whole.
+		echoed := capRunes(logical, maxModelName)
+		allowed := rt.allowed(agent)
+		// An empty allowed name means the route is not granted to this agent. It
+		// is refused before any comparison, so an empty or absent request model
+		// can never equal it, and before Resolve, which maps "" to
+		// defaults.model.
+		if allowed == "" && rt.denyUnset != "" {
+			logger.Warn("model call refused", "reason", rt.denyUnset)
+			logical = echoed
+			refuse(rt.denyUnset, http.StatusForbidden)
+			return
+		}
 		// refuseModel is the one answer to a model the agent may not name here.
-		// logical is agent-supplied and, on this path, unvalidated — cap it
-		// before it enters the ledger (same bound as hashResult /
-		// resultErrorText) so an oversized "model" value can't bloat the
-		// event.
 		refuseModel := func() {
-			echoed := capRunes(logical, maxModelName)
 			logger.Warn("model call refused", "model", echoed)
 			logical = echoed
 			appendEvent(engine.Event{
@@ -1001,16 +1033,7 @@ func (p *Gateway) modelDoor(rt v1Route, bind engine.Binding, agent config.AgentD
 			})
 			http.Error(w, "model not allowed", http.StatusForbidden)
 		}
-		allowed := rt.allowed(agent)
-		if allowed == "" {
-			refuseModel()
-			return
-		}
-		if logical == "" {
-			refuseModel()
-			return
-		}
-		if logical != allowed {
+		if allowed == "" || logical == "" || logical != allowed {
 			refuseModel()
 			return
 		}
@@ -1147,6 +1170,9 @@ func (p *Gateway) modelDoor(rt v1Route, bind engine.Binding, agent config.AgentD
 				resp.ContentLength = int64(len(rb))
 				resp.Header.Set("Content-Length", strconv.Itoa(len(rb)))
 				pt, ct := parseUsage(rb)
+				if rt.promptUsageOnly {
+					ct = nil
+				}
 				logger.Debug("model call routed", "model", logical)
 				record(engine.Event{
 					Type: "model_call", Agent: agent.Name, Status: "succeeded",
