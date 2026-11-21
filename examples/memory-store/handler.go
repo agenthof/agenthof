@@ -1,0 +1,227 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"math"
+	"regexp"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// Limits are the handler-enforced bounds on a call's arguments.
+type Limits struct {
+	MaxK, MaxTextBytes, MaxVectorDim int
+}
+
+// DefaultLimits are the bounds the server runs with.
+var DefaultLimits = Limits{MaxK: 64, MaxTextBytes: 16384, MaxVectorDim: 4096}
+
+const maxCallerIDBytes = 256
+
+// The closed set of messages a tool call can fail with. Every error result is
+// one of these fixed strings: never an argument's bytes, never a decoder's or
+// a backend's error text. The tool input schemas carry no pattern, length or
+// range keyword, so the SDK never validates an argument and echoes its value;
+// all validation happens in the handlers below.
+const (
+	msgBadArguments   = "invalid arguments"
+	msgBadCollection  = "collection must match [A-Za-z0-9_-]{1,64}"
+	msgBadVector      = "vector must be a non-empty array of finite numbers with a non-zero norm, within the dimension limit"
+	msgBadMetadata    = "metadata must be a JSON object"
+	msgBadText        = "text exceeds the size limit"
+	msgBadID          = "id exceeds the size limit"
+	msgBadK           = "k must be between 1 and the maximum"
+	msgDimension      = "vector dimension does not match the collection"
+	msgCollection     = "collection configuration conflict"
+	msgEntryCap       = "the store has reached its entry cap"
+	msgStoreCorrupt   = "the store could not be read"
+	msgUnavailable    = "the backend is unavailable"
+	msgInternalFailed = "the request failed"
+)
+
+// fixedErrorStrings enumerates the closed set, for tests that assert an error
+// result carries nothing but one of these.
+var fixedErrorStrings = []string{
+	msgBadArguments, msgBadCollection, msgBadVector, msgBadMetadata, msgBadText,
+	msgBadID, msgBadK, msgDimension, msgCollection, msgEntryCap, msgStoreCorrupt,
+	msgUnavailable, msgInternalFailed,
+}
+
+var collectionRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+type upsertArgs struct {
+	Collection string          `json:"collection"`
+	ID         string          `json:"id"`
+	Text       string          `json:"text"`
+	Vector     []float32       `json:"vector"`
+	Metadata   json.RawMessage `json:"metadata"`
+}
+
+type searchArgs struct {
+	Collection string    `json:"collection"`
+	Vector     []float32 `json:"vector"`
+	K          int       `json:"k"`
+}
+
+type upsertResult struct {
+	ID string `json:"id"`
+}
+
+type searchResult struct {
+	Results []Hit `json:"results"`
+}
+
+func fail(msg string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: msg}}}
+}
+
+// backendFailure maps a backend error to its fixed message. Anything that is
+// not a known sentinel gets the generic message: the error text is dropped.
+func backendFailure(err error) *mcp.CallToolResult {
+	switch {
+	case errors.Is(err, ErrDimensionMismatch):
+		return fail(msgDimension)
+	case errors.Is(err, ErrCollectionConfig):
+		return fail(msgCollection)
+	case errors.Is(err, ErrEntryCap):
+		return fail(msgEntryCap)
+	case errors.Is(err, ErrStoreCorrupt):
+		return fail(msgStoreCorrupt)
+	case errors.Is(err, ErrBackendUnavailable):
+		return fail(msgUnavailable)
+	default:
+		return fail(msgInternalFailed)
+	}
+}
+
+// vectorNorm returns the Euclidean norm, accumulated in float64. ok is false
+// for a non-finite component or a non-finite norm.
+func vectorNorm(v []float32) (norm float64, ok bool) {
+	var sum float64
+	for _, c := range v {
+		f := float64(c)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0, false
+		}
+		sum += f * f
+	}
+	norm = math.Sqrt(sum)
+	if math.IsNaN(norm) || math.IsInf(norm, 0) {
+		return 0, false
+	}
+	return norm, true
+}
+
+func validVector(v []float32, l Limits) bool {
+	if len(v) == 0 || len(v) > l.MaxVectorDim {
+		return false
+	}
+	norm, ok := vectorNorm(v)
+	return ok && norm > 0
+}
+
+func validMetadata(m json.RawMessage, l Limits) bool {
+	m = bytes.TrimSpace(m)
+	return len(m) > 0 && len(m) <= l.MaxTextBytes && m[0] == '{' && json.Valid(m)
+}
+
+func decodeArgs(req *mcp.CallToolRequest, into any) bool {
+	if req == nil || req.Params == nil {
+		return false
+	}
+	return json.Unmarshal(req.Params.Arguments, into) == nil
+}
+
+func upsertHandler(be Backend, l Limits) mcp.ToolHandler {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var a upsertArgs
+		if !decodeArgs(req, &a) {
+			return fail(msgBadArguments), nil
+		}
+		switch {
+		case !collectionRe.MatchString(a.Collection):
+			return fail(msgBadCollection), nil
+		case !validVector(a.Vector, l):
+			return fail(msgBadVector), nil
+		case !validMetadata(a.Metadata, l):
+			return fail(msgBadMetadata), nil
+		case len(a.Text) > l.MaxTextBytes:
+			return fail(msgBadText), nil
+		case len(a.ID) > maxCallerIDBytes:
+			return fail(msgBadID), nil
+		}
+		id, err := deriveID(a.Collection, a.ID)
+		if err != nil {
+			return fail(msgInternalFailed), nil
+		}
+		if err := be.Upsert(ctx, a.Collection, id, a.Vector, a.Text, bytes.TrimSpace(a.Metadata)); err != nil {
+			return backendFailure(err), nil
+		}
+		return &mcp.CallToolResult{StructuredContent: upsertResult{ID: id}}, nil
+	}
+}
+
+func searchHandler(be Backend, l Limits) mcp.ToolHandler {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var a searchArgs
+		if !decodeArgs(req, &a) {
+			return fail(msgBadArguments), nil
+		}
+		switch {
+		case !collectionRe.MatchString(a.Collection):
+			return fail(msgBadCollection), nil
+		case !validVector(a.Vector, l):
+			return fail(msgBadVector), nil
+		case a.K < 1 || a.K > l.MaxK:
+			return fail(msgBadK), nil
+		}
+		hits, err := be.Search(ctx, a.Collection, a.Vector, a.K)
+		if err != nil {
+			return backendFailure(err), nil
+		}
+		if hits == nil {
+			hits = []Hit{}
+		}
+		return &mcp.CallToolResult{StructuredContent: searchResult{Results: hits}}, nil
+	}
+}
+
+// registerTools registers memory_upsert and memory_search through the raw
+// AddTool path, so the SDK neither unmarshals nor schema-validates the
+// arguments. The schemas below describe the shape for the model; they carry
+// no constraint keyword the SDK could enforce and echo back.
+func registerTools(server *mcp.Server, be Backend, l Limits) {
+	server.AddTool(&mcp.Tool{
+		Name:        "memory_upsert",
+		Description: "store a text chunk with its embedding vector and JSON metadata in a collection; returns the chunk id",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection": map[string]any{"type": "string", "description": "collection name"},
+				"id":         map[string]any{"type": "string", "description": "optional stable id; upserting the same id again overwrites"},
+				"text":       map[string]any{"type": "string"},
+				"vector":     map[string]any{"type": "array", "items": map[string]any{"type": "number"}},
+				"metadata":   map[string]any{"type": "object"},
+			},
+			"required": []string{"collection", "text", "vector", "metadata"},
+		},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false},
+	}, upsertHandler(be, l))
+	server.AddTool(&mcp.Tool{
+		Name:        "memory_search",
+		Description: "return the k stored chunks nearest to a query vector in a collection",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection": map[string]any{"type": "string", "description": "collection name"},
+				"vector":     map[string]any{"type": "array", "items": map[string]any{"type": "number"}},
+				"k":          map[string]any{"type": "integer"},
+			},
+			"required": []string{"collection", "vector", "k"},
+		},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, searchHandler(be, l))
+}
