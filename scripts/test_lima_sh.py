@@ -65,6 +65,16 @@ class LimaShTest(unittest.TestCase):
         cmds = self.shell_cmds(calls)
         self.assertTrue(any(c.endswith("bash scripts/e2e-embeddings.sh --keep") for c in cmds), cmds)
 
+    def test_e2e_memory_runs_the_script_forwards_keep(self):
+        res, calls = self.lima("e2e", "memory")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cmds = self.shell_cmds(calls)
+        self.assertTrue(any(c.endswith("bash scripts/e2e-memory.sh") for c in cmds), cmds)
+        res, calls = self.lima("e2e", "memory", "--keep")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cmds = self.shell_cmds(calls)
+        self.assertTrue(any(c.endswith("bash scripts/e2e-memory.sh --keep") for c in cmds), cmds)
+
     def test_all_ends_with_acceptance(self):
         res, calls = self.lima("e2e", "all")
         self.assertEqual(res.returncode, 0, res.stderr)

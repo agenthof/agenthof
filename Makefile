@@ -3,9 +3,10 @@
 # file holds installing the binaries and the real-backend proofs — the combined
 # podman containment run (Linux/Lima), the macOS Seatbelt run, the enrolled-agent
 # artifact binding runs (podman and Seatbelt), the Rekor v1 anchoring run
-# and the embeddings run against a real embeddings server (both Linux/Lima) — run by judgment on a developer machine, never by CI.
+# the embeddings run against a real embeddings server (both Linux/Lima)
+# and the memory-store run against a real Qdrant (Linux/Lima, plus Seatbelt on macOS) — run by judgment on a developer machine, never by CI.
 .DEFAULT_GOAL := help
-.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-enroll
+.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-memory acceptance-enroll
 
 GO ?= go
 UNAME_S ?= $(shell uname -s)
@@ -39,6 +40,12 @@ help:
 	@echo "    (scripts/e2e-embeddings.sh): a governed embed, a mismatched-model refusal and a"
 	@echo "    no-grant refusal, no external key. Linux: runs natively (needs rootless podman)."
 	@echo "    macOS: inside the Lima VM (started if needed). KEEP=1 leaves the server and files."
+	@echo "make acceptance-memory [KEEP=1]"
+	@echo "    The real-backend memory-store proof: the governed memory MCP server on the embedded"
+	@echo "    backend and on a REAL Qdrant (digest-pinned), with a seam proof that both return the"
+	@echo "    same top-k ids and scores (scripts/e2e-memory.sh). Linux: podman natively. macOS: podman"
+	@echo "    inside the Lima VM (started if needed) plus the native Seatbelt store-file falsifier"
+	@echo "    (scripts/e2e-memory-seatbelt.sh). KEEP=1 leaves the Qdrant container and files."
 
 install:
 	$(GO) install ./cmd/agenthof
@@ -119,4 +126,22 @@ else ifeq ($(UNAME_S),Darwin)
 	deploy/lima/lima.sh e2e embeddings $(KEEP_FLAG)
 else
 	@echo "make acceptance-embeddings: unsupported host $(UNAME_S) — run scripts/e2e-embeddings.sh on a Linux host with rootless podman"; exit 1
+endif
+
+# The memory-store proof runs the governed memory MCP server against a REAL Qdrant
+# (a digest-pinned container on loopback) beside the embedded backend, and proves
+# the two agree. On macOS the embedded store file's confinement is also proven on
+# the real Seatbelt sandbox. Linux/Lima like the runs above, and like them
+# local/by-judgment, never CI.
+acceptance-memory:
+ifeq ($(UNAME_S),Linux)
+	@command -v podman >/dev/null || { echo "make acceptance-memory: podman is not installed (rootless podman is required)"; exit 1; }
+	scripts/e2e-memory.sh $(KEEP_FLAG)
+else ifeq ($(UNAME_S),Darwin)
+	@command -v sandbox-exec >/dev/null || { echo "make acceptance-memory: sandbox-exec not found (macOS required)"; exit 1; }
+	deploy/lima/lima.sh up
+	deploy/lima/lima.sh e2e memory $(KEEP_FLAG)
+	scripts/e2e-memory-seatbelt.sh
+else
+	@echo "make acceptance-memory: unsupported host $(UNAME_S) — run scripts/e2e-memory.sh on a Linux host with rootless podman"; exit 1
 endif
