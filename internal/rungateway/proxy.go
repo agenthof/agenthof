@@ -1125,7 +1125,7 @@ func (p *Gateway) modelDoor(rt v1Route, bind engine.Binding, agent config.AgentD
 				// Accept-Encoding at all. The agent's own HTTP client sets
 				// one; forwarding it verbatim would leave ModifyResponse
 				// reading raw compressed bytes, so parseUsage would silently
-				// fail and the 10 MiB cap would measure compressed size.
+				// fail and the route's response cap would measure compressed size.
 				pr.Out.Header.Del("Accept-Encoding")
 			},
 			ModifyResponse: func(resp *http.Response) error {

@@ -95,7 +95,8 @@ hash of either.
 An embeddings call is recorded as a `model_call` too, not a new event kind. Its
 model is the embedding model's logical name. It carries `prompt_tokens` and
 never `completion_tokens`, and `audit` prints it as
-`model <name> — <N> prompt tokens`, with no completion clause. Neither the input
+`model <name> — <N> prompt tokens`, with no completion clause (a chat call whose
+provider sent no completion count renders the same prompt-only line). Neither the input
 text nor the returned vector is recorded, nor a hash of either.
 
 | Response | `model_call` |
