@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"regexp"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -35,9 +36,10 @@ const maxCallerIDBytes = 256
 
 // The closed set of messages a tool call can fail with. Every error result is
 // one of these fixed strings: never an argument's bytes, never a decoder's or
-// a backend's error text. The tool input schemas carry no pattern, length or
-// range keyword, so the SDK never validates an argument and echoes its value;
-// all validation happens in the handlers below.
+// a backend's error text. The tools are registered through the raw AddTool path,
+// so the SDK neither validates nor echoes an argument's value (the schema
+// still carries type and required); all validation happens in the handlers
+// below.
 const (
 	msgBadArguments   = "invalid arguments"
 	msgBadCollection  = "collection must match [A-Za-z0-9_-]{1,64}"
@@ -139,7 +141,7 @@ func validVector(v []float32, l Limits) bool {
 
 func validMetadata(m json.RawMessage) bool {
 	m = bytes.TrimSpace(m)
-	return len(m) > 0 && m[0] == '{' && json.Valid(m)
+	return len(m) > 0 && m[0] == '{' && json.Valid(m) && utf8.Valid(m)
 }
 
 // structured marshals the result inside the handler, so an encoding failure

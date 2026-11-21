@@ -20,8 +20,13 @@
 #   4. the credential value is in no ledger, artifact, or log.
 # The seam proof then compares the two legs: the SAME top-k ids (compared by the
 # derived UUID, never byte-for-byte) with the scores equal within an epsilon
-# and well separated, so the ranking cannot hinge on a float32 tie. Metadata is
-# not returned by memory_search, so it is not part of the seam.
+# and well separated, so the ranking cannot hinge on a float32 tie. The agent
+# does not print metadata from a search, so it is not part of the seam; on the
+# Qdrant leg the stored payload (text, caller id, nested metadata) is instead
+# read straight from the server. After the restart the writer re-upserts the
+# same record, so a second session's first upsert takes the existing-collection
+# path against the real server and the caller-id overwrite leaves the count at
+# five.
 #
 # Pinned: the Qdrant IMAGE, by the multi-arch INDEX digest of the v1.20.2 tag
 # (resolved from the registry: the tag's Docker-Content-Digest, which `latest`
@@ -129,6 +134,7 @@ UPSERTS='[
 {"collection":"seam","id":"seam-d","text":"seam d","vector":[0,1,0,0],"metadata":{"k":"d"}},
 {"collection":"seam","id":"seam-e","text":"seam e","vector":[-1,0,0,0],"metadata":{"k":"e"}}]'
 UPSERTS="$(printf '%s' "$UPSERTS" | tr -d '\n')"
+UPSERT_A="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])[0], separators=(",",":")))' "$UPSERTS")"
 QUERY='[1,0,0,0]'
 SEARCH="{\"collection\":\"seam\",\"vector\":$QUERY,\"k\":3}"
 
@@ -284,6 +290,20 @@ EOF
 			|| fail "qdrant: could not read the point count from the server"
 		[ "$counted" = 5 ] || fail "qdrant: the server holds $counted points in 'seam', want 5"
 		echo "qdrant: the server itself holds 5 points — ok"
+		# First-hand payload shape: scroll the points and check seam-a's payload.
+		curl -fsS -X POST "$QDRANT_URL/collections/seam/points/scroll" -H 'Content-Type: application/json' \
+			-d '{"limit":10,"with_payload":true}' >"$ldir/scroll.json" || fail "qdrant: could not scroll the points"
+		python3 - "$ldir/scroll.json" <<'PY' || fail "qdrant: the stored payload does not have the expected shape"
+import json, sys
+pts = json.load(open(sys.argv[1]))["result"]["points"]
+by = {p["payload"].get("caller_id"): p["payload"] for p in pts}
+assert set(by) == {"seam-a", "seam-b", "seam-c", "seam-d", "seam-e"}, "caller ids: %r" % sorted(k for k in by if k)
+a = by["seam-a"]
+assert a["text"] == "seam a", a
+assert a["metadata"] == {"k": "a", "n": {"x": 1, "y": [1, 2]}}, a
+assert set(a) == {"text", "caller_id", "metadata"}, "unexpected payload keys: %r" % sorted(a)
+PY
+		echo "qdrant: a stored point's payload holds text, caller_id and nested metadata — ok"
 	fi
 
 	# b. a tool outside the read-only grant is refused and recorded; nothing is run.
@@ -328,6 +348,44 @@ EOF
 	[ "$(grep '^hit ' "$art3" | sed 's/^hit //')" = "$(cat "$BASE/$name.ids")" ] || fail "$name: the post-restart search differs from the original"
 	echo "$name: persistence: the restarted store returns the same top three — ok"
 
+	# c1. the writer, in a NEW session after the restart, re-upserts seam-a (same
+	#     caller id, so the same derived id): its first upsert takes the
+	#     existing-collection path, and the record is overwritten, not added.
+	local out5 art5="" id5 f
+	out5="$(run memory-writer "{\"upserts\":[$UPSERT_A]}" 2>"$ldir/run5.err")" || {
+		cat "$ldir/run5.err" "$ldir/bridge.err" || true
+		fail "$name: the re-upsert run failed"
+	}
+	echo "$out5"
+	grep -q "finished: succeeded" <<<"$out5" || fail "$name: the re-upsert run did not succeed"
+	id5="$(runid_of "$out5")"
+	[ -n "$id5" ] || fail "$name: no run id for the re-upsert run"
+	check_audit "$id5" "re-upsert run"
+	for f in "$arts"/*; do
+		[ "$f" != "$art1" ] && grep -q '^upserted ' "$f" && art5="$f"
+	done
+	[ -n "$art5" ] || fail "$name: no artifact from the re-upsert run"
+	[ "$(sed -n 's/^upserted //p' "$art5")" = "$ida" ] || fail "$name: the re-upsert did not derive the same id"
+	if [ "$name" = qdrant ]; then
+		local recounted
+		recounted="$(curl -fsS -X POST "$QDRANT_URL/collections/seam/points/count" -H 'Content-Type: application/json' -d '{"exact":true}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["count"])')" \
+			|| fail "qdrant: could not read the point count after the re-upsert"
+		[ "$recounted" = 5 ] || fail "qdrant: the server holds $recounted points after the re-upsert, want 5 (overwrite, not add)"
+	fi
+	local out6 art6=""
+	# k=4 (not 3) so the artifact differs from the earlier search's: artifacts are content-addressed.
+	out6="$(run memory-reader "{\"searches\":[{\"collection\":\"seam\",\"vector\":$QUERY,\"k\":4}]}" 2>"$ldir/run6.err")" || {
+		cat "$ldir/run6.err" "$ldir/bridge.err" || true
+		fail "$name: the search after the re-upsert failed"
+	}
+	echo "$out6"
+	for f in "$arts"/*; do
+		[ "$f" != "$art1" ] && [ "$f" != "$art3" ] && grep -q '^hit ' "$f" && art6="$f"
+	done
+	[ -n "$art6" ] || fail "$name: no artifact from the post-overwrite search"
+	[ "$(grep '^hit ' "$art6" | head -n 3 | sed 's/^hit //')" = "$(cat "$BASE/$name.ids")" ] || fail "$name: the search after the overwrite differs from the original"
+	echo "$name: a second session's re-upsert overwrote in place; the same top three — ok"
+
 	# c2. the forbidden record did not land: a wide search finds exactly the five.
 	local out4 id4 art4=""
 	out4="$(run memory-reader "{\"searches\":[{\"collection\":\"seam\",\"vector\":[0,0,1,0],\"k\":10}]}" 2>"$ldir/run4.err")" || {
@@ -338,17 +396,17 @@ EOF
 	id4="$(runid_of "$out4")"
 	[ -n "$id4" ] || fail "$name: no run id for the wide search"
 	for f in "$arts"/*; do
-		[ "$f" != "$art1" ] && [ "$f" != "$art3" ] && grep -q '^hit ' "$f" && art4="$f"
+		[ "$f" != "$art1" ] && [ "$f" != "$art3" ] && [ "$f" != "$art6" ] && grep -q '^hit ' "$f" && art4="$f"
 	done
 	[ -n "$art4" ] || fail "$name: no artifact from the wide search"
 	[ "$(grep -c '^hit ' "$art4")" = 5 ] || fail "$name: the store holds $(grep -c '^hit ' "$art4") records, want 5 (a refused write landed?)"
 	echo "$name: the refused write left no record (five records in the store) — ok"
 
 	# d. the credential is in no ledger, artifact, or log, nor in any run output.
-	if printf '%s\n' "$out1" "$out2" "$out3" "$out4" | grep -qF -- "$MEMORY_TOKEN"; then
+	if printf '%s\n' "$out1" "$out2" "$out3" "$out4" "$out5" "$out6" | grep -qF -- "$MEMORY_TOKEN"; then
 		fail "$name: the credential value reached agenthof's output"
 	fi
-	if grep -rqF -- "$MEMORY_TOKEN" "$logs" "$arts" "$ctl" "$ldir/bridge.err" "$ldir/agent.err" "$ldir/run1.err" "$ldir/run3.err" "$ldir/run4.err" "$store"; then
+	if grep -rqF -- "$MEMORY_TOKEN" "$logs" "$arts" "$ctl" "$ldir/bridge.err" "$ldir/agent.err" "$ldir/run1.err" "$ldir/run3.err" "$ldir/run4.err" "$ldir/run5.err" "$ldir/run6.err" "$store"; then
 		fail "$name: the credential value reached a ledger, artifact, log, or the store"
 	fi
 	echo "$name: the credential value is in no ledger, artifact, or log — ok"

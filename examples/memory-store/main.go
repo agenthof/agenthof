@@ -60,7 +60,7 @@ func parseCollections(csv string) (map[string]struct{}, error) {
 func buildBackend(name, storeFile, qdrantURL, qdrantAuth string, maxEntries int) (Backend, error) {
 	switch name {
 	case "embedded":
-		if storeFile == "" {
+		if strings.TrimSpace(storeFile) == "" {
 			return nil, errors.New("-store-file must not be empty for the embedded backend")
 		}
 		if maxEntries < 1 {

@@ -18,9 +18,9 @@ import (
 const qdrantMaxBody = 16 << 20
 
 // qdrantBackend talks to a Qdrant service over its REST API using only the
-// standard library. Target image: current-stable qdrant/qdrant; the concrete
-// @sha256 and resolved version are pinned by the memory acceptance script added
-// in a later task (the Query API needs Qdrant >= 1.10).
+// standard library. Exercised against the digest-pinned Qdrant in
+// scripts/e2e-memory.sh. The unified Query API (points/query) requires
+// Qdrant >= 1.10.
 //
 // The client never uses a proxy and never follows a redirect, so a configured
 // base URL cannot be bounced to another host. No response body is ever

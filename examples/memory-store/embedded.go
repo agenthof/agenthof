@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -44,7 +45,7 @@ type storeRecord struct {
 type embeddedBackend struct {
 	path       string
 	maxEntries int
-	mu         sync.Mutex // flock does not exclude goroutines of one process
+	mu         sync.Mutex // serializes this process's operations around the shared file; each takes its own fd, so the flock alone is not the guard here
 }
 
 func newEmbeddedBackend(storeFile string, maxEntries int) *embeddedBackend {
@@ -52,7 +53,9 @@ func newEmbeddedBackend(storeFile string, maxEntries int) *embeddedBackend {
 }
 
 // lock takes the process mutex and the cross-process flock. The returned
-// func releases both.
+// func releases both. The flock wait does not honor ctx cancellation: a hung
+// peer holding the lock blocks the caller, and a cancelled ctx surfaces as
+// ErrBackendUnavailable only before the wait. Acceptable for a reference store.
 func (b *embeddedBackend) lock() (func(), error) {
 	b.mu.Lock()
 	if err := os.MkdirAll(filepath.Dir(b.path), 0o700); err != nil {
@@ -152,12 +155,17 @@ func (b *embeddedBackend) save(s *storeFile) error {
 // holding the exclusive lock: every writer holds that lock for the life of its
 // temp, so any temp seen here is stale.
 func (b *embeddedBackend) sweepTemps() {
-	matches, err := filepath.Glob(b.path + ".tmp.*")
+	// A literal prefix match, never a glob: the store path may itself contain
+	// glob metacharacters.
+	dir, prefix := filepath.Dir(b.path), filepath.Base(b.path)+".tmp."
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	for _, m := range matches {
-		_ = os.Remove(m)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
 	}
 }
 

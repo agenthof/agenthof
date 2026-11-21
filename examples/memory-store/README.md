@@ -10,7 +10,8 @@ speaks MCP over stdio and exposes two tools:
   re-indexing the same chunk overwrites it, otherwise a random UUID. Your
   original `id` is not returned.
 - `memory_search` — return the `k` stored chunks nearest to a query vector
-  (`collection`, `vector`, `k`), each as `{id, score, text, metadata}` (`id` being the derived UUID above).
+  (`collection`, `vector`, `k`), each as `{id, score, text, metadata}` (`id`
+  being the derived UUID above).
 
 It is a **reference payload**, not a product. A production operator brings their
 own vector-store MCP server. The `memory_*` tool names are this server's
@@ -27,9 +28,14 @@ Storage is pluggable:
   Cosine). This is the production path.
 
 Both backends return the same result shape. Metadata round-trips as semantic
-JSON, not byte-identical: Qdrant re-serializes it. The server returns
-structured MCP content only, so a client that reads only the `content` array
-sees an empty payload.
+JSON, not byte-identical: Qdrant re-serializes it. Invalid UTF-8 in metadata is
+rejected, but some valid JSON metadata still round-trips semantically and not
+byte-identically: lone-surrogate `\uXXXX` escapes, very large numbers such as
+`1e999`, and duplicate keys are stored verbatim by the embedded backend while
+Qdrant normalizes them. Equal cosine scores are ordered by `id` on the embedded
+backend and are unspecified on Qdrant. The server returns structured MCP
+content only, so a client that reads only the `content` array sees an empty
+payload.
 
 ## Flags
 
@@ -86,9 +92,9 @@ tools:
     read_only_tools: [memory_search]
 ```
 
-`runtime: refbridge` makes the bridge attest first-hand, on every call that returns a result, what it
-ran (argv, pid, environment names); the ledger records that on the `tool_call`
-event.
+`runtime: refbridge` makes the bridge attest first-hand, on every call that
+returns a result, what it ran (argv, pid, environment names); the ledger
+records that on the `tool_call` event.
 
 Agents are then granted the resource per role of use:
 
@@ -149,8 +155,8 @@ past the cut, but a record with short metadata can bring the start of
 a field into the prefix. So the ledger holds a bounded preview that may include
 the start of a retrieved record; it is neither "the text is logged" nor "never
 logged". It is your own audit ledger, whose evidence is limited and
-tamper-evident, not tamper-proof. The server's own error results are fixed strings that carry none of the
-argument's bytes.
+tamper-evident, not tamper-proof. The server's own error results are fixed
+strings that carry none of the argument's bytes.
 
 **3. Authorization is per tool, not per collection.** Any agent granted
 `memory_upsert` may write any collection, and any agent granted `memory_search`

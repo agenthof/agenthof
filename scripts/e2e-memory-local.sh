@@ -10,8 +10,9 @@
 # integrity verified and completeness complete; the search-only agent's
 # memory_upsert is refused as "tool is not available to this run" and records
 # a refused tool_call with no resource or attestation; a SECOND, separate run's search finds the first run's upserts;
-# and the credential value is in no ledger, artifact, or log. Requires go and
-# python3. Runs on macOS and Linux.
+# a call naming an invalid collection fails with the fixed reason and its
+# canary arguments reach no ledger, artifact, or log; and the credential value
+# is in no ledger, artifact, or log. Requires go. Runs on macOS and Linux.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,10 +46,10 @@ fail() {
 no_leak() {
 	local value="$1"
 	shift
-	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK/bridge.err" "$WORK/agent.err" "$WORK/control.jsonl" "$WORK/run1.err" "$WORK/run3.err" "$STORE_DIR"; then
+	if grep -rqF -- "$value" "$WORK/logs" "$WORK/artifacts" "$WORK/bridge.err" "$WORK/agent.err" "$WORK/control.jsonl" "$WORK/run1.err" "$WORK/run3.err" "$WORK/run4.err" "$STORE_DIR"; then
 		fail "$* reached the ledger, an artifact, or a process log"
 	fi
-	if printf '%s\n' "${OUT1:-}" "${AUDIT1:-}" "${OUT2:-}" "${AUDIT2:-}" "${OUT3:-}" "${AUDIT3:-}" | grep -qF -- "$value"; then
+	if printf '%s\n' "${OUT1:-}" "${AUDIT1:-}" "${OUT2:-}" "${AUDIT2:-}" "${OUT3:-}" "${AUDIT3:-}" "${OUT4:-}" "${AUDIT4:-}" | grep -qF -- "$value"; then
 		fail "$* reached agenthof's output"
 	fi
 }
@@ -250,7 +251,25 @@ grep -qE "^hit $ID_B " "$ART3" || fail "the second run's search did not find the
 [ "$(grep -c '^hit ' "$ART3")" = 2 ] || fail "the store holds something other than the two upserted chunks (a refused write landed?)"
 echo "persistence: the second run found the first run's upserts — ok"
 
-# 5. The credential is nowhere in any ledger, artifact, or log.
+# 5. The load-bearing rule end to end: an invalid collection carrying canary
+#    arguments fails with the FIXED reason, and no canary byte reaches a ledger,
+#    artifact, or log. Nothing is printed from the canaries.
+CANARY="canary-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+if OUT4="$(run memory-write "{\"upserts\":[{\"collection\":\"bad/$CANARY\",\"id\":\"id-$CANARY\",\"text\":\"text-$CANARY\",\"vector\":$VEC_A,\"metadata\":{\"k\":\"meta-$CANARY\"}}]}" 2>"$WORK/run4.err")"; then
+	fail "an upsert into an invalid collection did not fail"
+fi
+echo "$OUT4"
+RUNID4="$(runid_of "$OUT4")"
+[ -n "$RUNID4" ] || fail "no run id for the invalid-collection run"
+echo "$OUT4" | grep -q "finished: failed" || fail "the invalid-collection run did not finish failed"
+AUDIT4="$(audit "$RUNID4")"
+echo "$AUDIT4"
+echo "$AUDIT4" | grep -q "ledger integrity: verified" || fail "invalid-collection run ledger not verified"
+grep -qF "tool memory_upsert failed — collection must match [A-Za-z0-9_-]{1,64}" <<<"$AUDIT4" || fail "the audit does not show the fixed invalid-collection reason"
+no_leak "$CANARY" "the invalid-collection canary"
+echo "invalid collection: fixed reason surfaced; canary reached no ledger, artifact, or log — ok"
+
+# 6. The credential is nowhere in any ledger, artifact, or log.
 no_leak "$MEMORY_TOKEN" "the memory credential value"
 no_leak "not-for-the-child-$NONCE" "the non-allowlisted variable's value"
 if grep -q "LEAKED_SECRET" "$WORK/bridge.err"; then fail "a non-allowlisted variable leaked into the bridge log"; fi

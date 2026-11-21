@@ -246,6 +246,17 @@ func TestMetadataRequiredObject(t *testing.T) {
 	}
 }
 
+func TestMetadataInvalidUTF8Refused(t *testing.T) {
+	res := callRaw(t, "memory_upsert", "{\"collection\":\"m\",\"text\":\"x\",\"vector\":[1,0],\"metadata\":{\"k\":\"a\xffb\"},\"id\":\"i\"}")
+	if !res.IsError {
+		t.Fatal("invalid UTF-8 metadata must be refused")
+	}
+	assertFixedString(t, res)
+	if bytes.Contains(resultBytes(t, res), []byte{0xff}) {
+		t.Fatal("argument bytes leaked")
+	}
+}
+
 func TestBoundsEnforced(t *testing.T) {
 	big := make([]string, testLimits.MaxVectorDim+1)
 	for i := range big {

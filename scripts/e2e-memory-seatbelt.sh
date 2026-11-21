@@ -12,10 +12,11 @@
 # sentinel bytes are really on disk; (3) an exec-door agent's `cat <store
 # file>` INSIDE the Seatbelt compartment exits 1, recorded first-hand by
 # refexec, while a contained read of an ordinary host file succeeds (so the
-# denial is specific, not a deny-everything sandbox); (4) the sentinel is in no
-# ledger, artifact, or log; (5) with shared_host_scratch ON the same contained
-# read is STILL refused, the tier records the loosening, and the contained
-# read of an ordinary file still works. Requires macOS with sandbox-exec
+# denial is specific, not a deny-everything sandbox); (4) with
+# shared_host_scratch ON the same contained read is STILL refused, the tier
+# records the loosening, and the contained read of an ordinary file still
+# works; (5) record B's disk-only sentinel (never returned through the door) is
+# in no ledger, artifact, or log. Requires macOS with sandbox-exec
 # (skips cleanly anywhere else), go and python3. Run from the repo root.
 set -euo pipefail
 
@@ -318,7 +319,7 @@ grep -q '"runtime_attestation":{"runtime":"refexec"' "$WORK/logs/$RUNID.jsonl" |
 if grep -q '"runtime_attestation":{"runtime":"refbridge"' "$WORK/logs/$RUNID.jsonl"; then fail "the contained read produced a memory tool_call: it was not out-of-band"; fi
 echo "contained cat of the store file refused (exit 1), recorded first-hand — ok"
 
-# 5. shared_host_scratch ON: the loosening opens /private/tmp for read and
+# 4. shared_host_scratch ON: the loosening opens /private/tmp for read and
 #    write, not the store dir (which is outside it), so the store read is STILL
 #    refused. The audit's loosening marker is the proof the variant really ran
 #    with shared scratch (an ordinary file reads under the baseline regardless).
@@ -331,7 +332,7 @@ echo "$AUDIT" | grep -Eq "exec cat $STORE_FILE — exit 1 \(runtime\) \[runtime-
 echo "$AUDIT" | grep -q "; shared host scratch\]" || fail "the refused shared-scratch run did not record the loosening"
 echo "shared_host_scratch on: the store file is still refused (store dir outside /private/tmp) — ok"
 
-# 4. RECORD B'S SENTINEL ABSENT everywhere an out-of-band read could have put
+# 5. RECORD B'S SENTINEL ABSENT everywhere an out-of-band read could have put
 #    it. B was never returned through the door (only A was), so its bytes exist
 #    only in the store file: finding them in a ledger, artifact, or log would
 #    mean a contained read got through. A is deliberately NOT asserted absent:

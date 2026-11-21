@@ -71,8 +71,8 @@ The governed core is real and runnable today:
   (`memory_upsert`, `memory_search`) over an embedded file-backed index or
   Qdrant, fronted by `deploy/refbridge` and governed like any other tool
   resource: per-tool grants, a read-only search-only mode, and a first-hand
-  attested `tool_call` for every call that returns a result. It is a reference payload — bring your
-  own vector-store MCP in production — and its README states the limits
+  attested `tool_call` for every call that returns a result. It is a reference
+  payload — bring your own vector-store MCP in production — and its README states the limits
   plainly (macOS file readability, a bounded result preview in the ledger,
   per-tool rather than per-collection authorization).
 - **Retention** — `runs prune` ships in the core, not behind a paywall; it is authorized against the installed roles' `prune`
