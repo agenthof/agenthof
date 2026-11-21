@@ -30,6 +30,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Description | `description` | string | no | — |
 | Enabled | `enabled` | bool | no | `true` |
 | Model | `model` | string | no | — |
+| EmbeddingModel | `embedding_model` | string | no | — |
 | Instruction | `instruction` | string | no | — |
 | Tools | `tools` | list of tool grants ({resource, tools} or {resource, mode} objects) | no | none |
 | Output | `output` | string | no | — |
@@ -79,6 +80,15 @@ Optional string. The agent's effective model is this value, or
 that the name has a route. At run time the model door allows a chat
 completion only when the agent's request names that effective model, then
 resolves it through [`models`](#models).
+
+### `embedding_model`
+
+Optional string. The one logical model this agent may name on
+`POST <proxy URL>v1/embeddings`. **Empty means the agent cannot embed — there
+is no fallback to `model` or to `defaults.model`.** `apply` does not check that
+the name has a route; a missing route is a recorded `failed` call at run time.
+The name is resolved through [`models`](#models), like `model`. An enrolled
+agent has none.
 
 ### `instruction`
 
