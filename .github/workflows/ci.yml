@@ -82,6 +82,7 @@ jobs:
           go-version-file: go.mod
       - run: python3 -m unittest discover -s scripts -p 'test_fake_token*' -v
       - run: ./scripts/e2e-refbridge-local.sh
+      - run: ./scripts/e2e-memory-local.sh
 
   refexec-local:
     runs-on: ubuntu-latest

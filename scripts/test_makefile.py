@@ -67,11 +67,48 @@ class MakefileTest(unittest.TestCase):
         self.assertNotIn("deploy/lima", res.stdout)
         self.assertFalse(any(l.strip().startswith("scripts/e2e-embeddings.sh") for l in res.stdout.splitlines()), res.stdout)
 
+    def test_memory_darwin_runs_lima_then_the_native_seatbelt_leg(self):
+        res = make_n("acceptance-memory", "UNAME_S=Darwin")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        lines = [l.strip() for l in res.stdout.splitlines() if l.strip() and not l.startswith("make:")]
+        self.assertEqual(lines[1:], ["deploy/lima/lima.sh up", "deploy/lima/lima.sh e2e memory", "scripts/e2e-memory-seatbelt.sh"])
+        self.assertIn("sandbox-exec", lines[0])
+
+    def test_memory_darwin_keep_is_forwarded_to_the_podman_leg_only(self):
+        res = make_n("acceptance-memory", "UNAME_S=Darwin", "KEEP=1")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("deploy/lima/lima.sh e2e memory --keep", res.stdout)
+        self.assertNotIn("e2e-memory-seatbelt.sh --keep", res.stdout)
+
+    def test_memory_linux_runs_the_podman_script_only_behind_a_podman_guard(self):
+        res = make_n("acceptance-memory", "UNAME_S=Linux", "KEEP=1")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("command -v podman", res.stdout)
+        self.assertIn("scripts/e2e-memory.sh --keep", res.stdout)
+        self.assertNotIn("lima.sh", res.stdout)
+        self.assertNotIn("seatbelt", res.stdout)
+
+    def test_memory_unsupported_host_message(self):
+        res = make_n("acceptance-memory", "UNAME_S=FreeBSD")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("unsupported host FreeBSD", res.stdout)
+        self.assertIn("exit 1", res.stdout)
+        self.assertNotIn("deploy/lima", res.stdout)
+        self.assertFalse(any(l.strip().startswith("scripts/e2e-memory.sh") for l in res.stdout.splitlines()), res.stdout)
+
+    def test_every_script_a_recipe_runs_directly_is_executable(self):
+        import os
+        import re
+        text = (REPO / "Makefile").read_text()
+        for rel in sorted(set(re.findall(r"^\t(?:@)?(scripts/[\w./-]+\.sh)\b", text, re.M))):
+            self.assertTrue(os.access(REPO / rel, os.X_OK), rel + " is run directly by a Makefile recipe but is not executable")
+
     def test_help_is_the_default_goal(self):
         res = make_n()
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("acceptance-podman", res.stdout)
         self.assertIn("acceptance-embeddings", res.stdout)
+        self.assertIn("acceptance-memory", res.stdout)
         self.assertIn("KEEP=1", res.stdout)
 
 
