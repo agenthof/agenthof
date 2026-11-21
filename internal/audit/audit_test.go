@@ -80,6 +80,40 @@ func TestRenderModelCallSucceeded(t *testing.T) {
 	}
 }
 
+func TestRenderModelCallPromptOnly(t *testing.T) {
+	pt := 7
+	events := []engine.Event{{
+		Type: "model_call", Status: "succeeded", Model: "embed",
+		PromptTokens: &pt, Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
+	if !strings.Contains(out, "model embed — 7 prompt tokens") || strings.Contains(out, "completion") {
+		t.Fatalf("prompt-only model_call not rendered:\n%s", out)
+	}
+}
+
+func TestRenderModelCallNoUsage(t *testing.T) {
+	events := []engine.Event{{
+		Type: "model_call", Status: "succeeded", Model: "embed", Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
+	if !strings.Contains(out, "model embed — ? prompt tokens") || strings.Contains(out, "completion") {
+		t.Fatalf("no-usage model_call not rendered:\n%s", out)
+	}
+}
+
+func TestRenderModelCallZeroCompletion(t *testing.T) {
+	pt, ct := 12, 0
+	events := []engine.Event{{
+		Type: "model_call", Status: "succeeded", Model: "fast",
+		PromptTokens: &pt, CompletionTokens: &ct, Time: time.Unix(0, 0).UTC(),
+	}}
+	out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
+	if !strings.Contains(out, "model fast — 12 prompt / 0 completion tokens") {
+		t.Fatalf("zero-completion model_call not rendered:\n%s", out)
+	}
+}
+
 func TestRenderModelCallRefused(t *testing.T) {
 	events := []engine.Event{{
 		Type: "model_call", Status: "refused", Model: "gpt-9",
