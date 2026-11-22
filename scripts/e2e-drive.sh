@@ -164,16 +164,18 @@ podman build -q -t "$IMAGE" -f "$WORK/Containerfile" "$ROOT" >/dev/null || fail 
 NONCE="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 BEARER="placeholder-bearer-$NONCE"      # the tool resource's own bearer: not the Google credential
 BAD_REFRESH="bogus-refresh-token-$NONCE" # for the OAuth-failure path only
+export DRIVE_BRIDGE_BEARER="$BEARER" # the tool resource resolves its bearer from agenthof's own environment
 export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE" # the model route is never called; the key only lets it resolve
 REFRESH="$GOOGLE_DRIVE_MCP_REFRESH_TOKEN"
 CLIENT_ID="$GOOGLE_DRIVE_MCP_CLIENT_ID"
 CLIENT_SECRET="$GOOGLE_DRIVE_MCP_CLIENT_SECRET"
 
-# --- 1. scope check (M6): the minted token's granted scopes must all be
+# --- 1. scope check: the minted token's granted scopes must all be
 # read-only. The token itself is never written anywhere: only the scope names
 # are, and that file is a leak-scan target at the end.
 echo "checking the minted token's scopes with Google's tokeninfo..."
-python3 - "$WORK/scope-check.out" <<'PY' || fail "the scope check failed (see above): the credential must mint a token whose scopes are all read-only"
+GOOGLE_DRIVE_MCP_REFRESH_TOKEN="$REFRESH" GOOGLE_DRIVE_MCP_CLIENT_ID="$CLIENT_ID" GOOGLE_DRIVE_MCP_CLIENT_SECRET="$CLIENT_SECRET" \
+	python3 - "$WORK/scope-check.out" <<'PY' || fail "the scope check failed (see above): the credential must mint a token whose scopes are all read-only"
 import json, os, sys, urllib.parse, urllib.request
 
 def post(url, fields):
@@ -344,12 +346,12 @@ ART1="$(grep -rlF -- "$DRIVE_E2E_EXPECTED_TEXT" "$WORK/artifacts" | head -n1 || 
 grep -qF -- "$DRIVE_E2E_NOTE_ID" "$ART1" || fail "the search result does not carry the fixture note's id"
 echo "governed read: the contained agent read the fixture note; two attested tool_call events — ok"
 
-# --- 3. env names (M7): the bearer plus the three passthrough variables, exactly.
+# --- 3. env names: the bearer plus the three passthrough variables, exactly.
 ENV_JSON='"env_names":["DRIVE_BRIDGE_BEARER","GOOGLE_DRIVE_MCP_CLIENT_ID","GOOGLE_DRIVE_MCP_CLIENT_SECRET","GOOGLE_DRIVE_MCP_REFRESH_TOKEN"]'
 [ "$(grep -cF "$ENV_JSON" "$LEDGER1")" = 2 ] || fail "want env_names of exactly the bearer plus the three Google variables on both tool_call events (a dropped variable would send the MCP to a browser OAuth flow)"
 echo "env names: the three Google variables and the bearer are attested on both events — ok"
 
-# --- 4. containment (M5): no route from the compartment to Google, no credential in it.
+# --- 4. containment: no route from the compartment to Google, no credential in it.
 GOOGLE_IP="$(python3 -c 'import socket; print(socket.getaddrinfo("www.googleapis.com", 443, socket.AF_INET, socket.SOCK_STREAM)[0][4][0])' 2>/dev/null || true)"
 [ -n "$GOOGLE_IP" ] || fail "could not resolve www.googleapis.com on the host, so the dial below would name nothing"
 # The host reaches that address: so a refused dial from the compartment is the wall, not a dead address.
@@ -373,6 +375,7 @@ if grep -Eqi 'GOOGLE|TOKEN|SECRET|PASSWORD|API_KEY|AGENTHOF_|DRIVE_BRIDGE' <<<"$
 	fail "the compartment has a credential-like name in its environment"
 fi
 cmounts="$(out_of podman inspect "$CNAME" --format '{{json .Mounts}}')"
+[ -n "$cmounts" ] || fail "podman named no mounts at all for the compartment, so the bridge-directory search would prove nothing"
 case "$cmounts" in *"$BRIDGE_DIR"*) fail "the bridge's socket directory is mounted into the compartment" ;; esac
 echo "containment: /probe ran; the dial to $GOOGLE_IP:443 hit the wall; no credential name in the compartment — ok"
 
@@ -400,9 +403,26 @@ echo "$OUT3"
 OUTS+=("$OUT3")
 RUNID3="$(runid_of "$OUT3")"
 [ -n "$RUNID3" ] || fail "no run id for the bad-id run"
+grep -q "finished: failed" <<<"$OUT3" || fail "the bad-id run did not finish failed"
 check_audit "$RUNID3" "bad-id run"
+# The failure must come from the real upstream: a failed, attested readGoogleDoc
+# call with a recorded reason, not any other way a run can fail.
+python3 - "$WORK/logs/$RUNID3.jsonl" <<'PY' || fail "the bad-id run has no failed, attested readGoogleDoc tool_call with a reason: the failure did not come from the MCP"
+import json, sys
+for line in open(sys.argv[1]):
+    if not line.strip():
+        continue
+    e = json.loads(line)
+    if e.get("type") == "tool_call" and e.get("tool") == "readGoogleDoc" and e.get("status") != "ok" \
+            and e.get("reason") and (e.get("runtime_attestation") or {}).get("runtime") == "refbridge":
+        sys.exit(0)
+sys.exit(1)
+PY
+podman logs "$CNAME" >"$WORK/agent.err" 2>&1 || true
+[ "$(grep -c 'drive-agent: tool call failed' "$WORK/agent.err")" = 2 ] || fail "want two failed-call lines in the agent's log after the refused and bad-id runs"
 echo "upstream error: a real Google error failed the run, ledger verified — ok"
 
+T0=$SECONDS
 if OUT4="$(run driveauth-read "read $DRIVE_E2E_NOTE_ID" 2>"$WORK/run4.err")"; then
 	fail "a read with a bogus refresh token did not fail the step"
 fi
@@ -411,11 +431,21 @@ OUTS+=("$OUT4")
 RUNID4="$(runid_of "$OUT4")"
 [ -n "$RUNID4" ] || fail "no run id for the OAuth-failure run"
 check_audit "$RUNID4" "OAuth-failure run"
+# The MCP must have REJECTED the credential, not hung: its child was started,
+# the run ended well inside the agent's 240s budget, and the agent's failure
+# is not a timeout.
+grep -q "child spawned" "$WORK/bridge-driveauth.err" || fail "the driveauth child never started, so the failure did not come from the MCP"
+[ $((SECONDS - T0)) -lt 200 ] || fail "the OAuth-failure run took $((SECONDS - T0))s: the MCP hung rather than rejecting the credential"
+podman logs "$CNAME" >"$WORK/agent.err" 2>&1 || true
+[ "$(grep -c 'drive-agent: tool call failed' "$WORK/agent.err")" = 3 ] || fail "want three failed-call lines in the agent's log after the OAuth-failure run"
+if grep 'drive-agent: tool call failed' "$WORK/agent.err" | tail -n1 | grep -Eqi 'deadline exceeded|timed out|timeout'; then
+	fail "the OAuth-failure run ended on a timeout: the MCP hung rather than rejecting the credential"
+fi
 echo "OAuth failure: a real OAuth rejection failed the run, ledger verified — ok"
 
-# --- 7. real-tier leak scan (M1). The agent's log is captured from the
+# --- 7. leak scan. The agent's log is captured from the
 # compartment first; the artifacts hold the full result the agent received.
-podman logs "$CNAME" >"$WORK/agent.err" 2>&1 || true
+[ -s "$WORK/agent.err" ] || fail "the agent's log is empty, so scanning the error results it received would prove nothing"
 printf '%s\n' "${OUTS[@]}" >"$WORK/outs.txt"
 leak() { # $1 = value, $2 = what
 	no_leak "$1" "$2"
