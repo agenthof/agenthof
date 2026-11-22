@@ -140,6 +140,75 @@ defaults:
 	}
 }
 
+func TestToolResourceLaunchSpecParse(t *testing.T) {
+	src := `
+tools:
+  withspec:
+    kind: mcp
+    url: unix:///run/mcp/a.sock
+    runtime: refbridge
+    command: [/usr/local/bin/mcp-a, --stdio]
+    env_passthrough: [A_TOKEN, B_TOKEN]
+    egress: [api.example.com, files.example.com]
+  legacy:
+    kind: mcp
+    url: unix:///run/mcp/b.sock
+    runtime: refbridge
+  plain:
+    kind: mcp
+    url: https://mcp.example.com/mcp
+`
+	var gw GatewayConfig
+	if err := yaml.Unmarshal([]byte(src), &gw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	w := gw.Tools["withspec"]
+	if !w.IsRefbridge() {
+		t.Error("withspec: IsRefbridge = false, want true")
+	}
+	if got := strings.Join(w.Command, " "); got != "/usr/local/bin/mcp-a --stdio" {
+		t.Errorf("command = %q", got)
+	}
+	if got := strings.Join(w.EnvPassthrough, ","); got != "A_TOKEN,B_TOKEN" {
+		t.Errorf("env_passthrough = %q", got)
+	}
+	if got := strings.Join(w.Egress, ","); got != "api.example.com,files.example.com" {
+		t.Errorf("egress = %q", got)
+	}
+	// Round-trips unchanged.
+	out, err := yaml.Marshal(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back ToolResource
+	if err := yaml.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(w.Command, back.Command) ||
+		!slices.Equal(w.EnvPassthrough, back.EnvPassthrough) ||
+		!slices.Equal(w.Egress, back.Egress) || !back.IsRefbridge() {
+		t.Errorf("round-trip: got %+v, want %+v", back, w)
+	}
+
+	// A legacy refbridge resource (no launch spec) still parses; command absent.
+	l := gw.Tools["legacy"]
+	if !l.IsRefbridge() || l.Command != nil || l.EnvPassthrough != nil || l.Egress != nil {
+		t.Errorf("legacy: %+v", l)
+	}
+	out, err = yaml.Marshal(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"command", "env_passthrough", "egress"} {
+		if strings.Contains(string(out), k) {
+			t.Errorf("legacy marshal contains %q:\n%s", k, out)
+		}
+	}
+	if gw.Tools["plain"].IsRefbridge() {
+		t.Error("plain: IsRefbridge = true, want false")
+	}
+}
+
 func TestExecConfigAllows(t *testing.T) {
 	ec := ExecConfig{Allow: []ExecEntry{
 		{Exe: "go", ArgsPrefix: []string{"test"}},

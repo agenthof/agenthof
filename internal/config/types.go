@@ -518,7 +518,20 @@ type ToolResource struct {
 	// runtime: any such claim on a result is stripped and never recorded.
 	// Only "refbridge" is implemented; it requires a unix:// url.
 	Runtime string `yaml:"runtime"`
+	// Command, EnvPassthrough and Egress are the optional launch spec of a
+	// refbridge-fronted MCP, declared here so it is governed config rather
+	// than a side file. Command is the absolute argv to launch; absent
+	// (empty) means the legacy side-file launch. EnvPassthrough lists env
+	// var NAMES to pass through to the process, never values (Article II).
+	// Egress lists the hosts the MCP may reach; it is declared here and
+	// enforced by the podman recipe, not by this struct or by refbridge.
+	Command        []string `yaml:"command,omitempty"`
+	EnvPassthrough []string `yaml:"env_passthrough,omitempty"`
+	Egress         []string `yaml:"egress,omitempty"`
 }
+
+// IsRefbridge reports whether a refbridge runtime fronts this resource.
+func (r ToolResource) IsRefbridge() bool { return r.Runtime == "refbridge" }
 
 type Config struct {
 	Agents    []AgentDef

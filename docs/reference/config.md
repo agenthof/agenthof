@@ -585,6 +585,9 @@ for the runtime flow):
 | Audience | `audience` | string | yes for `token_exchange`; must not be set on other grants | — |
 | ReadOnlyTools | `read_only_tools` | list of strings | no | empty (no read-only grant) |
 | Runtime | `runtime` | string | no | `""` (no trusted runtime) |
+| Command | `command` | list of strings | no; for `runtime: refbridge` | empty (the runtime's own side-file launch) |
+| EnvPassthrough | `env_passthrough` | list of strings | no; for `runtime: refbridge` | empty |
+| Egress | `egress` | list of strings | no; for `runtime: refbridge` | empty |
 
 `read_only_tools` is the operator's list of the tools on this resource that
 an agent grant with `mode: read-only` may use (`tools: ["*"]` for all of them, or a named subset). A tool whose name is not in the
@@ -608,6 +611,14 @@ variable NAMES — never a value); a result that arrives without a well-formed
 attestation fails the call with reason `runtime attestation missing` or
 `runtime attestation malformed`. Leave it unset for an ordinary MCP server:
 any such claim on its results is stripped and never recorded.
+
+`command`, `env_passthrough` and `egress` optionally declare the launch spec
+of a `runtime: refbridge` resource in the config rather than in the
+runtime's side file. `command` is the argv to launch; when absent, the
+runtime launches from its side file as before. `env_passthrough` lists
+environment variable NAMES to pass to the process — never values. `egress`
+lists the hosts the MCP may reach; it is declared here and enforced by the
+container recipe, not by Agenthof or the bridge.
 
 `apply` requires `kind` to be exactly `"mcp"` and `url` to be set and
 `https` (or `http` only to a loopback host — `localhost`, `127.0.0.1`, or
