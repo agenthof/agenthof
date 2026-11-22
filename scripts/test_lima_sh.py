@@ -75,6 +75,21 @@ class LimaShTest(unittest.TestCase):
         cmds = self.shell_cmds(calls)
         self.assertTrue(any(c.endswith("bash scripts/e2e-memory.sh --keep") for c in cmds), cmds)
 
+    def test_e2e_drive_runs_the_script_forwards_keep(self):
+        res, calls = self.lima("e2e", "drive")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cmds = self.shell_cmds(calls)
+        self.assertTrue(any(c.endswith("bash scripts/e2e-drive.sh") for c in cmds), cmds)
+        res, calls = self.lima("e2e", "drive", "--keep")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cmds = self.shell_cmds(calls)
+        self.assertTrue(any(c.endswith("bash scripts/e2e-drive.sh --keep") for c in cmds), cmds)
+
+    def test_all_does_not_include_drive(self):
+        res, calls = self.lima("e2e", "all")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(any("e2e-drive.sh" in c for c in self.shell_cmds(calls)))
+
     def test_all_ends_with_acceptance(self):
         res, calls = self.lima("e2e", "all")
         self.assertEqual(res.returncode, 0, res.stderr)

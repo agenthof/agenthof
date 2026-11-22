@@ -96,6 +96,35 @@ class MakefileTest(unittest.TestCase):
         self.assertNotIn("deploy/lima", res.stdout)
         self.assertFalse(any(l.strip().startswith("scripts/e2e-memory.sh") for l in res.stdout.splitlines()), res.stdout)
 
+    def test_drive_darwin_runs_lima_then_the_native_seatbelt_leg_requiring_network(self):
+        res = make_n("acceptance-drive", "UNAME_S=Darwin")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        lines = [l.strip() for l in res.stdout.splitlines() if l.strip() and not l.startswith("make:")]
+        self.assertEqual(lines[1:], ["deploy/lima/lima.sh up", "deploy/lima/lima.sh e2e drive", "DRIVE_SEATBELT_REQUIRE_NET=1 scripts/e2e-drive-seatbelt.sh"])
+        self.assertIn("sandbox-exec", lines[0])
+
+    def test_drive_darwin_keep_is_forwarded_to_the_podman_leg_only(self):
+        res = make_n("acceptance-drive", "UNAME_S=Darwin", "KEEP=1")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("deploy/lima/lima.sh e2e drive --keep", res.stdout)
+        self.assertNotIn("e2e-drive-seatbelt.sh --keep", res.stdout)
+
+    def test_drive_linux_runs_the_podman_script_only_behind_a_podman_guard(self):
+        res = make_n("acceptance-drive", "UNAME_S=Linux", "KEEP=1")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("command -v podman", res.stdout)
+        self.assertIn("scripts/e2e-drive.sh --keep", res.stdout)
+        self.assertNotIn("lima.sh", res.stdout)
+        self.assertNotIn("seatbelt", res.stdout)
+
+    def test_drive_unsupported_host_message(self):
+        res = make_n("acceptance-drive", "UNAME_S=FreeBSD")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("unsupported host FreeBSD", res.stdout)
+        self.assertIn("exit 1", res.stdout)
+        self.assertNotIn("deploy/lima", res.stdout)
+        self.assertFalse(any(l.strip().startswith("scripts/e2e-drive.sh") for l in res.stdout.splitlines()), res.stdout)
+
     def test_every_script_a_recipe_runs_directly_is_executable(self):
         import os
         import re
@@ -109,6 +138,7 @@ class MakefileTest(unittest.TestCase):
         self.assertIn("acceptance-podman", res.stdout)
         self.assertIn("acceptance-embeddings", res.stdout)
         self.assertIn("acceptance-memory", res.stdout)
+        self.assertIn("acceptance-drive", res.stdout)
         self.assertIn("KEEP=1", res.stdout)
 
 
