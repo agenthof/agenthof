@@ -2,11 +2,13 @@ package registry
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +36,25 @@ func IsFetchAtSpawn(argv []string) bool {
 	return len(argv) > 0 && slices.Contains(fetchLaunchers, filepath.Base(argv[0]))
 }
 
+// validEgressEntry accepts a bare host or host:port. It restates the shape
+// refbridge enforces on its own side (core never imports deploy/): commas are
+// rejected because the entries are joined with them; @ and = are credential
+// shapes; a scheme or path is not a host.
+func validEgressEntry(entry string) bool {
+	if entry == "" || strings.ContainsAny(entry, " \t/,@=") {
+		return false
+	}
+	if !strings.Contains(entry, ":") {
+		return true
+	}
+	host, port, err := net.SplitHostPort(entry)
+	if err != nil || host == "" {
+		return false
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	return err == nil && n > 0
+}
+
 // launchSpecErrors returns messages for an invalid launch spec on r. A
 // refbridge resource with no command is the legacy side-file launch and is
 // valid.
@@ -44,6 +65,11 @@ func launchSpecErrors(r config.ToolResource) []string {
 			msgs = append(msgs, "command, env_passthrough and egress are only valid with runtime refbridge")
 		}
 		return msgs
+	}
+	if len(r.Command) == 0 && (len(r.EnvPassthrough) > 0 || len(r.Egress) > 0) {
+		// Without a command the side-file launch applies and these values
+		// would be inert: refuse rather than imply they are governed.
+		msgs = append(msgs, "env_passthrough and egress require command: a launch spec without a command is not applied")
 	}
 	if len(r.Command) > 0 {
 		if !filepath.IsAbs(r.Command[0]) {
@@ -58,8 +84,18 @@ func launchSpecErrors(r config.ToolResource) []string {
 			break
 		}
 	}
-	if r.TokenEnv != "" && slices.Contains(r.EnvPassthrough, r.TokenEnv) {
-		msgs = append(msgs, "env_passthrough must not include token_env")
+	for _, cred := range []struct{ field, name string }{
+		{"token_env", r.TokenEnv}, {"client_id_env", r.ClientIDEnv}, {"client_secret_env", r.ClientSecretEnv},
+	} {
+		if cred.name != "" && slices.Contains(r.EnvPassthrough, cred.name) {
+			msgs = append(msgs, "env_passthrough must not include "+cred.field)
+		}
+	}
+	for _, e := range r.Egress {
+		if !validEgressEntry(e) {
+			msgs = append(msgs, "egress entries must be a host or host:port")
+			break
+		}
 	}
 	return msgs
 }
