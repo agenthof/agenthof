@@ -40,8 +40,9 @@ The `drive` e2e (`make acceptance-drive`) talks to real Google. Its credential
 pre-vetted, pinned install of the Drive MCP inside the VM) must be set INSIDE
 the VM, for example in a mode-0600 env file sourced by the VM's login shell.
 Never export the credential in the macOS host shell: it would not reach the
-VM, and it would sit in a macOS process environment while the Seatbelt leg
-runs, where a contained agent can read it.
+VM, and a credential left on the host (a shell rc or env file) is readable by
+the Seatbelt compartment's host-wide file reads unless it sits under the
+confiner's deny_read.
 
 ## Commands
 

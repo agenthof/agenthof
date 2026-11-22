@@ -50,10 +50,11 @@
 # On macOS, `make acceptance-drive` runs this inside the Lima VM (deploy/lima).
 # Set ALL the variables above INSIDE the VM (e.g. a mode-0600 env file sourced
 # by the VM's login shell), and have node installed there. NEVER export the real
-# Google credential in the macOS host shell: it would not reach the VM, and it
-# would sit in a macOS process environment while the Seatbelt leg runs, where a
-# contained agent can read it. On a Linux host the MCP runs as a host process
-# that holds the token: use a dedicated machine or VM. --keep (or KEEP=1) keeps
+# Google credential in the macOS host shell: it would not reach the VM, and a
+# credential left on the host (a shell rc or env file) is readable by the Seatbelt
+# compartment's host-wide file reads unless it sits under the confiner's deny_read.
+# On a Linux host the MCP runs as a host process that holds the token: use a
+# dedicated machine or VM. --keep (or KEEP=1) keeps
 # the compartment and the scratch directories.
 set -euo pipefail
 
