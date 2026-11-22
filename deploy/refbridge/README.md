@@ -63,11 +63,15 @@ the rest of the configuration. The slice is rebuilt from the installed file on
 every launch, so edit `gateway.yaml` and re-apply it rather than the slice.
 Point `REFBRIDGE_GATEWAY_CONFIG` at the INSTALLED (applied) snapshot, the
 `gateway.yaml` under `<control-log dir>/installed/<config hash>/`, not a working
-copy. The launcher is not trusted to do so: the gateway holds the applied
-`command` itself and compares it with the argv the bridge attests on every call,
-failing a call whose command differs (reason `runtime attestation command does
-not match the governed launch spec`). That check detects a bridge launched from
-something other than the applied configuration; it is not a measurement of the
+copy. The gateway does not rely on that: it holds the applied `command` itself
+and compares it with the argv the bridge attests on every call. The check runs
+on the result, so the call has already been forwarded (credential injected) to
+the server the bridge launched; on a mismatch the gateway withholds the result
+and records the call failed (reason `runtime attestation command does not match
+the governed launch spec`). It is authoritative detection, not prevention. It
+detects a bridge whose launched COMMAND differs from the applied one;
+`env_passthrough` and `egress` are NOT verified at the door (they are declared
+configuration the launcher and recipe apply). It is not a measurement of the
 server's code, and the pin remains the operator-vetted absolute path. The
 slice limits what the bridge can read; it does not make the stdio server
 trustworthy, and the socket directory and compartment remain the gate.

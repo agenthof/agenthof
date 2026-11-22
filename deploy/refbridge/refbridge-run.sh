@@ -29,8 +29,12 @@ NAME="${REFBRIDGE_NAME:-refbridge}"
 #     every launch, at a stable per-resource path in its own 0700 directory
 #     (never the socket directory), so nothing is removed from under a
 #     running or detached bridge. The socket comes from the resource's
-#     unix:// url; REFBRIDGE_CREDENTIAL_ENV names the variable the bridge sets
-#     on the MCP process (not the resource's token_env).
+#     unix:// url. REFBRIDGE_CREDENTIAL_ENV (the variable the bridge sets on
+#     the MCP process, not the resource's token_env) and
+#     REFBRIDGE_MATERIALIZATION (env-at-spawn or respawn-on-rotation) are
+#     REQUIRED, with no defaults. REFBRIDGE_MAX_SESSIONS, REFBRIDGE_IDLE_TIMEOUT
+#     and REFBRIDGE_MAX_LIFETIME are optional and default to the bridge's own
+#     (4, 10m, 30m); they are operational settings, not governed config.
 if [ -n "${REFBRIDGE_GATEWAY_CONFIG:-}" ] || [ -n "${REFBRIDGE_RESOURCE:-}" ]; then
 	: "${REFBRIDGE_GATEWAY_CONFIG:?refbridge-run: REFBRIDGE_GATEWAY_CONFIG and REFBRIDGE_RESOURCE must be set together}"
 	: "${REFBRIDGE_RESOURCE:?refbridge-run: REFBRIDGE_GATEWAY_CONFIG and REFBRIDGE_RESOURCE must be set together}"

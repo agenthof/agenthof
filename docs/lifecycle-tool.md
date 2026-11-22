@@ -345,12 +345,17 @@ session limits, which default to 4 sessions, 10m idle and 30m lifetime) are
 supplied by the operator at launch; the credential variable and materialization
 mode have no default.
 
-The launch is verified at the door, not trusted. The gateway holds the applied
-`command` and compares it with the argv the bridge attests on each result; a
-call whose attested command differs from the applied one fails with reason
-`runtime attestation command does not match the governed launch spec`, and the
-`tool_call` event records it failed. This detects a bridge that was launched
-from something other than the applied configuration. It is not a measurement of
+The launch command is verified at the door, not trusted. The gateway holds the
+applied `command` and compares it with the argv the bridge attests on each
+result. The check runs on the result, so the call has already been forwarded
+(credential injected) to the server the bridge launched; when the attested
+command differs from the applied one, the gateway withholds the result, fails
+the call with reason `runtime attestation command does not match the governed
+launch spec`, and the `tool_call` event records it failed. This is
+authoritative detection, not prevention. It detects a bridge whose launched
+command differs from the applied one; `env_passthrough` and `egress` are not
+verified at the door (they are declared configuration the launcher and recipe
+apply). It is not a measurement of
 the server's code: the pin is the operator-vetted absolute path in `command`
 (a package launcher that fetches code at spawn time is refused at `apply`).
 A resource that declares no `command` keeps the side-file launch and is not

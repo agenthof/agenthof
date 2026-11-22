@@ -37,7 +37,7 @@ func TestGovernedCommandMismatchFailsCall(t *testing.T) {
 			if err != nil || !result.IsError || resultErrorText(result) != reason {
 				t.Fatalf("agent must get an error result with the fixed reason, got %v %+v", err, result)
 			}
-			if e := onlyToolCall(t, events); e.Status != "failed" || e.Reason != reason {
+			if e := onlyToolCall(t, events); e.Status != "failed" || e.Reason != reason || e.RuntimeAttestation == nil {
 				t.Fatalf("event = %+v", e)
 			}
 		})
