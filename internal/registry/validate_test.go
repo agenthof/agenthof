@@ -483,6 +483,78 @@ func TestBadCredentialSourceRejected(t *testing.T) {
 	}
 }
 
+func TestValidateRefbridgeLaunchSpec(t *testing.T) {
+	base := func(mut func(*config.ToolResource)) config.Config {
+		r := config.ToolResource{
+			Kind: "mcp", URL: "unix:///run/rb/t.sock", Runtime: "refbridge",
+			CredentialSource: "static_env", TokenEnv: "TOK",
+		}
+		mut(&r)
+		return config.Config{Gateway: config.GatewayConfig{Tools: map[string]config.ToolResource{"t": r}}}
+	}
+	cases := []struct {
+		name string
+		mut  func(*config.ToolResource)
+		want bool // want a bad-tool-resource finding
+	}{
+		{"no launch spec (legacy side-file)", func(*config.ToolResource) {}, false},
+		{"absolute command", func(r *config.ToolResource) { r.Command = []string{"/opt/mcp/server", "--flag"} }, false},
+		{"valid env_passthrough", func(r *config.ToolResource) { r.EnvPassthrough = []string{"API_KEY", "_x1"} }, false},
+		{"egress alone on refbridge", func(r *config.ToolResource) { r.Egress = []string{"api.example.com:443"} }, false},
+		{"relative command", func(r *config.ToolResource) { r.Command = []string{"server"} }, true},
+		{"empty-string command", func(r *config.ToolResource) { r.Command = []string{""} }, true},
+		{"npx", func(r *config.ToolResource) { r.Command = []string{"/usr/bin/npx", "pkg"} }, true},
+		{"uvx", func(r *config.ToolResource) { r.Command = []string{"/usr/bin/uvx", "pkg"} }, true},
+		{"npm exec -y", func(r *config.ToolResource) { r.Command = []string{"/usr/bin/npm", "exec", "-y", "pkg"} }, true},
+		{"bad env name", func(r *config.ToolResource) { r.EnvPassthrough = []string{"1BAD"} }, true},
+		{"env name with dash", func(r *config.ToolResource) { r.EnvPassthrough = []string{"A-B"} }, true},
+		{"empty env name", func(r *config.ToolResource) { r.EnvPassthrough = []string{""} }, true},
+		{"env_passthrough equals token_env", func(r *config.ToolResource) { r.EnvPassthrough = []string{"TOK"} }, true},
+		{"command on non-refbridge", func(r *config.ToolResource) {
+			r.Runtime, r.URL = "", "https://mcp/x"
+			r.Command = []string{"/bin/x"}
+		}, true},
+		{"env_passthrough on non-refbridge", func(r *config.ToolResource) {
+			r.Runtime, r.URL = "", "https://mcp/x"
+			r.EnvPassthrough = []string{"A"}
+		}, true},
+		{"egress on non-refbridge", func(r *config.ToolResource) {
+			r.Runtime, r.URL = "", "https://mcp/x"
+			r.Egress = []string{"a:1"}
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := Validate(base(tc.mut))
+			if got := hasCode(errs, "bad-tool-resource"); got != tc.want {
+				t.Fatalf("bad-tool-resource finding = %v, want %v (errs: %v)", got, tc.want, errs)
+			}
+		})
+	}
+}
+
+func TestIsFetchAtSpawn(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{"/opt/mcp/server"}, false},
+		{[]string{"/usr/local/bin/npx", "pkg"}, true},
+		{[]string{"npm", "exec", "pkg"}, true},
+		{[]string{"/x/uvx", "pkg"}, true},
+		{[]string{"pipx", "run", "pkg"}, true},
+		{[]string{"/x/bunx", "pkg"}, true},
+		{[]string{"/opt/server", "-y"}, false},
+		{[]string{"/usr/bin/pipx", "run", "--yes", "pkg"}, true},
+	}
+	for _, tc := range cases {
+		if got := IsFetchAtSpawn(tc.argv); got != tc.want {
+			t.Errorf("IsFetchAtSpawn(%v) = %v, want %v", tc.argv, got, tc.want)
+		}
+	}
+}
+
 func TestValidateClientCredentialsToolResource(t *testing.T) {
 	base := func(mut func(*config.ToolResource)) config.Config {
 		r := config.ToolResource{

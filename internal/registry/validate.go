@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -16,6 +17,52 @@ import (
 type ValidationError struct{ File, Entity, Code, Msg string }
 
 func (e ValidationError) Error() string { return fmt.Sprintf("%s: %s: %s", e.File, e.Entity, e.Msg) }
+
+// envNameRE is the shape of an environment variable name an operator may pass
+// through to a launched MCP server. Names only, never values.
+var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// fetchLaunchers are package launchers that download code at spawn time.
+var fetchLaunchers = []string{"npx", "npm", "uvx", "pipx", "bunx"}
+
+// IsFetchAtSpawn reports whether argv launches code fetched at spawn time (a
+// package launcher such as npx or uvx, with or without -y/--yes) rather than
+// an operator-vetted, already-installed binary. This is a guard-rail, not an
+// airtight check: `env npx` or `sh -c ...` evade it. The real pin is the
+// operator-vetted absolute path.
+func IsFetchAtSpawn(argv []string) bool {
+	return len(argv) > 0 && slices.Contains(fetchLaunchers, filepath.Base(argv[0]))
+}
+
+// launchSpecErrors returns messages for an invalid launch spec on r. A
+// refbridge resource with no command is the legacy side-file launch and is
+// valid.
+func launchSpecErrors(r config.ToolResource) []string {
+	var msgs []string
+	if !r.IsRefbridge() {
+		if len(r.Command) > 0 || len(r.EnvPassthrough) > 0 || len(r.Egress) > 0 {
+			msgs = append(msgs, "command, env_passthrough and egress are only valid with runtime refbridge")
+		}
+		return msgs
+	}
+	if len(r.Command) > 0 {
+		if !filepath.IsAbs(r.Command[0]) {
+			msgs = append(msgs, "command[0] must be an absolute path to a pinned install")
+		} else if IsFetchAtSpawn(r.Command) {
+			msgs = append(msgs, "command must be a pinned install, not fetch-at-spawn (npx, npm, uvx, pipx, bunx)")
+		}
+	}
+	for _, n := range r.EnvPassthrough {
+		if !envNameRE.MatchString(n) {
+			msgs = append(msgs, "env_passthrough entries must be environment variable names")
+			break
+		}
+	}
+	if r.TokenEnv != "" && slices.Contains(r.EnvPassthrough, r.TokenEnv) {
+		msgs = append(msgs, "env_passthrough must not include token_env")
+	}
+	return msgs
+}
 
 func Validate(cfg config.Config) []ValidationError {
 	var errs []ValidationError
@@ -244,6 +291,9 @@ func Validate(cfg config.Config) []ValidationError {
 		default:
 			add("gateway.yaml", id, "bad-tool-resource",
 				fmt.Sprintf("tool resource %q: runtime %q is not implemented (only refbridge)", id, r.Runtime))
+		}
+		for _, m := range launchSpecErrors(r) {
+			add("gateway.yaml", id, "bad-tool-resource", fmt.Sprintf("tool resource %q: %s", id, m))
 		}
 		if r.CredentialSource != "static_env" {
 			add("gateway.yaml", id, "bad-tool-resource",
