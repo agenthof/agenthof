@@ -115,6 +115,16 @@ jobs:
           go-version-file: go.mod
       - run: ./scripts/e2e-obo-local.sh
 
+  enroll-mcp-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: ./scripts/e2e-enroll-mcp-local.sh
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
