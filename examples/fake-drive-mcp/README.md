@@ -145,22 +145,28 @@ takes the path of your vetted install in `DRIVE_MCP_DIR`.
 
 These are properties of the design, stated so an operator can decide.
 
-**1. Two tiers, three guarantees.**
+**1. Two tiers: what each one guarantees.**
 - *Agent network:* denied on both tiers: `--network none` under rootless podman,
   and `(deny network*)` under macOS Seatbelt.
-- *Credential exposure to the contained agent:* on **macOS Seatbelt** a contained
-  agent can read the environment of other host processes (the bridge and the
-  MCP), including credential variables, through `sysctl`. This is not a file
-  read, so `deny_read` does not stop it. On podman the namespaces isolate it.
-  So **real Google credentials belong on the podman tier only** (for example inside a Linux VM on a Mac); on Seatbelt use a
-  placeholder credential. A credential kept in a file is **not**
-  protected by default: Seatbelt allows host-wide reads, so a contained agent can
-  read it unless you list its directory in the confiner's `deny_read` and keep it
-  outside every later allow (for example `/tmp`, a workspace, or a shared scratch
-  path). Nothing enforces that for you; it is an operator obligation. It
-  covers the MCP's own at-rest files too: the MCP's consent setup writes
-  `~/.config/google-drive-mcp/tokens.json` and `gcp-oauth.keys.json`, which fall
-  under the same obligation.
+- *Another process's environment — not readable.* On **macOS Seatbelt** a contained
+  agent **cannot** read the environment of other host processes (the bridge, the MCP),
+  verified on macOS 26: `sysctl KERN_PROCARGS2` returns another process's command-line
+  arguments but **not** its environment, and reading another process's memory
+  (`task_for_pid`) is denied by the confiner and by the OS for a non-root process. So
+  credential variables held in the bridge's or MCP's environment are not exposed to the
+  agent — this does not rule out the Seatbelt tier for a real credential, **provided the
+  at-rest obligation below is met.** Two caveats: a process's *argv* is visible, so never
+  pass a secret on the command line (Agenthof passes credentials by environment, never
+  argv); and podman's namespaces remain the stronger isolation tier (older macOS releases
+  may expose the environment here, so this is verified only on current macOS).
+- *A credential at rest (a file) — readable on Seatbelt unless `deny_read`.* A credential
+  kept in a file is **not** protected by default: Seatbelt allows host-wide reads, so a
+  contained agent can read it unless you list its directory in the confiner's `deny_read`
+  and keep it outside every later allow (for example `/tmp`, a workspace, or a shared
+  scratch path). Nothing enforces that for you; it is an operator obligation. It covers
+  the MCP's own at-rest files too: the MCP's consent setup writes
+  `~/.config/google-drive-mcp/tokens.json` and `gcp-oauth.keys.json`, which fall under
+  the same obligation.
 - *The MCP's own egress:* `egress.allow` is declared, and enforced only by an
   operator network that restricts the bridge's process; on the host it is
   validated, not enforced. The MCP holds the token and could in principle send it

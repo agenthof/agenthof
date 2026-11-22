@@ -40,6 +40,17 @@ type profileInput struct {
 // except the LaunchServices family a confined `open` would use to make the
 // user's unconfined browser carry a request, and signals reach the
 // compartment's own descendants only.
+//
+// A compartment cannot read another process's memory or environment: no
+// process-info or task-port operation is allowed (no process-info*,
+// mach-priv-task-port or mach-task*), so task_for_pid is denied under
+// (deny default) — and the OS denies it to a non-root process regardless. On
+// current macOS sysctl KERN_PROCARGS2 returns another process's argv only; it
+// does not return the environment to another non-root process. Do NOT add a
+// process-info or task-port allow here: it would remove this layer, leaving
+// another process's environment protected only by the OS check. A process's
+// argv IS visible — so credentials travel by environment, never as a
+// command-line argument.
 var sbplBaseline = []string{
 	"(version 1)",
 	"(deny default)",

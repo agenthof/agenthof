@@ -162,8 +162,9 @@ endif
 # network is unreachable. Linux/Lima like the runs above, and like them
 # local/by-judgment, never CI. On macOS the real Google credential, the fixture vars
 # and DRIVE_MCP_DIR must be set INSIDE the Lima VM (e.g. a mode-0600 env file sourced
-# by its login shell), never exported in the host shell: that would not reach the VM
-# and would leave the credential in a macOS process environment during the Seatbelt leg.
+# by its login shell), never exported in the host shell: that would not reach the VM,
+# and a credential left on the host (a shell rc or env file) is readable by the Seatbelt
+# compartment's host-wide file reads unless it sits under the confiner's deny_read.
 acceptance-drive:
 ifeq ($(UNAME_S),Linux)
 	@command -v podman >/dev/null || { echo "make acceptance-drive: podman is not installed (rootless podman is required)"; exit 1; }
