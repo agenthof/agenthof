@@ -124,6 +124,24 @@ type Event struct {
 	// config and audits; it installs nothing (no config_hash) and Installing
 	// never accepts it. Additive and omitempty (Article VI).
 	Enroll *Enroll `json:"enroll,omitempty"`
+	// EnrollMCP is the payload of an action "enroll_mcp" record: what a
+	// governed local-MCP enrollment recorded — the resource, the launch
+	// command, the env var names (never values), the read-only tools
+	// granted, and the config files written. A local MCP has no signed card,
+	// so there is no card digest or signer. Append admits it only under a
+	// structural permit; it installs nothing (no config_hash). Additive and
+	// omitempty (Article VI).
+	EnrollMCP *EnrollMCP `json:"enroll_mcp,omitempty"`
+}
+
+// EnrollMCP is what an "enroll_mcp" record says about a governed MCP
+// enrollment.
+type EnrollMCP struct {
+	Resource      string       `json:"resource"`                  // the tool resource's name
+	Command       []string     `json:"command"`                   // the launch argv the operator approved
+	EnvNames      []string     `json:"env_names,omitempty"`       // names of env vars passed through; never values
+	ReadOnlyTools []string     `json:"read_only_tools,omitempty"` // tools granted read-only
+	Files         []EnrollFile `json:"files,omitempty"`           // config files the enrollment wrote
 }
 
 // EnrollFile is one config file an enrollment wrote: its path and digest.

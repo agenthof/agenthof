@@ -55,8 +55,10 @@ type record struct {
 	Seal *Seal `json:"seal,omitempty"`
 	// Enroll is the payload of an action "enroll" record (control.Enroll).
 	Enroll *Enroll `json:"enroll,omitempty"`
-	Prev   string  `json:"prev"`
-	LogID  string  `json:"log_id,omitempty"`
+	// EnrollMCP is the payload of an action "enroll_mcp" record.
+	EnrollMCP *EnrollMCP `json:"enroll_mcp,omitempty"`
+	Prev      string     `json:"prev"`
+	LogID     string     `json:"log_id,omitempty"`
 }
 
 // MaxAnchorProofLen bounds Anchor.Proof on a record: 8192 bytes of standard
@@ -173,7 +175,72 @@ const (
 	MaxEnrollProgramLen    = 256
 	MaxEnrollBuilds        = 32
 	MaxEnrollBuildFieldLen = 64
+	// Caps on an enroll_mcp record's launch command (argv count and each
+	// element's bytes).
+	MaxEnrollCommand = 64
+	MaxEnrollArgLen  = 1024
 )
+
+// maxEnrollMCPResourceLen bounds an enroll_mcp resource name. The CLI owns
+// the name grammar; this only bounds what a record can carry.
+const maxEnrollMCPResourceLen = 64
+
+// checkEnrollMCPShape is Append's structural permit for an enroll_mcp record,
+// decidable before the ledger is opened. The payload is valid only on an
+// "enroll_mcp" action; a success must carry it, a refusal may, and if it does
+// it is held to the same bounds. An enroll_mcp installs nothing and carries no
+// config_hash. It judges only at Append, never on read.
+func checkEnrollMCPShape(e Event) error {
+	if e.EnrollMCP != nil && e.Action != "enroll_mcp" {
+		return fmt.Errorf("control: enroll_mcp payload on a %q record", e.Action)
+	}
+	if e.Action != "enroll_mcp" {
+		return nil
+	}
+	if e.ConfigHash != "" {
+		return errors.New("control: an enroll_mcp installs nothing and carries no config_hash")
+	}
+	m := e.EnrollMCP
+	if m == nil {
+		if e.Outcome == "success" {
+			return errors.New("control: a successful enroll_mcp must say what it enrolled")
+		}
+		return nil
+	}
+	if m.Resource == "" || len(m.Resource) > maxEnrollMCPResourceLen {
+		return fmt.Errorf("control: enroll_mcp resource must be 1 to %d bytes", maxEnrollMCPResourceLen)
+	}
+	if len(m.Command) == 0 || len(m.Command) > MaxEnrollCommand {
+		return fmt.Errorf("control: enroll_mcp command must have 1 to %d elements", MaxEnrollCommand)
+	}
+	for _, a := range m.Command {
+		if a == "" || len(a) > MaxEnrollArgLen {
+			return fmt.Errorf("control: an enroll_mcp command element must be 1 to %d bytes", MaxEnrollArgLen)
+		}
+	}
+	for name, list := range map[string][]string{"env_names": m.EnvNames, "read_only_tools": m.ReadOnlyTools} {
+		if len(list) > MaxEnrollRequested {
+			return fmt.Errorf("control: enroll_mcp lists %d %s; the cap is %d", len(list), name, MaxEnrollRequested)
+		}
+		for _, s := range list {
+			if len(s) > MaxEnrollRequestedLen {
+				return fmt.Errorf("control: an enroll_mcp %s entry is %d bytes; the cap is %d", name, len(s), MaxEnrollRequestedLen)
+			}
+		}
+	}
+	if len(m.Files) > MaxEnrollFiles {
+		return fmt.Errorf("control: enroll_mcp lists %d files; the cap is %d", len(m.Files), MaxEnrollFiles)
+	}
+	for _, f := range m.Files {
+		if f.Path == "" || len(f.Path) > MaxEnrollPathLen {
+			return fmt.Errorf("control: an enroll_mcp file path must be 1 to %d bytes", MaxEnrollPathLen)
+		}
+		if !anchorHashRE.MatchString(f.SHA256) {
+			return fmt.Errorf("control: enroll_mcp file sha256 %q is not a lowercase hex sha256", f.SHA256)
+		}
+	}
+	return nil
+}
 
 // checkEnrollShape is Append's structural permit for an enroll record,
 // decidable before the ledger is opened, so a malformed one appends nothing.
@@ -284,6 +351,9 @@ func Append(path string, e Event) (ledger.Head, error) {
 	if err := checkEnrollShape(e); err != nil {
 		return ledger.Head{}, err
 	}
+	if err := checkEnrollMCPShape(e); err != nil {
+		return ledger.Head{}, err
+	}
 	if e.Outcome != "success" && e.Reason == nil {
 		return ledger.Head{}, fmt.Errorf("control: outcome %q requires a reason", e.Outcome)
 	}
@@ -337,6 +407,7 @@ func appendOn(c *ledger.Chain, view View, e Event) (ledger.Head, []byte, error) 
 		Anchor:      e.Anchor,
 		Seal:        e.Seal,
 		Enroll:      e.Enroll,
+		EnrollMCP:   e.EnrollMCP,
 		Prev:        c.Prev(),
 	}
 	if c.Base() == 0 && c.Count() == 0 {
