@@ -85,9 +85,13 @@ To drive Agenthof by hand, follow the same steps that script does. The detail a
 from-scratch attempt trips on: the bridge's `socket:` and `refbridge-run.sh`'s
 socket directory must be the *same* writable path (the compartment mounts it at
 that path inside and out), and the shipped
-`deploy/refbridge/bridge-config/refbridge.yaml` carries a placeholder path — so
+`deploy/refbridge/config/gateway.yaml` (and the legacy
+`deploy/refbridge/bridge-config/refbridge.yaml`) carry a placeholder path — so
 point both at a directory you own (e.g. `$XDG_RUNTIME_DIR/agenthof-bridge`)
-before starting the bridge. Write run state (`--control-log`, `--log-dir`,
+before starting the bridge. To launch the bridge from the governed resource
+instead of a side-file, set `REFBRIDGE_GATEWAY_CONFIG` (the installed
+`gateway.yaml`), `REFBRIDGE_RESOURCE` and `REFBRIDGE_CREDENTIAL_ENV`, and leave
+`REFBRIDGE_CONFIG_DIR` unset. Write run state (`--control-log`, `--log-dir`,
 `--artifact-dir`) to a writable path such as `/tmp`, since the repository is
 mounted read-only.
 

@@ -30,9 +30,11 @@ key fails there.
 
 ### Launching from the governed resource spec
 
-When a tool resource in `gateway.yaml` declares `command` (with optional
-`env_passthrough` and `egress`), that resource is the source of truth for the
-launch. Run, on the host:
+The launch spec's home is the governed tool resource: when a resource in
+`gateway.yaml` declares `command` (with optional `env_passthrough` and
+`egress`), it is the source of truth for the launch, so what runs is part of
+the configuration `apply` records. The side-file above remains the legacy,
+operational form for a resource that declares no `command`. Run, on the host:
 
 ```
 refbridge -project <installed gateway.yaml> -resource <id> -credential-env <child var> -out slice.yaml
@@ -50,7 +52,12 @@ defaults. Give the bridge only that file via `-config`.
 slice to a private per-resource path and mounting just that file into the
 compartment.
 The MCP process shares the bridge's filesystem, so never mount `gateway.yaml`
-itself.
+itself: the projection runs on the host and the compartment sees only the
+one-resource slice, so neither the bridge nor the process it spawns can read
+the rest of the configuration. The slice is rebuilt from the installed file on
+every launch, so edit `gateway.yaml` and re-apply it rather than the slice.
+This limits what the bridge can read; it does not make the stdio server
+trustworthy, and the socket directory and compartment remain the gate.
 
 The socket's directory is the access gate. refbridge checks at startup that
 it is mode 0700 and owned by the user refbridge runs as, and refuses to start
@@ -113,11 +120,14 @@ environment never supplies it.
 `scripts/e2e-refbridge-local.sh` runs this whole path against the real
 `agenthof` binary. The compartment recipe (`Containerfile`, `refbridge-run.sh`,
 `bridge-config/`) sits next to this program; `scripts/e2e-refbridge.sh` runs it
-in a rootless-podman compartment. `refbridge-run.sh` bind-mounts the socket
+in a rootless-podman compartment, launching from the demo resource in
+`config/gateway.yaml` (slice mode). `refbridge-run.sh` bind-mounts the socket
 directory (`REFBRIDGE_SOCKET_DIR`) at the same path inside and out, so the
 config's `socket:` is valid for both the bridge and Agenthof; the shipped
-`bridge-config/refbridge.yaml` carries a placeholder socket path, which the e2e
-rewrites to a temporary directory it owns. The stdio server is the `/stdio-tool`
+`config/gateway.yaml` and the legacy `bridge-config/refbridge.yaml` carry a
+placeholder socket path, which the e2e rewrites to a temporary directory it
+owns. In slice mode the resource's `unix://` url must sit under that socket
+directory. The stdio server is the `/stdio-tool`
 binary baked into the image.
 
 ## Limits, stated

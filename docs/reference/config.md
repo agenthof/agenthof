@@ -618,7 +618,10 @@ runtime's side file. `command` is the argv to launch; when absent, the
 runtime launches from its side file as before. `env_passthrough` lists
 environment variable NAMES to pass to the process — never values. `egress`
 lists the hosts the MCP may reach; it is declared here and enforced by the
-container recipe, not by Agenthof or the bridge.
+container recipe, not by Agenthof or the bridge. The operator-side launcher
+reads these on the host and hands the bridge a slice holding only this
+resource's launch spec; the bridge and the process it spawns never read the
+full `gateway.yaml`.
 
 `apply` requires `kind` to be exactly `"mcp"` and `url` to be set and
 `https` (or `http` only to a loopback host — `localhost`, `127.0.0.1`, or

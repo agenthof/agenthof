@@ -331,6 +331,16 @@ The socket, command, credential variable and mode, environment list,
 egress list, and session limits are all required; a config that omits any
 of them is refused before the bridge starts.
 
+The command, environment list and egress list can live on the governed tool
+resource itself (`command`, `env_passthrough`, `egress` in `gateway.yaml`),
+so the launch spec is part of the configuration `apply` records rather than a
+separate file. A host-side step reads the installed `gateway.yaml` and writes
+a slice holding only that resource's launch spec (the socket comes from its
+`unix://` url); only that slice is mounted into the bridge's compartment, so
+neither the bridge nor the server it spawns can read the rest of the
+configuration. A resource that declares no `command` keeps the side-file
+launch.
+
 ## Honest limits
 
 Agenthof is on the path only for an agent that uses this door. A
