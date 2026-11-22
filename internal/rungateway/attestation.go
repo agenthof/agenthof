@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -37,9 +38,10 @@ const (
 )
 
 var (
-	errAttestationMissing   = errors.New("runtime attestation missing")
-	errAttestationMalformed = errors.New("runtime attestation malformed")
-	envNameRE               = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	errAttestationMissing         = errors.New("runtime attestation missing")
+	errAttestationMalformed       = errors.New("runtime attestation malformed")
+	errAttestationCommandMismatch = errors.New("runtime attestation command does not match the governed launch spec")
+	envNameRE                     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	// confinerTokenRE is the shape of a confiner tier or opt token. It restates
 	// the confiner package's token shape on purpose: core never imports deploy/.
 	// Shape only — a well-formed token this reader does not know is recorded
@@ -54,9 +56,12 @@ var (
 // claim to a trust it was not given and is dropped (dropped reports that, so
 // the caller can log it); "refbridge" means the operator declared a trusted
 // runtime, so a result must carry a well-formed attestation and a missing or
-// malformed one is an error the caller turns into a failed call. Errors are
+// malformed one is an error the caller turns into a failed call. When
+// declaredCommand is non-empty (the resource's applied launch spec), the
+// attested argv must equal it exactly, else the call fails; an empty
+// declaredCommand (a legacy resource) is not checked. Errors are
 // fixed strings: the raw value never reaches a reason or a log line.
-func takeRuntimeAttestation(result *mcp.CallToolResult, declared string) (att *engine.RuntimeAttestation, dropped bool, err error) {
+func takeRuntimeAttestation(result *mcp.CallToolResult, declared string, declaredCommand []string) (att *engine.RuntimeAttestation, dropped bool, err error) {
 	var raw any
 	present := false
 	if result != nil {
@@ -75,7 +80,18 @@ func takeRuntimeAttestation(result *mcp.CallToolResult, declared string) (att *e
 		return nil, false, errAttestationMissing
 	}
 	att, err = decodeAttestation(raw, declared)
-	return att, false, err
+	if err != nil {
+		return att, false, err
+	}
+	// The operator's applied configuration is the authority on what the
+	// bridge was told to launch: the gateway compares the argv the bridge
+	// attests against its own copy of the governed command, never against
+	// anything the bridge echoes about itself. The attestation stays on
+	// the returned value so the ledger records what actually ran.
+	if len(declaredCommand) > 0 && !slices.Equal(att.Command, declaredCommand) {
+		return att, false, errAttestationCommandMismatch
+	}
+	return att, false, nil
 }
 
 // decodeAttestation turns a runtime's attestation as decoded from JSON — raw

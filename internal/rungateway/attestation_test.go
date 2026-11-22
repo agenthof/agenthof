@@ -39,7 +39,7 @@ func TestTakeRuntimeAttestation(t *testing.T) {
 	}
 	t.Run("declared and well-formed: decoded, stripped", func(t *testing.T) {
 		res := withMeta(goodAttestation())
-		att, dropped, err := takeRuntimeAttestation(res, "refbridge")
+		att, dropped, err := takeRuntimeAttestation(res, "refbridge", nil)
 		if err != nil || dropped || att == nil {
 			t.Fatalf("got att=%v dropped=%v err=%v", att, dropped, err)
 		}
@@ -52,29 +52,29 @@ func TestTakeRuntimeAttestation(t *testing.T) {
 	})
 	t.Run("undeclared: stripped, dropped, no error", func(t *testing.T) {
 		res := withMeta(goodAttestation())
-		att, dropped, err := takeRuntimeAttestation(res, "")
+		att, dropped, err := takeRuntimeAttestation(res, "", nil)
 		if err != nil || !dropped || att != nil || res.Meta != nil {
 			t.Fatalf("got att=%v dropped=%v err=%v meta=%v", att, dropped, err, res.Meta)
 		}
 	})
 	t.Run("undeclared and absent: nothing to do", func(t *testing.T) {
 		res := withMeta(nil)
-		if att, dropped, err := takeRuntimeAttestation(res, ""); att != nil || dropped || err != nil {
+		if att, dropped, err := takeRuntimeAttestation(res, "", nil); att != nil || dropped || err != nil {
 			t.Fatalf("got att=%v dropped=%v err=%v", att, dropped, err)
 		}
 	})
 	t.Run("declared and absent: missing", func(t *testing.T) {
-		if _, _, err := takeRuntimeAttestation(withMeta(nil), "refbridge"); err == nil || err.Error() != "runtime attestation missing" {
+		if _, _, err := takeRuntimeAttestation(withMeta(nil), "refbridge", nil); err == nil || err.Error() != "runtime attestation missing" {
 			t.Fatalf("err = %v", err)
 		}
-		if _, _, err := takeRuntimeAttestation(nil, "refbridge"); err == nil || err.Error() != "runtime attestation missing" {
+		if _, _, err := takeRuntimeAttestation(nil, "refbridge", nil); err == nil || err.Error() != "runtime attestation missing" {
 			t.Fatalf("nil result err = %v", err)
 		}
 	})
 	t.Run("other _meta keys survive stripping", func(t *testing.T) {
 		res := withMeta(goodAttestation())
 		res.Meta["other"] = "kept"
-		if _, _, err := takeRuntimeAttestation(res, "refbridge"); err != nil {
+		if _, _, err := takeRuntimeAttestation(res, "refbridge", nil); err != nil {
 			t.Fatal(err)
 		}
 		if res.Meta["other"] != "kept" || len(res.Meta) != 1 {
@@ -112,7 +112,7 @@ func TestTakeRuntimeAttestation(t *testing.T) {
 				mut(m)
 				res = withMeta(m)
 			}
-			_, _, err := takeRuntimeAttestation(res, "refbridge")
+			_, _, err := takeRuntimeAttestation(res, "refbridge", nil)
 			if err == nil || err.Error() != "runtime attestation malformed" {
 				t.Fatalf("err = %v, want runtime attestation malformed", err)
 			}
