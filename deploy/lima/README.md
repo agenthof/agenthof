@@ -90,7 +90,8 @@ that path inside and out), and the shipped
 point both at a directory you own (e.g. `$XDG_RUNTIME_DIR/agenthof-bridge`)
 before starting the bridge. To launch the bridge from the governed resource
 instead of a side-file, set `REFBRIDGE_GATEWAY_CONFIG` (the installed
-`gateway.yaml`), `REFBRIDGE_RESOURCE` and `REFBRIDGE_CREDENTIAL_ENV`, and leave
+`gateway.yaml` under the control log's `installed/` directory),
+`REFBRIDGE_RESOURCE`, `REFBRIDGE_CREDENTIAL_ENV` and `REFBRIDGE_MATERIALIZATION`, and leave
 `REFBRIDGE_CONFIG_DIR` unset. Write run state (`--control-log`, `--log-dir`,
 `--artifact-dir`) to a writable path such as `/tmp`, since the repository is
 mounted read-only.

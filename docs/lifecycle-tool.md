@@ -307,8 +307,9 @@ the `tool_call` event. What the bridge adds:
 - **Egress is the compartment's.** The bridge config names the hosts the
   server may reach; an empty list runs the compartment with no network at
   all, which is what the reference recipe proves. A non-empty list is
-  enforced by a network the operator restricts (`REFBRIDGE_NETWORK`), or
-  the recipe refuses.
+  declared in the config but is not filtered by Agenthof or the bridge: it
+  needs a network the operator restricts to those hosts
+  (`REFBRIDGE_NETWORK`), or the recipe refuses.
 - **The bridge attests first-hand what it ran.** The bridge is the party
   that built the subprocess's environment, started it, and relayed the
   call, so on every result it hands back it states what it did, and
@@ -334,12 +335,26 @@ of them is refused before the bridge starts.
 The command, environment list and egress list can live on the governed tool
 resource itself (`command`, `env_passthrough`, `egress` in `gateway.yaml`),
 so the launch spec is part of the configuration `apply` records rather than a
-separate file. A host-side step reads the installed `gateway.yaml` and writes
-a slice holding only that resource's launch spec (the socket comes from its
-`unix://` url); only that slice is mounted into the bridge's compartment, so
-neither the bridge nor the server it spawns can read the rest of the
-configuration. A resource that declares no `command` keeps the side-file
-launch.
+separate file. A host-side step reads the installed (applied) `gateway.yaml`
+and writes a slice holding only that resource's launch spec (the socket comes
+from its `unix://` url); only that slice is mounted into the bridge's
+compartment, so neither the bridge nor the server it spawns can read the rest
+of the configuration. The operational settings that are not part of the
+governed resource (the credential variable, the materialization mode, and the
+session limits, which default to 4 sessions, 10m idle and 30m lifetime) are
+supplied by the operator at launch; the credential variable and materialization
+mode have no default.
+
+The launch is verified at the door, not trusted. The gateway holds the applied
+`command` and compares it with the argv the bridge attests on each result; a
+call whose attested command differs from the applied one fails with reason
+`runtime attestation command does not match the governed launch spec`, and the
+`tool_call` event records it failed. This detects a bridge that was launched
+from something other than the applied configuration. It is not a measurement of
+the server's code: the pin is the operator-vetted absolute path in `command`
+(a package launcher that fetches code at spawn time is refused at `apply`).
+A resource that declares no `command` keeps the side-file launch and is not
+checked.
 
 ## Honest limits
 

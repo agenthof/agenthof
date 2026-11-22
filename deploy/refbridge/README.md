@@ -37,26 +37,39 @@ the configuration `apply` records. The side-file above remains the legacy,
 operational form for a resource that declares no `command`. Run, on the host:
 
 ```
-refbridge -project <installed gateway.yaml> -resource <id> -credential-env <child var> -out slice.yaml
+refbridge -project <installed gateway.yaml> -resource <id> -credential-env <child var> -materialization <mode> -out slice.yaml
 ```
 
 It reads the whole `gateway.yaml` and writes a side-file for that one resource
 only (`command`, `env_passthrough` and `egress.allow` from the resource; the
 socket from its `unix://` url). `-credential-env` names the variable refbridge
 sets on the MCP process; it is separate from the resource's `token_env`, the
-bearer source Agenthof injects. Session limits and materialization are flags
-(`-max-sessions`, `-idle-timeout`, `-max-lifetime`, `-materialization`) with
-defaults. Give the bridge only that file via `-config`.
+bearer source Agenthof injects. `-materialization` is required, with no
+default (`env-at-spawn` for a static credential, `respawn-on-rotation` for a
+rotating one). The session limits (`-max-sessions`, `-idle-timeout`,
+`-max-lifetime`) are operational settings of the deployment, not governed
+configuration: they default to 4 sessions, 10m idle and 30m lifetime, and are
+not recorded by `apply`. Give the bridge only that file via `-config`.
 `refbridge-run.sh` does this when `REFBRIDGE_GATEWAY_CONFIG` and
-`REFBRIDGE_RESOURCE` are set (with `REFBRIDGE_CREDENTIAL_ENV`), writing the
-slice to a private per-resource path and mounting just that file into the
-compartment.
+`REFBRIDGE_RESOURCE` are set. It requires `REFBRIDGE_CREDENTIAL_ENV` and
+`REFBRIDGE_MATERIALIZATION` (no defaults) and takes optional
+`REFBRIDGE_MAX_SESSIONS`, `REFBRIDGE_IDLE_TIMEOUT` and `REFBRIDGE_MAX_LIFETIME`;
+it writes the slice to a private per-resource path and mounts just that file
+into the compartment.
 The MCP process shares the bridge's filesystem, so never mount `gateway.yaml`
 itself: the projection runs on the host and the compartment sees only the
 one-resource slice, so neither the bridge nor the process it spawns can read
 the rest of the configuration. The slice is rebuilt from the installed file on
 every launch, so edit `gateway.yaml` and re-apply it rather than the slice.
-This limits what the bridge can read; it does not make the stdio server
+Point `REFBRIDGE_GATEWAY_CONFIG` at the INSTALLED (applied) snapshot, the
+`gateway.yaml` under `<control-log dir>/installed/<config hash>/`, not a working
+copy. The launcher is not trusted to do so: the gateway holds the applied
+`command` itself and compares it with the argv the bridge attests on every call,
+failing a call whose command differs (reason `runtime attestation command does
+not match the governed launch spec`). That check detects a bridge launched from
+something other than the applied configuration; it is not a measurement of the
+server's code, and the pin remains the operator-vetted absolute path. The
+slice limits what the bridge can read; it does not make the stdio server
 trustworthy, and the socket directory and compartment remain the gate.
 
 The socket's directory is the access gate. refbridge checks at startup that
