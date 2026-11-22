@@ -28,6 +28,30 @@ sessions:
 `egress=none` or `egress=<host,...>` without listening; a file that omits any
 key fails there.
 
+### Launching from the governed resource spec
+
+When a tool resource in `gateway.yaml` declares `command` (with optional
+`env_passthrough` and `egress`), that resource is the source of truth for the
+launch. Run, on the host:
+
+```
+refbridge -project <installed gateway.yaml> -resource <id> -credential-env <child var> -out slice.yaml
+```
+
+It reads the whole `gateway.yaml` and writes a side-file for that one resource
+only (`command`, `env_passthrough` and `egress.allow` from the resource; the
+socket from its `unix://` url). `-credential-env` names the variable refbridge
+sets on the MCP process; it is separate from the resource's `token_env`, the
+bearer source Agenthof injects. Session limits and materialization are flags
+(`-max-sessions`, `-idle-timeout`, `-max-lifetime`, `-materialization`) with
+defaults. Give the bridge only that file via `-config`.
+`refbridge-run.sh` does this when `REFBRIDGE_GATEWAY_CONFIG` and
+`REFBRIDGE_RESOURCE` are set (with `REFBRIDGE_CREDENTIAL_ENV`), writing the
+slice to a private per-resource path and mounting just that file into the
+compartment.
+The MCP process shares the bridge's filesystem, so never mount `gateway.yaml`
+itself.
+
 The socket's directory is the access gate. refbridge checks at startup that
 it is mode 0700 and owned by the user refbridge runs as, and refuses to start
 otherwise. Never point `socket` into the refbox socket directory
