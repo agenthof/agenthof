@@ -51,7 +51,7 @@ type projectOps struct {
 // slice that would not launch is never written.
 func projectSlice(gateway []byte, id string, ops projectOps) ([]byte, error) {
 	if id == "" {
-		return nil, errors.New("refbridge project: --resource is required")
+		return nil, errors.New("refbridge project: -resource is required")
 	}
 	var gw projectedGateway
 	if err := yaml.Unmarshal(gateway, &gw); err != nil {

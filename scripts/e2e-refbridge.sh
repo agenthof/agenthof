@@ -60,14 +60,21 @@ cp -R deploy/refbridge/config/. "$WORK/config/"
 sed -i "s|/run/agenthof-bridge-agent|$AGENT_DIR|g; s|/run/agenthof-bridge|$SOCK_DIR|g" "$WORK/config/gateway.yaml" "$WORK/config"/agents/*.yaml
 printf 'refbox_socket_dir: %s\n' "$AGENT_DIR" >>"$WORK/config/gateway.yaml"
 
+# Apply FIRST: the bridge launches from what was governed and applied, never
+# from the working directory.
+"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups bridge-users
+HASH="$(tr -d '[:space:]' <"$WORK/installed/current")"
+INSTALLED_GATEWAY="$WORK/installed/${HASH#sha256:}/gateway.yaml"
+[ -f "$INSTALLED_GATEWAY" ] || fail "no installed gateway.yaml at $INSTALLED_GATEWAY"
+
 # The bridge launches from the governed resource spec: the host projects the
-# installed gateway.yaml's stdio-tool resource into a one-resource slice and
+# INSTALLED gateway.yaml's stdio-tool resource into a one-resource slice and
 # only that file is mounted (slice mode: REFBRIDGE_CONFIG_DIR stays unset).
 go build -o "$WORK/refbridge" ./deploy/refbridge
 unset REFBRIDGE_CONFIG_DIR || true
 export REFBRIDGE_SLICE_DIR="$WORK/slice"
 SLICE="$REFBRIDGE_SLICE_DIR/stdio-tool.yaml"
-REFBRIDGE_BIN="$WORK/refbridge" REFBRIDGE_GATEWAY_CONFIG="$WORK/config/gateway.yaml" REFBRIDGE_RESOURCE=stdio-tool REFBRIDGE_CREDENTIAL_ENV=DEMO_TOKEN \
+REFBRIDGE_BIN="$WORK/refbridge" REFBRIDGE_GATEWAY_CONFIG="$INSTALLED_GATEWAY" REFBRIDGE_RESOURCE=stdio-tool REFBRIDGE_CREDENTIAL_ENV=DEMO_TOKEN REFBRIDGE_MATERIALIZATION=env-at-spawn \
 	REFBRIDGE_DETACH=1 REFBRIDGE_IMAGE="$IMAGE" REFBRIDGE_NAME="$NAME" deploy/refbridge/refbridge-run.sh >/dev/null
 for i in $(seq 1 30); do
 	[ -S "$SOCK_DIR/stdio-tool.sock" ] && break
@@ -95,7 +102,6 @@ NONCE="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 export DEMO_TOOL_TOKEN="tool-secret-$NONCE"
 export AGENTHOF_GATEWAY_KEY="host-side-dummy-key-$NONCE"
 
-"$WORK/agenthof" apply --config "$WORK/config" --control-log "$WORK/control.jsonl" --as ci --groups bridge-users
 OUT="$("$WORK/agenthof" run bridge-operator bridge-demo --input "call echo hello-$NONCE; call credential; call environment" \
 	--as ci --groups bridge-users --config "$WORK/config" --control-log "$WORK/control.jsonl" \
 	--log-dir "$WORK/logs" --artifact-dir "$WORK/artifacts")"
@@ -143,6 +149,7 @@ fi
 MOUNTS="$(podman inspect "$NAME" --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}')"
 echo "$MOUNTS" | grep -q "bind $SOCK_DIR $SOCK_DIR" || fail "socket dir not mounted at the same path"
 echo "$MOUNTS" | grep -q "bind $SLICE /config/refbridge.yaml" || fail "the one-resource slice is not mounted"
+podman inspect "$NAME" --format '{{range .Mounts}}{{.Destination}} rw={{.RW}}{{"\n"}}{{end}}' | grep -q '^/config/refbridge.yaml rw=false$' || fail "the slice must be mounted read-only (:ro)"
 if echo "$MOUNTS" | grep -Eq "bind $WORK/config|gateway.yaml"; then fail "gateway.yaml must never be mounted into the bridge"; fi
 if grep -q 'DEMO_TOOL_TOKEN' "$SLICE"; then fail "the slice must not carry the gateway's token_env"; fi
 [ "$(echo "$MOUNTS" | grep -c '^bind ' || true)" = 2 ] || fail "unexpected binds: $MOUNTS"

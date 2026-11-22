@@ -10,7 +10,7 @@
 //
 //	refbridge -config refbridge.yaml          serve
 //	refbridge -config refbridge.yaml -check   validate and print the egress line
-//	refbridge -project gateway.yaml -resource ID -credential-env NAME -out slice.yaml
+//	refbridge -project gateway.yaml -resource ID -credential-env NAME -materialization MODE -out slice.yaml
 //	                                          host-side: write the side-file for one governed resource, then exit
 package main
 
@@ -33,8 +33,18 @@ func main() {
 	maxSessions := flag.Int("max-sessions", 4, "with -project: concurrent sessions")
 	idle := flag.String("idle-timeout", "10m", "with -project: idle session timeout")
 	life := flag.String("max-lifetime", "30m", "with -project: session lifetime cap")
-	mat := flag.String("materialization", matEnvAtSpawn, "with -project: credential materialization")
+	mat := flag.String("materialization", "", "with -project: credential materialization (required: env-at-spawn or respawn-on-rotation)")
 	flag.Parse()
+	if *project == "" {
+		// The -project-only flags would otherwise be ignored without a word.
+		projectOnly := map[string]bool{"resource": true, "out": true, "credential-env": true, "max-sessions": true, "idle-timeout": true, "max-lifetime": true, "materialization": true}
+		flag.Visit(func(f *flag.Flag) {
+			if projectOnly[f.Name] {
+				fmt.Fprintf(os.Stderr, "refbridge: -%s only applies with -project\n", f.Name)
+				os.Exit(2)
+			}
+		})
+	}
 	if *project != "" {
 		if *cfgPath != "" || *check {
 			fmt.Fprintln(os.Stderr, "refbridge: -project is its own mode; it takes neither -config nor -check")

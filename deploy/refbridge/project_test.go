@@ -139,6 +139,14 @@ func TestProjectRequiresCredentialEnv(t *testing.T) {
 	}
 }
 
+func TestProjectRequiresMaterialization(t *testing.T) {
+	ops := testOps
+	ops.Materialization = ""
+	if _, err := projectSlice([]byte(multiGateway), "stdio-tool", ops); err == nil || !strings.Contains(err.Error(), "materialization") {
+		t.Fatalf("want a materialization error (no silent default), got %v", err)
+	}
+}
+
 // The slice shape is strict: an unknown launch-spec field fails closed.
 func TestSliceUnknownFieldFailsClosed(t *testing.T) {
 	bad := strings.Replace(validYAML, "env_passthrough: []", "env_passthrough: []\nargs_extra: [\"--x\"]", 1)

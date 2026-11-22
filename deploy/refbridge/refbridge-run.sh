@@ -49,8 +49,18 @@ if [ -n "${REFBRIDGE_GATEWAY_CONFIG:-}" ] || [ -n "${REFBRIDGE_RESOURCE:-}" ]; t
 	mkdir -p "$SLICE_DIR"
 	chmod 0700 "$SLICE_DIR"
 	SLICE="$SLICE_DIR/$REFBRIDGE_RESOURCE.yaml"
-	"${REFBRIDGE_BIN:-refbridge}" -project "$REFBRIDGE_GATEWAY_CONFIG" -resource "$REFBRIDGE_RESOURCE" \
-		-credential-env "${REFBRIDGE_CREDENTIAL_ENV:-DEMO_TOKEN}" -out "$SLICE"
+	# Operational settings are the bridge's deployment, not the governed
+	# resource: the credential variable and materialization are REQUIRED (no
+	# silent default); session limits default to the bridge's own flag defaults
+	# (4 sessions, 10m idle, 30m lifetime) unless set here.
+	: "${REFBRIDGE_CREDENTIAL_ENV:?refbridge-run: REFBRIDGE_CREDENTIAL_ENV is required (the variable the bridge sets on the MCP process)}"
+	: "${REFBRIDGE_MATERIALIZATION:?refbridge-run: REFBRIDGE_MATERIALIZATION is required (env-at-spawn or respawn-on-rotation)}"
+	project_args=(-project "$REFBRIDGE_GATEWAY_CONFIG" -resource "$REFBRIDGE_RESOURCE"
+		-credential-env "$REFBRIDGE_CREDENTIAL_ENV" -materialization "$REFBRIDGE_MATERIALIZATION" -out "$SLICE")
+	[ -z "${REFBRIDGE_MAX_SESSIONS:-}" ] || project_args+=(-max-sessions "$REFBRIDGE_MAX_SESSIONS")
+	[ -z "${REFBRIDGE_IDLE_TIMEOUT:-}" ] || project_args+=(-idle-timeout "$REFBRIDGE_IDLE_TIMEOUT")
+	[ -z "${REFBRIDGE_MAX_LIFETIME:-}" ] || project_args+=(-max-lifetime "$REFBRIDGE_MAX_LIFETIME")
+	"${REFBRIDGE_BIN:-refbridge}" "${project_args[@]}"
 	config_mount=(-v "$SLICE:/config/refbridge.yaml:ro")
 else
 	config_mount=(-v "$CONFIG_DIR:/config:ro")
