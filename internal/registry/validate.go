@@ -2,10 +2,13 @@ package registry
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +19,86 @@ import (
 type ValidationError struct{ File, Entity, Code, Msg string }
 
 func (e ValidationError) Error() string { return fmt.Sprintf("%s: %s: %s", e.File, e.Entity, e.Msg) }
+
+// envNameRE is the shape of an environment variable name an operator may pass
+// through to a launched MCP server. Names only, never values.
+var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// fetchLaunchers are package launchers that download code at spawn time.
+var fetchLaunchers = []string{"npx", "npm", "uvx", "pipx", "bunx"}
+
+// IsFetchAtSpawn reports whether argv launches code fetched at spawn time (a
+// package launcher such as npx or uvx, with or without -y/--yes) rather than
+// an operator-vetted, already-installed binary. This is a guard-rail, not an
+// airtight check: `env npx` or `sh -c ...` evade it. The real pin is the
+// operator-vetted absolute path.
+func IsFetchAtSpawn(argv []string) bool {
+	return len(argv) > 0 && slices.Contains(fetchLaunchers, filepath.Base(argv[0]))
+}
+
+// validEgressEntry accepts a bare host or host:port. It restates the shape
+// refbridge enforces on its own side (core never imports deploy/): commas are
+// rejected because the entries are joined with them; @ and = are credential
+// shapes; a scheme or path is not a host.
+func validEgressEntry(entry string) bool {
+	if entry == "" || strings.ContainsAny(entry, " \t/,@=") {
+		return false
+	}
+	if !strings.Contains(entry, ":") {
+		return true
+	}
+	host, port, err := net.SplitHostPort(entry)
+	if err != nil || host == "" {
+		return false
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	return err == nil && n > 0
+}
+
+// launchSpecErrors returns messages for an invalid launch spec on r. A
+// refbridge resource with no command is the legacy side-file launch and is
+// valid.
+func launchSpecErrors(r config.ToolResource) []string {
+	var msgs []string
+	if !r.IsRefbridge() {
+		if len(r.Command) > 0 || len(r.EnvPassthrough) > 0 || len(r.Egress) > 0 {
+			msgs = append(msgs, "command, env_passthrough and egress are only valid with runtime refbridge")
+		}
+		return msgs
+	}
+	if len(r.Command) == 0 && (len(r.EnvPassthrough) > 0 || len(r.Egress) > 0) {
+		// Without a command the side-file launch applies and these values
+		// would be inert: refuse rather than imply they are governed.
+		msgs = append(msgs, "env_passthrough and egress require command: a launch spec without a command is not applied")
+	}
+	if len(r.Command) > 0 {
+		if !filepath.IsAbs(r.Command[0]) {
+			msgs = append(msgs, "command[0] must be an absolute path to a pinned install")
+		} else if IsFetchAtSpawn(r.Command) {
+			msgs = append(msgs, "command must be a pinned install, not fetch-at-spawn (npx, npm, uvx, pipx, bunx)")
+		}
+	}
+	for _, n := range r.EnvPassthrough {
+		if !envNameRE.MatchString(n) {
+			msgs = append(msgs, "env_passthrough entries must be environment variable names")
+			break
+		}
+	}
+	for _, cred := range []struct{ field, name string }{
+		{"token_env", r.TokenEnv}, {"client_id_env", r.ClientIDEnv}, {"client_secret_env", r.ClientSecretEnv},
+	} {
+		if cred.name != "" && slices.Contains(r.EnvPassthrough, cred.name) {
+			msgs = append(msgs, "env_passthrough must not include "+cred.field)
+		}
+	}
+	for _, e := range r.Egress {
+		if !validEgressEntry(e) {
+			msgs = append(msgs, "egress entries must be a host or host:port")
+			break
+		}
+	}
+	return msgs
+}
 
 func Validate(cfg config.Config) []ValidationError {
 	var errs []ValidationError
@@ -244,6 +327,9 @@ func Validate(cfg config.Config) []ValidationError {
 		default:
 			add("gateway.yaml", id, "bad-tool-resource",
 				fmt.Sprintf("tool resource %q: runtime %q is not implemented (only refbridge)", id, r.Runtime))
+		}
+		for _, m := range launchSpecErrors(r) {
+			add("gateway.yaml", id, "bad-tool-resource", fmt.Sprintf("tool resource %q: %s", id, m))
 		}
 		if r.CredentialSource != "static_env" {
 			add("gateway.yaml", id, "bad-tool-resource",

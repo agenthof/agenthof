@@ -10,6 +10,8 @@
 //
 //	refbridge -config refbridge.yaml          serve
 //	refbridge -config refbridge.yaml -check   validate and print the egress line
+//	refbridge -project gateway.yaml -resource ID -credential-env NAME -materialization MODE -out slice.yaml
+//	                                          host-side: write the side-file for one governed resource, then exit
 package main
 
 import (
@@ -24,7 +26,41 @@ import (
 func main() {
 	cfgPath := flag.String("config", "", "path to the bridge's YAML config (required)")
 	check := flag.Bool("check", false, "validate the config, print its egress line (egress=none or egress=host,...) and exit")
+	project := flag.String("project", "", "host-side: path to the installed gateway.yaml to project one resource's launch spec from (writes -out and exits)")
+	resource := flag.String("resource", "", "with -project: the tool resource id")
+	out := flag.String("out", "", "with -project: where to write the side-file")
+	credEnv := flag.String("credential-env", "", "with -project: the variable refbridge sets on the MCP child (required; not the resource's token_env)")
+	maxSessions := flag.Int("max-sessions", 4, "with -project: concurrent sessions")
+	idle := flag.String("idle-timeout", "10m", "with -project: idle session timeout")
+	life := flag.String("max-lifetime", "30m", "with -project: session lifetime cap")
+	mat := flag.String("materialization", "", "with -project: credential materialization (required: env-at-spawn or respawn-on-rotation)")
 	flag.Parse()
+	if *project == "" {
+		// The -project-only flags would otherwise be ignored without a word.
+		projectOnly := map[string]bool{"resource": true, "out": true, "credential-env": true, "max-sessions": true, "idle-timeout": true, "max-lifetime": true, "materialization": true}
+		flag.Visit(func(f *flag.Flag) {
+			if projectOnly[f.Name] {
+				fmt.Fprintf(os.Stderr, "refbridge: -%s only applies with -project\n", f.Name)
+				os.Exit(2)
+			}
+		})
+	}
+	if *project != "" {
+		if *cfgPath != "" || *check {
+			fmt.Fprintln(os.Stderr, "refbridge: -project is its own mode; it takes neither -config nor -check")
+			os.Exit(2)
+		}
+		if *out == "" {
+			fmt.Fprintln(os.Stderr, "refbridge: -project requires -out")
+			os.Exit(2)
+		}
+		ops := projectOps{CredentialEnv: *credEnv, MaxSessions: *maxSessions, IdleTimeout: *idle, MaxLifetime: *life, Materialization: *mat}
+		if err := runProject(*project, *resource, *out, ops); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
 	if *cfgPath == "" {
 		fmt.Fprintln(os.Stderr, "refbridge: -config is required")
 		os.Exit(2)

@@ -157,7 +157,13 @@ The governed core is real and runnable today:
   with the session. Agenthof still runs nothing — and because the bridge is
   the party that runs the server, it attests first-hand on every call what
   it ran, which the ledger records on the `tool_call` event when the
-  resource declares `runtime: refbridge`.
+  resource declares `runtime: refbridge`. The server's launch spec
+  (`command`, `env_passthrough`, `egress`) can be declared on the tool
+  resource itself, so it is part of the governed configuration; the launcher
+  projects the applied configuration on the host and mounts only that one
+  resource's slice into the bridge's compartment, never the full
+  `gateway.yaml`, and the gateway fails a call whose attested command differs
+  from the applied one.
 - **Exec gateway, first-hand** — allowlisted commands, run by a trusted
   operator-side runtime. The agent asks, and `deploy/refexec` — a reference
   operator-side runtime on the host — runs the allowlisted command in a

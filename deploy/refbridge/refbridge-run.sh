@@ -17,6 +17,59 @@ CONFIG_DIR="${REFBRIDGE_CONFIG_DIR:-$(cd "$(dirname "$0")" && pwd)/bridge-config
 IMAGE="${REFBRIDGE_IMAGE:-refbridge:test}"
 NAME="${REFBRIDGE_NAME:-refbridge}"
 
+# Two ways to supply the bridge's config:
+#   - a side-file directory (REFBRIDGE_CONFIG_DIR, the default), mounted whole;
+#   - the governed resource spec: REFBRIDGE_GATEWAY_CONFIG (the installed
+#     gateway.yaml) + REFBRIDGE_RESOURCE (the tool resource id). A host-side
+#     `refbridge -project` run (REFBRIDGE_BIN) writes a slice holding only that
+#     resource's launch spec, and ONLY that one file is mounted into the
+#     compartment. The gateway.yaml itself is never mounted: the MCP process
+#     shares the bridge's filesystem, so it must not be able to read the rest
+#     of the configuration. The slice is rebuilt from the installed file on
+#     every launch, at a stable per-resource path in its own 0700 directory
+#     (never the socket directory), so nothing is removed from under a
+#     running or detached bridge. The socket comes from the resource's
+#     unix:// url. REFBRIDGE_CREDENTIAL_ENV (the variable the bridge sets on
+#     the MCP process, not the resource's token_env) and
+#     REFBRIDGE_MATERIALIZATION (env-at-spawn or respawn-on-rotation) are
+#     REQUIRED, with no defaults. REFBRIDGE_MAX_SESSIONS, REFBRIDGE_IDLE_TIMEOUT
+#     and REFBRIDGE_MAX_LIFETIME are optional and default to the bridge's own
+#     (4, 10m, 30m); they are operational settings, not governed config.
+if [ -n "${REFBRIDGE_GATEWAY_CONFIG:-}" ] || [ -n "${REFBRIDGE_RESOURCE:-}" ]; then
+	: "${REFBRIDGE_GATEWAY_CONFIG:?refbridge-run: REFBRIDGE_GATEWAY_CONFIG and REFBRIDGE_RESOURCE must be set together}"
+	: "${REFBRIDGE_RESOURCE:?refbridge-run: REFBRIDGE_GATEWAY_CONFIG and REFBRIDGE_RESOURCE must be set together}"
+	if [ -n "${REFBRIDGE_CONFIG_DIR:-}" ]; then
+		echo "refbridge-run: REFBRIDGE_CONFIG_DIR cannot be combined with REFBRIDGE_GATEWAY_CONFIG/REFBRIDGE_RESOURCE" >&2
+		exit 1
+	fi
+	case "$REFBRIDGE_RESOURCE" in
+		*/* | . | ..) echo "refbridge-run: REFBRIDGE_RESOURCE must be a plain resource id" >&2; exit 1 ;;
+	esac
+	SLICE_DIR="${REFBRIDGE_SLICE_DIR:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/agenthof-bridge-slice}"
+	if [ "$SLICE_DIR" = "$SOCK_DIR" ]; then
+		echo "refbridge-run: REFBRIDGE_SLICE_DIR must differ from the socket directory" >&2
+		exit 1
+	fi
+	mkdir -p "$SLICE_DIR"
+	chmod 0700 "$SLICE_DIR"
+	SLICE="$SLICE_DIR/$REFBRIDGE_RESOURCE.yaml"
+	# Operational settings are the bridge's deployment, not the governed
+	# resource: the credential variable and materialization are REQUIRED (no
+	# silent default); session limits default to the bridge's own flag defaults
+	# (4 sessions, 10m idle, 30m lifetime) unless set here.
+	: "${REFBRIDGE_CREDENTIAL_ENV:?refbridge-run: REFBRIDGE_CREDENTIAL_ENV is required (the variable the bridge sets on the MCP process)}"
+	: "${REFBRIDGE_MATERIALIZATION:?refbridge-run: REFBRIDGE_MATERIALIZATION is required (env-at-spawn or respawn-on-rotation)}"
+	project_args=(-project "$REFBRIDGE_GATEWAY_CONFIG" -resource "$REFBRIDGE_RESOURCE"
+		-credential-env "$REFBRIDGE_CREDENTIAL_ENV" -materialization "$REFBRIDGE_MATERIALIZATION" -out "$SLICE")
+	[ -z "${REFBRIDGE_MAX_SESSIONS:-}" ] || project_args+=(-max-sessions "$REFBRIDGE_MAX_SESSIONS")
+	[ -z "${REFBRIDGE_IDLE_TIMEOUT:-}" ] || project_args+=(-idle-timeout "$REFBRIDGE_IDLE_TIMEOUT")
+	[ -z "${REFBRIDGE_MAX_LIFETIME:-}" ] || project_args+=(-max-lifetime "$REFBRIDGE_MAX_LIFETIME")
+	"${REFBRIDGE_BIN:-refbridge}" "${project_args[@]}"
+	config_mount=(-v "$SLICE:/config/refbridge.yaml:ro")
+else
+	config_mount=(-v "$CONFIG_DIR:/config:ro")
+fi
+
 # 0700: the directory is the access gate the bridge insists on. With
 # --userns=keep-id --user, the bridge runs as this host user, so the
 # directory it checks is owned by the uid it runs as.
@@ -26,7 +79,7 @@ chmod 0700 "$SOCK_DIR"
 # keep-id + --user: without them the image's nonroot uid maps to a subuid that
 # cannot read a 0700 config directory. The image ENTRYPOINT already carries
 # `-config /config/refbridge.yaml`; arguments after the image append to it.
-EGRESS="$(podman run --rm --network none --userns=keep-id --user "$(id -u):$(id -g)" -v "$CONFIG_DIR:/config:ro" "$IMAGE" -check)"
+EGRESS="$(podman run --rm --network none --userns=keep-id --user "$(id -u):$(id -g)" "${config_mount[@]}" "$IMAGE" -check)"
 case "$EGRESS" in
 	egress=none) network=(--network none) ;;
 	egress=*)
@@ -51,7 +104,7 @@ common=(
 	--cpus=1
 	--pids-limit=64
 	-v "$SOCK_DIR:$SOCK_DIR"
-	-v "$CONFIG_DIR:/config:ro"
+	"${config_mount[@]}"
 )
 
 if [ "${REFBRIDGE_DETACH:-}" = 1 ]; then

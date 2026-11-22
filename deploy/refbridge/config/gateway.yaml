@@ -1,6 +1,9 @@
 # Agenthof's side of the demo: the bridge is an ordinary MCP tool resource
-# whose url is the bridge's Unix socket. The path must equal the bridge
-# config's `socket` (the e2e rewrites /run/agenthof-bridge to a temp dir).
+# whose url is the bridge's Unix socket. The resource also carries the
+# governed launch spec (command, env_passthrough, egress); `refbridge -project`
+# derives the bridge's own config from it, taking the socket from this url.
+# The socket must sit under the directory refbridge-run.sh bind-mounts
+# (REFBRIDGE_SOCKET_DIR); the e2e rewrites /run/agenthof-bridge to a temp dir.
 # runtime: refbridge says a trusted runtime fronts it: the bridge attests
 # first-hand what it ran on every result, Agenthof records that on the
 # tool_call event, and a result without it fails the call.
@@ -11,6 +14,9 @@ tools:
     runtime: refbridge
     credential_source: static_env
     token_env: DEMO_TOOL_TOKEN
+    command: ["/stdio-tool", "-credential-env", "DEMO_TOKEN"]
+    env_passthrough: []
+    egress: []           # [] → the recipe runs the compartment with --network none
 models:
   fast:
     endpoint: http://localhost:4000

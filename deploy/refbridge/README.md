@@ -28,6 +28,54 @@ sessions:
 `egress=none` or `egress=<host,...>` without listening; a file that omits any
 key fails there.
 
+### Launching from the governed resource spec
+
+The launch spec's home is the governed tool resource: when a resource in
+`gateway.yaml` declares `command` (with optional `env_passthrough` and
+`egress`), it is the source of truth for the launch, so what runs is part of
+the configuration `apply` records. The side-file above remains the legacy,
+operational form for a resource that declares no `command`. Run, on the host:
+
+```
+refbridge -project <installed gateway.yaml> -resource <id> -credential-env <child var> -materialization <mode> -out slice.yaml
+```
+
+It reads the whole `gateway.yaml` and writes a side-file for that one resource
+only (`command`, `env_passthrough` and `egress.allow` from the resource; the
+socket from its `unix://` url). `-credential-env` names the variable refbridge
+sets on the MCP process; it is separate from the resource's `token_env`, the
+bearer source Agenthof injects. `-materialization` is required, with no
+default (`env-at-spawn` for a static credential, `respawn-on-rotation` for a
+rotating one). The session limits (`-max-sessions`, `-idle-timeout`,
+`-max-lifetime`) are operational settings of the deployment, not governed
+configuration: they default to 4 sessions, 10m idle and 30m lifetime, and are
+not recorded by `apply`. Give the bridge only that file via `-config`.
+`refbridge-run.sh` does this when `REFBRIDGE_GATEWAY_CONFIG` and
+`REFBRIDGE_RESOURCE` are set. It requires `REFBRIDGE_CREDENTIAL_ENV` and
+`REFBRIDGE_MATERIALIZATION` (no defaults) and takes optional
+`REFBRIDGE_MAX_SESSIONS`, `REFBRIDGE_IDLE_TIMEOUT` and `REFBRIDGE_MAX_LIFETIME`;
+it writes the slice to a private per-resource path and mounts just that file
+into the compartment.
+The MCP process shares the bridge's filesystem, so never mount `gateway.yaml`
+itself: the projection runs on the host and the compartment sees only the
+one-resource slice, so neither the bridge nor the process it spawns can read
+the rest of the configuration. The slice is rebuilt from the installed file on
+every launch, so edit `gateway.yaml` and re-apply it rather than the slice.
+Point `REFBRIDGE_GATEWAY_CONFIG` at the INSTALLED (applied) snapshot, the
+`gateway.yaml` under `<control-log dir>/installed/<config hash>/`, not a working
+copy. The gateway does not rely on that: it holds the applied `command` itself
+and compares it with the argv the bridge attests on every call. The check runs
+on the result, so the call has already been forwarded (credential injected) to
+the server the bridge launched; on a mismatch the gateway withholds the result
+and records the call failed (reason `runtime attestation command does not match
+the governed launch spec`). It is authoritative detection, not prevention. It
+detects a bridge whose launched COMMAND differs from the applied one;
+`env_passthrough` and `egress` are NOT verified at the door (they are declared
+configuration the launcher and recipe apply). It is not a measurement of the
+server's code, and the pin remains the operator-vetted absolute path. The
+slice limits what the bridge can read; it does not make the stdio server
+trustworthy, and the socket directory and compartment remain the gate.
+
 The socket's directory is the access gate. refbridge checks at startup that
 it is mode 0700 and owned by the user refbridge runs as, and refuses to start
 otherwise. Never point `socket` into the refbox socket directory
@@ -89,11 +137,14 @@ environment never supplies it.
 `scripts/e2e-refbridge-local.sh` runs this whole path against the real
 `agenthof` binary. The compartment recipe (`Containerfile`, `refbridge-run.sh`,
 `bridge-config/`) sits next to this program; `scripts/e2e-refbridge.sh` runs it
-in a rootless-podman compartment. `refbridge-run.sh` bind-mounts the socket
+in a rootless-podman compartment, launching from the demo resource in
+`config/gateway.yaml` (slice mode). `refbridge-run.sh` bind-mounts the socket
 directory (`REFBRIDGE_SOCKET_DIR`) at the same path inside and out, so the
 config's `socket:` is valid for both the bridge and Agenthof; the shipped
-`bridge-config/refbridge.yaml` carries a placeholder socket path, which the e2e
-rewrites to a temporary directory it owns. The stdio server is the `/stdio-tool`
+`config/gateway.yaml` and the legacy `bridge-config/refbridge.yaml` carry a
+placeholder socket path, which the e2e rewrites to a temporary directory it
+owns. In slice mode the resource's `unix://` url must sit under that socket
+directory. The stdio server is the `/stdio-tool`
 binary baked into the image.
 
 ## Limits, stated

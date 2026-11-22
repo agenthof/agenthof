@@ -547,7 +547,7 @@ func (p *Gateway) forward(stepCtx context.Context, bind engine.Binding, agent co
 		// recover silently); an undeclared resource's claim is dropped.
 		var attestation *engine.RuntimeAttestation
 		if callErr == nil {
-			att, dropped, attErr := takeRuntimeAttestation(result, p.tools[resourceID].Runtime)
+			att, dropped, attErr := takeRuntimeAttestation(result, p.tools[resourceID].Runtime, p.tools[resourceID].Command)
 			switch {
 			case attErr != nil:
 				logger.Error("runtime attestation rejected", "resource", resourceID, "tool", req.Params.Name, "reason", attErr.Error())

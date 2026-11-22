@@ -585,6 +585,9 @@ for the runtime flow):
 | Audience | `audience` | string | yes for `token_exchange`; must not be set on other grants | — |
 | ReadOnlyTools | `read_only_tools` | list of strings | no | empty (no read-only grant) |
 | Runtime | `runtime` | string | no | `""` (no trusted runtime) |
+| Command | `command` | list of strings | no; for `runtime: refbridge` | empty (the runtime's own side-file launch) |
+| EnvPassthrough | `env_passthrough` | list of strings | no; for `runtime: refbridge` | empty |
+| Egress | `egress` | list of strings | no; for `runtime: refbridge` | empty |
 
 `read_only_tools` is the operator's list of the tools on this resource that
 an agent grant with `mode: read-only` may use (`tools: ["*"]` for all of them, or a named subset). A tool whose name is not in the
@@ -608,6 +611,43 @@ variable NAMES — never a value); a result that arrives without a well-formed
 attestation fails the call with reason `runtime attestation missing` or
 `runtime attestation malformed`. Leave it unset for an ordinary MCP server:
 any such claim on its results is stripped and never recorded.
+
+`command`, `env_passthrough` and `egress` optionally declare the launch spec
+of a `runtime: refbridge` resource in the config rather than in the
+runtime's side file. `command` is the argv to launch; when absent, the
+runtime launches from its side file as before. `env_passthrough` lists
+environment variable NAMES to pass to the process — never values. `egress`
+is declared here: an empty list runs the compartment with no network, and a
+non-empty list requires a podman network the operator restricts to those
+hosts. Agenthof and the bridge do not filter egress by host themselves. The
+operator-side launcher reads the installed (applied) `gateway.yaml` on the
+host and hands the bridge a slice holding only this resource's launch spec;
+the bridge and the process it spawns never read the full `gateway.yaml`.
+When a resource declares `command`, the gateway also compares the argv the
+bridge attests on each call with the applied `command`, and a call whose
+attested argv differs fails with reason `runtime attestation command does not
+match the governed launch spec`. A resource with no `command` is not checked.
+
+`apply` checks the launch spec and rejects the resource with
+`bad-tool-resource` when:
+
+- any of `command`, `env_passthrough` or `egress` is set on a resource that is
+  not `runtime: refbridge` ("command, env_passthrough and egress are only valid
+  with runtime refbridge");
+- `env_passthrough` or `egress` is set without `command` ("env_passthrough and
+  egress require command: a launch spec without a command is not applied");
+- `command[0]` is not an absolute path ("command[0] must be an absolute path to
+  a pinned install");
+- `command` launches code fetched at spawn time, such as `npx`, `npm`, `uvx`,
+  `pipx` or `bunx` ("command must be a pinned install, not fetch-at-spawn
+  ..."). This is a guard-rail, not an airtight check; the pin is the
+  operator-vetted absolute path;
+- an `env_passthrough` entry is not an environment variable name
+  ("env_passthrough entries must be environment variable names"), or names the
+  resource's `token_env`, `client_id_env` or `client_secret_env` ("env_passthrough
+  must not include token_env", and likewise for the others);
+- an `egress` entry is not a host or `host:port` ("egress entries must be a host
+  or host:port").
 
 `apply` requires `kind` to be exactly `"mcp"` and `url` to be set and
 `https` (or `http` only to a loopback host — `localhost`, `127.0.0.1`, or
