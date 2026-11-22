@@ -44,7 +44,7 @@ podman build -f deploy/refbridge/Containerfile -t "$IMAGE" .
 # The bridge config, pointed at the private socket dir.
 mkdir -p "$WORK/bridge-config"
 sed "s|/run/agenthof-bridge|$SOCK_DIR|g" deploy/refbridge/bridge-config/refbridge.yaml >"$WORK/bridge-config/refbridge.yaml"
-export REFBRIDGE_CONFIG_DIR="$WORK/bridge-config"
+# The side-file form stays covered by the config-is-law refusal below.
 
 # Config is law before the compartment exists: a config without a
 # materialization mode is refused by the same binary that would serve it.
@@ -55,7 +55,20 @@ if podman run --rm --network none --userns=keep-id --user "$(id -u):$(id -g)" -v
 fi
 grep -q "credential.materialization" "$WORK/check.err" || { cat "$WORK/check.err" >&2; fail "the refusal did not name credential.materialization"; }
 
-REFBRIDGE_DETACH=1 REFBRIDGE_IMAGE="$IMAGE" REFBRIDGE_NAME="$NAME" deploy/refbridge/refbridge-run.sh >/dev/null
+mkdir -p "$WORK/config"
+cp -R deploy/refbridge/config/. "$WORK/config/"
+sed -i "s|/run/agenthof-bridge-agent|$AGENT_DIR|g; s|/run/agenthof-bridge|$SOCK_DIR|g" "$WORK/config/gateway.yaml" "$WORK/config"/agents/*.yaml
+printf 'refbox_socket_dir: %s\n' "$AGENT_DIR" >>"$WORK/config/gateway.yaml"
+
+# The bridge launches from the governed resource spec: the host projects the
+# installed gateway.yaml's stdio-tool resource into a one-resource slice and
+# only that file is mounted (slice mode: REFBRIDGE_CONFIG_DIR stays unset).
+go build -o "$WORK/refbridge" ./deploy/refbridge
+unset REFBRIDGE_CONFIG_DIR || true
+export REFBRIDGE_SLICE_DIR="$WORK/slice"
+SLICE="$REFBRIDGE_SLICE_DIR/stdio-tool.yaml"
+REFBRIDGE_BIN="$WORK/refbridge" REFBRIDGE_GATEWAY_CONFIG="$WORK/config/gateway.yaml" REFBRIDGE_RESOURCE=stdio-tool REFBRIDGE_CREDENTIAL_ENV=DEMO_TOKEN \
+	REFBRIDGE_DETACH=1 REFBRIDGE_IMAGE="$IMAGE" REFBRIDGE_NAME="$NAME" deploy/refbridge/refbridge-run.sh >/dev/null
 for i in $(seq 1 30); do
 	[ -S "$SOCK_DIR/stdio-tool.sock" ] && break
 	[ "$i" = 30 ] && {
@@ -74,11 +87,6 @@ for i in $(seq 1 30); do
 	[ "$i" = 30 ] && fail "agent socket never appeared"
 	sleep 0.5
 done
-
-mkdir -p "$WORK/config"
-cp -R deploy/refbridge/config/. "$WORK/config/"
-sed -i "s|/run/agenthof-bridge-agent|$AGENT_DIR|g; s|/run/agenthof-bridge|$SOCK_DIR|g" "$WORK/config/gateway.yaml" "$WORK/config"/agents/*.yaml
-printf 'refbox_socket_dir: %s\n' "$AGENT_DIR" >>"$WORK/config/gateway.yaml"
 
 NONCE="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 # The tool credential lives with the HOST agenthof process only: exported
@@ -134,7 +142,9 @@ if podman inspect "$NAME" --format '{{range .Config.Env}}{{println .}}{{end}}' |
 fi
 MOUNTS="$(podman inspect "$NAME" --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}')"
 echo "$MOUNTS" | grep -q "bind $SOCK_DIR $SOCK_DIR" || fail "socket dir not mounted at the same path"
-echo "$MOUNTS" | grep -q "bind $WORK/bridge-config /config" || fail "config not mounted"
+echo "$MOUNTS" | grep -q "bind $SLICE /config/refbridge.yaml" || fail "the one-resource slice is not mounted"
+if echo "$MOUNTS" | grep -Eq "bind $WORK/config|gateway.yaml"; then fail "gateway.yaml must never be mounted into the bridge"; fi
+if grep -q 'DEMO_TOOL_TOKEN' "$SLICE"; then fail "the slice must not carry the gateway's token_env"; fi
 [ "$(echo "$MOUNTS" | grep -c '^bind ' || true)" = 2 ] || fail "unexpected binds: $MOUNTS"
 if echo "$MOUNTS" | grep -q "$AGENT_DIR"; then fail "the agent/gateway socket dir must never be mounted into the bridge"; fi
 podman logs "$NAME" 2>&1 | grep -q "session ended; child torn down" || fail "no teardown logged"
