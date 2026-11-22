@@ -540,6 +540,7 @@ func TestValidateRefbridgeLaunchSpec(t *testing.T) {
 		{"env_passthrough equals token_env", func(r *config.ToolResource) {
 			r.Command, r.EnvPassthrough = []string{"/opt/mcp/server"}, []string{"TOK"}
 		}, true},
+		{"token_env holds a value, not a name", func(r *config.ToolResource) { r.TokenEnv = "sk-live-abc123" }, true},
 		{"command on non-refbridge", func(r *config.ToolResource) {
 			r.Runtime, r.URL = "", "https://mcp/x"
 			r.Command = []string{"/bin/x"}

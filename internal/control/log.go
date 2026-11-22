@@ -185,6 +185,16 @@ const (
 // the name grammar; this only bounds what a record can carry.
 const maxEnrollMCPResourceLen = 64
 
+// ValidateEnrollMCP applies Append's bounds for a successful enroll_mcp
+// payload, so a caller can refuse an over-bound enrollment before it writes
+// anything. The payload's Files are checked too if present.
+func ValidateEnrollMCP(m *EnrollMCP) error {
+	if m == nil {
+		return errors.New("control: no enroll_mcp payload")
+	}
+	return checkEnrollMCPShape(Event{Action: "enroll_mcp", Outcome: "success", EnrollMCP: m})
+}
+
 // checkEnrollMCPShape is Append's structural permit for an enroll_mcp record,
 // decidable before the ledger is opened. The payload is valid only on an
 // "enroll_mcp" action; a success must carry it, a refusal may, and if it does

@@ -300,17 +300,102 @@ func TestEnrollMCPUnauthorizedRefused(t *testing.T) {
 // mutatingReader edits the working gateway.yaml the first time it is read,
 // standing in for a file changing after the decision but before the write.
 type mutatingReader struct {
-	r    *strings.Reader
-	path string
-	done bool
+	r       *strings.Reader
+	path    string
+	content string // what the file becomes; the colliding gateway when empty
+	done    bool
 }
 
 func (m *mutatingReader) Read(p []byte) (int, error) {
 	if !m.done {
 		m.done = true
-		_ = os.WriteFile(m.path, []byte(mcpGateway+"  drive: {kind: mcp, url: https://other.example.test/y, credential_source: static_env, token_env: T, read_only_tools: [a]}\n"), 0o644)
+		c := m.content
+		if c == "" {
+			c = mcpGateway + "  drive: {kind: mcp, url: https://other.example.test/y, credential_source: static_env, token_env: T, read_only_tools: [a]}\n"
+		}
+		_ = os.WriteFile(m.path, []byte(c), 0o644)
 	}
 	return m.r.Read(p)
+}
+
+// A configuration that loads but fails validation only on the second
+// (under-lock) load is refused there, and gateway.yaml is left untouched.
+func TestEnrollMCPUnderLockValidationRefuses(t *testing.T) {
+	cfg, ctl := mcpEnv(t)
+	gwPath := filepath.Join(cfg, "gateway.yaml")
+	before := readFile(t, gwPath)
+	old := enrollMCPStdin
+	t.Cleanup(func() { enrollMCPStdin = old })
+	enrollMCPStdin = &mutatingReader{
+		r:       strings.NewReader(`{"command":"/opt/mcp/bin/drive"}`),
+		path:    filepath.Join(cfg, "agents/orch.yaml"),
+		content: "name: orch\nendpoint: http://localhost:9\ntools:\n  - {resource: nonexistent, tools: [x], mode: read-only}\n",
+	}
+	res := goodRes("/opt/mcp/bin/drive")
+	res.ReadOnlyTools = []string{"search"}
+	code, _, errs := runMCP(t, cfg, ctl, "drive", "--from-paste", "--tools", "search", "--accept", mcpDigestOf(t, res))
+	if code == 0 || !strings.Contains(errs, "would not pass validation") {
+		t.Fatalf("want under-lock validation refusal: %d %s", code, errs)
+	}
+	if readFile(t, gwPath) != before {
+		t.Fatal("gateway.yaml changed")
+	}
+}
+
+// A declined consent ledgers no argv: only what was consented to is recorded.
+func TestEnrollMCPDeclinedRecordsNoArgv(t *testing.T) {
+	cfg, ctl := mcpEnv(t)
+	code, _, _ := runMCP(t, cfg, ctl, "drive", "--command", "/opt/mcp/bin/drive --token=hunter2", "--tools", "search", "--accept", "sha256:"+strings.Repeat("0", 64))
+	if code == 0 {
+		t.Fatal("declined accepted")
+	}
+	ev := lastEvent(t, ctl)
+	if !strings.Contains(ev, `"action":"enroll_mcp"`) || !strings.Contains(ev, `"outcome":"refused"`) {
+		t.Fatalf("no refused record: %s", ev)
+	}
+	for _, leak := range []string{"hunter2", "/opt/mcp/bin/drive", "command"} {
+		if strings.Contains(ev, leak) {
+			t.Errorf("refused record holds %q: %s", leak, ev)
+		}
+	}
+}
+
+// --token-env must be an env var NAME; a value is refused without echo.
+func TestEnrollMCPTokenEnvMustBeAName(t *testing.T) {
+	cfg, ctl := mcpEnv(t)
+	before := readFile(t, filepath.Join(cfg, "gateway.yaml"))
+	code, out, errs := runMCP(t, cfg, ctl, "drive", "--command", "/opt/mcp/bin/drive", "--tools", "search", "--token-env", "sk-live-SECRET")
+	if code != 2 || strings.Contains(out+errs, "SECRET") || !strings.Contains(errs, "NAME") {
+		t.Fatalf("got %d %s %s", code, out, errs)
+	}
+	if readFile(t, filepath.Join(cfg, "gateway.yaml")) != before {
+		t.Fatal("gateway changed")
+	}
+}
+
+// Ledger bounds are enforced before disclosure: an empty pasted argument is
+// refused early, nothing disclosed or written.
+func TestEnrollMCPOverBoundRefusedBeforeDisclosure(t *testing.T) {
+	cfg, ctl := mcpEnv(t)
+	before := readFile(t, filepath.Join(cfg, "gateway.yaml"))
+	old := enrollMCPStdin
+	t.Cleanup(func() { enrollMCPStdin = old })
+	enrollMCPStdin = strings.NewReader(`{"command":"/opt/mcp/bin/drive","args":[""]}`)
+	code, out, errs := runMCP(t, cfg, ctl, "drive", "--from-paste", "--tools", "search")
+	if code == 0 || strings.Contains(out, "accept-digest") || !strings.Contains(errs, "nothing written") {
+		t.Fatalf("got %d %s %s", code, out, errs)
+	}
+	if readFile(t, filepath.Join(cfg, "gateway.yaml")) != before {
+		t.Fatal("gateway changed")
+	}
+}
+
+// A restore that fails is reported, not swallowed.
+func TestSnapshotRestoreReportsFailure(t *testing.T) {
+	s := fileSnapshot{path: filepath.Join(t.TempDir(), "no-such-dir", "f.yaml"), data: []byte("x"), existed: true}
+	if err := s.restore(); err == nil {
+		t.Fatal("restore into a missing directory reported success")
+	}
 }
 
 // The write is judged against the working files as they are under the lock,

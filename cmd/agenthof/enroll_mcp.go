@@ -141,12 +141,36 @@ func snapshot(path string) (fileSnapshot, error) {
 	return fileSnapshot{path: path, data: b, existed: true}, nil
 }
 
-func (s fileSnapshot) restore() {
+// restore puts the file back as it was: an absent file is removed, an
+// existing one is rewritten whole to a temp name and renamed into place.
+func (s fileSnapshot) restore() error {
 	if !s.existed {
-		_ = os.Remove(s.path)
-		return
+		if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
-	_ = os.WriteFile(s.path, s.data, 0o644)
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".enroll-restore-*")
+	if err != nil {
+		return err
+	}
+	_, werr := tmp.Write(s.data)
+	if werr == nil {
+		werr = tmp.Sync()
+	}
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp.Name(), 0o644)
+	}
+	if werr == nil {
+		werr = os.Rename(tmp.Name(), s.path)
+	}
+	if werr != nil {
+		_ = os.Remove(tmp.Name())
+	}
+	return werr
 }
 
 func fileSHA(path string) (string, error) {
@@ -209,6 +233,10 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 		}
 		return usage("%s", usageLine)
 	}
+	if !registry.IsEnvName(*tokenEnv) {
+		// The value is deliberately not echoed: it may be a pasted secret.
+		return usage("--token-env must be an environment variable NAME, never a token value")
+	}
 	if !filepath.IsAbs(*socket) {
 		return usage("--socket %q must be an absolute path", origin.Clean(*socket))
 	}
@@ -263,7 +291,7 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 	unlock, lockErr := ledger.LockFileShared(installedLock(*controlLog))
 	if lockErr != nil {
 		if errors.Is(lockErr, ledger.ErrLockHeld) {
-			return enrollRefusal(stderr, "%s", msgLockBusy)
+			return mcpRefusal(stderr, "%s", msgLockBusy)
 		}
 		_, _ = fmt.Fprintln(stderr, lockErr)
 		return record("error", &control.Reason{Code: control.CodeIOError, Message: truncateErr(lockErr)}, nil, 1)
@@ -292,9 +320,9 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 	if refusal != nil {
 		switch {
 		case refusal.Transient():
-			return enrollRefusal(stderr, "%s", msgLockBusy)
+			return mcpRefusal(stderr, "%s", msgLockBusy)
 		case refusal.Kind != verifyNotOnRecord:
-			return enrollRefusal(stderr, "%s", refusal.Error())
+			return mcpRefusal(stderr, "%s", refusal.Error())
 		}
 		_, _ = fmt.Fprintf(stderr, "enroll mcp: %s\n", refusal.Error())
 		return record("refused", vouchRefused(refusal), nil, 1)
@@ -316,15 +344,15 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 			for _, e := range loadErrs {
 				_, _ = fmt.Fprintln(stderr, origin.Clean(e.Error()))
 			}
-			return workCfg, "", enrollRefusal(stderr, "the configuration in %s does not load; fix it before enrolling", *cfgDir)
+			return workCfg, "", mcpRefusal(stderr, "the configuration in %s does not load; fix it before enrolling", *cfgDir)
 		}
 		if err := checkEnrollName(name, workCfg, instCfg); err != nil {
-			return workCfg, "", enrollRefusal(stderr, "%v", err)
+			return workCfg, "", mcpRefusal(stderr, "%v", err)
 		}
 		for _, cfg := range []config.Config{workCfg, instCfg} {
 			for id := range cfg.Gateway.Tools {
 				if strings.EqualFold(id, name) {
-					return workCfg, "", enrollRefusal(stderr, "name %q is already a tool resource in the configuration", name)
+					return workCfg, "", mcpRefusal(stderr, "name %q is already a tool resource in the configuration", name)
 				}
 			}
 		}
@@ -335,7 +363,7 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 				}
 			}
 			if grantPath == "" {
-				return workCfg, "", enrollRefusal(stderr, "--grant %q is not an agent in %s", origin.Clean(*grant), *cfgDir)
+				return workCfg, "", mcpRefusal(stderr, "--grant %q is not an agent in %s", origin.Clean(*grant), *cfgDir)
 			}
 		}
 		return workCfg, grantPath, 0
@@ -385,6 +413,11 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	payload := &control.EnrollMCP{Resource: name, Command: cmdArgv, EnvNames: envList, ReadOnlyTools: readOnly}
+	// The ledger's bounds are checked now, not at Append, so an over-bound
+	// enrollment is refused before it is disclosed, digested or written.
+	if err := control.ValidateEnrollMCP(payload); err != nil {
+		return mcpRefusal(stderr, "%v; nothing written", err)
+	}
 
 	// validate runs the registry's own validation over the configuration plus
 	// the proposal, in memory: nothing is written unless it passes.
@@ -394,7 +427,7 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 			for _, e := range verrs {
 				_, _ = fmt.Fprintln(stderr, origin.Clean(e.Error()))
 			}
-			return enrollRefusal(stderr, "the enrolled resource would not pass validation in %s; nothing was written", *cfgDir)
+			return mcpRefusal(stderr, "the enrolled resource would not pass validation in %s; nothing was written", *cfgDir)
 		}
 		return 0
 	}
@@ -420,13 +453,13 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stdout, "resource, as it will be written to gateway.yaml:\n%s", resYAML)
 	_, _ = fmt.Fprintf(stdout, "accept-digest: sha256:%s\n", digest)
 	if *accept == "" {
-		_, _ = fmt.Fprintf(stdout, "nothing written. To enroll exactly this, run again with: --accept sha256:%s\n", digest)
+		_, _ = fmt.Fprintf(stdout, "nothing written. To enroll this resource body, run again with: --accept sha256:%s\n(the digest binds the resource body above, not the name or the --grant target; check those too)\n", digest)
 		return 0
 	}
 
 	if err := checkAccept("sha256:"+acceptDigest, digest); err != nil {
 		_, _ = fmt.Fprintf(stderr, "enroll mcp: %s; nothing written\n", msgEnrollMCPDeclined)
-		return record("refused", &control.Reason{Code: control.CodeConsentDeclined, Message: msgEnrollMCPDeclined}, payload, 1)
+		return record("refused", &control.Reason{Code: control.CodeConsentDeclined, Message: msgEnrollMCPDeclined}, nil, 1)
 	}
 
 	// Write, under the installed-configuration lock, and only if the
@@ -434,13 +467,13 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 	wunlock, lockErr := ledger.LockFile(installedLock(*controlLog))
 	if lockErr != nil {
 		if errors.Is(lockErr, ledger.ErrLockHeld) {
-			return enrollRefusal(stderr, "%s", msgLockBusy)
+			return mcpRefusal(stderr, "%s", msgLockBusy)
 		}
-		return enrollRefusal(stderr, "%v", lockErr)
+		return mcpRefusal(stderr, "%v", lockErr)
 	}
 	defer wunlock()
 	if cur, ok, err := config.InstalledHash(store); err != nil || !ok || cur != hash {
-		return enrollRefusal(stderr, "the installed configuration changed while enrolling; nothing written; run again")
+		return mcpRefusal(stderr, "the installed configuration changed while enrolling; nothing written; run again")
 	}
 
 	// Reload under the lock and judge the write against the files as they are
@@ -454,41 +487,57 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 	}
 	gwPath := filepath.Join(*cfgDir, "gateway.yaml")
 	snaps := []fileSnapshot{}
-	rollback := func() {
+	// fail reverts every edit made so far and refuses. It claims the edits
+	// were reverted only if every restore succeeded; otherwise it names the
+	// files that need the operator's attention.
+	fail := func(cause string, a ...any) int {
+		var stuck []string
 		for _, s := range snaps {
-			s.restore()
+			if err := s.restore(); err != nil {
+				stuck = append(stuck, s.path)
+			}
 		}
+		msg := fmt.Sprintf(cause, a...)
+		if len(stuck) > 0 {
+			return mcpRefusal(stderr, "%s; the edits could NOT be fully reverted: check %s by hand", msg, strings.Join(stuck, ", "))
+		}
+		return mcpRefusal(stderr, "%s; the edits were reverted", msg)
 	}
 	gwSnap, err := snapshot(gwPath)
 	if err != nil {
-		return enrollRefusal(stderr, "%v; nothing written", err)
+		return mcpRefusal(stderr, "%v; nothing written", err)
 	}
 	snaps = append(snaps, gwSnap)
 	files := []string{"gateway.yaml"}
 	if err := config.InsertToolResource(gwPath, name, res); err != nil {
-		rollback()
-		return enrollRefusal(stderr, "%v; nothing written", err)
+		return fail("%v", err)
 	}
 	if *grant != "" {
 		agentPath := filepath.Join(*cfgDir, filepath.FromSlash(grantPath))
 		asnap, err := snapshot(agentPath)
 		if err != nil {
-			rollback()
-			return enrollRefusal(stderr, "%v; nothing written", err)
+			return fail("%v", err)
 		}
 		snaps = append(snaps, asnap)
 		if err := config.InsertGrant(agentPath, grantDef); err != nil {
-			rollback()
-			return enrollRefusal(stderr, "%v; nothing written", err)
+			return fail("%v", err)
 		}
 		files = append(files, filepath.ToSlash(grantPath))
+	}
+	// Confirm the written state validates before ledgering it, so a recorded
+	// success always describes a validated, written configuration.
+	wroteCfg, reloadErrs := config.LoadDir(*cfgDir)
+	if len(reloadErrs) > 0 {
+		return fail("the written configuration does not load: %s", origin.Clean(reloadErrs[0].Error()))
+	}
+	if _, verrs := registry.Build(wroteCfg); len(verrs) > 0 {
+		return fail("the written configuration does not validate: %s", origin.Clean(verrs[0].Error()))
 	}
 	var written []control.EnrollFile
 	for _, rel := range files {
 		sum, err := fileSHA(filepath.Join(*cfgDir, filepath.FromSlash(rel)))
 		if err != nil {
-			rollback()
-			return enrollRefusal(stderr, "%v; nothing written", err)
+			return fail("%v", err)
 		}
 		written = append(written, control.EnrollFile{Path: rel, SHA256: sum})
 	}
@@ -502,9 +551,8 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 		EnrollMCP:  payload,
 	})
 	if err != nil {
-		rollback()
 		_, _ = fmt.Fprintln(stderr, err)
-		return enrollRefusal(stderr, "the enrollment could not be recorded; the edits were reverted")
+		return fail("the enrollment could not be recorded")
 	}
 	_, _ = fmt.Fprintf(stdout, "enrolled %q: %d file(s) edited under %s\n", name, len(files), *cfgDir)
 	_, _ = fmt.Fprintf(stdout, "control head: seq=%d sha256=%s\n", head.Count, head.Hash)
@@ -513,6 +561,12 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 	}
 	_, _ = fmt.Fprintf(stdout, "next: agenthof apply --config %s\n", *cfgDir)
 	return 0
+}
+
+// mcpRefusal prints a refusal on the enroll mcp channel and returns 1.
+func mcpRefusal(w io.Writer, format string, a ...any) int {
+	_, _ = fmt.Fprintf(w, "enroll mcp: "+format+"\n", a...)
+	return 1
 }
 
 func egressLabel(e []string) string {
