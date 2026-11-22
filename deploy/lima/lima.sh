@@ -6,8 +6,8 @@
 #   lima.sh shell              open a shell in the VM at the repo (/agenthof)
 #   lima.sh build              compile agenthof and build the compartment images
 #   lima.sh e2e [name] [--keep] [--flag…]
-#                              run e2e(s): refbox | refbridge | refexec | refspawn | acceptance | rekor | embeddings | memory | all
-#                              (default all; rekor, embeddings and memory stand up a real backend and are by-judgment, so NOT in all);
+#                              run e2e(s): refbox | refbridge | refexec | refspawn | acceptance | rekor | embeddings | memory | drive | all
+#                              (default all; rekor, embeddings, memory and drive stand up a real backend and are by-judgment, so NOT in all);
 #                              --keep skips the prune below and is passed to each script (only acceptance acts on it),
 #                              as is any other --flag
 #   lima.sh clean [--all]      prune compartment leftovers; --all drops cached images
@@ -68,10 +68,10 @@ cmd_e2e() {
 	local name="all" keep=0 extra=()
 	for a in "$@"; do
 		case "$a" in
-			refbox|refbridge|refexec|refspawn|acceptance|rekor|embeddings|memory|all) name="$a" ;;
+			refbox|refbridge|refexec|refspawn|acceptance|rekor|embeddings|memory|drive|all) name="$a" ;;
 			--keep) keep=1; extra+=("$a") ;;
 			--*) extra+=("$a") ;;
-			*) die "unknown e2e argument: $a (want refbox | refbridge | refexec | refspawn | acceptance | rekor | embeddings | memory | all [--keep] [--flag…])" ;;
+			*) die "unknown e2e argument: $a (want refbox | refbridge | refexec | refspawn | acceptance | rekor | embeddings | memory | drive | all [--keep] [--flag…])" ;;
 		esac
 	done
 	local scripts=()
@@ -84,10 +84,11 @@ cmd_e2e() {
 		rekor) scripts=("scripts/e2e-rekor.sh") ;;
 		embeddings) scripts=("scripts/e2e-embeddings.sh") ;;
 		memory) scripts=("scripts/e2e-memory.sh") ;;
+		drive) scripts=("scripts/e2e-drive.sh") ;;
 		all) scripts=("scripts/e2e-refbox.sh" "scripts/e2e-refbridge.sh" "scripts/e2e-refexec.sh" "scripts/e2e-refspawn.sh" "scripts/e2e-acceptance.sh") ;;
 	esac
 	# Flags go to every script as given: the per-slice scripts read no
-	# arguments, so this is harmless to them; e2e-acceptance.sh, e2e-rekor.sh, e2e-embeddings.sh and e2e-memory.sh act on --keep.
+	# arguments, so this is harmless to them; e2e-acceptance.sh, e2e-rekor.sh, e2e-embeddings.sh, e2e-memory.sh and e2e-drive.sh act on --keep.
 	# (${extra[*]+…}: an empty array under set -u is an error on bash 3.2.)
 	local args="${extra[*]+${extra[*]}}"
 	local rc=0

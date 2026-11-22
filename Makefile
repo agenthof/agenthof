@@ -4,10 +4,11 @@
 # podman containment run (Linux/Lima), the macOS Seatbelt run, the enrolled-agent
 # artifact binding runs (podman and Seatbelt), the Rekor v1 anchoring run, the
 # embeddings run against a real embeddings server (both Linux/Lima), and the
-# memory-store run against a real Qdrant (Linux/Lima, plus Seatbelt on macOS) —
+# memory-store run against a real Qdrant (Linux/Lima, plus Seatbelt on macOS), and
+# the governed Drive read against a real Drive (Linux/Lima, plus Seatbelt on macOS) —
 # run by judgment on a developer machine, never by CI.
 .DEFAULT_GOAL := help
-.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-memory acceptance-enroll
+.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-memory acceptance-drive acceptance-enroll
 
 GO ?= go
 UNAME_S ?= $(shell uname -s)
@@ -47,6 +48,14 @@ help:
 	@echo "    same top-k ids and scores (scripts/e2e-memory.sh). Linux: podman natively. macOS: podman"
 	@echo "    inside the Lima VM (started if needed) plus the native Seatbelt store-file falsifier"
 	@echo "    (scripts/e2e-memory-seatbelt.sh). KEEP=1 leaves the Qdrant container and files."
+	@echo "make acceptance-drive [KEEP=1]"
+	@echo "    The real-backend governed Drive read (scripts/e2e-drive.sh): a Drive-reading agent"
+	@echo "    through the tool door against the real Drive API. Linux: podman natively. macOS: podman"
+	@echo "    inside the Lima VM (started if needed) plus the native Seatbelt containment leg"
+	@echo "    (scripts/e2e-drive-seatbelt.sh, which fails if the network is unreachable). KEEP=1 leaves files."
+	@echo "    Needs DRIVE_MCP_DIR (a pre-vetted, pinned Drive MCP install), the GOOGLE_* credential and the"
+	@echo "    DRIVE_E2E_* fixture vars: on macOS set them INSIDE the Lima VM (a mode-0600 env file sourced by"
+	@echo "    its login shell), NEVER in the macOS host shell."
 
 install:
 	$(GO) install ./cmd/agenthof
@@ -145,4 +154,25 @@ else ifeq ($(UNAME_S),Darwin)
 	scripts/e2e-memory-seatbelt.sh
 else
 	@echo "make acceptance-memory: unsupported host $(UNAME_S) — run scripts/e2e-memory.sh on a Linux host with rootless podman"; exit 1
+endif
+
+# The governed Drive read runs the Drive-reading agent through the tool door against
+# the real Drive API. On macOS the containment is also proven on the real Seatbelt
+# sandbox; DRIVE_SEATBELT_REQUIRE_NET=1 makes that leg fail, not skip, when the
+# network is unreachable. Linux/Lima like the runs above, and like them
+# local/by-judgment, never CI. On macOS the real Google credential, the fixture vars
+# and DRIVE_MCP_DIR must be set INSIDE the Lima VM (e.g. a mode-0600 env file sourced
+# by its login shell), never exported in the host shell: that would not reach the VM
+# and would leave the credential in a macOS process environment during the Seatbelt leg.
+acceptance-drive:
+ifeq ($(UNAME_S),Linux)
+	@command -v podman >/dev/null || { echo "make acceptance-drive: podman is not installed (rootless podman is required)"; exit 1; }
+	scripts/e2e-drive.sh $(KEEP_FLAG)
+else ifeq ($(UNAME_S),Darwin)
+	@command -v sandbox-exec >/dev/null || { echo "make acceptance-drive: sandbox-exec not found (macOS required)"; exit 1; }
+	deploy/lima/lima.sh up
+	deploy/lima/lima.sh e2e drive $(KEEP_FLAG)
+	DRIVE_SEATBELT_REQUIRE_NET=1 scripts/e2e-drive-seatbelt.sh
+else
+	@echo "make acceptance-drive: unsupported host $(UNAME_S) — run scripts/e2e-drive.sh on a Linux host with rootless podman"; exit 1
 endif

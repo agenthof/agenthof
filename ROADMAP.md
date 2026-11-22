@@ -75,6 +75,18 @@ The governed core is real and runnable today:
   payload — bring your own vector-store MCP in production — and its README
   states the limits plainly (macOS file readability, a bounded result preview
   in the ledger, per-tool rather than per-collection authorization).
+- **Governed Google Drive read** — a Drive MCP you choose is fronted through
+  the tool door with a named read-only grant of two tools (`search`,
+  `readGoogleDoc`), so a contained agent with no network reads documents only
+  through a recorded door while the rest of the MCP's much larger tool surface is
+  never offered and is refused if called. Agenthof ships no Drive integration, only
+  a CI test double (`examples/fake-drive-mcp`) and a guide to fronting a real one.
+  The guide states the limits plainly: the MCP holds your Google token (vet it, pin
+  it, confine its egress; the door bounds it but does not vet it), real credentials
+  belong on the podman tier rather than macOS Seatbelt, the ledger keeps a bounded
+  result preview and up to 200 runes of upstream error text, and capability is the
+  MCP's, so a dedicated Google account is the way to narrow it. The official
+  Google-hosted Drive MCP is a later production target (see Next).
 - **Retention** — `runs prune` ships in the core, not behind a paywall; it is authorized against the installed roles' `prune`
   grant and recorded in the control ledger.
 - **Auditable control plane** — *who applied config* and *who flipped the
@@ -326,6 +338,16 @@ The governed core is real and runnable today:
   already executes only the install its control ledger records (above); what
   that cannot catch — a consistent rewrite of pointer and ledger together — is
   what external anchoring of the head (`anchor: tlog`, above) is for.
+- **The official Google Drive MCP as a remote tool resource** — front the
+  Google-hosted Drive MCP over HTTP, with no bridge, once Agenthof can run a
+  per-user OAuth consent flow for a remote resource (distinct from the token
+  exchange that ships today) and the service leaves preview. It trades a
+  third-party package's supply-chain risk for weaker provenance: no first-hand
+  attestation of what ran.
+- **Narrowing the macOS Seatbelt tier's view of the host environment** — a
+  contained agent can read the environment of other host processes there,
+  which is why real credentials stay on the podman tier today; tightening the
+  profile would lift that limit.
 - **Further confinement backends** — more tiers behind the same selection
   seam (for example Linux Landlock, Windows through WSL2, and a VM-class
   tier), each named in the ledger with its own honest statement of what it

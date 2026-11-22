@@ -25,12 +25,23 @@ deploy/lima/lima.sh e2e           # run the refbox, refbridge, refexec, refspawn
 ```
 
 `up` provisions rootless podman (with `podman-compose` and `qemu-user-static`,
-which the `rekor` e2e needs), Go, and python3, and mounts the repository
+which the `rekor` e2e needs), Go, python3, and node + npm (for the `drive`
+e2e's pre-vetted Drive MCP), and mounts the repository
 read-only at `/agenthof` inside the VM. The repository path is detected
 automatically, so the VM definition carries no machine-specific path.
 Provisioning runs only when the VM is created, so a VM made before those were
 added needs `lima.sh destroy && lima.sh up` (or an `apt-get install` in
-`lima.sh shell`) before `lima.sh e2e rekor`.
+`lima.sh shell`) before `lima.sh e2e rekor` or `lima.sh e2e drive`.
+
+The `drive` e2e (`make acceptance-drive`) talks to real Google. Its credential
+(`GOOGLE_DRIVE_MCP_REFRESH_TOKEN`, `GOOGLE_DRIVE_MCP_CLIENT_ID`,
+`GOOGLE_DRIVE_MCP_CLIENT_SECRET`), its fixture variables (`DRIVE_E2E_NOTE_ID`,
+`DRIVE_E2E_NOTE_NAME`, `DRIVE_E2E_EXPECTED_TEXT`) and `DRIVE_MCP_DIR` (a
+pre-vetted, pinned install of the Drive MCP inside the VM) must be set INSIDE
+the VM, for example in a mode-0600 env file sourced by the VM's login shell.
+Never export the credential in the macOS host shell: it would not reach the
+VM, and it would sit in a macOS process environment while the Seatbelt leg
+runs, where a contained agent can read it.
 
 ## Commands
 
