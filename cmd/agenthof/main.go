@@ -84,6 +84,11 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 	case "registry":
 		return cmdRegistry(argv[1:], stdout)
 	case "enroll":
+		// enroll mcp proposes a local MCP resource; every other form's first
+		// argument is an agent-card source.
+		if len(argv) > 1 && argv[1] == "mcp" {
+			return cmdEnrollMCP(argv[2:], stdout, stderr)
+		}
 		return cmdEnroll(argv[1:], stdout, stderr)
 	case "run":
 		return cmdRun(argv[1:], stdout, stderr)
