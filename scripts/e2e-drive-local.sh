@@ -214,6 +214,7 @@ echo "$AUDIT1" | grep -q "ledger integrity: verified" || fail "read run ledger n
 echo "$AUDIT1" | grep -q "ledger completeness: complete (" || fail "read run ledger does not account for itself"
 LEDGER1="$WORK/logs/$RUNID1.jsonl"
 [ "$(grep -c '"runtime_attestation":{"runtime":"refbridge"' "$LEDGER1")" = 2 ] || fail "want two attested tool_call events (search, read)"
+[ "$(grep -c '"resources_touched":\["drive"\]' "$LEDGER1")" = 2 ] || fail "want resources_touched [drive] on both tool_call events of the successful run"
 ATTESTED="\\[runtime-attested: refbridge $(ere_escape "$WORK/fake-drive-mcp") pid [0-9]+"
 [ "$(echo "$AUDIT1" | grep -Ec "tool search — args [0-9a-f]{8} \(static_env\) $ATTESTED")" = 1 ] || fail "audit does not render the attested search call"
 [ "$(echo "$AUDIT1" | grep -Ec "tool readGoogleDoc — args [0-9a-f]{8} \(static_env\) $ATTESTED")" = 1 ] || fail "audit does not render the attested readGoogleDoc call"

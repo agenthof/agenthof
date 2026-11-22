@@ -40,18 +40,24 @@
 #   DRIVE_E2E_NOTE_ID               id of the fixture Google Doc
 #   DRIVE_E2E_NOTE_NAME             its title (the search query; no ';')
 #   DRIVE_E2E_EXPECTED_TEXT         a substring its text must contain
-# Optional:
-#   DRIVE_MCP_INDEX   absolute path of an installed dist/index.js of the pinned
-#                     MCP (e.g. /opt/google-drive-mcp/dist/index.js); unset, the
-#                     pinned version is installed into the scratch directory
-#                     with --ignore-scripts. Always launched as `node <abs>`,
-#                     never through npx.
-# On macOS run it inside the Lima VM (deploy/lima). --keep (or KEEP=1) keeps the
-# compartment and the scratch directories.
+#   DRIVE_MCP_DIR                   absolute path of a PRE-VETTED, PINNED
+#                     install of the Drive MCP: either its dist/index.js or the
+#                     package directory holding dist/index.js (e.g.
+#                     /opt/google-drive-mcp). YOU vet and pin the MCP (version,
+#                     lockfile, no install scripts); Agenthof governs access to
+#                     it. The script installs nothing: no dependency floats on a
+#                     run. Always launched as `node <abs>`, never through npx.
+# On macOS, `make acceptance-drive` runs this inside the Lima VM (deploy/lima).
+# Set ALL the variables above INSIDE the VM (e.g. a mode-0600 env file sourced
+# by the VM's login shell), and have node installed there. NEVER export the real
+# Google credential in the macOS host shell: it would not reach the VM, and it
+# would sit in a macOS process environment while the Seatbelt leg runs, where a
+# contained agent can read it. On a Linux host the MCP runs as a host process
+# that holds the token: use a dedicated machine or VM. --keep (or KEEP=1) keeps
+# the compartment and the scratch directories.
 set -euo pipefail
 
 ME="e2e-drive"
-MCP_PKG="@piotr-agier/google-drive-mcp@2.13.0"
 IMAGE="localhost/agenthof-drive-agent:e2e"
 CNAME="refbox-drive-e2e"
 
@@ -74,7 +80,7 @@ fail() {
 # --- 0. preflight: fail clearly, never skip. Checked before anything is created.
 missing=()
 for v in GOOGLE_DRIVE_MCP_REFRESH_TOKEN GOOGLE_DRIVE_MCP_CLIENT_ID GOOGLE_DRIVE_MCP_CLIENT_SECRET \
-	DRIVE_E2E_NOTE_ID DRIVE_E2E_NOTE_NAME DRIVE_E2E_EXPECTED_TEXT; do
+	DRIVE_E2E_NOTE_ID DRIVE_E2E_NOTE_NAME DRIVE_E2E_EXPECTED_TEXT DRIVE_MCP_DIR; do
 	[ -n "${!v:-}" ] || missing+=("$v")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -85,7 +91,7 @@ fi
 case "$DRIVE_E2E_NOTE_NAME" in
 *";"*) fail "DRIVE_E2E_NOTE_NAME must not contain ';' (it is the agent script's search query)" ;;
 esac
-for tool in podman go python3 curl node npm; do
+for tool in podman go python3 curl node; do
 	command -v "$tool" >/dev/null 2>&1 || fail "$tool is required (rootless podman; run inside the Lima VM on macOS)"
 done
 [ "$(uname)" = Linux ] || fail "run on Linux (inside the Lima VM on macOS): the agent is a real podman compartment"
@@ -125,20 +131,13 @@ runid_of() { printf '%s\n' "$1" | sed -n 's/^run \(r-[a-f0-9]*\) finished.*/\1/p
 NODE_BIN="$(command -v node)"
 case "$NODE_BIN" in /*) ;; *) fail "node did not resolve to an absolute path: $NODE_BIN" ;; esac
 
-# --- the pinned MCP, launched as an absolute `node <abs>/dist/index.js`.
-if [ -n "${DRIVE_MCP_INDEX:-}" ]; then
-	MCP_INDEX="$DRIVE_MCP_INDEX"
+# --- the operator's pre-vetted, pinned MCP, launched as an absolute `node <abs>/dist/index.js`.
+case "$DRIVE_MCP_DIR" in /*) ;; *) fail "DRIVE_MCP_DIR must be an absolute path: $DRIVE_MCP_DIR" ;; esac
+if [ -d "$DRIVE_MCP_DIR" ]; then
+	MCP_INDEX="$DRIVE_MCP_DIR/dist/index.js"
 else
-	echo "installing $MCP_PKG (no lifecycle scripts)..."
-	mkdir -p "$WORK/mcp"
-	(cd "$WORK/mcp" && npm init -y >/dev/null && npm install --ignore-scripts --no-audit --no-fund "$MCP_PKG" >"$WORK/npm.out" 2>&1) \
-		|| {
-			cat "$WORK/npm.out" >&2 || true
-			fail "could not install $MCP_PKG"
-		}
-	MCP_INDEX="$WORK/mcp/node_modules/@piotr-agier/google-drive-mcp/dist/index.js"
+	MCP_INDEX="$DRIVE_MCP_DIR"
 fi
-case "$MCP_INDEX" in /*) ;; *) fail "the MCP entry point must be an absolute path: $MCP_INDEX" ;; esac
 [ -f "$MCP_INDEX" ] || fail "the MCP entry point does not exist: $MCP_INDEX"
 
 # --- binaries and the contained agent image.
@@ -192,6 +191,8 @@ tok = post("https://oauth2.googleapis.com/token", {
 })
 info = post("https://oauth2.googleapis.com/tokeninfo", {"access_token": tok["access_token"]})
 scopes = info.get("scope", "").split()
+# The access token is never written; its VALUE must also be absent from the
+# scope check's own output (leak scan target).
 with open(sys.argv[1], "w") as f:
     for s in scopes:
         f.write(s + "\n")
@@ -202,7 +203,11 @@ bad = [s for s in scopes if not s.endswith(".readonly")]
 if bad:
     print("scopes that are not read-only: " + " ".join(bad))
     sys.exit(1)
-print("granted scopes (all read-only): " + " ".join(scopes))
+out = "granted scopes (all read-only): " + " ".join(scopes)
+if tok["access_token"] in out:
+    print("the minted access token reached the scope check's output")
+    sys.exit(1)
+print(out)
 PY
 echo "scopes: every granted scope is read-only — ok"
 
@@ -219,7 +224,7 @@ credential:
   materialization: env-at-spawn
 env_passthrough: [GOOGLE_DRIVE_MCP_REFRESH_TOKEN, GOOGLE_DRIVE_MCP_CLIENT_ID, GOOGLE_DRIVE_MCP_CLIENT_SECRET]
 egress:
-  allow: [www.googleapis.com:443, oauth2.googleapis.com:443]
+  allow: [www.googleapis.com:443, oauth2.googleapis.com:443, docs.googleapis.com:443]
 sessions:
   max: 4
   idle_timeout: 10m
@@ -394,6 +399,23 @@ if grep -q '"runtime_attestation"' "$WORK/logs/$RUNID2.jsonl"; then fail "the re
 if grep -q '"resources_touched"' "$WORK/logs/$RUNID2.jsonl"; then fail "the refused call recorded a touched resource"; fi
 echo "named grant: downloadFile refused by name; no resource or attestation — ok"
 
+# failed_attested_read LEDGER: the failure must come from the real upstream: a
+# failed, attested readGoogleDoc call with a recorded reason, not any other way
+# a run can fail.
+failed_attested_read() {
+	python3 - "$1" <<'PY'
+import json, sys
+for line in open(sys.argv[1]):
+    if not line.strip():
+        continue
+    e = json.loads(line)
+    if e.get("type") == "tool_call" and e.get("tool") == "readGoogleDoc" and e.get("status") != "ok" \
+            and e.get("reason") and (e.get("runtime_attestation") or {}).get("runtime") == "refbridge":
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 # --- 6. real failures: an upstream error (a document id that does not exist)
 # and an OAuth failure (a bogus refresh token) must each fail the run and leak nothing.
 if OUT3="$(run drive-read "read no-such-document-$NONCE" 2>"$WORK/run3.err")"; then
@@ -405,19 +427,7 @@ RUNID3="$(runid_of "$OUT3")"
 [ -n "$RUNID3" ] || fail "no run id for the bad-id run"
 grep -q "finished: failed" <<<"$OUT3" || fail "the bad-id run did not finish failed"
 check_audit "$RUNID3" "bad-id run"
-# The failure must come from the real upstream: a failed, attested readGoogleDoc
-# call with a recorded reason, not any other way a run can fail.
-python3 - "$WORK/logs/$RUNID3.jsonl" <<'PY' || fail "the bad-id run has no failed, attested readGoogleDoc tool_call with a reason: the failure did not come from the MCP"
-import json, sys
-for line in open(sys.argv[1]):
-    if not line.strip():
-        continue
-    e = json.loads(line)
-    if e.get("type") == "tool_call" and e.get("tool") == "readGoogleDoc" and e.get("status") != "ok" \
-            and e.get("reason") and (e.get("runtime_attestation") or {}).get("runtime") == "refbridge":
-        sys.exit(0)
-sys.exit(1)
-PY
+failed_attested_read "$WORK/logs/$RUNID3.jsonl" || fail "the bad-id run has no failed, attested readGoogleDoc tool_call with a reason: the failure did not come from the MCP"
 podman logs "$CNAME" >"$WORK/agent.err" 2>&1 || true
 [ "$(grep -c 'drive-agent: tool call failed' "$WORK/agent.err")" = 2 ] || fail "want two failed-call lines in the agent's log after the refused and bad-id runs"
 echo "upstream error: a real Google error failed the run, ledger verified — ok"
@@ -431,6 +441,7 @@ OUTS+=("$OUT4")
 RUNID4="$(runid_of "$OUT4")"
 [ -n "$RUNID4" ] || fail "no run id for the OAuth-failure run"
 check_audit "$RUNID4" "OAuth-failure run"
+failed_attested_read "$WORK/logs/$RUNID4.jsonl" || fail "the OAuth-failure run has no failed, attested readGoogleDoc tool_call with a reason: the failure did not come from the MCP"
 # The MCP must have REJECTED the credential, not hung: its child was started,
 # the run ended well inside the agent's 240s budget, and the agent's failure
 # is not a timeout.
@@ -458,6 +469,9 @@ leak "$BEARER" "the placeholder bearer"
 leak "$BAD_REFRESH" "the bogus refresh-token value"
 if grep -rqi -- "access_token" "$WORK/logs" "$WORK/artifacts" "$WORK/control.jsonl" "$WORK"/*.err "$WORK/scope-check.out" "$WORK/outs.txt"; then
 	fail "an access_token reached a ledger, an artifact, the control log, a process log, an output, or the scope check's output"
+fi
+if grep -rqE 'ya29\.[A-Za-z0-9_-]{20,}|Bearer [A-Za-z0-9._-]{20,}' "$WORK/logs" "$WORK/artifacts" "$WORK/control.jsonl" "$WORK"/*.err "$WORK/scope-check.out" "$WORK/outs.txt"; then
+	fail "an access-token-shaped value (ya29.… or a long Bearer value) reached a ledger, an artifact, the control log, a process log, an output, or the scope check's output"
 fi
 echo "no credential value, placeholder bearer, or access_token in any ledger, artifact, log, agent result, or the scope check — ok"
 

@@ -129,7 +129,7 @@ class MakefileTest(unittest.TestCase):
         import os
         import re
         text = (REPO / "Makefile").read_text()
-        for rel in sorted(set(re.findall(r"^\t(?:@)?(scripts/[\w./-]+\.sh)\b", text, re.M))):
+        for rel in sorted(set(re.findall(r"^\t(?:@)?(?:\w+=\S+ )?(scripts/[\w./-]+\.sh)\b", text, re.M))):
             self.assertTrue(os.access(REPO / rel, os.X_OK), rel + " is run directly by a Makefile recipe but is not executable")
 
     def test_help_is_the_default_goal(self):

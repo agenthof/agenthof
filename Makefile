@@ -53,6 +53,9 @@ help:
 	@echo "    through the tool door against the real Drive API. Linux: podman natively. macOS: podman"
 	@echo "    inside the Lima VM (started if needed) plus the native Seatbelt containment leg"
 	@echo "    (scripts/e2e-drive-seatbelt.sh, which fails if the network is unreachable). KEEP=1 leaves files."
+	@echo "    Needs DRIVE_MCP_DIR (a pre-vetted, pinned Drive MCP install), the GOOGLE_* credential and the"
+	@echo "    DRIVE_E2E_* fixture vars: on macOS set them INSIDE the Lima VM (a mode-0600 env file sourced by"
+	@echo "    its login shell), NEVER in the macOS host shell."
 
 install:
 	$(GO) install ./cmd/agenthof
@@ -157,7 +160,10 @@ endif
 # the real Drive API. On macOS the containment is also proven on the real Seatbelt
 # sandbox; DRIVE_SEATBELT_REQUIRE_NET=1 makes that leg fail, not skip, when the
 # network is unreachable. Linux/Lima like the runs above, and like them
-# local/by-judgment, never CI.
+# local/by-judgment, never CI. On macOS the real Google credential, the fixture vars
+# and DRIVE_MCP_DIR must be set INSIDE the Lima VM (e.g. a mode-0600 env file sourced
+# by its login shell), never exported in the host shell: that would not reach the VM
+# and would leave the credential in a macOS process environment during the Seatbelt leg.
 acceptance-drive:
 ifeq ($(UNAME_S),Linux)
 	@command -v podman >/dev/null || { echo "make acceptance-drive: podman is not installed (rootless podman is required)"; exit 1; }

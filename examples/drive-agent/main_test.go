@@ -43,13 +43,17 @@ func TestParseMultiple(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cmds) != 2 || cmds[0].tool != "search" || cmds[1].tool != "readGoogleDoc" {
-		t.Fatalf("got %+v", cmds)
+	want := []command{
+		{tool: "search", args: map[string]any{"query": "a b"}},
+		{tool: "readGoogleDoc", args: map[string]any{"documentId": "d1"}},
+	}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("got %+v, want %+v", cmds, want)
 	}
 }
 
 func TestParseEmptyOrUnknown(t *testing.T) {
-	for _, in := range []string{"", " ; ", "frobnicate x", "search", "read", "read a b", "call", "call t badpair"} {
+	for _, in := range []string{"", " ; ", "frobnicate x", "search", "read", "read a b", "call", "call t badpair", "call t =v"} {
 		if _, err := parseScript(in); err == nil {
 			t.Errorf("parseScript(%q) = nil error, want error", in)
 		}

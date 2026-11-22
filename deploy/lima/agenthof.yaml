@@ -36,9 +36,12 @@ provision:
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     # podman + uidmap for rootless; python3 and iproute2 are used by the e2es.
+    # nodejs + npm run a pre-vetted Drive MCP for e2e-drive (DRIVE_MCP_DIR). NOTE:
+    # provisioning applies only when the VM is CREATED; an existing VM must be
+    # recreated (lima.sh destroy, then up) or have node installed by hand.
     # podman-compose drives the Rekor v1 stack (e2e-rekor); qemu-user-static
     # registers binfmt so an arm64 VM can run that stack's amd64-only MySQL image.
-    apt-get install -y podman uidmap python3 iproute2 ca-certificates curl podman-compose qemu-user-static
+    apt-get install -y podman uidmap python3 iproute2 ca-certificates curl podman-compose qemu-user-static nodejs npm
     # Go, pinned to the repo toolchain. Keep GOVER in sync with go.mod.
     GOVER=1.27.4
     ARCH="$(dpkg --print-architecture)"   # arm64 | amd64 — matches Go's naming

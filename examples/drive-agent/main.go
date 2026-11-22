@@ -212,7 +212,7 @@ func listenUnix(path string) (net.Listener, error) {
 }
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8084", "TCP listen address (ignored when -socket is set)")
+	addr := flag.String("addr", "127.0.0.1:8085", "TCP listen address (ignored when -socket is set)")
 	socket := flag.String("socket", "", "Unix socket path to listen on; overrides -addr")
 	flag.Parse()
 	srv := &http.Server{Handler: newMux()}

@@ -127,15 +127,19 @@ The door bounds the **agent's** use of the MCP, not the MCP itself. The MCP is
 third-party code that the bridge runs as a host process with the bridge user's
 privileges, so its reach is not limited to the token's scope. Run the bridge and
 the MCP in a compartment or VM, and confine the MCP's egress: otherwise a
-compromised MCP can also send the token elsewhere. (This is why the project's
-real-backend run is done inside a VM.)
+compromised MCP can also send the token elsewhere. The project's real-backend run
+follows this: on macOS it runs inside a Linux VM; on a Linux host it runs as a
+host process, so use a dedicated machine or VM and confine it.
 
 `@piotr-agier/google-drive-mcp` is one example of a Drive MCP that fits this
 wiring (it takes its credentials from the three variables above). It is a
 third-party, single-maintainer package, **not official and not recommended**.
-The project uses a pinned copy of it only as a fixture in a real-backend test run
-inside a VM. Whichever MCP you choose, install it pre-built at a pinned version,
-without install scripts, and launch it by absolute path as above.
+The project uses a pinned copy of it only as a fixture in a local real-backend
+test run (on macOS, inside a Linux VM). Whichever MCP you choose, install it
+pre-built at a pinned version with a lockfile, without install scripts, and
+launch it by absolute path as above. You vet and pin the MCP; Agenthof governs
+access to it. The real-backend run (`scripts/e2e-drive.sh`) installs nothing: it
+takes the path of your vetted install in `DRIVE_MCP_DIR`.
 
 ## Honest limits
 
@@ -146,9 +150,9 @@ These are properties of the design, stated so an operator can decide.
   and `(deny network*)` under macOS Seatbelt.
 - *Credential exposure to the contained agent:* on **macOS Seatbelt** a contained
   agent can read the environment of other host processes (the bridge and the
-  MCP), including credential variables, through `sysctl`. This is not a file read, so `deny_read` does not stop it. On
-  podman the namespaces isolate it. So **real Google credentials belong on the
-  podman tier only** (for example inside a Linux VM on a Mac); on Seatbelt use a
+  MCP), including credential variables, through `sysctl`. This is not a file
+  read, so `deny_read` does not stop it. On podman the namespaces isolate it.
+  So **real Google credentials belong on the podman tier only** (for example inside a Linux VM on a Mac); on Seatbelt use a
   placeholder credential. A credential kept in a file is **not**
   protected by default: Seatbelt allows host-wide reads, so a contained agent can
   read it unless you list its directory in the confiner's `deny_read` and keep it

@@ -55,9 +55,8 @@ type downloadArgs struct {
 }
 
 // newServer builds the MCP server. The tools return canned data and read no
-// environment, so lookupEnv is accepted only to keep the constructor shape
-// shared with the other example servers.
-func newServer(_ func(string) (string, bool)) *mcp.Server {
+// environment.
+func newServer() *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "fake-drive-mcp", Version: "v0.1.0"}, nil)
 	mcp.AddTool(server, &mcp.Tool{Name: "search", Description: "search the drive; one line per hit: id and title"},
 		func(_ context.Context, _ *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, any, error) {
@@ -113,7 +112,7 @@ func credentialFingerprintLine(lookupEnv func(string) (string, bool)) string {
 func main() {
 	// Diagnostics go to stderr only: stdout is the MCP stream.
 	fmt.Fprintln(os.Stderr, credentialFingerprintLine(os.LookupEnv))
-	if err := newServer(os.LookupEnv).Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	if err := newServer().Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatal(err)
 	}
 }

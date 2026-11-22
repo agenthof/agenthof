@@ -341,8 +341,9 @@ The governed core is real and runnable today:
 - **The official Google Drive MCP as a remote tool resource** — front the
   Google-hosted Drive MCP over HTTP, with no bridge, once Agenthof can run a
   per-user OAuth consent flow for a remote resource (distinct from the token
-  exchange that ships today) and the service leaves preview. It trades a third-party package's supply-chain
-  risk for weaker provenance: no first-hand attestation of what ran.
+  exchange that ships today) and the service leaves preview. It trades a
+  third-party package's supply-chain risk for weaker provenance: no first-hand
+  attestation of what ran.
 - **Narrowing the macOS Seatbelt tier's view of the host environment** — a
   contained agent can read the environment of other host processes there,
   which is why real credentials stay on the podman tier today; tightening the

@@ -16,7 +16,7 @@ func connect(t *testing.T) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	clientT, serverT := mcp.NewInMemoryTransports()
-	ss, err := newServer(func(string) (string, bool) { return "", false }).Connect(ctx, serverT, nil)
+	ss, err := newServer().Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -123,11 +123,16 @@ func TestCredentialFingerprintLine(t *testing.T) {
 	set := credentialFingerprintLine(func(n string) (string, bool) {
 		return "secret", n == "GOOGLE_DRIVE_MCP_REFRESH_TOKEN"
 	})
-	if !strings.Contains(set, fp) || strings.Contains(set, "secret") {
-		t.Fatalf("set line = %q", set)
+	if want := "fake-drive-mcp: credential GOOGLE_DRIVE_MCP_REFRESH_TOKEN fingerprint " + fp; set != want {
+		t.Fatalf("set line = %q, want %q", set, want)
 	}
+	const wantUnset = "fake-drive-mcp: credential GOOGLE_DRIVE_MCP_REFRESH_TOKEN not set"
 	unset := credentialFingerprintLine(func(string) (string, bool) { return "", false })
-	if !strings.Contains(unset, "not set") || strings.Contains(unset, fp) {
-		t.Fatalf("unset line = %q", unset)
+	if unset != wantUnset {
+		t.Fatalf("unset line = %q, want %q", unset, wantUnset)
+	}
+	empty := credentialFingerprintLine(func(string) (string, bool) { return "", true })
+	if empty != wantUnset {
+		t.Fatalf("set-but-empty line = %q, want %q", empty, wantUnset)
 	}
 }
