@@ -1,0 +1,60 @@
+# A signed card may request one embedding model. Enrollment discloses it under
+# the requested list, accepts only that card's own digest (another card's
+# digest is refused and writes nothing), writes the model to the agent file as
+# embedding_model, and the written configuration applies. A card that requests
+# none writes no embedding grant.
+
+cardsigner cfg/gateway.yaml
+mkcard embedding card.json
+mkcard good plain.json
+carddigest card.json DIGEST
+carddigest plain.json PLAINDIGEST
+exec agenthof apply --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+
+# disclosure names the grant and writes nothing
+exec agenthof enroll card.json --name embedder --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stdout 'embedding model embed'
+! exists cfg/agents/embedder.yaml
+
+# another card's digest does not accept this card
+! exec agenthof enroll card.json --name embedder --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops --accept $PLAINDIGEST
+! exists cfg/agents/embedder.yaml
+
+# the disclosed digest writes the grant
+exec agenthof enroll card.json --name embedder --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops --accept $DIGEST
+stdout 'enrolled "embedder"'
+grep '^embedding_model: embed$' cfg/agents/embedder.yaml
+grep 'embedding model embed' ctl/control.jsonl
+
+# a card requesting no embedding model writes none
+exec agenthof enroll plain.json --name plain --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops --accept $PLAINDIGEST
+! grep 'embedding_model' cfg/agents/plain.yaml
+
+# the written configuration applies
+exec agenthof apply --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stdout 'registry ok'
+
+-- cfg/gateway.yaml --
+models:
+  fast: {endpoint: http://localhost:4000, model: fast, api_key_env: K}
+  embed: {endpoint: http://localhost:4000, model: embed, api_key_env: K}
+defaults:
+  model: fast
+tools:
+  code-search: {kind: mcp, url: https://mcp.example.internal/cs, credential_source: static_env, token_env: T, read_only_tools: [search]}
+-- cfg/agents/orch.yaml --
+name: orch
+endpoint: http://localhost:9
+-- cfg/workflows/main.yaml --
+name: main
+steps:
+  - {name: s, agent: orch}
+-- cfg/roles/admin.yaml --
+name: admin
+workflows: [main]
+allowed_groups: [ops]
+control: [apply, enroll]
+-- cfg/roles/dev.yaml --
+name: dev
+workflows: [main]
+allowed_groups: [devs]
