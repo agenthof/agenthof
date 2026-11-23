@@ -228,7 +228,7 @@ func checkEnrollMCPShape(e Event) error {
 			return fmt.Errorf("control: an enroll_mcp command element must be 1 to %d bytes", MaxEnrollArgLen)
 		}
 	}
-	for name, list := range map[string][]string{"env_names": m.EnvNames, "read_only_tools": m.ReadOnlyTools} {
+	for name, list := range map[string][]string{"env_names": m.EnvNames, "read_only_tools": m.ReadOnlyTools, "egress": m.Egress} {
 		if len(list) > MaxEnrollRequested {
 			return fmt.Errorf("control: enroll_mcp lists %d %s; the cap is %d", len(list), name, MaxEnrollRequested)
 		}
@@ -237,6 +237,12 @@ func checkEnrollMCPShape(e Event) error {
 				return fmt.Errorf("control: an enroll_mcp %s entry is %d bytes; the cap is %d", name, len(s), MaxEnrollRequestedLen)
 			}
 		}
+	}
+	if len(m.GrantedTo) > maxEnrollMCPResourceLen {
+		return fmt.Errorf("control: enroll_mcp granted_to must be at most %d bytes", maxEnrollMCPResourceLen)
+	}
+	if m.AcceptSHA256 != "" && !anchorHashRE.MatchString(m.AcceptSHA256) {
+		return fmt.Errorf("control: enroll_mcp accept_sha256 %q is not a lowercase hex sha256", m.AcceptSHA256)
 	}
 	if len(m.Files) > MaxEnrollFiles {
 		return fmt.Errorf("control: enroll_mcp lists %d files; the cap is %d", len(m.Files), MaxEnrollFiles)

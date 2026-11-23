@@ -17,6 +17,9 @@ func goodEnrollMCP() *control.EnrollMCP {
 		Command:       []string{"npx", "-y", "drive-mcp"},
 		EnvNames:      []string{"DRIVE_TOKEN"},
 		ReadOnlyTools: []string{"search", "read"},
+		Egress:        []string{"api.example.com:443"},
+		GrantedTo:     "dana-agent",
+		AcceptSHA256:  enrollDigest,
 		Files:         []control.EnrollFile{{Path: "resources/drive.yaml", SHA256: enrollDigest}},
 	}
 }
@@ -42,8 +45,12 @@ func TestAppendEnrollMCPRoundTripsAndRenders(t *testing.T) {
 	}
 	m := d.EnrollMCP
 	if m == nil || m.Resource != "drive" || len(m.Command) != 3 || len(m.EnvNames) != 1 ||
-		len(m.ReadOnlyTools) != 2 || len(m.Files) != 1 || d.Enroll != nil {
+		len(m.ReadOnlyTools) != 2 || len(m.Files) != 1 || d.Enroll != nil ||
+		len(m.Egress) != 1 || m.GrantedTo != "dana-agent" || m.AcceptSHA256 != enrollDigest {
 		t.Fatalf("enroll_mcp payload did not round-trip: %+v", m)
+	}
+	if strings.Contains(line, "card_sha256") || strings.Contains(line, "config_hash") {
+		t.Fatalf("an enroll_mcp record carries no card digest or config hash: %s", line)
 	}
 	out := control.Render([]ledger.Record{{Raw: []byte(line)}}, ledger.Head{Count: 1}, nil)
 	if !strings.Contains(out, "resource drive enrolled") || strings.Contains(out, "agent  enrolled") {
@@ -63,6 +70,22 @@ func TestEnrollMCPRefusalRendersOutcome(t *testing.T) {
 	out := control.Render([]ledger.Record{{Raw: []byte(strings.TrimSpace(string(raw)))}}, ledger.Head{Count: 1}, nil)
 	if !strings.Contains(out, "refused") || !strings.Contains(out, "drive") {
 		t.Fatalf("declined enroll_mcp must render its decision:\n%s", out)
+	}
+}
+
+// A refusal the CLI records carries no payload; it must not render a blank name.
+func TestEnrollMCPNilPayloadRefusalRendersWithoutName(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "control.jsonl")
+	e := enrollMCPEvent(nil)
+	e.Outcome = "refused"
+	e.Reason = &control.Reason{Code: control.CodeConsentDeclined, Message: "operator declined"}
+	if _, err := control.Append(p, e); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(p)
+	out := control.Render([]ledger.Record{{Raw: []byte(strings.TrimSpace(string(raw)))}}, ledger.Head{Count: 1}, nil)
+	if !strings.Contains(out, "MCP resource enrollment refused") || strings.Contains(out, "resource  enrollment") {
+		t.Fatalf("a payload-less refusal must not render a blank name:\n%s", out)
 	}
 }
 
@@ -106,6 +129,10 @@ func TestEnrollMCPShapeRejects(t *testing.T) {
 		"long env":        func(m *control.EnrollMCP) { m.EnvNames = []string{long} },
 		"too many tools":  func(m *control.EnrollMCP) { m.ReadOnlyTools = manyReq },
 		"long tool":       func(m *control.EnrollMCP) { m.ReadOnlyTools = []string{long} },
+		"too many egress": func(m *control.EnrollMCP) { m.Egress = manyReq },
+		"long egress":     func(m *control.EnrollMCP) { m.Egress = []string{long} },
+		"long granted_to": func(m *control.EnrollMCP) { m.GrantedTo = strings.Repeat("g", 65) },
+		"bad accept sha":  func(m *control.EnrollMCP) { m.AcceptSHA256 = "sha256:abc" },
 		"bad file sha":    func(m *control.EnrollMCP) { m.Files[0].SHA256 = "XYZ" },
 		"empty file path": func(m *control.EnrollMCP) { m.Files[0].Path = "" },
 		"too many files":  func(m *control.EnrollMCP) { m.Files = make([]control.EnrollFile, control.MaxEnrollFiles+1) },

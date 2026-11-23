@@ -144,10 +144,11 @@ func label(rec record) string {
 	case "enroll_mcp":
 		// Names the resource; the command, env names, tools and files stay
 		// in the record for raw readers.
-		resource := ""
-		if rec.EnrollMCP != nil {
-			resource = origin.Clean(rec.EnrollMCP.Resource)
+		if rec.EnrollMCP == nil {
+			// A refusal recorded before a resource is proposed names none.
+			return "MCP resource enrollment " + rec.Outcome
 		}
+		resource := origin.Clean(rec.EnrollMCP.Resource)
 		if rec.Outcome == "success" {
 			return "resource " + resource + " enrolled"
 		}
