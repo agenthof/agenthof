@@ -10,7 +10,7 @@ import (
 // Map turns a card's Agenthof extension into a proposed AgentDef plus a flat
 // human-readable list of what the card requested. The result carries
 // Provenance (so it is spawn-only) and never an endpoint, exec url, or
-// may_spawn. Every requested tool resource and model must already exist in
+// may_spawn. Every requested tool resource, model and embedding model must already exist in
 // tools/models; wildcard tool requests and any spawn request are refused.
 func Map(ext AgenthofExt, name string, tools map[string]bool, models map[string]bool) (config.AgentDef, []string, error) {
 	if len(ext.Spawn) > 0 {

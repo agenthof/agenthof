@@ -51,7 +51,7 @@ format), carrying an **Agenthof extension** that declares what the agent is
 and what it needs: the artifact to run — an OCI image reference pinned by
 digest (`ref@sha256:…`), a **host program** (a program id plus the content
 hashes of its per-platform builds), or both — the interface it speaks (`a2a`), and the
-capabilities it **requests** — tools, a model, and exec commands. The card is
+capabilities it **requests** — tools, a model, an embedding model, and exec commands. The card is
 **signed** (a detached JWS over its canonical bytes). You get it from a
 **card source** you curate: a local file, or an `https` URL. A card is a
 **request, never a grant** — nothing in it grants the agent anything; a human
@@ -88,7 +88,7 @@ verified-authorized call:
 ## The two-step consent
 
 `enroll <source>` with no `--accept` **discloses and stops**: it prints
-exactly what the card requests — the tools and model it would be granted, the
+exactly what the card requests — the tools, model and embedding model it would be granted, the
 exec commands (disclosed, never granted — see below), the artifact — with any
 string that holds non-printable text refused rather than shown, and it prints
 the card's **digest**. It writes nothing and records nothing.

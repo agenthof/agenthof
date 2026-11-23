@@ -1,18 +1,23 @@
 # A signed card may request one embedding model. Enrollment discloses it under
-# the requested list, binds it into the accepted digest, writes it to the agent
-# file as embedding_model, and the written configuration applies. A card that
-# requests none writes no embedding grant, so the embeddings route stays
-# default-deny for that agent.
+# the requested list, accepts only that card's own digest (another card's
+# digest is refused and writes nothing), writes the model to the agent file as
+# embedding_model, and the written configuration applies. A card that requests
+# none writes no embedding grant.
 
 cardsigner cfg/gateway.yaml
 mkcard embedding card.json
 mkcard good plain.json
 carddigest card.json DIGEST
+carddigest plain.json PLAINDIGEST
 exec agenthof apply --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
 
 # disclosure names the grant and writes nothing
 exec agenthof enroll card.json --name embedder --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
 stdout 'embedding model embed'
+! exists cfg/agents/embedder.yaml
+
+# another card's digest does not accept this card
+! exec agenthof enroll card.json --name embedder --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops --accept $PLAINDIGEST
 ! exists cfg/agents/embedder.yaml
 
 # the disclosed digest writes the grant
@@ -22,7 +27,6 @@ grep '^embedding_model: embed$' cfg/agents/embedder.yaml
 grep 'embedding model embed' ctl/control.jsonl
 
 # a card requesting no embedding model writes none
-carddigest plain.json PLAINDIGEST
 exec agenthof enroll plain.json --name plain --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops --accept $PLAINDIGEST
 ! grep 'embedding_model' cfg/agents/plain.yaml
 

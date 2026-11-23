@@ -91,6 +91,9 @@ func TestEnrollWritesEmbeddingModel(t *testing.T) {
 		if extra["embedding"] != nil && !strings.Contains(stdout, "embedding model embed") {
 			t.Fatalf("disclosure lacks the embedding grant:\n%s", stdout)
 		}
+		if extra["embedding"] == nil && strings.Contains(stdout, "embedding model") {
+			t.Fatalf("disclosure names an embedding model the card did not request:\n%s", stdout)
+		}
 		if code, _, stderr := e.run(append(opsFlags, "--accept", digest)...); code != 0 {
 			t.Fatalf("accept: code=%d stderr=%s", code, stderr)
 		}

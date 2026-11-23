@@ -133,9 +133,11 @@ key. An unbudgeted role's embeddings are unbudgeted, like its chat calls.
 
 An agent may use exactly its one declared chat model and its one declared
 embedding model. A per-role list of models is reserved. An enrolled agent
-embeds only when its signed card was granted an `embedding_model`, which
-enrollment discloses and writes; without one it is refused, as above. OAuth-protected model providers are reserved; today the key is
-the per-role upstream key or the env key named on the route.
+embeds only when its signed card requested an embedding model and the operator
+accepted it: enrollment discloses the request and writes it as the agent's
+`embedding_model`. Without one it is refused, as above. OAuth-protected model
+providers are reserved; today the key is the per-role upstream key or the env
+key named on the route.
 
 `examples/model-agent` is an optional agent that makes this one call. The
 quickstart's `examples/echo-agent` does not. model-agent needs an

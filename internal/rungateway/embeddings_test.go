@@ -289,3 +289,34 @@ func TestEmbeddingsUnroutedModelFails(t *testing.T) {
 		t.Fatalf("events = %+v", *events)
 	}
 }
+
+func TestEmbeddingsEnrolledShapeAgent(t *testing.T) {
+	t.Setenv("MODEL_KEY", "sk-provider")
+	enrolled := func(embedding string) config.AgentDef {
+		def := embedAgent("chat-model", embedding)
+		def.Provenance = &config.Provenance{Image: "registry.example/agent@sha256:" + strings.Repeat("a", 64)}
+		return def
+	}
+	t.Run("granted", func(t *testing.T) {
+		_, base, token, _ := embedGateway(t, &modelUpstream{mode: "embed"}, enrolled("embed-model"))
+		resp := postEmbed(t, base, token, `{"model":"embed-model","input":"x"}`, nil)
+		code := resp.StatusCode
+		got := readBody(t, resp)
+		if code != http.StatusOK {
+			t.Fatalf("answer = %d %q, want 200", code, got)
+		}
+	})
+	t.Run("not granted", func(t *testing.T) {
+		up := &modelUpstream{mode: "embed"}
+		_, base, token, _ := embedGateway(t, up, enrolled(""))
+		resp := postEmbed(t, base, token, `{"model":"embed-model","input":"x"}`, nil)
+		code := resp.StatusCode
+		got := readBody(t, resp)
+		if code != http.StatusForbidden || got != reasonEmbeddingsNotAllowed+"\n" {
+			t.Fatalf("answer = %d %q", code, got)
+		}
+		if calls, _, _, _, _ := up.snapshot(); calls != 0 {
+			t.Fatalf("upstream calls = %d, want 0", calls)
+		}
+	})
+}
