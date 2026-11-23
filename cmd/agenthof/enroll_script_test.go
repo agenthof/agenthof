@@ -80,6 +80,8 @@ func cmdMkCard(ts *testscript.TestScript, neg bool, args []string) {
 	}
 	switch variant {
 	case "good", "swap", "jku", "algnone":
+	case "embedding":
+		params["embedding"] = "embed"
 	case "nomodel":
 		delete(params, "model")
 	case "hostprog":

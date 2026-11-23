@@ -258,11 +258,12 @@ func writeNewFiles(root string, files []enrollFile) ([]control.EnrollFile, error
 // Minimal write shapes: only what an enrollment sets, so the file the
 // operator reviews holds no empty endpoint, exec or may_spawn keys.
 type enrollAgentYAML struct {
-	Name        string             `yaml:"name"`
-	Description string             `yaml:"description"`
-	Model       string             `yaml:"model,omitempty"`
-	Tools       []config.ToolGrant `yaml:"tools,omitempty"`
-	Provenance  *config.Provenance `yaml:"provenance"`
+	Name           string             `yaml:"name"`
+	Description    string             `yaml:"description"`
+	Model          string             `yaml:"model,omitempty"`
+	EmbeddingModel string             `yaml:"embedding_model,omitempty"`
+	Tools          []config.ToolGrant `yaml:"tools,omitempty"`
+	Provenance     *config.Provenance `yaml:"provenance"`
 }
 
 type enrollStepYAML struct {
@@ -700,11 +701,12 @@ func enrollFiles(name string, def config.AgentDef, groups []string) ([]enrollFil
 		return nil, err
 	}
 	ag, err := yaml.Marshal(enrollAgentYAML{
-		Name:        name,
-		Description: "Enrolled third-party agent (card version " + def.Provenance.CardVersion + "); spawn-only",
-		Model:       def.Model,
-		Tools:       def.Tools,
-		Provenance:  def.Provenance,
+		Name:           name,
+		Description:    "Enrolled third-party agent (card version " + def.Provenance.CardVersion + "); spawn-only",
+		Model:          def.Model,
+		EmbeddingModel: def.EmbeddingModel,
+		Tools:          def.Tools,
+		Provenance:     def.Provenance,
 	})
 	if err != nil {
 		return nil, err
