@@ -212,6 +212,14 @@ The governed core is real and runnable today:
   confiner refuses a compartment that is not the consented artifact, the
   gateway refuses to admit a mismatch, and the receipt records the measured
   artifact (runtime-reported, not proof).
+  The same ceremony also brings an **operator-vetted local MCP tool resource**
+  under governance (`agenthof enroll mcp`), with no signed card: it discloses
+  the exact command, environment variable names, egress and read-only tools,
+  writes nothing until you accept the digest, edits your working configuration
+  in place, and records the enrollment. With no `--grant` the resource is
+  inert. The pin is your vetted install path, not a measurement of the MCP's
+  code. Remote MCP enrollment, a secret store beyond environment variables
+  and launch attestation are later.
 - **Served runs and a read API** — `agenthof serve` hosts concurrent
   governed runs behind an HTTP API where every call carries the human's
   own OIDC token: start a run, poll it, read its ledger with an honest

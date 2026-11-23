@@ -1,4 +1,11 @@
-# The life of an enrolled agent
+# The life of an enrollment
+
+`agenthof enroll` brings something under governance without hand-editing YAML.
+It has two journeys, covered in turn below: an **agent** from a signed card
+(the first half of this page), and a **local MCP tool resource** an operator
+has vetted, with no card (see [Enrolling a local MCP](#enrolling-a-local-mcp)).
+
+## The life of an enrolled agent
 
 One third-party agent, from a signed card an operator was handed to the
 governed configuration it becomes and the contained run it is allowed. This
@@ -274,6 +281,160 @@ The honest limits of the binding:
   [`lifecycle-spawn.md`](lifecycle-spawn.md#limits-stated-plainly). What
   Agenthof guarantees is that the agent runs *only* where the supervisor put
   it, governed and recorded, or not at all.
+
+## Enrolling a local MCP
+
+An operator has installed a local MCP server (a program that speaks the Model
+Context Protocol over stdio) and wants it governed: reachable only through
+the tool door, only by an agent that is granted it, and only for the tools
+the operator named. There is no signed card here. The operator **is** the
+vetting: they chose the install, the command and the tools, and
+`enroll mcp` records that decision. The ceremony has the same shape as the
+card journey: authorize, disclose, consent by digest, write, record.
+
+```
+  operator                 agenthof enroll mcp                   working config    control ledger
+    |  enroll mcp <name>        |                                      |                 |
+    |  --command ... --socket   |-- authorized to enroll? --- no --------------------> refused (not_authorized)
+    |  --token-env --tools      |      | yes                           |                 |
+    |                           |-- name free? validate the proposal    |                 |
+    |                           |     in memory (nothing written)       |                 |
+    |  inspect (no --accept) ---|  <-- discloses argv, env NAMES, egress, tools,         |
+    |                           |      accept-digest; stops (nothing recorded)           |
+    |  --accept sha256:<d> -----|-- digest of the proposal matches? -no----------------> refused (consent_declined)
+    |                           |      | yes                           |                 |
+    |                           |-- edit in place, under the lock ----->| tool resource   |
+    |                           |     (+ with --grant: one read-only    | (+ one grant)   |
+    |                           |      grant on the named agent)        |                 |
+    |                           |-- re-validate the written files       |                 |
+    |                           |-- record the enrollment -----------------------------> success {resource, command,
+    |                           |                                       |                  env names, tools, egress,
+    |                           |                                       |                  granted_to, digest, file hashes}
+    |  apply  -> installs; refbridge launches the MCP from the governed slice;
+    |            the tool door verifies the command and enforces the grant
+```
+
+### What the operator supplies
+
+```
+agenthof enroll mcp <name> --command "<abs argv>" --socket <abs path> \
+    --token-env <NAME> --tools a,b [--env N,..] [--egress host,..] \
+    [--grant <agent>] [--from-paste] [--accept sha256:<digest>]
+```
+
+- **The command** is the launch argv; its first element must be an absolute
+  path to an install you already made. A fetch-at-spawn launcher (`npx`,
+  `npm`, `uvx`, `pipx`, `bunx`) is refused: it would pull whatever the
+  registry serves at launch time, so there is nothing pinned to vet.
+  `--from-paste` reads a pasted `{command, args, env}` MCP configuration on
+  stdin instead; every pasted env **value** is discarded on the spot, and only
+  the names survive.
+- **The socket and token variable.** `--socket` is the absolute path the
+  bridge fronts the MCP on; `--token-env` is the **name** of the environment
+  variable the gateway reads the bearer token from. A value in that slot is
+  refused, never echoed.
+- **The tools.** `--tools` names the read-only tools explicitly. `*` is never
+  written. **Nothing is run at enroll time** to discover them: the operator
+  states them, and the door later holds the agent to exactly that list.
+- **Env names and egress.** `--env` lists environment variable **names** to
+  pass through to the MCP, never values. `--egress` lists the hosts it may
+  reach; empty means no network.
+
+### Authorization, disclosure, consent
+
+Like the card journey, enrollment is authorized against the `enroll` control
+operation a role declares in the installed configuration; an unauthorized
+caller is refused first and the refusal is recorded.
+
+With no `--accept`, `enroll mcp` **discloses and stops**: the exact argv, the
+environment variable names, the declared egress, the read-only tools, whom (if
+anyone) they would be granted to, the resource exactly as it would be written,
+and an **accept-digest**, the SHA-256 of that proposed resource. It writes
+nothing and records nothing. The digest binds the resource body shown; check
+the name and the `--grant` target yourself, they are not inside it.
+
+`--accept sha256:<digest>` proceeds only if the proposal still hashes to the
+digest you consented to. A mismatch is a recorded `consent_declined`.
+
+### What gets written
+
+On accept, under the same writer lock `apply` takes, Agenthof edits the
+**working** configuration in place (comments and layout are preserved):
+
+- a **tool resource** in `gateway.yaml` carrying the governed launch spec:
+  the command, the env names, the egress and the read-only tools; and
+- if `--grant <agent>` was given, one **named read-only grant** of exactly
+  those tools on that agent's file.
+
+It then reloads and re-validates the written files, and only then appends the
+`enroll_mcp` event. Any failure before that reverts the edits.
+
+**Propose, not install.** `enroll` writes the working configuration and
+ledgers the decision; it installs nothing. `apply` is its own act. And with no
+`--grant`, the resource is written **inert**: unreachable by any agent until
+one is granted it (default-deny).
+
+### The record
+
+One event, `enroll_mcp`, authorized by the `enroll` operation, carrying: the
+resource name, the command, the env names, the read-only tools, the declared
+egress, the agent it was granted to, the accept-digest consented to, and the
+SHA-256 of each file written. There is **no card digest and no signer**,
+because there was no card. A wrong `--accept` records `refused` /
+`consent_declined`, and a caller without the grant records `refused` /
+`not_authorized`. Other refusals (a name already in use, a configuration that
+does not load or validate, a busy lock, a changed installed configuration)
+print on stderr and are not recorded. `agenthof audit control` renders the
+line `resource <name> enrolled`; the command and the rest stay in the record
+for anyone reading it raw.
+
+### How an enrolled MCP runs
+
+After `apply`, the resource is part of the installed configuration. refbridge
+launches the MCP from that governed slice, inside the supervisor's
+compartment (see [`lifecycle-spawn.md`](lifecycle-spawn.md)). Each tool call
+then passes the tool door, which verifies the launched **command** against the
+applied configuration and enforces the grant's allowlist: an agent can call
+only the tools it was granted, and an ungranted agent cannot reach the
+resource at all. The call is ledgered like any other tool call
+([`lifecycle.md`](lifecycle.md)).
+
+### What is enforced today, and what is reserved
+
+Only what ships is a guarantee.
+
+- **Today:** the `enroll` authorization; disclosure and digest-bound consent;
+  the in-place, validated, reverted-on-failure edit; the inert default;
+  the explicit read-only allowlist; the command check at the door; the
+  audit record.
+- **Reserved, not shipped:** remote MCP enrollment by URL; a secret store
+  beyond environment variables (such as a keychain); `connect`/OAuth
+  flows; a chat front for enrollment; cryptographic attestation of the
+  launched program; and listing an MCP's tools by asking it.
+
+### Limits, stated plainly
+
+- **The pin is the operator's vetted install path, not a measurement.**
+  Agenthof does not hash or fingerprint the MCP's code. It checks that the
+  command it launches is the command you consented to. Whether that program
+  is trustworthy is your judgment, made when you installed it.
+- **The door verifies the command only.** `env_passthrough` and `egress` are
+  declared configuration, recorded and disclosed, but not checked by the door
+  at call time. What a compartment can actually reach is the supervisor's
+  tier, as for any spawn.
+- **The command is permanent.** The argv is written verbatim to the
+  configuration and to the append-only ledger, and cannot be taken back out.
+  Put secrets in environment variables (names only), never in arguments.
+- **Two crash windows, inherent to writing first and recording second.**
+  If the process dies after the configuration is edited but before the event
+  is appended, the files are changed with no record, and re-running then
+  refuses with "already a tool resource". And if an append reaches disk but
+  returns an error, the edits are reverted while a recorded success remains
+  whose file hashes describe files that no longer exist as written. Either
+  way the edit does nothing until a recorded `apply`, and the ledger is the
+  limited, not-tamper-proof evidence described in
+  [`concepts.md`](concepts.md), not a guarantee that no one else wrote the
+  configuration.
 
 ## See also
 

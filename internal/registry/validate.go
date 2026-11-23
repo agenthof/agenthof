@@ -24,6 +24,9 @@ func (e ValidationError) Error() string { return fmt.Sprintf("%s: %s: %s", e.Fil
 // through to a launched MCP server. Names only, never values.
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// IsEnvName reports whether s has the shape of an environment variable name.
+func IsEnvName(s string) bool { return envNameRE.MatchString(s) }
+
 // fetchLaunchers are package launchers that download code at spawn time.
 var fetchLaunchers = []string{"npx", "npm", "uvx", "pipx", "bunx"}
 
@@ -334,6 +337,10 @@ func Validate(cfg config.Config) []ValidationError {
 		if r.CredentialSource != "static_env" {
 			add("gateway.yaml", id, "bad-tool-resource",
 				fmt.Sprintf("tool resource %q: credential_source %q is not implemented (only static_env)", id, r.CredentialSource))
+		}
+		if r.TokenEnv != "" && !envNameRE.MatchString(r.TokenEnv) {
+			add("gateway.yaml", id, "bad-tool-resource",
+				fmt.Sprintf("tool resource %q: token_env must be an environment variable name, never a value", id))
 		}
 		switch r.GrantType {
 		case "":

@@ -141,6 +141,18 @@ func label(rec record) string {
 			return "agent " + agent + " enrolled" + digest
 		}
 		return "agent " + agent + " enrollment " + rec.Outcome + digest
+	case "enroll_mcp":
+		// Names the resource; the command, env names, tools and files stay
+		// in the record for raw readers.
+		if rec.EnrollMCP == nil {
+			// A refusal recorded before a resource is proposed names none.
+			return "MCP resource enrollment " + rec.Outcome
+		}
+		resource := origin.Clean(rec.EnrollMCP.Resource)
+		if rec.Outcome == "success" {
+			return "resource " + resource + " enrolled"
+		}
+		return "resource " + resource + " enrollment " + rec.Outcome
 	default:
 		return rec.Action
 	}

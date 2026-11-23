@@ -19,4 +19,9 @@ regexes = [
   # <placeholder>). A public key, never a secret; kept here because gitleaks
   # scans full history.
   '''11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=''',
+  # A fake secret-shaped literal in the tool-resource validation test
+  # (internal/registry/validate_test.go): the case proving that a VALUE typed
+  # into `token_env` — which must be an env-var NAME — is rejected. Never a
+  # credential; kept here because gitleaks scans full history.
+  '''sk-live-abc123''',
 ]
