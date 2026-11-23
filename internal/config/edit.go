@@ -19,7 +19,8 @@ var ErrResourceExists = errors.New("tool resource already exists")
 var ErrGrantExists = errors.New("tool grant already exists")
 
 // InsertToolResource adds res under tools.<id> in the gateway file at
-// gatewayPath, preserving every existing comment and key order. A missing
+// gatewayPath, preserving every existing comment and key order (the file is
+// re-serialized, so indentation and blank lines may change). A missing
 // file is created holding only this resource. An id already present is
 // refused with ErrResourceExists, never overwritten.
 func InsertToolResource(gatewayPath, id string, res ToolResource) error {
@@ -160,8 +161,13 @@ func editYAML(path string, create bool, mutate func(root *yaml.Node) error) erro
 }
 
 // writeFileAtomic writes data to path via a temp file in the same directory,
-// synced and renamed into place, mode 0644.
+// synced and renamed into place. An existing file keeps its mode; a new one
+// is 0644.
 func writeFileAtomic(path string, data []byte) error {
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".edit-*")
 	if err != nil {
 		return err
@@ -172,7 +178,7 @@ func writeFileAtomic(path string, data []byte) error {
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	if err := os.Chmod(tmpPath, 0o644); err != nil {
+	if err := os.Chmod(tmpPath, mode); err != nil {
 		_ = tmp.Close()
 		return err
 	}

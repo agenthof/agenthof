@@ -180,3 +180,53 @@ func TestInsertGrantNoToolsKey(t *testing.T) {
 		t.Errorf("err=%v tools=%+v\n%s", err, a.Tools, b)
 	}
 }
+
+func TestEditPreservesExistingFileMode(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "gateway.yaml")
+	if err := os.WriteFile(p, []byte(editGatewayFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := ToolResource{Kind: "mcp", URL: "unix:///run/new.sock", Runtime: "refbridge"}
+	if err := InsertToolResource(p, "newres", res); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v; an existing 0600 file must stay 0600", fi.Mode().Perm())
+	}
+	fresh := filepath.Join(t.TempDir(), "gateway.yaml")
+	if err := InsertToolResource(fresh, "newres", res); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(fresh); fi.Mode().Perm() != 0o644 {
+		t.Errorf("a newly created file is %v, want 0644", fi.Mode().Perm())
+	}
+}
+
+func TestInsertedResourceWritesOnlyTheKeysItUses(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "gateway.yaml")
+	res := ToolResource{Kind: "mcp", URL: "unix:///run/new.sock", Runtime: "refbridge",
+		CredentialSource: "static_env", TokenEnv: "NEW_TOKEN", Command: []string{"/usr/bin/new-mcp"}}
+	if err := InsertToolResource(p, "newres", res); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	for _, unwanted := range []string{"grant_type", "client_auth", "issuer", "token_endpoint", "client_id_env", "client_secret_env", "scope", "audience"} {
+		if strings.Contains(string(b), unwanted) {
+			t.Errorf("unused optional key %q was written:\n%s", unwanted, b)
+		}
+	}
+	cfg, errs := LoadDir(filepath.Dir(p))
+	if len(errs) != 0 {
+		t.Fatalf("LoadDir: %v", errs)
+	}
+	if got := cfg.Gateway.Tools["newres"]; got.TokenEnv != "NEW_TOKEN" || got.GrantType != "" {
+		t.Errorf("round-trip = %+v", got)
+	}
+}

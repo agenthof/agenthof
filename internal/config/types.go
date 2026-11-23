@@ -492,21 +492,21 @@ func (g GatewayConfig) EffectiveStepTimeout() time.Duration {
 type ToolResource struct {
 	Kind             string `yaml:"kind"` // "mcp"
 	URL              string `yaml:"url"`
-	CredentialSource string `yaml:"credential_source"` // "static_env" | vault|spiffe|sts (reserved)
-	TokenEnv         string `yaml:"token_env"`         // static_env bearer env NAME (direct-bearer grant only)
-	GrantType        string `yaml:"grant_type"`        // "" (direct-bearer) | "client_credentials" | "token_exchange"
-	ClientAuth       string `yaml:"client_auth"`       // client_credentials / token_exchange: "client_secret_basic" (other values reserved)
-	Issuer           string `yaml:"issuer"`            // client_credentials: (resource,issuer) key; rejected on token_exchange
-	TokenEndpoint    string `yaml:"token_endpoint"`    // client_credentials / token_exchange: https, or http to loopback only
-	ClientIDEnv      string `yaml:"client_id_env"`     // client_credentials / token_exchange: env NAME
-	ClientSecretEnv  string `yaml:"client_secret_env"` // client_credentials / token_exchange: client secret env NAME
-	Scope            string `yaml:"scope"`             // client_credentials / token_exchange: optional, space-delimited
+	CredentialSource string `yaml:"credential_source"`           // "static_env" | vault|spiffe|sts (reserved)
+	TokenEnv         string `yaml:"token_env"`                   // static_env bearer env NAME (direct-bearer grant only)
+	GrantType        string `yaml:"grant_type,omitempty"`        // "" (direct-bearer) | "client_credentials" | "token_exchange"
+	ClientAuth       string `yaml:"client_auth,omitempty"`       // client_credentials / token_exchange: "client_secret_basic" (other values reserved)
+	Issuer           string `yaml:"issuer,omitempty"`            // client_credentials: (resource,issuer) key; rejected on token_exchange
+	TokenEndpoint    string `yaml:"token_endpoint,omitempty"`    // client_credentials / token_exchange: https, or http to loopback only
+	ClientIDEnv      string `yaml:"client_id_env,omitempty"`     // client_credentials / token_exchange: env NAME
+	ClientSecretEnv  string `yaml:"client_secret_env,omitempty"` // client_credentials / token_exchange: client secret env NAME
+	Scope            string `yaml:"scope,omitempty"`             // client_credentials / token_exchange: optional, space-delimited
 	// Audience is, for grant_type token_exchange, the audience the exchanged
 	// per-user token is for (the RFC 8693 audience parameter — the upstream
 	// this resource fronts). Required there; rejected on every other grant.
 	// Distinct from AGENTHOF_OIDC_AUDIENCE, which is what tokens presented
 	// TO Agenthof may name.
-	Audience string `yaml:"audience"`
+	Audience string `yaml:"audience,omitempty"`
 	// ReadOnlyTools names the tools that are safe under a read-only grant
 	// (mode: read-only). Operator-declared. A tool not listed is mutating.
 	// Empty means this resource has no read-only grant.
