@@ -155,3 +155,45 @@ func TestMapBothForms(t *testing.T) {
 		t.Fatal("Map must copy the builds")
 	}
 }
+
+func TestMapEmbeddingGranted(t *testing.T) {
+	e := goodExt()
+	e.Embedding = "text-embed"
+	models := map[string]bool{"fast": true, "text-embed": true}
+	def, req, err := Map(e, "a", knownTools, models)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.EmbeddingModel != "text-embed" {
+		t.Fatalf("embedding model not set: %+v", def)
+	}
+	found := false
+	for _, r := range req {
+		if r == "embedding model text-embed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("requested summary missing embedding: %v", req)
+	}
+}
+
+func TestMapEmbeddingUnknownModel(t *testing.T) {
+	e := goodExt()
+	e.Embedding = "nope"
+	_, _, err := Map(e, "a", knownTools, knownModels)
+	if err == nil || !strings.Contains(err.Error(), `embedding model "nope" is not defined`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestMapEmbeddingWithSpawnStillRefused(t *testing.T) {
+	e := goodExt()
+	e.Embedding = "text-embed"
+	e.Spawn = []config.SpawnTarget{{Role: "r", Workflow: "w"}}
+	models := map[string]bool{"fast": true, "text-embed": true}
+	_, _, err := Map(e, "a", knownTools, models)
+	if err == nil || !strings.Contains(err.Error(), "a card may not grant may_spawn") {
+		t.Fatalf("got %v", err)
+	}
+}

@@ -63,6 +63,7 @@ type AgenthofExt struct {
 	Tools       []config.ToolGrant   `json:"tools"`
 	Exec        []string             `json:"exec"`
 	Model       string               `json:"model"`
+	Embedding   string               `json:"embedding"`
 	Spawn       []config.SpawnTarget `json:"spawn"`
 }
 

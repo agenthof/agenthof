@@ -62,6 +62,13 @@ func Map(ext AgenthofExt, name string, tools map[string]bool, models map[string]
 		def.Model = ext.Model
 		requested = append(requested, "model "+ext.Model)
 	}
+	if ext.Embedding != "" {
+		if !models[ext.Embedding] {
+			return config.AgentDef{}, nil, fmt.Errorf("embedding model %q is not defined", ext.Embedding)
+		}
+		def.EmbeddingModel = ext.Embedding
+		requested = append(requested, "embedding model "+ext.Embedding)
+	}
 	if len(ext.Exec) > 0 {
 		requested = append(requested, "exec (not granted): "+strings.Join(ext.Exec, ", "))
 	}

@@ -215,3 +215,18 @@ func TestParseRejectsHostProgramKeyVariants(t *testing.T) {
 		}
 	}
 }
+
+func TestExtensionAcceptsEmbedding(t *testing.T) {
+	in := strings.Replace(cardJSON, `"model": "fast"`, `"model": "fast", "embedding": "text-embed"`, 1)
+	c, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext, err := c.Extension()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ext.Embedding != "text-embed" {
+		t.Fatalf("embedding not carried: %+v", ext)
+	}
+}
