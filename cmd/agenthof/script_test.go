@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -198,6 +199,18 @@ func TestScript(t *testing.T) {
 			"snapshot":   cmdSnapshot,
 			"unchanged":  cmdUnchanged,
 			"cpdir":      cmdCpDir,
+			// stdoutvar <VAR> <regexp>: exports the first capture group of
+			// the regexp's match in the last command's stdout as $VAR.
+			"stdoutvar": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 2 {
+					ts.Fatalf("usage: stdoutvar <VAR> <regexp>")
+				}
+				m := regexp.MustCompile(args[1]).FindStringSubmatch(ts.ReadFile("stdout"))
+				if len(m) < 2 {
+					ts.Fatalf("stdout has no match for %q", args[1])
+				}
+				ts.Setenv(args[0], m[1])
+			},
 			"lastrun": func(ts *testscript.TestScript, neg bool, args []string) {
 				if len(args) != 1 {
 					ts.Fatalf("usage: lastrun <log-dir>")

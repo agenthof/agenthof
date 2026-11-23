@@ -184,8 +184,11 @@ func TestEnrollMCPAcceptNoGrantIsInert(t *testing.T) {
 			t.Errorf("event missing %q: %s", want, ev)
 		}
 	}
-	if strings.Contains(ev, "card_sha256") || strings.Contains(ev, "config_hash") {
-		t.Errorf("event carries card/config_hash: %s", ev)
+	if strings.Contains(ev, "card_sha256") || strings.Contains(ev, "config_hash") || strings.Contains(ev, "granted_to") {
+		t.Errorf("event carries card/config_hash/granted_to: %s", ev)
+	}
+	if !strings.Contains(ev, `"accept_sha256":"`+strings.TrimPrefix(mcpDigestOf(t, res), "sha256:")+`"`) {
+		t.Errorf("event lacks the consented digest: %s", ev)
 	}
 	sum := sha256.Sum256([]byte(gw))
 	if !strings.Contains(ev, hex.EncodeToString(sum[:])) {
@@ -217,8 +220,8 @@ func TestEnrollMCPGrantWritesNamedReadOnlyGrant(t *testing.T) {
 	if strings.Contains(ag, `"*"`) {
 		t.Errorf("wildcard grant: %s", ag)
 	}
-	if !strings.Contains(lastEvent(t, ctl), `"path":"agents/orch.yaml"`) {
-		t.Errorf("event lacks agent file: %s", lastEvent(t, ctl))
+	if !strings.Contains(lastEvent(t, ctl), `"path":"agents/orch.yaml"`) || !strings.Contains(lastEvent(t, ctl), `"granted_to":"orch"`) {
+		t.Errorf("event lacks agent file or grantee: %s", lastEvent(t, ctl))
 	}
 	if _, loadErrs := config.LoadDir(cfg); len(loadErrs) > 0 {
 		t.Fatalf("result does not load: %v", loadErrs)
@@ -237,7 +240,8 @@ func TestEnrollMCPFromPasteLiftsEnvValues(t *testing.T) {
 	res.ReadOnlyTools = []string{"search"}
 	// The disclosure must not echo the value either.
 	code, out, errs := runMCP(t, cfg, ctl, "drive", "--from-paste", "--tools", "search")
-	if code != 0 || strings.Contains(out+errs, secret) || !strings.Contains(out, "DRIVE_KEY") || !strings.Contains(out, "discarded") {
+	if code != 0 || strings.Contains(out+errs, secret) || !strings.Contains(out, "DRIVE_KEY") || !strings.Contains(out, "discarded") ||
+		!strings.Contains(out, "written verbatim to the configuration and the append-only ledger") {
 		t.Fatalf("disclosure: %d %s %s", code, out, errs)
 	}
 	enrollMCPStdin = strings.NewReader(paste)
@@ -384,6 +388,71 @@ func TestEnrollMCPOverBoundRefusedBeforeDisclosure(t *testing.T) {
 	code, out, errs := runMCP(t, cfg, ctl, "drive", "--from-paste", "--tools", "search")
 	if code == 0 || strings.Contains(out, "accept-digest") || !strings.Contains(errs, "nothing written") {
 		t.Fatalf("got %d %s %s", code, out, errs)
+	}
+	if readFile(t, filepath.Join(cfg, "gateway.yaml")) != before {
+		t.Fatal("gateway changed")
+	}
+}
+
+// The launch command is recorded verbatim; the operator is told so on both
+// launch forms, and the egress the operator named is recorded.
+func TestEnrollMCPRecordsEgressAndWarnsAboutArgv(t *testing.T) {
+	cfg, ctl := mcpEnv(t)
+	res := goodRes("/opt/mcp/bin/drive")
+	res.Egress = []string{"api.example.com:443"}
+	code, out, errs := runMCP(t, cfg, ctl, "drive", "--command", "/opt/mcp/bin/drive", "--tools", "search,readGoogleDoc",
+		"--egress", "api.example.com:443")
+	if code != 0 || !strings.Contains(out, "must not contain secrets") {
+		t.Fatalf("disclosure: %d %s %s", code, out, errs)
+	}
+	code, out, errs = runMCP(t, cfg, ctl, "drive", "--command", "/opt/mcp/bin/drive", "--tools", "search,readGoogleDoc",
+		"--egress", "api.example.com:443", "--accept", mcpDigestOf(t, res))
+	if code != 0 {
+		t.Fatalf("exit %d: %s %s", code, out, errs)
+	}
+	if !strings.Contains(lastEvent(t, ctl), `"egress":["api.example.com:443"]`) {
+		t.Errorf("event lacks egress: %s", lastEvent(t, ctl))
+	}
+}
+
+// Editing keeps an existing file's mode, and so does the rollback.
+func TestEnrollMCPKeepsFileModeAndRestoreKeepsIt(t *testing.T) {
+	cfg, ctl := mcpEnv(t)
+	gw := filepath.Join(cfg, "gateway.yaml")
+	if err := os.Chmod(gw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := goodRes("/opt/mcp/bin/drive")
+	code, out, errs := runMCP(t, cfg, ctl, "drive", "--command", "/opt/mcp/bin/drive", "--tools", "search,readGoogleDoc", "--accept", mcpDigestOf(t, res))
+	if code != 0 {
+		t.Fatalf("exit %d: %s %s", code, out, errs)
+	}
+	if fi, _ := os.Stat(gw); fi.Mode().Perm() != 0o600 {
+		t.Errorf("edit changed mode to %v", fi.Mode().Perm())
+	}
+	s, err := snapshot(gw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.restore(); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(gw); fi.Mode().Perm() != 0o600 {
+		t.Errorf("restore set mode %v, want the snapshot's 0600", fi.Mode().Perm())
+	}
+}
+
+func TestEnrollMCPRejectsMalformedToolNames(t *testing.T) {
+	cfg, ctl := mcpEnv(t)
+	before := readFile(t, filepath.Join(cfg, "gateway.yaml"))
+	for _, tools := range []string{"a b", "#x", "ok,bad name", "x\ty"} {
+		code, _, errs := runMCP(t, cfg, ctl, "drive", "--command", "/opt/mcp/bin/drive", "--tools", tools)
+		if code != 2 || !strings.Contains(errs, "tool name") {
+			t.Errorf("%q: got %d %s", tools, code, errs)
+		}
 	}
 	if readFile(t, filepath.Join(cfg, "gateway.yaml")) != before {
 		t.Fatal("gateway changed")

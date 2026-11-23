@@ -1,0 +1,69 @@
+# agenthof enroll mcp end to end: an operator-vetted local MCP is disclosed
+# (nothing written), a declined acceptance is refused and recorded without a
+# resource name, an accepted one writes the resource and a named read-only
+# grant and ledgers the enrollment without installing anything, and the
+# audit trail reads back. The written configuration then applies.
+
+exec agenthof apply --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+snapshot before cfg ctl/control.jsonl
+
+# disclosure: what would be written and recorded, and nothing else
+exec agenthof enroll mcp drive --command '/opt/mcp/bin/drive --stdio' --socket /run/agenthof/drive.sock --token-env DRIVE_TOKEN --tools search,readDoc --egress api.example.com:443 --grant orch --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stdout 'proposed governed MCP resource "drive"'
+stdout 'must not contain secrets'
+stdout 'egress: api.example.com:443'
+stdout 'nothing written'
+stdoutvar DIGEST 'accept-digest: (sha256:[0-9a-f]{64})'
+unchanged before cfg ctl/control.jsonl
+
+# a digest the operator did not see: refused, recorded, nothing written
+! exec agenthof enroll mcp drive --command '/opt/mcp/bin/drive --stdio' --socket /run/agenthof/drive.sock --token-env DRIVE_TOKEN --tools search,readDoc --egress api.example.com:443 --grant orch --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops --accept sha256:0000000000000000000000000000000000000000000000000000000000000000
+stderr 'does not match'
+unchanged -dir before cfg ctl/control.jsonl
+exec agenthof audit control --control-log ctl/control.jsonl
+stdout 'MCP resource enrollment refused'
+! stdout 'resource  enrollment'
+! stdout 'resource drive enrolled'
+
+# the disclosed digest: the resource and the grant are written, the
+# enrollment is ledgered
+exec agenthof enroll mcp drive --command '/opt/mcp/bin/drive --stdio' --socket /run/agenthof/drive.sock --token-env DRIVE_TOKEN --tools search,readDoc --egress api.example.com:443 --grant orch --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops --accept $DIGEST
+stdout 'enrolled "drive": 2 file\(s\) edited'
+stdout 'next: agenthof apply'
+grep 'drive:' cfg/gateway.yaml
+grep '# operator notes' cfg/gateway.yaml
+grep 'resource: drive' cfg/agents/orch.yaml
+grep '"action":"enroll_mcp"' ctl/control.jsonl
+grep '"granted_to":"orch"' ctl/control.jsonl
+grep '"egress":\["api.example.com:443"\]' ctl/control.jsonl
+grep '"accept_sha256":"[0-9a-f]{64}"' ctl/control.jsonl
+! grep '"action":"enroll_mcp".*config_hash' ctl/control.jsonl
+! grep 'card_sha256' ctl/control.jsonl
+
+# the audit trail names the resource
+exec agenthof audit control --control-log ctl/control.jsonl
+stdout 'resource drive enrolled'
+stdout 'ops-user'
+
+# enrolling installed nothing; apply is its own act, and the result applies
+exec agenthof apply --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stdout 'registry ok'
+
+-- cfg/gateway.yaml --
+# operator notes
+models:
+  fast: {endpoint: http://localhost:4000, model: fast, api_key_env: K}
+tools:
+  code-search: {kind: mcp, url: https://mcp.example.internal/cs, credential_source: static_env, token_env: T, read_only_tools: [search]}
+-- cfg/agents/orch.yaml --
+name: orch
+endpoint: http://localhost:9
+-- cfg/workflows/main.yaml --
+name: main
+steps:
+  - {name: s, agent: orch}
+-- cfg/roles/admin.yaml --
+name: admin
+workflows: [main]
+allowed_groups: [ops]
+control: [apply, enroll]

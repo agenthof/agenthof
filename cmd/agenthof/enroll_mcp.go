@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -32,6 +33,10 @@ var enrollMCPStdin io.Reader = os.Stdin
 
 // maxPasteBytes bounds a pasted MCP configuration.
 const maxPasteBytes = 1 << 20
+
+// mcpToolNameRE is the grammar of a tool name in --tools: the characters MCP
+// tool names use, nothing that could be read as whitespace or YAML syntax.
+var mcpToolNameRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,127}$`)
 
 const msgEnrollMCPDeclined = "the accepted digest does not match the proposed resource"
 
@@ -127,6 +132,7 @@ func withMCPCandidate(cfg config.Config, name string, res config.ToolResource, g
 type fileSnapshot struct {
 	path    string
 	data    []byte
+	mode    os.FileMode
 	existed bool
 }
 
@@ -138,7 +144,11 @@ func snapshot(path string) (fileSnapshot, error) {
 	if err != nil {
 		return fileSnapshot{}, err
 	}
-	return fileSnapshot{path: path, data: b, existed: true}, nil
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	return fileSnapshot{path: path, data: b, mode: mode, existed: true}, nil
 }
 
 // restore puts the file back as it was: an absent file is removed, an
@@ -162,7 +172,7 @@ func (s fileSnapshot) restore() error {
 		werr = cerr
 	}
 	if werr == nil {
-		werr = os.Chmod(tmp.Name(), 0o644)
+		werr = os.Chmod(tmp.Name(), s.mode)
 	}
 	if werr == nil {
 		werr = os.Rename(tmp.Name(), s.path)
@@ -247,6 +257,11 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 	readOnly := splitList(*tools)
 	if len(readOnly) == 0 || slices.Contains(readOnly, "*") {
 		return usage("--tools must name the read-only tools explicitly; \"*\" is never written")
+	}
+	for _, t := range readOnly {
+		if !mcpToolNameRE.MatchString(t) {
+			return usage("--tools: %q is not a valid tool name (letters, digits and _ . : / - only)", origin.Clean(t))
+		}
 	}
 	var acceptDigest string
 	if *accept != "" {
@@ -412,7 +427,10 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "enroll mcp: %v\n", err)
 		return 1
 	}
-	payload := &control.EnrollMCP{Resource: name, Command: cmdArgv, EnvNames: envList, ReadOnlyTools: readOnly}
+	payload := &control.EnrollMCP{
+		Resource: name, Command: cmdArgv, EnvNames: envList, ReadOnlyTools: readOnly,
+		Egress: res.Egress, GrantedTo: *grant, AcceptSHA256: digest,
+	}
 	// The ledger's bounds are checked now, not at Append, so an over-bound
 	// enrollment is refused before it is disclosed, digested or written.
 	if err := control.ValidateEnrollMCP(payload); err != nil {
@@ -435,7 +453,8 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	// Disclose: exactly what the ledger will hold and what is written.
+	// Disclose what is written and what the ledger will hold: the command,
+	// env names, egress, tools, grantee and the digest being consented to.
 	resYAML, _ := yaml.Marshal(res)
 	_, _ = fmt.Fprintf(stdout, "enroll mcp: proposed governed MCP resource %q\n", name)
 	_, _ = fmt.Fprintf(stdout, "command (recorded verbatim in the ledger): %q\n", cmdArgv)
@@ -443,6 +462,7 @@ func cmdEnrollMCP(argv []string, stdout, stderr io.Writer) int {
 	if *fromPaste && len(envList) > 0 {
 		_, _ = fmt.Fprintln(stdout, "note: any env values in the pasted configuration were discarded; set them in the environment the MCP runs in")
 	}
+	_, _ = fmt.Fprintln(stdout, "note: the command arguments are written verbatim to the configuration and the append-only ledger and must not contain secrets; put secrets in environment variables (names only)")
 	_, _ = fmt.Fprintf(stdout, "egress: %s\n", egressLabel(res.Egress))
 	_, _ = fmt.Fprintf(stdout, "read-only tools: %s\n", strings.Join(readOnly, ", "))
 	if *grant != "" {

@@ -124,6 +124,7 @@ DISC="$("${ENROLL[@]}")" || fail "the disclosure run failed"
 echo "$DISC"
 echo "$DISC" | grep -qF "command (recorded verbatim in the ledger): [\"$WORK/stdio-tool\" \"-credential-env\" \"DEMO_TOKEN\"]" || fail "the disclosure did not show the launch argv"
 echo "$DISC" | grep -qF "env names (passed through; values are never read or recorded): " || fail "the disclosure did not show the env names line"
+echo "$DISC" | grep -qF "must not contain secrets" || fail "the disclosure did not warn that the command arguments are recorded verbatim"
 echo "$DISC" | grep -qF "read-only tools: echo, credential" || fail "the disclosure did not show the tools"
 echo "$DISC" | grep -qF "grant: agent \"tool-user\" gets exactly those tools, read-only" || fail "the disclosure did not show the grant"
 DIGEST="$(echo "$DISC" | sed -n 's/^accept-digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p')"
@@ -167,6 +168,8 @@ EV="$(grep '"action":"enroll_mcp"' "$CTL" | tail -n 1)"
 echo "$EV" | grep -qF '"outcome":"success"' || fail "the enroll_mcp event is not a success"
 echo "$EV" | grep -qF "$WORK/stdio-tool" || fail "the enroll_mcp event does not carry the launch argv"
 if echo "$EV" | grep -q "card_sha256"; then fail "the enroll_mcp event carries a card digest"; fi
+echo "$EV" | grep -qF '"granted_to":"tool-user"' || fail "the enroll_mcp event does not name the granted agent"
+echo "$EV" | grep -qF "\"accept_sha256\":\"${DIGEST#sha256:}\"" || fail "the enroll_mcp event does not carry the consented digest"
 # Enroll proposes; apply installs: nothing is installed yet.
 [ "$(tr -d '[:space:]' <"$INSTALLED_CURRENT")" = "$BASE_HASH" ] || fail "enroll changed the installed configuration"
 if grep -rqF "demo-tool" "$WORK/installed"; then fail "enroll installed the resource before apply"; fi
