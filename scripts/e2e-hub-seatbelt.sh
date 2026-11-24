@@ -19,6 +19,9 @@
 # skips cleanly when unset, off macOS, or without /usr/bin/sandbox-exec). The
 # card's pinned darwin/arm64 hash is the hub's authoritative native build; on
 # another arch or toolchain the build differs, and the script says so and skips.
+# The hub pins go1.27.4 for its reproducible build (the same pin as the hub's
+# go.mod toolchain line and its scripts/build.sh); keep the version below in
+# sync with it.
 # Requires go, curl and python3. Run from the repo root.
 set -euo pipefail
 
@@ -38,6 +41,11 @@ for tool in go curl python3 pgrep; do
 done
 [ -f "$HUB_DIR/scripts/build.sh" ] && [ -f "$HUB_DIR/agents/generic-chat/card.json" ] || { echo "e2e-hub-seatbelt: FAIL — HUB_DIR is not an agents hub checkout"; exit 1; }
 HUB_DIR="$(cd "$HUB_DIR" && pwd)"
+HUB_GO=go1.27.4   # the hub's pinned build toolchain; keep in sync with its scripts/build.sh
+if [ "$(go env GOVERSION)" != "$HUB_GO" ]; then
+	echo "e2e-hub-seatbelt: SKIP — the hub's pinned hashes reproduce only on $HUB_GO (found $(go env GOVERSION)); put $HUB_GO first on PATH"
+	exit 0
+fi
 
 SOCK_DIR="$(mktemp -d /tmp/hs.XXXXXX)"
 SUP_DIR="$(mktemp -d /tmp/hs.XXXXXX)"
@@ -83,7 +91,7 @@ VARIANT_HASH="$(sha_of "$WORK/generic-chat-variant")"
 [ "$HASH" != "$VARIANT_HASH" ] || fail "the variant has the consented bytes, so refusing it would prove nothing"
 CARD="$HUB_DIR/agents/generic-chat/card.json"
 if ! grep -q "$HASH" "$CARD"; then
-	echo "e2e-hub-seatbelt: SKIP — this toolchain does not reproduce the card's pinned darwin/arm64 hash ($HASH)"
+	echo "e2e-hub-seatbelt: SKIP — this $HUB_GO build does not reproduce the card's pinned darwin/arm64 hash ($HASH)"
 	exit 0
 fi
 
