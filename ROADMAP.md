@@ -213,6 +213,13 @@ The governed core is real and runnable today:
   gateway refuses to admit a mismatch, and the receipt records the measured
   artifact (runtime-reported, not proof). A curator makes a signing key and
   signs a card with `agenthof card`.
+  The first such agents are published in a **public hub** — `agenthof/hub` — that
+  you install from by URL (`agenthof enroll https://…/agents/<name>/card.json`):
+  each is a least-privilege, reproducibly built program your engine pins by
+  content hash and runs contained. The hub distributes the signed card and the
+  program, never a grant — your gateway still decides what the agent may do, and
+  your confiner still refuses any bytes but the ones the card pins — so you can
+  install an agent you do not have to trust.
   The same ceremony also brings an **operator-vetted local MCP tool resource**
   under governance (`agenthof enroll mcp`), with no signed card: it discloses
   the exact command, environment variable names, egress and read-only tools,
