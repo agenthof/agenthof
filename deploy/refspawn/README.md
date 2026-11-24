@@ -77,7 +77,7 @@ host unless a subtree is denied, so the configuration must be denied **by
 configuration**. Deny the exact paths a compartment must not read, as their
 real, resolved paths (Seatbelt matches resolved paths):
 
-- **What `ask`/`run` actually execute is the INSTALLED snapshot under the
+- What `ask`/`run` actually execute is the INSTALLED snapshot under the
   **control-log directory** (`<control-root>/installed/…`), not a `--config`
   source directory. The control root also holds the operator signing key. So
   deny the **control root** — via `deny_read`, or by pointing `deny_config_read`
@@ -85,8 +85,8 @@ real, resolved paths (Seatbelt matches resolved paths):
   identical installed copy next door even when the `--config` directory is
   denied.
 - The **run ledgers and artifact store** hold other runs' records and answers.
-  By default they sit beside the control log (`.agenthof/runs`,
-  `.agenthof/artifacts`), so denying the control root's parent covers them; a
+  By default they sit inside the control root (`.agenthof/runs`,
+  `.agenthof/artifacts`), so denying the control root covers them; a
   relocated `--log-dir`/`--artifact-dir` needs its own `deny_read` entry.
 - A `--config` source directory you also keep on the host is worth denying too,
   but denying it alone does **not** cover the executed configuration.
