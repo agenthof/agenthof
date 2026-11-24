@@ -179,8 +179,8 @@ func TestClassifyFailsClosed(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			gw, _, orch, reg, store := newAskFixture(t, "null")
-			gw = rungateway.New(askCfg().Gateway, ".", nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "").WithSpawner(c.sp)
+			_, _, orch, reg, store := newAskFixture(t, "null")
+			gw := rungateway.New(askCfg().Gateway, ".", nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "").WithSpawner(c.sp)
 			role, wf, matched, err := classify(context.Background(), gw, engine.Binding{RunID: "r-orch"}, orch, projectMenu(orch, reg), "hi", store,
 				func(engine.Event) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			if err == nil || matched || role != "" || wf != "" {
