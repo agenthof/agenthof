@@ -1,38 +1,64 @@
 # ask, as far as it can be proven with no compartment supervisor: usage and
 # flag handling, a missing installed configuration, a configuration without
-# the orchestrator, and the fail-closed path when the configured spawn
-# supervisor is unreachable (the classifier cannot start, so nothing runs and no answer is
-# printed). The routing, the confirmation gate, and the receipt need real
-# compartments; they are covered by the unit tests and the real-sandbox run.
+# the orchestrator, an invoker outside the orchestrator role's groups, and the
+# fail-closed path when the configured spawn supervisor is unreachable (the
+# classifier cannot start, so nothing runs and no answer is printed). Every
+# error and status line goes to stderr; stdout carries the answer alone. The
+# routing, the confirmation gate, and the receipt need real compartments; they
+# are covered by the unit tests and the real-sandbox run.
 
-# no prompt: usage
+# no prompt: usage, on stderr
 ! exec agenthof ask --config cfg --control-log ctl/control.jsonl --log-dir logs --artifact-dir artifacts
-stdout 'ask needs a prompt'
+! stdout '.|\n'
+stderr 'ask needs a prompt'
 
 # an unknown flag is a usage error
 ! exec agenthof ask --no-such-flag hi
-stdout 'flag provided but not defined'
+stderr 'flag provided but not defined'
 
-# nothing installed: a recorded refusal with the remedy
-! exec agenthof ask --yes --as dana@example.com --groups eng --config cfg --control-log emptyctl/control.jsonl --log-dir logs --artifact-dir artifacts "what is a mutex"
-stdout 'ask: no configuration installed under emptyctl/installed; run: agenthof apply --config cfg --control-log emptyctl/control.jsonl'
-stdout 'ask r-[0-9a-f]{16} refused: no configuration installed'
+# a prompt that begins with - is read as a flag unless -- precedes it
+! exec agenthof ask -weird
+stderr 'flag provided but not defined'
+
+# a flag AFTER the prompt is a leftover positional, never folded into the
+# prompt (a --token/--as there must not reach the model or be dropped)
+! exec agenthof ask 'what is a mutex' --yes
+! stdout '.|\n'
+stderr 'exactly one prompt'
+! exec agenthof ask --yes 'what is a mutex' extra
+! stdout '.|\n'
+stderr 'exactly one prompt'
+
+# nothing installed: a recorded refusal with the remedy, on stderr
+! exec agenthof ask --yes --as dana@example.com --groups eng --config cfg --control-log emptyctl/control.jsonl --log-dir logs --artifact-dir artifacts 'what is a mutex'
+! stdout '.|\n'
+stderr 'ask: no configuration installed under emptyctl/installed; run: agenthof apply --config cfg --control-log emptyctl/control.jsonl'
+stderr 'ask r-[0-9a-f]{16} refused: no configuration installed'
 
 # an installed configuration with no orchestrator agent
 exec agenthof apply --config nocfg --control-log noctl/control.jsonl --as dana@example.com --groups eng
-! exec agenthof ask --yes --as dana@example.com --groups eng --config nocfg --control-log noctl/control.jsonl --log-dir logs --artifact-dir artifacts "what is a mutex"
-stdout 'the installed configuration has no "orchestrator" agent'
+! exec agenthof ask --yes --as dana@example.com --groups eng --config nocfg --control-log noctl/control.jsonl --log-dir logs --artifact-dir artifacts 'what is a mutex'
+stderr 'the installed configuration has no "orchestrator" agent'
 
-# an orchestrator, a classifier and a leaf, whose spawn supervisor is
-# unreachable: the classifier cannot be started, ask fails closed, nothing is printed to stdout
+# an orchestrator, a classifier and a leaf; the orchestrator role admits only
+# the eng group (see cfg/roles/orchestrator.yaml)
 exec agenthof apply --config cfg --control-log ctl/control.jsonl --as dana@example.com --groups eng
-! exec agenthof ask --yes --as dana@example.com --groups eng --config cfg --control-log ctl/control.jsonl --log-dir logs --artifact-dir artifacts "what is a mutex"
-! stdout .
+
+# an invoker outside the orchestrator role's groups is refused before any spawn
+! exec agenthof ask --yes --as mallory --groups other --config cfg --control-log ctl/control.jsonl --log-dir logs --artifact-dir artifacts 'what is a mutex'
+! stdout '.|\n'
+stderr 'requires membership'
+stderr 'ask r-[0-9a-f]{16} refused:'
+
+# the spawn supervisor is unreachable: the classifier cannot be started, ask
+# fails closed, nothing is printed to stdout
+! exec agenthof ask --yes --as dana@example.com --groups eng --config cfg --control-log ctl/control.jsonl --log-dir logs --artifact-dir artifacts 'what is a mutex'
+! stdout '.|\n'
 stderr 'ask r-[0-9a-f]{16}: .*spawn compartment unavailable'
 
 # the same without --yes: still fails closed before any gate or prompt
-! exec agenthof ask --as dana@example.com --groups eng --config cfg --control-log ctl/control.jsonl --log-dir logs --artifact-dir artifacts "what is a mutex"
-! stdout .
+! exec agenthof ask --as dana@example.com --groups eng --config cfg --control-log ctl/control.jsonl --log-dir logs --artifact-dir artifacts 'what is a mutex'
+! stdout '.|\n'
 stderr 'spawn compartment unavailable'
 
 -- nocfg/gateway.yaml --
@@ -112,7 +138,7 @@ steps:
 -- cfg/roles/orchestrator.yaml --
 name: orchestrator
 workflows: [ask]
-allowed_groups: ["*"]
+allowed_groups: [eng]
 -- cfg/roles/router-chat.yaml --
 name: router-chat
 workflows: [router-chat]

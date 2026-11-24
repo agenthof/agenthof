@@ -136,9 +136,16 @@ func parseConfigOn(data []byte, goos string) (spawnConfig, error) {
 		cfg.Keys.DenyRead = *fc.DenyRead
 	}
 	if fc.DenyConfigRead != "" {
-		// The installed config directory, joined to the read-deny set so a
-		// Seatbelt compartment cannot read it. On podman a compartment has no
-		// host access at all, and the key is refused like deny_read.
+		// An absolute directory joined to the read-deny set so a Seatbelt
+		// compartment cannot read it; set it to the directory the deployment
+		// wants kept out of compartments. Note `ask`/`run` execute the
+		// INSTALLED snapshot under the control-log directory, not a `--config`
+		// source directory, so deny THAT control root (it holds installed/ and
+		// the operator signing key; the run ledgers and artifact store sit
+		// beside the control log by default) — either here or via deny_read. On
+		// podman a compartment has no host access at all, so the key is refused
+		// there; because it is folded into the deny-read set, a podman config's
+		// unconsumed-key error names it as deny_read.
 		if !filepath.IsAbs(fc.DenyConfigRead) {
 			fail("deny_config_read must be an absolute path")
 		}

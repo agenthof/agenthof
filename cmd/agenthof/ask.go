@@ -16,10 +16,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/obs"
 	"github.com/agenthof/agenthof/internal/refspawn"
@@ -40,7 +43,25 @@ const (
 	// like any other child, and is never offered as a menu choice.
 	routerRole     = "router-chat"
 	routerWorkflow = "router-chat"
+	// orchestrateStep labels the single step window the orchestrator's own
+	// ledger wraps its spawns in, so the ledger accounts for itself like any
+	// governed run's: every door (spawn) event sits inside the window and the
+	// step terminal carries the door-call count the gate admitted.
+	orchestrateStep = "orchestrate"
+	// reasonOffMenu is the fixed terminal reason recorded when the classifier
+	// names a target that is not on the offered menu — a misbehaviour signal,
+	// never the classifier's own (untrusted) text.
+	reasonOffMenu = "classifier named a target that is not on the menu"
 )
+
+// Convention: the installed configuration names the trusted orchestrator
+// agent exactly orchestratorAgent and the classifier exactly routerRole/
+// routerWorkflow; ask drives these by name, not by discovery. The orchestrator
+// AgentDef's endpoint is never dialled by ask (ask spawns its children
+// directly rather than running the orchestrator as a step), so it may be any
+// placeholder; but `run orchestrator ask` WOULD front that endpoint and hand
+// whatever listens there the orchestrator's may_spawn authority, so the
+// orchestrator agent is meant to be run only through this command.
 
 // menuEntry is one choice offered to the classifier. Its JSON shape is the
 // classifier's input contract; the key names are fixed by its signed card.
@@ -88,19 +109,24 @@ func projectMenu(orch config.AgentDef, reg *registry.Registry) []menuEntry {
 	return menu
 }
 
+// spawnFunc is the orchestrator's one way to start a child: it counts the
+// gate entry, drives the shared spawn gate (the may_spawn re-check, caps and
+// parent spawn event), and fails closed on a parent-ledger write error so a
+// child's output is never used once the record of it could not be written.
+type spawnFunc func(ctx context.Context, role, workflow, input string) (rungateway.SpawnResult, error)
+
 // classify asks the installed classifier which menu entry fits the prompt.
 // The spawn goes through the gateway's spawn gate, so the classifier is
 // subject to the same may_spawn check, caps and parent-ledger record as any
 // child. Its answer is read from the artifact store by the recorded digest.
 // A spawn that did not succeed, or an answer that is neither a complete pick
 // nor null, is an error — never a guessed pick.
-func classify(ctx context.Context, gw *rungateway.Gateway, bind engine.Binding, orch config.AgentDef, menu []menuEntry,
-	prompt string, store *artifact.Store, appendEvent func(engine.Event), logger *slog.Logger) (role, workflow string, matched bool, err error) {
+func classify(ctx context.Context, spawn spawnFunc, menu []menuEntry, prompt string, store *artifact.Store) (role, workflow string, matched bool, err error) {
 	in, err := json.Marshal(classifierInput{Menu: menu, Utterance: prompt})
 	if err != nil {
 		return "", "", false, err
 	}
-	res, err := gw.AuthorizeAndSpawn(ctx, bind, orch, routerRole, routerWorkflow, string(in), appendEvent, logger)
+	res, err := spawn(ctx, routerRole, routerWorkflow, string(in))
 	if err != nil {
 		return "", "", false, fmt.Errorf("classifier spawn did not complete: %w", err)
 	}
@@ -129,15 +155,14 @@ func classify(ctx context.Context, gw *rungateway.Gateway, bind engine.Binding, 
 	return pick.Role, pick.Workflow, true, nil
 }
 
-// cmdAsk is `ask "<prompt>"`: a trusted command, not a contained agent. It
-// establishes its own run from the installed configuration, offers the
-// orchestrator agent's may_spawn list to the classifier, and reports the
-// pick. The prompt is the first argument; flags may follow it.
+// cmdAsk is `ask [flags] "<prompt>"`: a trusted command, not a contained
+// agent. It establishes its own run from the installed configuration, offers
+// the orchestrator agent's may_spawn list to the classifier, and reports the
+// pick. Flags must precede the prompt, which is the single trailing
+// positional argument; a prompt that begins with "-" must be preceded by "--".
+// Only the answer is written to out; every usage error, refusal and status
+// line goes to stderr, so a piped stdout carries the answer alone.
 func cmdAsk(args []string, out, stderr io.Writer) int {
-	var prompt string
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		prompt, args = args[0], args[1:]
-	}
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	as := fs.String("as", "", "invoker identity (defaults to the OS user); ignored when --token is given")
 	groups := fs.String("groups", "", "comma-separated groups asserted for the --as identity; DEV ONLY — self-asserted, not verified, ignored when --token is given")
@@ -150,20 +175,29 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 	yes := fs.Bool("yes", false, "run the chosen agent without asking for confirmation")
 	logLevel := fs.String("log-level", "", "operational log level: debug|info|warn|error (default info; env "+envLogLevel+")")
 	logFormat := fs.String("log-format", "", "operational log format: text|json (default text; env "+envLogFormat+")")
-	fs.SetOutput(out)
+	fs.SetOutput(stderr)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if prompt == "" {
-		prompt = strings.Join(fs.Args(), " ")
-	}
-	if strings.TrimSpace(prompt) == "" {
-		_, _ = fmt.Fprintln(out, `ask needs a prompt: ask "<prompt>"`)
+	// Exactly one positional prompt. Flag parsing stops at the first
+	// non-flag, so a flag written AFTER the prompt lands here as a leftover
+	// positional: it is refused, never folded into the prompt (a --token or
+	// --as after the prompt would otherwise be sent to the model or silently
+	// dropped). A prompt that begins with "-" is parsed as a flag unless the
+	// caller separates it with "--".
+	rest := fs.Args()
+	if len(rest) == 0 || strings.TrimSpace(rest[0]) == "" {
+		_, _ = fmt.Fprintln(stderr, `ask needs a prompt: ask [flags] "<prompt>" (flags precede the prompt; use -- before a prompt that begins with -)`)
 		return 2
 	}
+	if len(rest) > 1 {
+		_, _ = fmt.Fprintf(stderr, "ask takes exactly one prompt; %d extra argument(s) followed it. Flags must precede the prompt.\n", len(rest)-1)
+		return 2
+	}
+	prompt := rest[0]
 	level, format, err := resolveLogConfig(*logLevel, *logFormat, os.Getenv)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "ask: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "ask: %v\n", err)
 		return 2
 	}
 	logger := obs.New(stderr, level, format)
@@ -171,20 +205,20 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 	r := resolveInvokerForRun(*as, *groups, *token)
 	inv := r.inv
 	if r.usageErr {
-		_, _ = fmt.Fprintln(out, "ask: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
+		_, _ = fmt.Fprintln(stderr, "ask: AGENTHOF_OIDC_ISSUER must be set in the environment to authenticate --token")
 		return 2
 	}
 	refuse := func(reason string) int {
 		runID, refErr := engine.Refuse(*logDir, orchestratorRole, askWorkflow, inv, reason, nil)
 		if refErr != nil {
-			_, _ = fmt.Fprintln(out, refErr)
+			_, _ = fmt.Fprintln(stderr, refErr)
 			return 1
 		}
-		_, _ = fmt.Fprintf(out, "ask %s refused: %s\n", runID, reason)
+		_, _ = fmt.Fprintf(stderr, "ask %s refused: %s\n", runID, reason)
 		return 1
 	}
 	if r.refused {
-		_, _ = fmt.Fprintf(out, "ask: token authentication failed: %v\n", r.verifyErr)
+		_, _ = fmt.Fprintf(stderr, "ask: token authentication failed: %v\n", r.verifyErr)
 		return refuse("token verification failed")
 	}
 
@@ -192,28 +226,35 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 	// raw configuration directory.
 	cfg, reg, h, installed, cfgErrs, unverified := resolveRunConfig(*controlLog, *verifyKey, verifyAndAdvance)
 	for _, e := range cfgErrs {
-		_, _ = fmt.Fprintln(out, e.Error())
+		_, _ = fmt.Fprintln(stderr, e.Error())
 	}
 	if len(cfgErrs) > 0 {
 		return refuse("configuration invalid: " + cfgErrs[0].Error())
 	}
 	if unverified != nil {
 		if unverified.Transient() {
-			_, _ = fmt.Fprintf(out, "ask: %s\n", msgLockBusy)
+			_, _ = fmt.Fprintf(stderr, "ask: %s\n", msgLockBusy)
 			return 1
 		}
-		_, _ = fmt.Fprintf(out, "ask: %s\n", unverified.Error())
+		_, _ = fmt.Fprintf(stderr, "ask: %s\n", unverified.Error())
 		return refuse(unverified.Error())
 	}
 	if !installed {
-		_, _ = fmt.Fprintf(out, "ask: %s under %s; run: agenthof apply --config %s --control-log %s\n",
+		_, _ = fmt.Fprintf(stderr, "ask: %s under %s; run: agenthof apply --config %s --control-log %s\n",
 			msgNoConfigInstalled, installedStore(*controlLog), *cfgDir, *controlLog)
 		return refuse(msgNoConfigInstalled)
 	}
 	orch, ok := reg.Agent(orchestratorAgent)
 	if !ok {
-		_, _ = fmt.Fprintf(out, "ask: the installed configuration has no %q agent\n", orchestratorAgent)
+		_, _ = fmt.Fprintf(stderr, "ask: the installed configuration has no %q agent\n", orchestratorAgent)
 		return 1
+	}
+	// The orchestrator run passes the registry gate every run does: the role
+	// exists, owns the ask workflow, and admits this invoker. Without this the
+	// orchestrator role's allowed_groups would be decorative — a stamped role
+	// never checked against the caller — so it runs before any spawn.
+	if reason, admitted := engine.Admit(reg, orchestratorRole, askWorkflow, inv); !admitted {
+		return refuse(reason)
 	}
 	if reason, refused := preRunRefusal(cfg, reg, askWorkflow, inv); refused {
 		return refuse(reason)
@@ -223,7 +264,7 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 	if ep := cfg.Gateway.SpawnSupervisor; ep != "" {
 		client, err := refspawn.New(ep, logger)
 		if err != nil {
-			_, _ = fmt.Fprintf(out, "ask: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "ask: %v\n", err)
 			return 2
 		}
 		sup = client
@@ -231,9 +272,21 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 	deps := newRunDeps(cfg, reg, newBroker(subjectTokenTypeFromEnv(os.Getenv)), logger, *logDir, *artifactDir, h, r.subjectToken, sup)
 	store, err := artifact.NewStore(*artifactDir)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "ask: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "ask: %v\n", err)
 		return 1
 	}
+
+	// The projected menu is offered to the classifier (the may_spawn re-check
+	// at the gate is the authority over any pick, so a thin or forged menu is
+	// harmless); the invoker-admitted subset is what "here is what I can do"
+	// lists. With the orchestrator unable to start anything but the classifier,
+	// there is nothing to route to — say so without spending a spawn.
+	menu := projectMenu(orch, reg)
+	if len(menu) == 0 {
+		_, _ = fmt.Fprintf(stderr, "ask: the %q agent's may_spawn lists no workflow to route to; add targets to it\n", orchestratorAgent)
+		return 1
+	}
+	admitted := admittedMenu(reg, menu, inv)
 
 	// The orchestrator's own run: a ledger of its own, so every spawn it
 	// makes is recorded on a parent the way a spawning agent's are.
@@ -241,64 +294,187 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 	bind := engine.Binding{Invoker: inv, Role: orchestratorRole, Workflow: askWorkflow, RunID: runID}
 	log, err := engine.OpenLog(*logDir, runID)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "ask: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "ask: %v\n", err)
 		return 1
 	}
 	defer func() { _ = log.Close() }()
-	var logErr error
-	appendEvent := func(e engine.Event) {
-		if logErr != nil {
-			return
-		}
-		e.Time = time.Now().UTC()
-		e.Binding = bind
-		logErr = log.Append(e)
-	}
-	appendEvent(engine.Event{Type: "workflow_started", ConfigHash: h, DoorAccounting: engine.DoorAccountingAdmission})
-	finish := func(status, reason string, code int) int {
-		appendEvent(engine.Event{Type: "workflow_finished", Status: status, Reason: reason})
-		if logErr != nil {
-			_, _ = fmt.Fprintf(out, "ask %s: run ledger write failed\n", runID)
-			return 1
-		}
-		return code
-	}
 
 	// One cancellable command context for every spawn: an interrupt or a
 	// termination signal cancels a child that is still running.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	gw := rungateway.New(cfg.Gateway, ".", deps.broker, logger, r.subjectToken).WithSpawner(deps)
-	menu := projectMenu(orch, reg)
-	role, workflow, matched, err := classify(ctx, gw, bind, orch, menu, prompt, store, appendEvent, logger)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "ask %s: %v\n", runID, err)
-		return finish("failed", "classification failed", 1)
-	}
+
 	fi, statErr := os.Stdin.Stat()
 	var served servedLeaf
-	status, reason, code := dispatchPick(ctx, pickRun{
-		gw: gw, bind: bind, orch: orch, reg: reg, menu: menu, prompt: prompt, store: store,
-		yes: *yes, interactive: statErr == nil && fi.Mode()&os.ModeCharDevice != 0,
-		in: os.Stdin, out: out, msg: stderr, runID: runID, appendEvent: appendEvent, logger: logger,
-		served: &served,
-	}, role, workflow, matched)
-	code = finish(status, reason, code)
-	// The receipt follows the answer, after the run's own terminal event is
-	// on its ledger, so the verdicts it reports cover the whole run.
+	code := runOrchestration(ctx, orchestration{
+		gw: gw, bind: bind, orch: orch, reg: reg, menu: menu, admitted: admitted, prompt: prompt,
+		store: store, configHash: h, log: log, logger: logger,
+		yes:         *yes,
+		interactive: statErr == nil && fi.Mode()&os.ModeCharDevice != 0,
+		outTerminal: isCharDevice(out),
+		in:          os.Stdin, out: out, msg: stderr, served: &served,
+	})
+	// The receipt follows the answer, after the run's own terminal event is on
+	// its ledger, so the verdicts it reports cover the whole run. A blank line
+	// separates it from the answer; the answer was control-char-stripped on a
+	// terminal so it cannot drive the cursor to overwrite the receipt.
 	if served.answered {
+		_, _ = fmt.Fprintln(stderr)
 		renderReceipt(stderr, *logDir, runID, served.agents)
 	}
 	return code
 }
 
-// printMenu lists what ask can do: the projected menu, never the
-// classifier's own may_spawn entry.
+// orchestration is the ask run's own-ledger orchestration: the gateway and
+// binding it spawns through, the offered and admitted menus, the artifact
+// store, the open run log, and the streams. It is the testable core of cmdAsk
+// — everything from the first ledger event through the run's terminal — so the
+// ledger shape and its completeness are exercised without disk configuration.
+type orchestration struct {
+	gw          *rungateway.Gateway
+	bind        engine.Binding
+	orch        config.AgentDef
+	reg         *registry.Registry
+	menu        []menuEntry
+	admitted    []menuEntry
+	prompt      string
+	store       *artifact.Store
+	configHash  string
+	log         *engine.Log
+	logger      *slog.Logger
+	yes         bool
+	interactive bool // stdin is a terminal a person can answer on
+	outTerminal bool // stdout is a terminal, so the answer is control-char-stripped
+	in          io.Reader
+	out, msg    io.Writer
+	served      *servedLeaf
+}
+
+// runOrchestration writes the ask run's ledger and drives the classify →
+// dispatch flow. The ledger accounts for itself like any governed run's: a
+// workflow_started that promises door accounting, ONE step window the spawns
+// sit inside, and a step terminal carrying the door-call count the gate
+// admitted — so `audit` reports completeness, not a false gap. finish is the
+// one exit after workflow_started and every path reaches it, so the step and
+// the workflow always carry agreeing terminals. The orchestrator fails closed
+// on any parent-ledger write error: a child's output is never used once the
+// record of it could not be written.
+func runOrchestration(ctx context.Context, o orchestration) int {
+	var logErr error
+	appendEvent := func(e engine.Event) {
+		if logErr != nil {
+			return
+		}
+		e.Time = time.Now().UTC()
+		e.Binding = o.bind
+		logErr = o.log.Append(e)
+	}
+	// doorCalls counts gate entries — the door calls the gate admits — so the
+	// step terminal records the count independently of whether each spawn
+	// event's append succeeded. A lost append then shows up as a completeness
+	// gap (recorded < admitted).
+	doorCalls := 0
+	spawn := func(ctx context.Context, role, workflow, input string) (rungateway.SpawnResult, error) {
+		doorCalls++
+		res, err := o.gw.AuthorizeAndSpawn(ctx, o.bind, o.orch, role, workflow, input, appendEvent, o.logger)
+		if err != nil {
+			return res, err
+		}
+		if logErr != nil {
+			return res, fmt.Errorf("run ledger write failed: %w", logErr)
+		}
+		return res, nil
+	}
+
+	appendEvent(engine.Event{Type: "workflow_started", ConfigHash: o.configHash, DoorAccounting: engine.DoorAccountingAdmission})
+	appendEvent(engine.Event{Type: "step_started", Step: orchestrateStep, Agent: o.orch.Name})
+	finish := func(status, reason string, code int) int {
+		dc := doorCalls
+		stepTerm := "step_failed"
+		if status == "succeeded" {
+			stepTerm = "step_succeeded"
+		}
+		appendEvent(engine.Event{Type: stepTerm, Step: orchestrateStep, DoorCalls: &dc})
+		appendEvent(engine.Event{Type: "workflow_finished", Status: status, Reason: reason})
+		if logErr != nil {
+			_, _ = fmt.Fprintf(o.msg, "ask %s: run ledger write failed\n", o.bind.RunID)
+			return 1
+		}
+		return code
+	}
+	if logErr != nil {
+		return finish("failed", "run ledger write failed", 1)
+	}
+
+	role, workflow, matched, err := classify(ctx, spawn, o.menu, o.prompt, o.store)
+	if err != nil {
+		_, _ = fmt.Fprintf(o.msg, "ask %s: %v\n", o.bind.RunID, err)
+		return finish("failed", "classification failed", 1)
+	}
+	status, reason, code := dispatchPick(ctx, pickRun{
+		spawn: spawn, reg: o.reg, menu: o.menu, admitted: o.admitted, prompt: o.prompt, store: o.store,
+		yes: o.yes, interactive: o.interactive, outIsTerminal: o.outTerminal,
+		in: o.in, out: o.out, msg: o.msg, runID: o.bind.RunID, logger: o.logger,
+		served: o.served,
+	}, role, workflow, matched)
+	return finish(status, reason, code)
+}
+
+// isCharDevice reports whether w is a terminal (a character device): an
+// *os.File whose mode says so. A pipe, a file or an in-memory buffer is not,
+// so the answer stays byte-exact when it is not going to a screen.
+func isCharDevice(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// admittedMenu is the subset of menu the invoker may actually run: each
+// entry's role must admit the invoker to that workflow, judged by the same
+// registry gate a run passes. It is what "here is what I can do" lists.
+func admittedMenu(reg *registry.Registry, menu []menuEntry, inv identity.Invoker) []menuEntry {
+	out := make([]menuEntry, 0, len(menu))
+	for _, m := range menu {
+		if _, ok := engine.Admit(reg, m.Role, m.Workflow, inv); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// printMenu lists what ask can do for this invoker: the admitted subset of
+// the projected menu, never the classifier's own may_spawn entry.
 func printMenu(out io.Writer, runID string, menu []menuEntry) {
 	_, _ = fmt.Fprintf(out, "ask %s: nothing fits that request. Here is what I can do:\n", runID)
 	for _, m := range menu {
 		_, _ = fmt.Fprintf(out, "  %s/%s: %s\n", m.Role, m.Workflow, m.Description)
 	}
+}
+
+// sanitizeForTerminal drops control characters other than newline and tab
+// from an untrusted string bound for a terminal, so a contained leaf's answer
+// cannot drive the cursor, recolour, or clear the screen to forge the trust
+// signals around it. It is origin.Clean's rule relaxed to keep the line
+// structure of a real answer (newlines and tabs) and with no length cap. It
+// keeps every graphic rune — IsGraphic, not IsPrint, so non-ASCII spaces like
+// NBSP and the ideographic space survive and French/CJK text is not mangled. A
+// plain-text look-alike is not prevented by this — only escape sequences are.
+func sanitizeForTerminal(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == utf8.RuneError {
+			continue
+		}
+		if r == '\n' || r == '\t' || unicode.IsGraphic(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // confirm asks a yes/no question on w and reads the answer from r. yes skips
@@ -357,26 +533,25 @@ func needsConfirm(reg *registry.Registry, workflow string) bool {
 	return false
 }
 
-// pickRun is everything dispatchPick needs: the spawn gate and its binding,
-// the projected menu, the store the answer is read from, and the streams. The
+// pickRun is everything dispatchPick needs: the spawn path, the offered and
+// admitted menus, the store the answer is read from, and the streams. The
 // answer goes to out alone; every other message goes to msg, so piping the
 // command yields only the answer.
 type pickRun struct {
-	gw          *rungateway.Gateway
-	bind        engine.Binding
-	orch        config.AgentDef
-	reg         *registry.Registry
-	menu        []menuEntry
-	prompt      string
-	store       *artifact.Store
-	yes         bool
-	interactive bool // stdin is a terminal a person can answer on
-	in          io.Reader
-	out, msg    io.Writer
-	runID       string
-	appendEvent func(engine.Event)
-	logger      *slog.Logger
-	served      *servedLeaf // when set, filled once an answer has been printed
+	spawn         spawnFunc
+	reg           *registry.Registry
+	menu          []menuEntry // offered to the classifier; a pick must be one of these
+	admitted      []menuEntry // the invoker-admitted subset, listed on a no-match
+	prompt        string
+	store         *artifact.Store
+	yes           bool
+	interactive   bool // stdin is a terminal a person can answer on
+	outIsTerminal bool // stdout is a terminal, so the answer is control-char-stripped
+	in            io.Reader
+	out, msg      io.Writer
+	runID         string
+	logger        *slog.Logger
+	served        *servedLeaf // when set, filled once an answer has been printed
 }
 
 // servedLeaf records what the receipt needs to know about the leaf that
@@ -401,7 +576,13 @@ func dispatchPick(ctx context.Context, p pickRun, role, workflow string, matched
 		}
 	}
 	if !inMenu {
-		printMenu(p.msg, p.runID, p.menu)
+		printMenu(p.msg, p.runID, p.admitted)
+		// A pick that named an off-menu target (as opposed to the literal
+		// null) is classifier misbehaviour: recorded with a fixed reason, never
+		// the classifier's own text, so the terminal event tells the two apart.
+		if matched {
+			return "succeeded", reasonOffMenu, 0
+		}
 		return "succeeded", "", 0
 	}
 	_, _ = fmt.Fprintf(p.msg, "ask %s: picked %s/%s\n", p.runID, role, workflow)
@@ -420,7 +601,7 @@ func dispatchPick(ctx context.Context, p pickRun, role, workflow string, matched
 			return "failed", "not confirmed", 1
 		}
 	}
-	res, err := p.gw.AuthorizeAndSpawn(ctx, p.bind, p.orch, role, workflow, p.prompt, p.appendEvent, p.logger)
+	res, err := p.spawn(ctx, role, workflow, p.prompt)
 	if err != nil {
 		_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s did not complete: %v\n", p.runID, role, workflow, err)
 		return "failed", "leaf spawn failed", 1
@@ -446,6 +627,12 @@ func dispatchPick(ctx context.Context, p pickRun, role, workflow string, matched
 	if strings.TrimSpace(body) == "" {
 		_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s produced an empty answer\n", p.runID, role, workflow)
 		return "failed", "answer empty", 1
+	}
+	// Byte-exact when piped; on a terminal, control characters are stripped so
+	// the contained leaf's answer cannot drive the cursor or forge the receipt
+	// that follows it on stderr.
+	if p.outIsTerminal {
+		body = sanitizeForTerminal(body)
 	}
 	_, _ = fmt.Fprintln(p.out, body)
 	if p.served != nil {
@@ -511,7 +698,7 @@ func renderReceipt(w io.Writer, logDir, runID string, leafAgents []config.AgentD
 
 	_, _ = fmt.Fprintf(w, "receipt for ask %s\n", runID)
 	var invokerAsserted string
-	_, _ = fmt.Fprintln(w, "enforced by construction (recorded by the gateway in the run ledgers, not reported by the agents):")
+	_, _ = fmt.Fprintln(w, "enforced by construction (from the run ledgers — recorded as the run happened, the containment tier as the supervisor reported it — not the agents' own claims):")
 	for _, e := range events {
 		if e.Type == "workflow_started" {
 			inv := e.Binding.Invoker
@@ -548,10 +735,10 @@ func renderReceipt(w io.Writer, logDir, runID string, leafAgents []config.AgentD
 		}
 		_, _ = fmt.Fprintln(w)
 		if !haveLedger[e.ChildRunID] {
-			_, _ = fmt.Fprintln(w, "    doors fired: no ledger found for this run")
+			_, _ = fmt.Fprintln(w, "    door calls: no ledger found for this run")
 			continue
 		}
-		_, _ = fmt.Fprintf(w, "    doors fired: %s\n", doorSummary(doors[e.ChildRunID]))
+		_, _ = fmt.Fprintf(w, "    door calls: %s\n", doorSummary(doors[e.ChildRunID]))
 	}
 	for _, s := range res.Sources {
 		if s.Kind != "run" {
@@ -563,9 +750,10 @@ func renderReceipt(w io.Writer, logDir, runID string, leafAgents []config.AgentD
 		}
 		_, _ = fmt.Fprintf(w, "  ledger %s: chain %s, completeness %s\n", strings.TrimSuffix(filepath.Base(s.Path), ".jsonl"), s.Integrity, comp)
 	}
+	_, _ = fmt.Fprintln(w, "  door calls count every door the run opened, a refused or denied call included")
 	_, _ = fmt.Fprintln(w, "  limits: the chain links each record to the one before it, so edits to a ledger show up; it is evidence, not a guarantee against someone who controls the ledger")
 
-	_, _ = fmt.Fprintln(w, "agent-asserted (the agent's own claim, not checked by agenthof):")
+	_, _ = fmt.Fprintln(w, "agent-asserted (declared in configuration or by the caller, not checked by agenthof):")
 	if invokerAsserted != "" {
 		_, _ = fmt.Fprintf(w, "  %s\n", invokerAsserted)
 	}

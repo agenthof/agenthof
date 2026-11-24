@@ -39,9 +39,9 @@ than ignored:
   run); each `images` value is an image reference.
 - **seatbelt:** `store_root` and `pid_dir` (absolute directories that
   must already exist), optionally `deny_read` (extra subtrees compartments
-  may not read), optionally `deny_config_read` (an absolute path; set it to
-  your agenthof config directory so a compartment cannot read it) and
-  `shared_host_scratch`; no `refexec.image`. Each
+  may not read), optionally `deny_config_read` (an absolute path, folded into
+  the deny-read set, for the configuration directory a compartment must not
+  read) and `shared_host_scratch`; no `refexec.image`. Each
   `images` value is the absolute path of the executable that runs as that
   agent. `limits` and `refexec.limits` are required by the schema but not
   enforced on this tier.
@@ -72,11 +72,30 @@ Seatbelt the child's refexec gets the same `store_root`, `pid_dir` and
 `deny_config_read` path if set, plus `spawn_root`.
 
 Config isolation: on podman a compartment has no access to the host's
-config directory by construction; on Seatbelt it is denied by configuration,
-so set `deny_config_read` to your agenthof config directory (give a
-symlinked directory as its real, resolved path: Seatbelt matches resolved
-paths). `deny_config_read` is a Seatbelt key and is refused on podman, which
-denies config access by construction.
+filesystem by construction; on Seatbelt a compartment can read most of the
+host unless a subtree is denied, so the configuration must be denied **by
+configuration**. Deny the exact paths a compartment must not read, as their
+real, resolved paths (Seatbelt matches resolved paths):
+
+- **What `ask`/`run` actually execute is the INSTALLED snapshot under the
+  **control-log directory** (`<control-root>/installed/…`), not a `--config`
+  source directory. The control root also holds the operator signing key. So
+  deny the **control root** — via `deny_read`, or by pointing `deny_config_read`
+  at it — or a compartment can read the running `gateway.yaml` from the
+  identical installed copy next door even when the `--config` directory is
+  denied.
+- The **run ledgers and artifact store** hold other runs' records and answers.
+  By default they sit beside the control log (`.agenthof/runs`,
+  `.agenthof/artifacts`), so denying the control root's parent covers them; a
+  relocated `--log-dir`/`--artifact-dir` needs its own `deny_read` entry.
+- A `--config` source directory you also keep on the host is worth denying too,
+  but denying it alone does **not** cover the executed configuration.
+
+`deny_config_read` is a single absolute path folded into the deny-read set;
+use `deny_read` for the several subtrees a real deployment denies. Both are
+Seatbelt keys: on podman a compartment already has no host access, so they are
+refused there (a podman config that sets `deny_config_read` is rejected, named
+in the unconsumed-key error as `deny_read`).
 
 The socket's directory is the access gate: it must be mode 0700 and owned
 by the user refspawn runs as, and it must not be under Agenthof's
