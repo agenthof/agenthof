@@ -487,13 +487,19 @@ func renderReceipt(w io.Writer, logDir, runID string, leafAgents []config.AgentD
 		_, _ = fmt.Fprintf(w, "receipt unavailable: %v\n", err)
 		return
 	}
-	events, _, err := engine.ReadLog(logDir, runID)
+	events, _, err := engine.ReadLog(logDir, runID) // a torn or broken ledger is an error here, never a partial receipt
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "receipt unavailable: the run ledger could not be read in full: %v\n", err)
 		return
 	}
 
 	doors := map[string]map[string]int{} // run id -> door kind -> count
+	haveLedger := map[string]bool{}
+	for _, src := range res.Sources {
+		if src.Kind == "run" {
+			haveLedger[strings.TrimSuffix(filepath.Base(src.Path), ".jsonl")] = true
+		}
+	}
 	for _, r := range res.Events {
 		if r.Source == "run" && doorKinds[r.Kind] {
 			if doors[r.RunID] == nil {
@@ -504,10 +510,16 @@ func renderReceipt(w io.Writer, logDir, runID string, leafAgents []config.AgentD
 	}
 
 	_, _ = fmt.Fprintf(w, "receipt for ask %s\n", runID)
+	var invokerAsserted string
 	_, _ = fmt.Fprintln(w, "enforced by construction (recorded by the gateway in the run ledgers, not reported by the agents):")
 	for _, e := range events {
 		if e.Type == "workflow_started" {
-			_, _ = fmt.Fprintf(w, "  invoker: %s (%s)\n", e.Binding.Invoker.Subject, e.Binding.Invoker.Method)
+			inv := e.Binding.Invoker
+			if inv.Method == "oidc" {
+				_, _ = fmt.Fprintf(w, "  invoker: %s (oidc, verified)\n", inv.Subject)
+			} else {
+				invokerAsserted = fmt.Sprintf("invoker: %s (%s by the caller, not verified)", inv.Subject, inv.Method)
+			}
 			break
 		}
 	}
@@ -535,6 +547,10 @@ func renderReceipt(w io.Writer, logDir, runID string, leafAgents []config.AgentD
 			}
 		}
 		_, _ = fmt.Fprintln(w)
+		if !haveLedger[e.ChildRunID] {
+			_, _ = fmt.Fprintln(w, "    doors fired: no ledger found for this run")
+			continue
+		}
 		_, _ = fmt.Fprintf(w, "    doors fired: %s\n", doorSummary(doors[e.ChildRunID]))
 	}
 	for _, s := range res.Sources {
@@ -550,6 +566,9 @@ func renderReceipt(w io.Writer, logDir, runID string, leafAgents []config.AgentD
 	_, _ = fmt.Fprintln(w, "  limits: the chain links each record to the one before it, so edits to a ledger show up; it is evidence, not a guarantee against someone who controls the ledger")
 
 	_, _ = fmt.Fprintln(w, "agent-asserted (the agent's own claim, not checked by agenthof):")
+	if invokerAsserted != "" {
+		_, _ = fmt.Fprintf(w, "  %s\n", invokerAsserted)
+	}
 	for _, a := range leafAgents {
 		_, _ = fmt.Fprintf(w, "  %s\n", assertedLine(a))
 	}

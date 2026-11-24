@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -446,6 +448,11 @@ func TestNeedsConfirmAnyStepOrUnknown(t *testing.T) {
 // the doors it fired. It returns the log dir.
 func receiptLedgers(t *testing.T) string {
 	t.Helper()
+	return receiptLedgersAs(t, identity.Invoker{Subject: "dana@example.com", Method: "asserted"})
+}
+
+func receiptLedgersAs(t *testing.T, inv identity.Invoker) string {
+	t.Helper()
 	dir := t.TempDir()
 	write := func(runID string, evs []engine.Event) {
 		l, err := engine.OpenLog(dir, runID)
@@ -460,7 +467,6 @@ func receiptLedgers(t *testing.T) string {
 			}
 		}
 	}
-	inv := identity.Invoker{Subject: "dana@example.com", Method: "asserted"}
 	orch := engine.Binding{Invoker: inv, Role: orchestratorRole, Workflow: askWorkflow, RunID: "r-orch"}
 	child := engine.Binding{Invoker: inv, Role: "dev", Workflow: "generic-chat", RunID: "r-leaf", ParentRunID: "r-orch", Depth: 1}
 	write("r-orch", []engine.Event{
@@ -520,5 +526,49 @@ func TestReceiptHonestWording(t *testing.T) {
 	}
 	if !strings.Contains(got, "enforced by construction") || !strings.Contains(got, "agent-asserted (") {
 		t.Errorf("enforced-vs-asserted split not explicit:\n%s", got)
+	}
+}
+
+func TestReceiptInvokerHonesty(t *testing.T) {
+	render := func(inv identity.Invoker) (enforced, asserted string) {
+		var b strings.Builder
+		renderReceipt(&b, receiptLedgersAs(t, inv), "r-orch", nil)
+		enforced, asserted, _ = strings.Cut(b.String(), "agent-asserted (")
+		return
+	}
+	enf, asr := render(identity.Invoker{Subject: "ci", Method: "asserted"})
+	if strings.Contains(enf, "invoker:") || !strings.Contains(asr, "invoker: ci (asserted by the caller, not verified)") {
+		t.Errorf("an asserted invoker must not sit under enforced:\nenforced=%s\nasserted=%s", enf, asr)
+	}
+	enf, asr = render(identity.Invoker{Subject: "dana", Issuer: "https://idp", Method: "oidc"})
+	if !strings.Contains(enf, "invoker: dana (oidc, verified)") || strings.Contains(asr, "invoker:") {
+		t.Errorf("an oidc invoker belongs under enforced:\nenforced=%s\nasserted=%s", enf, asr)
+	}
+}
+
+func TestReceiptMissingChildLedger(t *testing.T) {
+	dir := receiptLedgers(t)
+	if err := os.Remove(filepath.Join(dir, "r-leaf.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", nil)
+	if !strings.Contains(b.String(), "no ledger found for this run") || strings.Contains(b.String(), "doors fired: none") {
+		t.Errorf("a missing child ledger must not read as no doors:\n%s", b.String())
+	}
+}
+
+func TestReceiptUnreadableLedgerIsUnavailable(t *testing.T) {
+	var b strings.Builder
+	renderReceipt(&b, t.TempDir(), "r-absent", nil)
+	if !strings.Contains(b.String(), "receipt unavailable") {
+		t.Errorf("want an unavailable line, got %q", b.String())
+	}
+}
+
+func TestAnswerStaysOnStdout(t *testing.T) {
+	e := runPick(t, "grounded", "dev", "generic-chat", true, true, false, "", "the answer")
+	if e.out.String() != "the answer\n" || strings.Contains(e.msg.String(), "the answer") {
+		t.Errorf("answer must be the only stdout content: out=%q msg=%q", e.out.String(), e.msg.String())
 	}
 }
