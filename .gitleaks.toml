@@ -24,4 +24,8 @@ regexes = [
   # into `token_env` — which must be an env-var NAME — is rejected. Never a
   # credential; kept here because gitleaks scans full history.
   '''sk-live-abc123''',
+  # The hub curator's Ed25519 PUBLIC key, echoed in scripts/e2e-hub-seatbelt.sh
+  # as the trusted signer for the published hub cards. A public key, never a
+  # secret; kept here because gitleaks scans full history.
+  '''k2troapQ5SHzGpMeckKzHBUNcI517qZmiX/bw9Bl05o=''',
 ]

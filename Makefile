@@ -8,7 +8,7 @@
 # the governed Drive read against a real Drive (Linux/Lima, plus Seatbelt on macOS) —
 # run by judgment on a developer machine, never by CI.
 .DEFAULT_GOAL := help
-.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-memory acceptance-drive acceptance-enroll
+.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-memory acceptance-drive acceptance-enroll acceptance-hub
 
 GO ?= go
 UNAME_S ?= $(shell uname -s)
@@ -48,6 +48,11 @@ help:
 	@echo "    same top-k ids and scores (scripts/e2e-memory.sh). Linux: podman natively. macOS: podman"
 	@echo "    inside the Lima VM (started if needed) plus the native Seatbelt store-file falsifier"
 	@echo "    (scripts/e2e-memory-seatbelt.sh). KEEP=1 leaves the Qdrant container and files."
+	@echo "make acceptance-hub HUB_DIR=<hub checkout>"
+	@echo "    A signed hub agent run CONTAINED under the real macOS Seatbelt backend"
+	@echo "    (scripts/e2e-hub-seatbelt.sh): its pinned program hash is bound at spawn, one governed"
+	@echo "    chat call, a repointed binary refused. macOS only; needs the hub's pinned Go toolchain"
+	@echo "    first on PATH. Skips cleanly when HUB_DIR is unset."
 	@echo "make acceptance-drive [KEEP=1]"
 	@echo "    The real-backend governed Drive read (scripts/e2e-drive.sh): a Drive-reading agent"
 	@echo "    through the tool door against the real Drive API. Linux: podman natively. macOS: podman"
@@ -177,3 +182,9 @@ else ifeq ($(UNAME_S),Darwin)
 else
 	@echo "make acceptance-drive: unsupported host $(UNAME_S) — run scripts/e2e-drive.sh on a Linux host with rootless podman"; exit 1
 endif
+
+# A hub agent (signed card, reproducible build) governed under the real macOS
+# Seatbelt backend. Local/by-judgment, never CI; the script skips cleanly without
+# HUB_DIR, off macOS, or on a toolchain that does not reproduce the card's hash.
+acceptance-hub:
+	scripts/e2e-hub-seatbelt.sh
