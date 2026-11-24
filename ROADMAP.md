@@ -229,6 +229,19 @@ The governed core is real and runnable today:
   inert. The pin is your vetted install path, not a measurement of the MCP's
   code. Remote MCP enrollment, a secret store beyond environment variables
   and launch attestation are later.
+- **Routing a prompt to an installed agent** — `agenthof ask "…"` is an
+  orchestrator that answers nothing itself: it establishes a governed run of
+  its own, asks an installed classifier which of the operator's agents fits the
+  request, and runs the chosen one as a spawned child in its own compartment. It
+  routes only to the orchestrator's `may_spawn` list — re-checked at the spawn
+  gate, so the classifier cannot widen what runs — and runs an answer that is
+  not grounded only after a human confirms (or `--yes`). The answer comes back
+  read from the artifact store by digest, never riding a ledger, and is printed
+  with a receipt that separates what is enforced by construction — the invoker,
+  each child's containment tier and door calls, each ledger's chain and
+  completeness — from what the agent only asserts. On macOS Seatbelt the
+  installed configuration is denied to the compartments by the supervisor's
+  `deny_read`; on podman they have no host access by construction.
 - **Served runs and a read API** — `agenthof serve` hosts concurrent
   governed runs behind an HTTP API where every call carries the human's
   own OIDC token: start a run, poll it, read its ledger with an honest

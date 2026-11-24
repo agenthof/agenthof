@@ -18,7 +18,7 @@ import (
 
 // fileConfig is the YAML shape. Pointers distinguish an OMITTED block from
 // an empty one: a missing env_allow is rejected, never read as "nothing".
-// The backend keys (confiner, store_root, pid_dir, deny_read,
+// The backend keys (confiner, store_root, pid_dir, deny_read, deny_config_read,
 // shared_host_scratch, refexec.image) are all optional here; which of them
 // the selected confiner consumes is the confiner factory's decision, not
 // this file's.
@@ -29,6 +29,7 @@ type fileConfig struct {
 	StoreRoot         string            `yaml:"store_root"`
 	PIDDir            string            `yaml:"pid_dir"`
 	DenyRead          *[]string         `yaml:"deny_read"`
+	DenyConfigRead    string            `yaml:"deny_config_read"`
 	SharedHostScratch bool              `yaml:"shared_host_scratch"`
 	Images            map[string]string `yaml:"images"`
 	Timeout           string            `yaml:"timeout"`
@@ -133,6 +134,22 @@ func parseConfigOn(data []byte, goos string) (spawnConfig, error) {
 	}
 	if fc.DenyRead != nil {
 		cfg.Keys.DenyRead = *fc.DenyRead
+	}
+	if fc.DenyConfigRead != "" {
+		// An absolute directory joined to the read-deny set so a Seatbelt
+		// compartment cannot read it; set it to the directory the deployment
+		// wants kept out of compartments. Note `ask`/`run` execute the
+		// INSTALLED snapshot under the control-log directory, not a `--config`
+		// source directory, so deny THAT control root (it holds installed/ and
+		// the operator signing key; the run ledgers and artifact store sit
+		// beside the control log by default) — either here or via deny_read. On
+		// podman a compartment has no host access at all, so the key is refused
+		// there; because it is folded into the deny-read set, a podman config's
+		// unconsumed-key error names it as deny_read.
+		if !filepath.IsAbs(fc.DenyConfigRead) {
+			fail("deny_config_read must be an absolute path")
+		}
+		cfg.Keys.DenyRead = append(cfg.Keys.DenyRead, filepath.Clean(fc.DenyConfigRead))
 	}
 	if fc.Refexec != nil {
 		cfg.Keys.Image = fc.Refexec.Image

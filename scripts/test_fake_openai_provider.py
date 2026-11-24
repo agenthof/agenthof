@@ -111,6 +111,37 @@ class StatusOverrideTest(unittest.TestCase):
         self.assertEqual(json.loads(data), {"error": {"message": "fake provider refused"}})
 
 
+class ReplyForTest(unittest.TestCase):
+    def test_per_model_reply_overrides_default(self):
+        # --reply-for answers a call by the request's model; an unmapped model
+        # falls back to --reply. This is what lets one provider serve both the
+        # router (classifier) and the chat (answer) legs of an ask run.
+        proc, listening = start(
+            "--bind", "127.0.0.1:0", "--reply", "answered:nonce", "--reply-for", "router=1",
+        )
+        try:
+            def content(model):
+                status, data = post(tcp_conn(listening), "/v1/chat/completions",
+                                    {"model": model, "messages": [{"role": "user", "content": "hi"}]},
+                                    {"Authorization": "Bearer k"})
+                self.assertEqual(status, 200)
+                return json.loads(data)["choices"][0]["message"]["content"]
+            self.assertEqual(content("router"), "1")
+            self.assertEqual(content("chat"), "answered:nonce")
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_malformed_reply_for_is_rejected(self):
+        proc = subprocess.Popen(
+            [sys.executable, str(PROVIDER), "--bind", "127.0.0.1:0", "--reply-for", "no-equals-sign"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        _, err = proc.communicate(timeout=5)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("MODEL=TEXT", err)
+
+
 class UnixListenerTest(unittest.TestCase):
     def test_serves_on_a_unix_socket(self):
         tmp = tempfile.mkdtemp(dir="/tmp")  # short: Unix socket paths have a small length limit

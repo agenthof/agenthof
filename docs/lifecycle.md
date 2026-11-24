@@ -571,6 +571,7 @@ Only shipped behavior is a guarantee.
 - [`lifecycle-model.md`](lifecycle-model.md) — the life of a model call: authorize the logical model, inject the provider key, record `model_call`.
 - [`lifecycle-tool.md`](lifecycle-tool.md) — the life of a tool call: mirror the resource's tools, inject the resource credential, record `tool_call`.
 - [`lifecycle-spawn.md`](lifecycle-spawn.md) — the life of a spawn: a governed child run in compartments of its own, linked to its parent, bounded by config.
+- [`lifecycle-ask.md`](lifecycle-ask.md) — the life of an ask: the orchestrator that classifies a prompt, runs the chosen agent as a governed child, and returns its answer with a receipt.
 - [`control-plane-lifecycle.md`](control-plane-lifecycle.md) — the life of a control action (the governance plane that decides what may run).
 - [`concepts.md`](concepts.md) — the pieces and why they're arranged this way.
 - [`constitution.md`](constitution.md) — the invariants every run must honor.

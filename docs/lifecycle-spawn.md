@@ -333,6 +333,7 @@ is complete, and there is no runtime check.
 ## See also
 
 - [`lifecycle.md`](lifecycle.md) — the life of a run, which every child is.
+- [`lifecycle-ask.md`](lifecycle-ask.md) — the life of an ask: the orchestrator that spawns a classifier and a chosen agent from the command line.
 - [`lifecycle-enroll.md`](lifecycle-enroll.md) — the life of an enrolled agent, which runs only as a spawn target.
 - [`lifecycle-exec.md`](lifecycle-exec.md) — the first-hand exec door a child's refexec serves.
 - [`agent-protocol.md`](agent-protocol.md#spawn-door--a-governed-child-run) — the wire shape.

@@ -31,6 +31,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Enabled | `enabled` | bool | no | `true` |
 | Model | `model` | string | no | — |
 | EmbeddingModel | `embedding_model` | string | no | — |
+| Grounding | `grounding` | string (`generated` or `grounded`) | no | `generated` |
 | Instruction | `instruction` | string | no | — |
 | Tools | `tools` | list of tool grants ({resource, tools} or {resource, mode} objects) | no | none |
 | Output | `output` | string | no | — |
@@ -80,6 +81,13 @@ Optional string. The agent's effective model is this value, or
 that the name has a route. At run time the model door allows a chat
 completion only when the agent's request names that effective model, then
 resolves it through [`models`](#models).
+
+### `grounding`
+
+Optional string: `generated` or `grounded`; any other value fails `apply`
+validation. Declares whether the agent's answers are drawn from governed sources
+(`grounded`) or are free-form model output (`generated`). Empty means
+`generated`, so an unset agent is treated as needing a human confirmation.
 
 ### `embedding_model`
 

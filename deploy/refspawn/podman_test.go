@@ -476,3 +476,18 @@ func fakeRefexec(args []string) int {
 	_ = srv.Serve(ln)
 	return 0
 }
+
+// A configured deny_config_read reaches each child's rendered refexec
+// deny_read, so the children's exec compartments cannot read it either.
+func TestChildRenderCarriesConfigDeny(t *testing.T) {
+	cfg, err := parseConfig([]byte(withoutExecImage(t, strings.Replace(goodConfig, "confiner: podman\n",
+		"confiner: seatbelt\nstore_root: /s/stores\npid_dir: /s/pids\ndeny_config_read: /etc/agenthof\n", 1))))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	rc := refexecConfig{Timeout: time.Minute, Limits: limits{Memory: "256m", CPUs: "1", PIDs: 64}, MaxCompartments: 1}
+	out := renderRefexecConfig(rc, "/r/c/refexec.sock", "store", confiner.TierSeatbelt, cfg.Keys, "/r/children")
+	if !strings.Contains(out, "deny_read: [\"/etc/agenthof\", \"/r/children\"]\n") {
+		t.Fatalf("child render lacks the config dir:\n%s", out)
+	}
+}

@@ -131,6 +131,13 @@ func Validate(cfg config.Config) []ValidationError {
 				fmt.Sprintf("execution %q must be \"fronted\"", a.Execution))
 		}
 
+		switch a.Grounding {
+		case "", "generated", "grounded":
+		default:
+			add(a.SourceFile, a.Name, "bad-grounding",
+				fmt.Sprintf("grounding %q must be \"generated\" or \"grounded\"", a.Grounding))
+		}
+
 		effectiveExec := a.EffectiveExecution()
 		if a.SpawnOnly() {
 			// An enrolled agent runs only as a spawned, confiner-contained

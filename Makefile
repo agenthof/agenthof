@@ -8,7 +8,7 @@
 # the governed Drive read against a real Drive (Linux/Lima, plus Seatbelt on macOS) —
 # run by judgment on a developer machine, never by CI.
 .DEFAULT_GOAL := help
-.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-memory acceptance-drive acceptance-enroll acceptance-hub
+.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-memory acceptance-drive acceptance-enroll acceptance-hub acceptance-ask
 
 GO ?= go
 UNAME_S ?= $(shell uname -s)
@@ -53,6 +53,11 @@ help:
 	@echo "    (scripts/e2e-hub-seatbelt.sh): its pinned program hash is bound at spawn, one governed"
 	@echo "    chat call, a repointed binary refused. macOS only; needs the hub's pinned Go toolchain"
 	@echo "    first on PATH. Skips cleanly when HUB_DIR is unset."
+	@echo "make acceptance-ask HUB_DIR=<hub checkout>"
+	@echo "    agenthof ask end to end under the real macOS Seatbelt backend"
+	@echo "    (scripts/e2e-ask-seatbelt.sh): the classifier and the answering agent, both signed hub"
+	@echo "    agents, each run contained; the answer, the receipt, the config-dir read denial and a"
+	@echo "    repointed-binary refusal. macOS only; same toolchain note and skip as acceptance-hub."
 	@echo "make acceptance-drive [KEEP=1]"
 	@echo "    The real-backend governed Drive read (scripts/e2e-drive.sh): a Drive-reading agent"
 	@echo "    through the tool door against the real Drive API. Linux: podman natively. macOS: podman"
@@ -188,3 +193,8 @@ endif
 # HUB_DIR, off macOS, or on a toolchain that does not reproduce the card's hash.
 acceptance-hub:
 	scripts/e2e-hub-seatbelt.sh
+
+# agenthof ask governed end to end under the real macOS Seatbelt backend, from two
+# signed hub agents. Local/by-judgment, never CI; skips cleanly like acceptance-hub.
+acceptance-ask:
+	scripts/e2e-ask-seatbelt.sh

@@ -2,6 +2,7 @@ package confiner
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -114,5 +115,21 @@ func TestSelectDarwinDefaultRejectsAPodmanShapedConfig(t *testing.T) {
 	_, err := Select(Options{GOOS: "darwin", Keys: Keys{Image: "i:1", WorkspacePath: "/work"}})
 	if !errors.Is(err, ErrUnconsumedKeys) {
 		t.Fatalf("err = %v, want ErrUnconsumedKeys", err)
+	}
+}
+
+// The factory hands Keys.DenyRead (which carries a refspawn deny_config_read)
+// to the Seatbelt backend, whose read-deny set then contains it.
+func TestSelectSeatbeltDeniesConfiguredConfigDir(t *testing.T) {
+	c, err := Select(Options{GOOS: "darwin", Keys: Keys{StoreRoot: "/s", PIDDir: "/p", DenyRead: []string{"/x/cfg"}}})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	sb, ok := c.(*Seatbelt)
+	if !ok {
+		t.Fatalf("got %T, want *Seatbelt", c)
+	}
+	if !slices.Contains(sb.denyRead, "/x/cfg") || !strings.Contains(sbplProfile(profileInput{DenyRead: sb.denyRead}), `(deny file-read* (subpath "/x/cfg"))`) {
+		t.Fatalf("denyRead = %q, missing /x/cfg", sb.denyRead)
 	}
 }

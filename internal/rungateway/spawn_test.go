@@ -681,3 +681,41 @@ func TestSpawnMalformedFieldIsRecordedAndCounted(t *testing.T) {
 		t.Fatalf("Stop() = %d, want 1", n)
 	}
 }
+
+func TestAuthorizeAndSpawnCallableWithoutHTTP(t *testing.T) {
+	sp := &stubSpawner{result: SpawnResult{ChildRunID: "r-child", Status: "succeeded", Provisioned: true,
+		OutputSHA: "abc123", ChildConfiner: "podman"}}
+	p := New(spawnPolicy(2, 2, 5), "", broker.StaticEnv{}, nil, "").WithSpawner(sp)
+	agent := spawnAgent(workerChild)
+	bind := engine.Binding{RunID: "r-parent"}
+	rec := &eventRecorder{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	ctx := context.Background()
+
+	res, err := p.authorizeAndSpawn(ctx, bind, agent, "other", "child-wf", "in", rec.record, logger)
+	if err != nil || res.Status != "refused" || res.Reason != reasonSpawnNotAllowed {
+		t.Fatalf("off-list target: res=%+v err=%v", res, err)
+	}
+	if sp.callCount() != 0 {
+		t.Fatalf("Spawner called for a refused target")
+	}
+	evs := spawnEvents(rec)
+	if len(evs) != 1 || evs[0].Status != "refused" || evs[0].Reason != reasonSpawnNotAllowed {
+		t.Fatalf("refused event = %+v", evs)
+	}
+
+	res, err = p.authorizeAndSpawn(ctx, bind, agent, "worker", "child-wf", "in", rec.record, logger)
+	if err != nil || res.Status != "succeeded" || res.ChildRunID != "r-child" {
+		t.Fatalf("allowed target: res=%+v err=%v", res, err)
+	}
+	if sp.callCount() != 1 {
+		t.Fatalf("Spawner calls = %d, want 1", sp.callCount())
+	}
+	evs = spawnEvents(rec)
+	if len(evs) != 2 {
+		t.Fatalf("events = %+v", evs)
+	}
+	if e := evs[1]; e.Status != "succeeded" || e.OutputSHA != "abc123" || e.ChildConfiner != "podman" || e.ChildRunID != "r-child" {
+		t.Fatalf("success event = %+v", e)
+	}
+}
