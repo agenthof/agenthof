@@ -831,7 +831,8 @@ card. Each entry is an object with two required string fields:
 `apply` rejects a malformed entry with `bad-trusted-signer`. `enroll` reads
 the list from the installed configuration, so adding a signer is an applied,
 recorded act. With no signers `enroll` refuses every card; there is no
-trust by default and no way to skip the check.
+trust by default and no way to skip the check. A curator makes a key pair
+with `agenthof card keygen`, which prints the `kid` and `key` values to use.
 
 ```yaml
 trusted_signers:

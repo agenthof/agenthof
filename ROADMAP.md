@@ -211,7 +211,8 @@ The governed core is real and runnable today:
   digest or a host program's content hashes) is enforced at launch: the
   confiner refuses a compartment that is not the consented artifact, the
   gateway refuses to admit a mismatch, and the receipt records the measured
-  artifact (runtime-reported, not proof).
+  artifact (runtime-reported, not proof). A curator makes a signing key and
+  signs a card with `agenthof card`.
   The same ceremony also brings an **operator-vetted local MCP tool resource**
   under governance (`agenthof enroll mcp`), with no signed card: it discloses
   the exact command, environment variable names, egress and read-only tools,

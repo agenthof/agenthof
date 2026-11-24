@@ -43,6 +43,7 @@ exec agenthof card keygen --dir other
 stdoutvar OTHERKID 'kid: (\S+)'
 exec agenthof card sign --key other/curator.key --kid $OTHERKID --out foreign.json card.json
 ! exec agenthof enroll foreign.json --name triage2 --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stderr 'no signature verifies'
 ! exists cfg/agents/triage2.yaml
 
 -- card.json --

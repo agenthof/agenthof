@@ -1,6 +1,7 @@
 package agentcard
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"strings"
 	"testing"
@@ -70,5 +71,41 @@ func TestSignErrors(t *testing.T) {
 	}
 	if _, err := Sign([]byte(testBody), "k1", nil); err == nil {
 		t.Error("Sign accepted a nil key")
+	}
+}
+
+func TestSignRefusesUnsafeInput(t *testing.T) {
+	_, priv := newKey(t)
+	cases := map[string]struct{ card, kid string }{
+		"null":          {"null", "k1"},
+		"array root":    {"[]", "k1"},
+		"number root":   {"1", "k1"},
+		"trailing data": {testBody + "garbage", "k1"},
+		"dup keys":      {`{"name":"a","name":"b"}`, "k1"},
+		"empty kid":     {testBody, ""},
+	}
+	for name, c := range cases {
+		if _, err := Sign([]byte(c.card), c.kid, priv); err == nil {
+			t.Errorf("%s: Sign accepted it", name)
+		}
+	}
+}
+
+func TestSignKeepsHTMLCharsUnescaped(t *testing.T) {
+	pub, priv := newKey(t)
+	body := `{"name":"a<b>&c","version":"1","capabilities":{"extensions":[]}}`
+	out, err := Sign([]byte(body), "k1", priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte("a<b>&c")) {
+		t.Errorf("HTML characters were escaped: %s", out)
+	}
+	c, err := Parse(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(c, []Anchor{{KID: "k1", Key: pub}}); err != nil {
+		t.Fatal(err)
 	}
 }

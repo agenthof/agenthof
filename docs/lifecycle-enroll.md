@@ -57,39 +57,11 @@ capabilities it **requests** — tools, a model, an embedding model, and exec co
 **request, never a grant** — nothing in it grants the agent anything; a human
 consents, you `apply`, and the four doors enforce at run time regardless.
 
-## What Agenthof checks, in order
-
-Enrollment is a **control-plane action**, authorized the same way `apply` or
-`enable` is: against the `enroll` operation a role declares, read from the
-installed configuration. An unauthorized caller is refused **before anything
-is fetched**, so `enroll` can never be turned into a fetcher. Then, on a
-verified-authorized call:
-
-1. **Fetch** the card — a local file or an `https` URL only. No shelling out
-   to `git`, no cross-host redirects, a size cap and a timeout. ("A git repo
-   of cards" means: clone it yourself, point `enroll` at the card file.)
-2. **Parse**, strictly: duplicate, case-variant, and non-ASCII JSON keys
-   rejected, size bounded, no trailing data. (Strict parsing is not cosmetic —
-   a lax parser and the verifier disagreeing about which key wins is how a
-   signed card gets read two ways.)
-3. **Verify the signature first, before reading the card's contents.** The
-   JWS must verify as **EdDSA** over the canonical card body against a key in
-   the operator's [`trusted_signers`](reference/config.md#trusted_signers) —
-   matched by key id, never a key taken from the card itself. With **no
-   signers configured, every card is refused**: there is no trust by default
-   and no way to skip the check. An unsigned card, an untrusted key, or a
-   tampered body is a hard refusal. Only on a verified card does Agenthof read
-   the extension and the requests.
-4. **Fail fast on the content**: exactly one Agenthof extension, at least one
-   pinned artifact form (an image digest or a host program's build hashes), and
-   a supported interface, or a refusal that names the
-   problem — still before anything is disclosed or written.
-
 ## Signing a card
 
-If you curate cards, `agenthof card` makes and signs them locally. It reads
-and writes only the files you name: it edits no configuration and contacts
-nothing.
+If you curate cards, `agenthof card` makes a curator key pair and signs a card
+you have written; it does not author cards for you. It reads and writes only
+the files you name: it edits no configuration and contacts nothing.
 
 1. **Make a curator key pair.** `agenthof card keygen --dir curator` writes
    `curator/curator.key` (the private key, mode 0600; keep it with you) and
@@ -117,10 +89,15 @@ nothing.
 3. **Sign it.** `agenthof card sign --key curator/curator.key --kid <kid>
    card.json` writes the signed card to stdout (or to `--out <path>`, which
    never overwrites). It refuses, writing nothing, a card that does not parse,
-   one without exactly one Agenthof extension, an unreadable key, or an empty
-   or over-long `kid`.
-4. **Hand over the key and the card.** The operator who will enroll it adds the
-   public key to the gateway's `trusted_signers`:
+   one without exactly one Agenthof extension, an unreadable key, or a `kid`
+   that could not be a `trusted_signers` entry (1 to 128 printable ASCII
+   characters, no spaces). Signing **replaces** any signature the card already
+   carries; co-signing is not supported.
+4. **Hand over the public key and the card.** Give the operator the signed
+   card, the printed `public_key` value, and the `kid`. `curator.key` is
+   the private key and never leaves the curator. The operator, after
+   confirming the public key with you out of band, adds it to the gateway's
+   `trusted_signers`:
 
    ```yaml
    trusted_signers:
@@ -129,8 +106,37 @@ nothing.
 
    and then runs `agenthof enroll signed.json ...` as described above.
 
-Signing proves who vouched for the card, not that the agent is safe: the card
-stays a request, and the operator's consent and the doors decide what it gets.
+Signing shows which key vouched for the card, not that the agent is safe: the
+card stays a request, and the operator's consent and the doors decide what it
+gets.
+
+## What Agenthof checks, in order
+
+Enrollment is a **control-plane action**, authorized the same way `apply` or
+`enable` is: against the `enroll` operation a role declares, read from the
+installed configuration. An unauthorized caller is refused **before anything
+is fetched**, so `enroll` can never be turned into a fetcher. Then, on a
+verified-authorized call:
+
+1. **Fetch** the card — a local file or an `https` URL only. No shelling out
+   to `git`, no cross-host redirects, a size cap and a timeout. ("A git repo
+   of cards" means: clone it yourself, point `enroll` at the card file.)
+2. **Parse**, strictly: duplicate, case-variant, and non-ASCII JSON keys
+   rejected, size bounded, no trailing data. (Strict parsing is not cosmetic —
+   a lax parser and the verifier disagreeing about which key wins is how a
+   signed card gets read two ways.)
+3. **Verify the signature first, before reading the card's contents.** The
+   JWS must verify as **EdDSA** over the canonical card body against a key in
+   the operator's [`trusted_signers`](reference/config.md#trusted_signers) —
+   matched by key id, never a key taken from the card itself. With **no
+   signers configured, every card is refused**: there is no trust by default
+   and no way to skip the check. An unsigned card, an untrusted key, or a
+   tampered body is a hard refusal. Only on a verified card does Agenthof read
+   the extension and the requests.
+4. **Fail fast on the content**: exactly one Agenthof extension, at least one
+   pinned artifact form (an image digest or a host program's build hashes), and
+   a supported interface, or a refusal that names the
+   problem — still before anything is disclosed or written.
 
 ## The two-step consent
 
