@@ -1,0 +1,133 @@
+# ask, as far as it can be proven with no compartment supervisor: usage and
+# flag handling, a missing installed configuration, a configuration without
+# the orchestrator, and the fail-closed path when the configured spawn
+# supervisor is unreachable (the classifier cannot start, so nothing runs and no answer is
+# printed). The routing, the confirmation gate, and the receipt need real
+# compartments; they are covered by the unit tests and the real-sandbox run.
+
+# no prompt: usage
+! exec agenthof ask --config cfg --control-log ctl/control.jsonl --log-dir logs --artifact-dir artifacts
+stdout 'ask needs a prompt'
+
+# an unknown flag is a usage error
+! exec agenthof ask --no-such-flag hi
+stdout 'flag provided but not defined'
+
+# nothing installed: a recorded refusal with the remedy
+! exec agenthof ask --yes --as dana@example.com --groups eng --config cfg --control-log emptyctl/control.jsonl --log-dir logs --artifact-dir artifacts "what is a mutex"
+stdout 'ask: no configuration installed under emptyctl/installed; run: agenthof apply --config cfg --control-log emptyctl/control.jsonl'
+stdout 'ask r-[0-9a-f]{16} refused: no configuration installed'
+
+# an installed configuration with no orchestrator agent
+exec agenthof apply --config nocfg --control-log noctl/control.jsonl --as dana@example.com --groups eng
+! exec agenthof ask --yes --as dana@example.com --groups eng --config nocfg --control-log noctl/control.jsonl --log-dir logs --artifact-dir artifacts "what is a mutex"
+stdout 'the installed configuration has no "orchestrator" agent'
+
+# an orchestrator, a classifier and a leaf, whose spawn supervisor is
+# unreachable: the classifier cannot be started, ask fails closed, nothing is printed to stdout
+exec agenthof apply --config cfg --control-log ctl/control.jsonl --as dana@example.com --groups eng
+! exec agenthof ask --yes --as dana@example.com --groups eng --config cfg --control-log ctl/control.jsonl --log-dir logs --artifact-dir artifacts "what is a mutex"
+! stdout .
+stderr 'ask r-[0-9a-f]{16}: .*spawn compartment unavailable'
+
+# the same without --yes: still fails closed before any gate or prompt
+! exec agenthof ask --as dana@example.com --groups eng --config cfg --control-log ctl/control.jsonl --log-dir logs --artifact-dir artifacts "what is a mutex"
+! stdout .
+stderr 'spawn compartment unavailable'
+
+-- nocfg/gateway.yaml --
+models:
+  fast:
+    endpoint: http://localhost:4000
+    model: fast
+defaults:
+  model: fast
+-- nocfg/agents/chat.yaml --
+name: chat
+model: fast
+instruction: answer
+output: text
+endpoint: http://127.0.0.1:8080/
+-- nocfg/workflows/generic-chat.yaml --
+name: generic-chat
+steps:
+  - name: s
+    agent: chat
+-- nocfg/roles/dev.yaml --
+name: dev
+workflows: [generic-chat]
+allowed_groups: ["*"]
+-- cfg/gateway.yaml --
+models:
+  fast:
+    endpoint: http://localhost:4000
+    model: fast
+defaults:
+  model: fast
+spawn:
+  max_depth: 2
+  max_parallel: 2
+  max_total_spawns: 4
+spawn_supervisor: unix:///nonexistent/agenthof-spawn/refspawn.sock
+-- cfg/agents/orchestrator.yaml --
+name: orchestrator
+model: fast
+instruction: route
+output: text
+endpoint: http://127.0.0.1:8080/
+may_spawn:
+  - {role: router-chat, workflow: router-chat}
+  - {role: dev, workflow: generic-chat}
+-- cfg/agents/router.yaml --
+name: router
+model: fast
+instruction: classify
+output: text
+endpoint: http://127.0.0.1:8080/
+-- cfg/agents/chat.yaml --
+name: chat
+description: a general chat agent
+model: fast
+instruction: answer
+output: text
+grounding: generated
+endpoint: http://127.0.0.1:8080/
+-- cfg/workflows/ask.yaml --
+name: ask
+steps:
+  - name: s
+    agent: orchestrator
+-- cfg/workflows/router-chat.yaml --
+name: router-chat
+description: classifies a request
+steps:
+  - name: s
+    agent: router
+-- cfg/workflows/generic-chat.yaml --
+name: generic-chat
+description: answers general questions
+steps:
+  - name: s
+    agent: chat
+-- cfg/roles/orchestrator.yaml --
+name: orchestrator
+workflows: [ask]
+allowed_groups: ["*"]
+-- cfg/roles/router-chat.yaml --
+name: router-chat
+workflows: [router-chat]
+allowed_groups: ["*"]
+-- cfg/roles/dev.yaml --
+name: dev
+workflows: [generic-chat]
+allowed_groups: ["*"]
+-- nocfg/roles/admin.yaml --
+name: admin
+description: applies configuration
+allowed_groups: [eng]
+control: [apply]
+-- cfg/roles/admin.yaml --
+name: admin
+description: applies configuration
+allowed_groups: [eng]
+control: [apply]
