@@ -112,11 +112,16 @@ through this command.
 3. **Are you allowed.** The orchestrator run passes the same registry gate
    every run passes — the `orchestrator` role must exist, own the `ask`
    workflow, and admit the invoker's groups — before any spawn. Without this
-   the role's `allowed_groups` would be decorative. A no is recorded as a
-   refusal with the role's classifying reason, and nothing is spawned.
+   the role's `allowed_groups` would be decorative. The same stage also refuses
+   a run that would reach an on-behalf-of resource without a verified human,
+   exactly as at `run`. A no is recorded as a refusal with the classifying
+   reason, and nothing is spawned.
 
-Each refusal is written to a ledger of its own before `ask` stops, so even a
-request that never routes anywhere leaves an auditable record.
+A refused route is written to a ledger of its own before `ask` stops, so even a
+request that never routes anywhere leaves an auditable record. (A few early
+stops — a busy configuration lock, no installed `orchestrator` agent, or an
+orchestrator with nothing to route to — report the error and exit without
+recording a refusal, because no run was established to attribute one to.)
 
 ## The menu and the classifier
 
@@ -193,34 +198,41 @@ the step terminal and the workflow terminal always agree. The result is that
 `agenthof audit <ask-run>` reports the orchestrator run **complete**, not a
 false gap — the flagship command audits clean like any other run.
 
-`ask` fails closed on any parent-ledger write error: if the record of a spawn
-could not be written, that spawn's output is never used and the run ends with a
-ledger-write failure. A governed child never runs unrecorded with its output
-released.
+`ask` fails closed on a spawn whose record could not be written: if the spawn
+event does not land on the ledger, that spawn's answer is never printed and the
+run ends with a ledger-write failure. This covers the path up to and including
+the answer. A failure writing the run's *own* terminal events — which are
+appended after the answer has already gone to stdout — still yields a non-zero
+exit and a `run ledger write failed` message, but cannot recall an answer
+already released.
 
 ## The answer and the receipt
 
-The answer goes to **stdout**. When stdout is a pipe or a file it is
-byte-exact. When stdout is a terminal, control characters other than newline
-and tab are stripped first, so a contained leaf's answer cannot drive the
-cursor, recolour, or clear the screen to forge the trust signals around it.
+The answer goes to **stdout**. When stdout is a pipe or a file it is the answer
+exactly as stored, with a final newline added. When stdout is a terminal it is
+first stripped to graphic runes plus newline and tab — dropping the control,
+format, and separator characters a contained leaf could otherwise use to drive
+the cursor, recolour, or clear the screen and forge the trust signals around it.
 (Graphic runes — accented letters, CJK, non-breaking spaces — are kept, so real
 text in any language is untouched.)
 
 The **receipt** follows on stderr, after the run's own terminal event is on the
-ledger, so its verdicts cover the whole run. It is a rollup of the run subtree —
+ledger, so its verdicts cover the whole run. It is printed only when an answer
+was produced — a refusal, a no-match, a declined confirmation, or a failure
+ends with its own message on stderr and no receipt. It is a rollup of the run subtree —
 the orchestrator's ledger and every child's — in two deliberately separated
 parts:
 
-- **Enforced by construction**, read from the run ledgers: the invoker (shown
-  `verified` only for an OIDC token, otherwise marked caller-asserted and not
-  verified); for each child, its containment tier as the supervisor reported it
-  and, for an enrolled agent, the measured artifact; the door calls each child
-  run fired; and per ledger, the hash-chain integrity and the completeness
-  verdict. It carries digests and verdicts only — never an artifact body.
+- **Enforced by construction**, read from the run ledgers: the invoker, but
+  only when it is an OIDC-verified token; for each child, its containment tier
+  as the supervisor reported it and, for an enrolled agent, the measured
+  artifact; the door calls each child run fired; and per ledger, the hash-chain
+  integrity and the completeness verdict. It carries digests and verdicts only —
+  never an artifact body.
 - **Agent-asserted**, declared in configuration or by the caller and **not
-  checked** by Agenthof: whether the leaf agent calls its answers grounded or
-  model-generated.
+  checked** by Agenthof: an invoker that is not an OIDC token (an `--as`
+  identity, shown as asserted by the caller and not verified), and whether the
+  leaf agent calls its answers grounded or model-generated.
 
 The receipt reuses the honest wording of
 [Article III](constitution.md): the chain links each record to the one before
@@ -283,5 +295,5 @@ declaration); and richer menus. Only the shipped behaviour is a guarantee.
 - [`lifecycle-spawn.md`](lifecycle-spawn.md) — how the classifier and the leaf are run, confined, and recorded.
 - [`lifecycle-enroll.md`](lifecycle-enroll.md) — how the agents `ask` routes to were installed from a signed card.
 - [`constitution.md`](constitution.md) — Article II (three identities), Article III (the ledger is limited evidence).
-- [`reference/config.md`](reference/config.md#may_spawn) — `may_spawn`, `grounding`, the gateway `spawn` caps, `spawn_supervisor`.
+- [`reference/config.md`](reference/config.md) — [`may_spawn`](reference/config.md#may_spawn), [`grounding`](reference/config.md#grounding), the gateway [`spawn`](reference/config.md#spawn) caps, [`spawn_supervisor`](reference/config.md#spawn_supervisor).
 - [`deploy/refspawn/README.md`](../deploy/refspawn/README.md) — the reference supervisor and its `deny_read` config isolation.
