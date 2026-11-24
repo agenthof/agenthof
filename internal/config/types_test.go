@@ -612,3 +612,21 @@ provenance:
 		t.Fatalf("without provenance: %+v", b)
 	}
 }
+
+func TestGroundingParses(t *testing.T) {
+	var a AgentDef
+	if err := yaml.Unmarshal([]byte("name: a\ngrounding: generated\n"), &a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Grounding != "generated" {
+		t.Fatalf("Grounding = %q, want generated", a.Grounding)
+	}
+}
+
+func TestNeedsConfirm(t *testing.T) {
+	for g, want := range map[string]bool{"": true, "generated": true, "grounded": false} {
+		if got := (AgentDef{Grounding: g}).NeedsConfirm(); got != want {
+			t.Errorf("NeedsConfirm(%q) = %v, want %v", g, got, want)
+		}
+	}
+}

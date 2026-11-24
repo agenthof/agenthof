@@ -33,8 +33,17 @@ type AgentDef struct {
 	Exec           ExecConfig    `yaml:"exec"`       // fronted only: allowlisted exec, first-hand via a trusted runtime (refexec)
 	MaySpawn       []SpawnTarget `yaml:"may_spawn"`  // spawn door: the {role, workflow} child runs this agent may start; empty means none (default-deny)
 	Provenance     *Provenance   `yaml:"provenance"` // set for an enrolled third-party agent: where it came from; presence makes it spawn-only
-	SourceFile     string        `yaml:"-"`
+	// Grounding declares whether the agent's answers are "grounded" (drawn
+	// from governed sources) or "generated" (free-form model output); empty
+	// is treated as "generated".
+	Grounding  string `yaml:"grounding,omitempty"`
+	SourceFile string `yaml:"-"`
 }
+
+// NeedsConfirm reports whether an answer from this agent warrants a human
+// confirmation: true unless the agent is declared "grounded". An unset
+// grounding confirms.
+func (a AgentDef) NeedsConfirm() bool { return a.Grounding != "grounded" }
 
 // Provenance records where an enrolled agent came from: the artifact it was
 // enrolled with and the identity of the agent card it was enrolled from. The

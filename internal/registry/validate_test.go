@@ -1004,3 +1004,27 @@ func TestValidateSpawnOnly(t *testing.T) {
 		t.Fatalf("non-spawn-only without endpoint must still be fronted-needs-endpoint: %v", c)
 	}
 }
+
+func TestGroundingRejectsUnknown(t *testing.T) {
+	for _, g := range []string{"", "generated", "grounded"} {
+		cfg := baseCfg()
+		cfg.Agents[0].Grounding = g
+		if c := codes(Validate(cfg)); c["bad-grounding"] != 0 {
+			t.Fatalf("grounding %q must be accepted: %v", g, c)
+		}
+	}
+	cfg := baseCfg()
+	cfg.Agents[0].Grounding = "bogus"
+	var msg string
+	for _, e := range Validate(cfg) {
+		if e.Code == "bad-grounding" {
+			msg = e.Msg
+			if e.Entity != "planner" {
+				t.Fatalf("error must name the agent: %+v", e)
+			}
+		}
+	}
+	if !strings.Contains(msg, "grounding") || !strings.Contains(msg, "bogus") {
+		t.Fatalf("message must name the field and value: %q", msg)
+	}
+}
