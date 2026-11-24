@@ -216,7 +216,7 @@ func TestParseConfigSunPath(t *testing.T) {
 // the confiner's read-deny set next to deny_read, and must be absolute.
 func TestRefspawnConfigPlumbsConfigDeny(t *testing.T) {
 	seatbelt := strings.Replace(goodConfig, "confiner: podman\n",
-		"confiner: seatbelt\nstore_root: /var/agenthof/stores\npid_dir: /var/agenthof/pids\ndeny_read: [/home/op/secrets]\ndeny_config_read: /etc/agenthof\n", 1)
+		"confiner: seatbelt\nstore_root: /var/agenthof/stores\npid_dir: /var/agenthof/pids\ndeny_read: [/home/op/secrets]\ndeny_config_read: /etc/x/../agenthof/\n", 1)
 	cfg, err := parseConfig([]byte(withoutExecImage(t, seatbelt)))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -224,7 +224,7 @@ func TestRefspawnConfigPlumbsConfigDeny(t *testing.T) {
 	if want := []string{"/home/op/secrets", "/etc/agenthof"}; !reflect.DeepEqual(cfg.Keys.DenyRead, want) {
 		t.Fatalf("Keys.DenyRead = %q, want %q", cfg.Keys.DenyRead, want)
 	}
-	rel := strings.Replace(seatbelt, "deny_config_read: /etc/agenthof", "deny_config_read: etc/agenthof", 1)
+	rel := strings.Replace(seatbelt, "deny_config_read: /etc/x/../agenthof/", "deny_config_read: etc/agenthof", 1)
 	if _, err := parseConfig([]byte(withoutExecImage(t, rel))); err == nil {
 		t.Fatal("a relative deny_config_read was accepted")
 	}

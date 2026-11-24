@@ -73,7 +73,10 @@ Seatbelt the child's refexec gets the same `store_root`, `pid_dir` and
 
 Config isolation: on podman a compartment has no access to the host's
 config directory by construction; on Seatbelt it is denied by configuration,
-so set `deny_config_read` to your agenthof config directory.
+so set `deny_config_read` to your agenthof config directory (give a
+symlinked directory as its real, resolved path: Seatbelt matches resolved
+paths). `deny_config_read` is a Seatbelt key and is refused on podman, which
+denies config access by construction.
 
 The socket's directory is the access gate: it must be mode 0700 and owned
 by the user refspawn runs as, and it must not be under Agenthof's

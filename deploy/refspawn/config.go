@@ -142,7 +142,7 @@ func parseConfigOn(data []byte, goos string) (spawnConfig, error) {
 		if !filepath.IsAbs(fc.DenyConfigRead) {
 			fail("deny_config_read must be an absolute path")
 		}
-		cfg.Keys.DenyRead = append(cfg.Keys.DenyRead, fc.DenyConfigRead)
+		cfg.Keys.DenyRead = append(cfg.Keys.DenyRead, filepath.Clean(fc.DenyConfigRead))
 	}
 	if fc.Refexec != nil {
 		cfg.Keys.Image = fc.Refexec.Image
