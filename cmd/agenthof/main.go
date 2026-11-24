@@ -53,6 +53,7 @@ Usage:
   agenthof enroll <card file|https URL> --name <name> --role <role> [--accept sha256:<hex>] [--config <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]  (verifies a curator-signed agent card against gateway trusted_signers and discloses the spawn-only agent it would add; with --accept <the disclosed digest> it creates the new agent, workflow and role files and records the enrollment; the card form only creates new files and never edits an existing one; see enroll mcp below for the MCP form)
   agenthof enroll mcp <name> (--command <abs argv> | --from-paste) --socket <abs path> --token-env <NAME> --tools <a,b> [--env N,..] [--egress h,..] [--grant <agent>] [--accept sha256:<hex>] [--config <dir>] [--control-log <path>] [--as <user>] [--groups <a,b>] [--token <jwt>]  (proposes an operator-vetted local stdio MCP as a governed tool resource and discloses it; with --accept <the disclosed digest> it edits gateway.yaml, and with --grant the named agent's file, in place — comments and key order are kept, the exact bytes are not — and records the enrollment; installs nothing, run apply; command arguments are written verbatim to the configuration and ledger, so keep secrets in environment variables)
   agenthof run <role> <workflow> --input <text> [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--control-log <path>] [--verify-key <path>] [--log-dir <dir>] [--artifact-dir <dir>] [--tool-proxy-addr <addr>] [--log-level debug|info|warn|error] [--log-format text|json] [--server <url>]
+  agenthof ask "<prompt>" [--yes] [--as <user>] [--groups <a,b>] [--token <jwt>] [--config <dir>] [--control-log <path>] [--verify-key <path>] [--log-dir <dir>] [--artifact-dir <dir>] [--log-level debug|info|warn|error] [--log-format text|json]  (routes a prompt to one of the agents the installed orchestrator may spawn)
   agenthof serve [--addr 127.0.0.1:8080] [--allow-non-loopback] [--allow-api-bootstrap] [--addr-file <path>] [--config <dir>] [--log-dir <dir>] [--artifact-dir <dir>] [--control-log <path>] [--max-concurrent-runs <n>] [--shutdown-timeout <dur>] [--log-level ...] [--log-format ...]  (AGENTHOF_OIDC_ISSUER required)
   agenthof audit <run-id> [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>] [--server <url>] [--token <jwt>]
   agenthof audit verify <run-id> [--expect-head <hex>|<count>:<hex>] [--log-dir <dir>] [--control-log <path>] [--anchor-key <path>] [--offline] [--anchor-timeout 30s]
@@ -97,6 +98,8 @@ func dispatch(argv []string, stdout, stderr io.Writer) int {
 		return cmdCard(argv[1:], stdout, stderr)
 	case "run":
 		return cmdRun(argv[1:], stdout, stderr)
+	case "ask":
+		return cmdAsk(argv[1:], stdout, stderr)
 	case "audit":
 		// audit anchor alone speaks on the operational channel (its run form
 		// warns on stderr); every other audit form is stdout only.

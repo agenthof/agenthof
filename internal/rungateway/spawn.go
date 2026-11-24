@@ -189,6 +189,16 @@ func (p *Gateway) authorizeAndSpawn(ctx context.Context, bind engine.Binding, ag
 	return res, nil
 }
 
+// AuthorizeAndSpawn is the spawn gate for a caller that is not an agent behind
+// the HTTP door — the trusted single-shot orchestrator. It is authorizeAndSpawn
+// unchanged: the same may_spawn re-check, caps and parent spawn event. The
+// caller supplies the context the child runs under and keeps the parent's
+// ledger open across the call; a non-nil error means the spawn failed and the
+// result's output must not be used.
+func (p *Gateway) AuthorizeAndSpawn(ctx context.Context, bind engine.Binding, agent config.AgentDef, role, workflow, input string, appendEvent func(engine.Event), logger *slog.Logger) (SpawnResult, error) {
+	return p.authorizeAndSpawn(ctx, bind, agent, role, workflow, input, appendEvent, logger)
+}
+
 // spawnHandler is the spawn door: POST /spawn {role, workflow, input}. It
 // decodes the request and runs it through authorizeAndSpawn under a context
 // derived from the step's (stepCtx) that is also cancelled when the agent
