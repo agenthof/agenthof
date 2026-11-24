@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -157,7 +158,6 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(out, `ask needs a prompt: ask "<prompt>"`)
 		return 2
 	}
-	_ = yes // the confirmation gate that reads it comes with the leaf run
 	level, format, err := resolveLogConfig(*logLevel, *logFormat, os.Getenv)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "ask: %v\n", err)
@@ -272,13 +272,112 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(out, "ask %s: %v\n", runID, err)
 		return finish("failed", "classification failed", 1)
 	}
-	if !matched {
-		_, _ = fmt.Fprintf(out, "ask %s: nothing fits that request. Here is what I can do:\n", runID)
-		for _, m := range menu {
-			_, _ = fmt.Fprintf(out, "  %s/%s: %s\n", m.Role, m.Workflow, m.Description)
+	status, reason, code := dispatchPick(ctx, gw, bind, orch, reg, menu, role, workflow, matched, prompt, store, *yes, os.Stdin, out, runID, appendEvent, logger)
+	return finish(status, reason, code)
+}
+
+// printMenu lists what ask can do: the projected menu, never the
+// classifier's own may_spawn entry.
+func printMenu(out io.Writer, runID string, menu []menuEntry) {
+	_, _ = fmt.Fprintf(out, "ask %s: nothing fits that request. Here is what I can do:\n", runID)
+	for _, m := range menu {
+		_, _ = fmt.Fprintf(out, "  %s/%s: %s\n", m.Role, m.Workflow, m.Description)
+	}
+}
+
+// confirm asks a yes/no question on w and reads the answer from r. yes skips
+// the question. With nothing to read (a closed or empty input) and no yes it
+// refuses with a message instead of waiting or assuming consent.
+func confirm(w io.Writer, r io.Reader, yes bool, prompt string) (bool, error) {
+	if yes {
+		return true, nil
+	}
+	_, _ = fmt.Fprintf(w, "%s [y/N] ", prompt)
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	if strings.TrimSpace(line) == "" && errors.Is(err, io.EOF) {
+		_, _ = fmt.Fprintln(w, "\nno confirmation available: this answer is not grounded, so it needs --yes or an interactive confirmation")
+		return false, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true, nil
+	}
+	return false, nil
+}
+
+// needsConfirm reports whether running the workflow's agents can produce an
+// answer that is not grounded. An agent it cannot find counts as ungrounded.
+func needsConfirm(reg *registry.Registry, workflow string) bool {
+	wf, ok := reg.Workflow(workflow)
+	if !ok || len(wf.Steps) == 0 {
+		return true
+	}
+	for _, st := range wf.Steps {
+		a, ok := reg.Agent(st.Agent)
+		if !ok || a.NeedsConfirm() {
+			return true
 		}
-		return finish("succeeded", "", 0)
+	}
+	return false
+}
+
+// dispatchPick acts on the classifier's pick: it must be one of the offered
+// menu entries, ungrounded answers are confirmed, the leaf is spawned through
+// the spawn gate, and its answer is read from the store by digest and
+// printed. It returns the run's final status, reason and exit code.
+func dispatchPick(ctx context.Context, gw *rungateway.Gateway, bind engine.Binding, orch config.AgentDef, reg *registry.Registry, menu []menuEntry,
+	role, workflow string, matched bool, prompt string, store *artifact.Store, yes bool, in io.Reader, out io.Writer,
+	runID string, appendEvent func(engine.Event), logger *slog.Logger) (status, reason string, code int) {
+	inMenu := false
+	if matched {
+		for _, m := range menu {
+			if m.Role == role && m.Workflow == workflow {
+				inMenu = true
+				break
+			}
+		}
+	}
+	if !inMenu {
+		printMenu(out, runID, menu)
+		return "succeeded", "", 0
 	}
 	_, _ = fmt.Fprintf(out, "ask %s: picked %s/%s\n", runID, role, workflow)
-	return finish("succeeded", "", 0)
+	if needsConfirm(reg, workflow) {
+		ok, err := confirm(out, in, yes, fmt.Sprintf("Run %s/%s? Its answer is not grounded.", role, workflow))
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "ask %s: %v\n", runID, err)
+			return "failed", "confirmation failed", 1
+		}
+		if !ok {
+			_, _ = fmt.Fprintf(out, "ask %s: not run\n", runID)
+			return "failed", "not confirmed", 1
+		}
+	}
+	res, err := gw.AuthorizeAndSpawn(ctx, bind, orch, role, workflow, prompt, appendEvent, logger)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "ask %s: %s/%s did not complete: %v\n", runID, role, workflow, err)
+		return "failed", "leaf spawn failed", 1
+	}
+	if res.Status != "succeeded" {
+		why := res.Reason
+		if why == "" {
+			why = res.Status
+		}
+		_, _ = fmt.Fprintf(out, "ask %s: %s/%s %s: %s\n", runID, role, workflow, res.Status, why)
+		return "failed", "leaf " + res.Status, 1
+	}
+	if res.OutputSHA == "" {
+		_, _ = fmt.Fprintf(out, "ask %s: %s/%s produced no answer\n", runID, role, workflow)
+		return "failed", "no answer", 1
+	}
+	body, err := store.Get(res.OutputSHA)
+	if err != nil || strings.TrimSpace(body) == "" {
+		_, _ = fmt.Fprintf(out, "ask %s: %s/%s answer is missing from the artifact store\n", runID, role, workflow)
+		return "failed", "answer missing", 1
+	}
+	_, _ = fmt.Fprintln(out, body)
+	return "succeeded", "", 0
 }

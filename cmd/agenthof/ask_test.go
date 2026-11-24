@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -185,6 +186,112 @@ func TestClassifyFailsClosed(t *testing.T) {
 				func(engine.Event) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			if err == nil || matched || role != "" || wf != "" {
 				t.Fatalf("want an error and no pick, got %q %q matched=%v err=%v", role, wf, matched, err)
+			}
+		})
+	}
+}
+
+// dispatchFor runs the gate for a pick against a fixture whose leaf agent has
+// the given grounding, returning the output, exit code and the stub spawner.
+func dispatchFor(t *testing.T, grounding, role, wf string, matched bool, yes bool, input string, answer string) (string, int, *answerSpawner, *artifact.Store) {
+	t.Helper()
+	cfg := askCfg()
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "chat" {
+			cfg.Agents[i].Grounding = grounding
+		}
+	}
+	reg, errs := registry.Build(cfg)
+	if len(errs) > 0 {
+		t.Fatalf("registry: %v", errs)
+	}
+	store, err := artifact.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := &answerSpawner{store: store, answer: answer}
+	gw := rungateway.New(cfg.Gateway, ".", nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "").WithSpawner(sp)
+	orch, _ := reg.Agent(orchestratorAgent)
+	var out strings.Builder
+	_, _, code := dispatchPick(context.Background(), gw, engine.Binding{RunID: "r-orch"}, orch, reg, projectMenu(orch, reg),
+		role, wf, matched, "hello", store, yes, strings.NewReader(input), &out, "r-orch",
+		func(engine.Event) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return out.String(), code, sp, store
+}
+
+func TestGateConfirmsGenerated(t *testing.T) {
+	out, code, sp, _ := dispatchFor(t, "generated", "dev", "generic-chat", true, false, "y\n", "the answer")
+	if code != 0 || sp.role != "dev" || !strings.Contains(out, "the answer") {
+		t.Fatalf("y must proceed: code=%d role=%q out=%q", code, sp.role, out)
+	}
+	out, code, sp, _ = dispatchFor(t, "generated", "dev", "generic-chat", true, false, "n\n", "the answer")
+	if code == 0 || sp.role != "" || strings.Contains(out, "the answer") {
+		t.Fatalf("n must abort with nothing spawned: code=%d role=%q out=%q", code, sp.role, out)
+	}
+}
+
+func TestGateAutoRunsGrounded(t *testing.T) {
+	out, code, sp, _ := dispatchFor(t, "grounded", "dev", "generic-chat", true, false, "", "grounded answer")
+	if code != 0 || sp.role != "dev" || strings.Contains(out, "[y/N]") || !strings.Contains(out, "grounded answer") {
+		t.Fatalf("grounded must run without a prompt: code=%d out=%q", code, out)
+	}
+}
+
+func TestYesSkipsPrompt(t *testing.T) {
+	out, code, sp, _ := dispatchFor(t, "generated", "dev", "generic-chat", true, true, "", "yes answer")
+	if code != 0 || sp.role != "dev" || strings.Contains(out, "[y/N]") {
+		t.Fatalf("--yes must proceed without asking: code=%d out=%q", code, out)
+	}
+}
+
+func TestNonInteractiveWithoutYesRefuses(t *testing.T) {
+	out, code, sp, _ := dispatchFor(t, "", "dev", "generic-chat", true, false, "", "x")
+	if code == 0 || sp.role != "" || !strings.Contains(out, "--yes") {
+		t.Fatalf("empty input without --yes must refuse cleanly: code=%d role=%q out=%q", code, sp.role, out)
+	}
+}
+
+func TestAnswerReadFromStoreBySHA(t *testing.T) {
+	out, code, sp, store := dispatchFor(t, "grounded", "dev", "generic-chat", true, false, "", "stored body")
+	sha, _, err := store.Put(sp.answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := store.Get(sha)
+	if err != nil || code != 0 || !strings.Contains(out, want) {
+		t.Fatalf("printed answer must be the stored body %q: code=%d out=%q err=%v", want, code, out, err)
+	}
+}
+
+func TestPickOutsideMaySpawnRefused(t *testing.T) {
+	for _, p := range [][2]string{{routerRole, routerWorkflow}, {"dev", "nope"}, {"other", "generic-chat"}} {
+		out, code, sp, _ := dispatchFor(t, "grounded", p[0], p[1], true, true, "", "x")
+		if sp.role != "" || !strings.Contains(out, "Here is what I can do") || !strings.Contains(out, "dev/generic-chat") || strings.Contains(out, routerRole+"/") || code != 0 {
+			t.Fatalf("pick %v must list the menu and spawn nothing: code=%d role=%q out=%q", p, code, sp.role, out)
+		}
+	}
+	out, _, sp, _ := dispatchFor(t, "grounded", "", "", false, true, "", "x")
+	if sp.role != "" || !strings.Contains(out, "Here is what I can do") {
+		t.Fatalf("no match must list the menu: %q", out)
+	}
+}
+
+func TestEmptyOrMissingAnswer(t *testing.T) {
+	missing := "0000000000000000000000000000000000000000000000000000000000000000"
+	for name, res := range map[string]rungateway.SpawnResult{
+		"empty sha":  {Status: "succeeded", Provisioned: true},
+		"store miss": {Status: "succeeded", OutputSHA: missing, Provisioned: true},
+		"failed":     {Status: "failed", Provisioned: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, orch, reg, store := newAskFixture(t, "null")
+			gw := rungateway.New(askCfg().Gateway, ".", nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "").WithSpawner(stubSpawner{res: res})
+			var out strings.Builder
+			_, _, code := dispatchPick(context.Background(), gw, engine.Binding{RunID: "r-orch"}, orch, reg, projectMenu(orch, reg),
+				"dev", "generic-chat", true, "hello", store, true, strings.NewReader(""), &out, "r-orch",
+				func(engine.Event) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if code == 0 || strings.TrimSpace(out.String()) == "" {
+				t.Fatalf("want a message and non-zero exit, got code=%d out=%q", code, out.String())
 			}
 		})
 	}
