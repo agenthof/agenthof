@@ -269,10 +269,15 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 	menu := projectMenu(orch, reg)
 	role, workflow, matched, err := classify(ctx, gw, bind, orch, menu, prompt, store, appendEvent, logger)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "ask %s: %v\n", runID, err)
+		_, _ = fmt.Fprintf(stderr, "ask %s: %v\n", runID, err)
 		return finish("failed", "classification failed", 1)
 	}
-	status, reason, code := dispatchPick(ctx, gw, bind, orch, reg, menu, role, workflow, matched, prompt, store, *yes, os.Stdin, out, runID, appendEvent, logger)
+	fi, statErr := os.Stdin.Stat()
+	status, reason, code := dispatchPick(ctx, pickRun{
+		gw: gw, bind: bind, orch: orch, reg: reg, menu: menu, prompt: prompt, store: store,
+		yes: *yes, interactive: statErr == nil && fi.Mode()&os.ModeCharDevice != 0,
+		in: os.Stdin, out: out, msg: stderr, runID: runID, appendEvent: appendEvent, logger: logger,
+	}, role, workflow, matched)
 	return finish(status, reason, code)
 }
 
@@ -286,22 +291,39 @@ func printMenu(out io.Writer, runID string, menu []menuEntry) {
 }
 
 // confirm asks a yes/no question on w and reads the answer from r. yes skips
-// the question. With nothing to read (a closed or empty input) and no yes it
-// refuses with a message instead of waiting or assuming consent.
-func confirm(w io.Writer, r io.Reader, yes bool, prompt string) (bool, error) {
+// the question. The read gives way to ctx, so an interrupt ends the prompt
+// instead of leaving it blocked; a cancelled prompt is a decline, with the
+// context's error. With nothing to read (a closed or empty input) and no yes
+// it refuses with a message instead of assuming consent.
+func confirm(ctx context.Context, w io.Writer, r io.Reader, yes bool, prompt string) (bool, error) {
 	if yes {
 		return true, nil
 	}
 	_, _ = fmt.Fprintf(w, "%s [y/N] ", prompt)
-	line, err := bufio.NewReader(r).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return false, err
+	type readResult struct {
+		line string
+		err  error
 	}
-	if strings.TrimSpace(line) == "" && errors.Is(err, io.EOF) {
+	ch := make(chan readResult, 1)
+	go func() {
+		line, err := bufio.NewReader(r).ReadString('\n')
+		ch <- readResult{line, err}
+	}()
+	var res readResult
+	select {
+	case <-ctx.Done():
+		_, _ = fmt.Fprintln(w)
+		return false, ctx.Err()
+	case res = <-ch:
+	}
+	if res.err != nil && !errors.Is(res.err, io.EOF) {
+		return false, res.err
+	}
+	if strings.TrimSpace(res.line) == "" && errors.Is(res.err, io.EOF) {
 		_, _ = fmt.Fprintln(w, "\nno confirmation available: this answer is not grounded, so it needs --yes or an interactive confirmation")
 		return false, nil
 	}
-	switch strings.ToLower(strings.TrimSpace(line)) {
+	switch strings.ToLower(strings.TrimSpace(res.line)) {
 	case "y", "yes":
 		return true, nil
 	}
@@ -324,16 +346,35 @@ func needsConfirm(reg *registry.Registry, workflow string) bool {
 	return false
 }
 
+// pickRun is everything dispatchPick needs: the spawn gate and its binding,
+// the projected menu, the store the answer is read from, and the streams. The
+// answer goes to out alone; every other message goes to msg, so piping the
+// command yields only the answer.
+type pickRun struct {
+	gw          *rungateway.Gateway
+	bind        engine.Binding
+	orch        config.AgentDef
+	reg         *registry.Registry
+	menu        []menuEntry
+	prompt      string
+	store       *artifact.Store
+	yes         bool
+	interactive bool // stdin is a terminal a person can answer on
+	in          io.Reader
+	out, msg    io.Writer
+	runID       string
+	appendEvent func(engine.Event)
+	logger      *slog.Logger
+}
+
 // dispatchPick acts on the classifier's pick: it must be one of the offered
 // menu entries, ungrounded answers are confirmed, the leaf is spawned through
 // the spawn gate, and its answer is read from the store by digest and
 // printed. It returns the run's final status, reason and exit code.
-func dispatchPick(ctx context.Context, gw *rungateway.Gateway, bind engine.Binding, orch config.AgentDef, reg *registry.Registry, menu []menuEntry,
-	role, workflow string, matched bool, prompt string, store *artifact.Store, yes bool, in io.Reader, out io.Writer,
-	runID string, appendEvent func(engine.Event), logger *slog.Logger) (status, reason string, code int) {
+func dispatchPick(ctx context.Context, p pickRun, role, workflow string, matched bool) (status, reason string, code int) {
 	inMenu := false
 	if matched {
-		for _, m := range menu {
+		for _, m := range p.menu {
 			if m.Role == role && m.Workflow == workflow {
 				inMenu = true
 				break
@@ -341,24 +382,28 @@ func dispatchPick(ctx context.Context, gw *rungateway.Gateway, bind engine.Bindi
 		}
 	}
 	if !inMenu {
-		printMenu(out, runID, menu)
+		printMenu(p.msg, p.runID, p.menu)
 		return "succeeded", "", 0
 	}
-	_, _ = fmt.Fprintf(out, "ask %s: picked %s/%s\n", runID, role, workflow)
-	if needsConfirm(reg, workflow) {
-		ok, err := confirm(out, in, yes, fmt.Sprintf("Run %s/%s? Its answer is not grounded.", role, workflow))
+	_, _ = fmt.Fprintf(p.msg, "ask %s: picked %s/%s\n", p.runID, role, workflow)
+	if !p.yes && needsConfirm(p.reg, workflow) {
+		if !p.interactive {
+			_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s is not grounded and there is no terminal to confirm on; re-run with --yes\n", p.runID, role, workflow)
+			return "failed", "not confirmed", 1
+		}
+		ok, err := confirm(ctx, p.msg, p.in, false, fmt.Sprintf("Run %s/%s? Its answer is not grounded.", role, workflow))
 		if err != nil {
-			_, _ = fmt.Fprintf(out, "ask %s: %v\n", runID, err)
-			return "failed", "confirmation failed", 1
+			_, _ = fmt.Fprintf(p.msg, "ask %s: confirmation ended: %v\n", p.runID, err)
+			return "failed", "confirmation ended", 1
 		}
 		if !ok {
-			_, _ = fmt.Fprintf(out, "ask %s: not run\n", runID)
+			_, _ = fmt.Fprintf(p.msg, "ask %s: not run\n", p.runID)
 			return "failed", "not confirmed", 1
 		}
 	}
-	res, err := gw.AuthorizeAndSpawn(ctx, bind, orch, role, workflow, prompt, appendEvent, logger)
+	res, err := p.gw.AuthorizeAndSpawn(ctx, p.bind, p.orch, role, workflow, p.prompt, p.appendEvent, p.logger)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "ask %s: %s/%s did not complete: %v\n", runID, role, workflow, err)
+		_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s did not complete: %v\n", p.runID, role, workflow, err)
 		return "failed", "leaf spawn failed", 1
 	}
 	if res.Status != "succeeded" {
@@ -366,18 +411,23 @@ func dispatchPick(ctx context.Context, gw *rungateway.Gateway, bind engine.Bindi
 		if why == "" {
 			why = res.Status
 		}
-		_, _ = fmt.Fprintf(out, "ask %s: %s/%s %s: %s\n", runID, role, workflow, res.Status, why)
+		_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s %s: %s\n", p.runID, role, workflow, res.Status, why)
 		return "failed", "leaf " + res.Status, 1
 	}
 	if res.OutputSHA == "" {
-		_, _ = fmt.Fprintf(out, "ask %s: %s/%s produced no answer\n", runID, role, workflow)
+		_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s produced no answer\n", p.runID, role, workflow)
 		return "failed", "no answer", 1
 	}
-	body, err := store.Get(res.OutputSHA)
-	if err != nil || strings.TrimSpace(body) == "" {
-		_, _ = fmt.Fprintf(out, "ask %s: %s/%s answer is missing from the artifact store\n", runID, role, workflow)
+	body, err := p.store.Get(res.OutputSHA)
+	if err != nil {
+		p.logger.Warn("ask answer read failed", "sha", res.OutputSHA, "err", err)
+		_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s answer is missing from the artifact store: %v\n", p.runID, role, workflow, err)
 		return "failed", "answer missing", 1
 	}
-	_, _ = fmt.Fprintln(out, body)
+	if strings.TrimSpace(body) == "" {
+		_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s produced an empty answer\n", p.runID, role, workflow)
+		return "failed", "answer empty", 1
+	}
+	_, _ = fmt.Fprintln(p.out, body)
 	return "succeeded", "", 0
 }

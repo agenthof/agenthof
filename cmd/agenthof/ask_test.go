@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/config"
@@ -191,9 +192,17 @@ func TestClassifyFailsClosed(t *testing.T) {
 	}
 }
 
-// dispatchFor runs the gate for a pick against a fixture whose leaf agent has
-// the given grounding, returning the output, exit code and the stub spawner.
-func dispatchFor(t *testing.T, grounding, role, wf string, matched bool, yes bool, input string, answer string) (string, int, *answerSpawner, *artifact.Store) {
+// pickEnv is a dispatch fixture: stdout and stderr are captured apart.
+type pickEnv struct {
+	out, msg strings.Builder
+	code     int
+	sp       *answerSpawner
+	store    *artifact.Store
+}
+
+// runPick dispatches a pick against a fixture whose "chat" agent has the given
+// grounding. interactive says whether stdin counts as a terminal.
+func runPick(t *testing.T, grounding, role, wf string, matched, yes, interactive bool, input, answer string) *pickEnv {
 	t.Helper()
 	cfg := askCfg()
 	for i := range cfg.Agents {
@@ -209,90 +218,224 @@ func dispatchFor(t *testing.T, grounding, role, wf string, matched bool, yes boo
 	if err != nil {
 		t.Fatal(err)
 	}
-	sp := &answerSpawner{store: store, answer: answer}
-	gw := rungateway.New(cfg.Gateway, ".", nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "").WithSpawner(sp)
+	e := &pickEnv{sp: &answerSpawner{store: store, answer: answer}, store: store}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	orch, _ := reg.Agent(orchestratorAgent)
-	var out strings.Builder
-	_, _, code := dispatchPick(context.Background(), gw, engine.Binding{RunID: "r-orch"}, orch, reg, projectMenu(orch, reg),
-		role, wf, matched, "hello", store, yes, strings.NewReader(input), &out, "r-orch",
-		func(engine.Event) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	return out.String(), code, sp, store
+	_, _, e.code = dispatchPick(context.Background(), pickRun{
+		gw:   rungateway.New(cfg.Gateway, ".", nil, logger, "").WithSpawner(e.sp),
+		bind: engine.Binding{RunID: "r-orch"}, orch: orch, reg: reg, menu: projectMenu(orch, reg),
+		prompt: "hello", store: store, yes: yes, interactive: interactive,
+		in: strings.NewReader(input), out: &e.out, msg: &e.msg, runID: "r-orch",
+		appendEvent: func(engine.Event) {}, logger: logger,
+	}, role, wf, matched)
+	return e
 }
 
 func TestGateConfirmsGenerated(t *testing.T) {
-	out, code, sp, _ := dispatchFor(t, "generated", "dev", "generic-chat", true, false, "y\n", "the answer")
-	if code != 0 || sp.role != "dev" || !strings.Contains(out, "the answer") {
-		t.Fatalf("y must proceed: code=%d role=%q out=%q", code, sp.role, out)
+	e := runPick(t, "generated", "dev", "generic-chat", true, false, true, "y\n", "the answer")
+	if e.code != 0 || e.sp.role != "dev" || strings.TrimSpace(e.out.String()) != "the answer" {
+		t.Fatalf("y must proceed: code=%d role=%q out=%q", e.code, e.sp.role, e.out.String())
 	}
-	out, code, sp, _ = dispatchFor(t, "generated", "dev", "generic-chat", true, false, "n\n", "the answer")
-	if code == 0 || sp.role != "" || strings.Contains(out, "the answer") {
-		t.Fatalf("n must abort with nothing spawned: code=%d role=%q out=%q", code, sp.role, out)
+	e = runPick(t, "generated", "dev", "generic-chat", true, false, true, "n\n", "the answer")
+	if e.code == 0 || e.sp.role != "" || e.out.Len() != 0 {
+		t.Fatalf("n must abort with nothing spawned: code=%d role=%q out=%q", e.code, e.sp.role, e.out.String())
 	}
 }
 
 func TestGateAutoRunsGrounded(t *testing.T) {
-	out, code, sp, _ := dispatchFor(t, "grounded", "dev", "generic-chat", true, false, "", "grounded answer")
-	if code != 0 || sp.role != "dev" || strings.Contains(out, "[y/N]") || !strings.Contains(out, "grounded answer") {
-		t.Fatalf("grounded must run without a prompt: code=%d out=%q", code, out)
+	e := runPick(t, "grounded", "dev", "generic-chat", true, false, true, "", "grounded answer")
+	if e.code != 0 || e.sp.role != "dev" || strings.Contains(e.msg.String(), "[y/N]") || strings.TrimSpace(e.out.String()) != "grounded answer" {
+		t.Fatalf("grounded must run without a prompt: code=%d msg=%q out=%q", e.code, e.msg.String(), e.out.String())
 	}
 }
 
 func TestYesSkipsPrompt(t *testing.T) {
-	out, code, sp, _ := dispatchFor(t, "generated", "dev", "generic-chat", true, true, "", "yes answer")
-	if code != 0 || sp.role != "dev" || strings.Contains(out, "[y/N]") {
-		t.Fatalf("--yes must proceed without asking: code=%d out=%q", code, out)
+	e := runPick(t, "generated", "dev", "generic-chat", true, true, false, "", "yes answer")
+	if e.code != 0 || e.sp.role != "dev" || strings.Contains(e.msg.String(), "[y/N]") {
+		t.Fatalf("--yes must proceed without asking: code=%d msg=%q", e.code, e.msg.String())
 	}
 }
 
 func TestNonInteractiveWithoutYesRefuses(t *testing.T) {
-	out, code, sp, _ := dispatchFor(t, "", "dev", "generic-chat", true, false, "", "x")
-	if code == 0 || sp.role != "" || !strings.Contains(out, "--yes") {
-		t.Fatalf("empty input without --yes must refuse cleanly: code=%d role=%q out=%q", code, sp.role, out)
+	// A non-terminal stdin is never read as consent, even when it says "y".
+	for _, input := range []string{"", "y\n"} {
+		e := runPick(t, "", "dev", "generic-chat", true, false, false, input, "x")
+		if e.code == 0 || e.sp.role != "" || !strings.Contains(e.msg.String(), "--yes") || e.out.Len() != 0 {
+			t.Fatalf("non-terminal without --yes must refuse (input %q): code=%d role=%q msg=%q", input, e.code, e.sp.role, e.msg.String())
+		}
+	}
+	// A terminal that yields nothing is a refusal too, not a hang.
+	e := runPick(t, "", "dev", "generic-chat", true, false, true, "", "x")
+	if e.code == 0 || e.sp.role != "" || !strings.Contains(e.msg.String(), "--yes") {
+		t.Fatalf("empty terminal input must refuse: code=%d msg=%q", e.code, e.msg.String())
+	}
+}
+
+func TestConfirmCancelledByContext(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var ok bool
+	var err error
+	go func() {
+		ok, err = confirm(ctx, io.Discard, pr, false, "run?")
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirm stayed blocked after cancellation")
+	}
+	if ok || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled prompt must decline with the context error, got ok=%v err=%v", ok, err)
 	}
 }
 
 func TestAnswerReadFromStoreBySHA(t *testing.T) {
-	out, code, sp, store := dispatchFor(t, "grounded", "dev", "generic-chat", true, false, "", "stored body")
-	sha, _, err := store.Put(sp.answer)
+	store, err := artifact.NewStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := store.Get(sha)
-	if err != nil || code != 0 || !strings.Contains(out, want) {
-		t.Fatalf("printed answer must be the stored body %q: code=%d out=%q err=%v", want, code, out, err)
+	cfg := askCfg()
+	// The spawner points at a known body while a decoy sits under another digest.
+	e := &pickEnv{}
+	reg, _ := registry.Build(cfg)
+	orch, _ := reg.Agent(orchestratorAgent)
+	known, _, err := store.Put("the known answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Put("a decoy body"); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sp := stubSpawner{res: rungateway.SpawnResult{Status: "succeeded", OutputSHA: known, Provisioned: true}}
+	_, _, code := dispatchPick(context.Background(), pickRun{
+		gw:   rungateway.New(cfg.Gateway, ".", nil, logger, "").WithSpawner(sp),
+		bind: engine.Binding{RunID: "r-orch"}, orch: orch, reg: reg, menu: projectMenu(orch, reg),
+		prompt: "hello", store: store, yes: true, in: strings.NewReader(""), out: &e.out, msg: &e.msg,
+		runID: "r-orch", appendEvent: func(engine.Event) {}, logger: logger,
+	}, "dev", "generic-chat", true)
+	if code != 0 || e.out.String() != "the known answer\n" {
+		t.Fatalf("printed answer must be exactly the body under the returned digest: code=%d out=%q", code, e.out.String())
 	}
 }
 
 func TestPickOutsideMaySpawnRefused(t *testing.T) {
 	for _, p := range [][2]string{{routerRole, routerWorkflow}, {"dev", "nope"}, {"other", "generic-chat"}} {
-		out, code, sp, _ := dispatchFor(t, "grounded", p[0], p[1], true, true, "", "x")
-		if sp.role != "" || !strings.Contains(out, "Here is what I can do") || !strings.Contains(out, "dev/generic-chat") || strings.Contains(out, routerRole+"/") || code != 0 {
-			t.Fatalf("pick %v must list the menu and spawn nothing: code=%d role=%q out=%q", p, code, sp.role, out)
+		e := runPick(t, "grounded", p[0], p[1], true, true, false, "", "x")
+		m := e.msg.String()
+		if e.sp.role != "" || !strings.Contains(m, "Here is what I can do") || !strings.Contains(m, "dev/generic-chat") || strings.Contains(m, routerRole+"/") || e.code != 0 || e.out.Len() != 0 {
+			t.Fatalf("pick %v must list the menu and spawn nothing: code=%d role=%q msg=%q", p, e.code, e.sp.role, m)
 		}
 	}
-	out, _, sp, _ := dispatchFor(t, "grounded", "", "", false, true, "", "x")
-	if sp.role != "" || !strings.Contains(out, "Here is what I can do") {
-		t.Fatalf("no match must list the menu: %q", out)
+	e := runPick(t, "grounded", "", "", false, true, false, "", "x")
+	if e.sp.role != "" || !strings.Contains(e.msg.String(), "Here is what I can do") {
+		t.Fatalf("no match must list the menu: %q", e.msg.String())
+	}
+}
+
+func TestFailedSpawnNeverPrintsBody(t *testing.T) {
+	cases := map[string]func(sha string) stubSpawner{
+		"failed status with a stored answer": func(sha string) stubSpawner {
+			return stubSpawner{res: rungateway.SpawnResult{Status: "failed", Reason: "boom", OutputSHA: sha, Provisioned: true}}
+		},
+		"spawner error with a stored answer": func(sha string) stubSpawner {
+			return stubSpawner{res: rungateway.SpawnResult{Status: "succeeded", OutputSHA: sha}, err: errors.New("boom")}
+		},
+	}
+	for name, mk := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := askCfg()
+			reg, _ := registry.Build(cfg)
+			orch, _ := reg.Agent(orchestratorAgent)
+			st, err := artifact.NewStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			sha, _, err := st.Put("SECRET BODY")
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := &pickEnv{}
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			_, _, code := dispatchPick(context.Background(), pickRun{
+				gw:   rungateway.New(cfg.Gateway, ".", nil, logger, "").WithSpawner(mk(sha)),
+				bind: engine.Binding{RunID: "r-orch"}, orch: orch, reg: reg, menu: projectMenu(orch, reg),
+				prompt: "hello", store: st, yes: true, in: strings.NewReader(""), out: &e.out, msg: &e.msg,
+				runID: "r-orch", appendEvent: func(engine.Event) {}, logger: logger,
+			}, "dev", "generic-chat", true)
+			if code != 1 || strings.Contains(e.out.String()+e.msg.String(), "SECRET BODY") {
+				t.Fatalf("a failed spawn must exit 1 and print no body: code=%d out=%q msg=%q", code, e.out.String(), e.msg.String())
+			}
+		})
 	}
 }
 
 func TestEmptyOrMissingAnswer(t *testing.T) {
 	missing := "0000000000000000000000000000000000000000000000000000000000000000"
-	for name, res := range map[string]rungateway.SpawnResult{
-		"empty sha":  {Status: "succeeded", Provisioned: true},
-		"store miss": {Status: "succeeded", OutputSHA: missing, Provisioned: true},
-		"failed":     {Status: "failed", Provisioned: true},
-	} {
+	cases := map[string]struct {
+		body string // stored and returned when non-empty
+		res  rungateway.SpawnResult
+		want string
+	}{
+		"empty sha":  {res: rungateway.SpawnResult{Status: "succeeded", Provisioned: true}, want: "no answer"},
+		"store miss": {res: rungateway.SpawnResult{Status: "succeeded", OutputSHA: missing, Provisioned: true}, want: "missing from the artifact store"},
+		"empty body": {body: "  \n", want: "empty answer"},
+	}
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, _, orch, reg, store := newAskFixture(t, "null")
-			gw := rungateway.New(askCfg().Gateway, ".", nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "").WithSpawner(stubSpawner{res: res})
-			var out strings.Builder
-			_, _, code := dispatchPick(context.Background(), gw, engine.Binding{RunID: "r-orch"}, orch, reg, projectMenu(orch, reg),
-				"dev", "generic-chat", true, "hello", store, true, strings.NewReader(""), &out, "r-orch",
-				func(engine.Event) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			if code == 0 || strings.TrimSpace(out.String()) == "" {
-				t.Fatalf("want a message and non-zero exit, got code=%d out=%q", code, out.String())
+			cfg := askCfg()
+			reg, _ := registry.Build(cfg)
+			orch, _ := reg.Agent(orchestratorAgent)
+			st, err := artifact.NewStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := c.res
+			if c.body != "" {
+				sha, _, err := st.Put(c.body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res = rungateway.SpawnResult{Status: "succeeded", OutputSHA: sha, Provisioned: true}
+			}
+			e := &pickEnv{}
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			_, _, code := dispatchPick(context.Background(), pickRun{
+				gw:   rungateway.New(cfg.Gateway, ".", nil, logger, "").WithSpawner(stubSpawner{res: res}),
+				bind: engine.Binding{RunID: "r-orch"}, orch: orch, reg: reg, menu: projectMenu(orch, reg),
+				prompt: "hello", store: st, yes: true, in: strings.NewReader(""), out: &e.out, msg: &e.msg,
+				runID: "r-orch", appendEvent: func(engine.Event) {}, logger: logger,
+			}, "dev", "generic-chat", true)
+			if code != 1 || !strings.Contains(e.msg.String(), c.want) || e.out.Len() != 0 {
+				t.Fatalf("want exit 1 and %q, got code=%d msg=%q out=%q", c.want, code, e.msg.String(), e.out.String())
 			}
 		})
+	}
+}
+
+func TestNeedsConfirmAnyStepOrUnknown(t *testing.T) {
+	cfg := askCfg()
+	cfg.Agents = append(cfg.Agents,
+		config.AgentDef{Name: "g1", Endpoint: "https://x", Grounding: "grounded", SourceFile: "a/g1.yaml"},
+		config.AgentDef{Name: "g2", Endpoint: "https://x", Grounding: "generated", SourceFile: "a/g2.yaml"})
+	cfg.Workflows = append(cfg.Workflows,
+		config.WorkflowDef{Name: "two-step", SourceFile: "w/two.yaml", Steps: []config.Step{{Name: "a", Agent: "g1"}, {Name: "b", Agent: "g2"}}},
+		config.WorkflowDef{Name: "all-grounded", SourceFile: "w/ag.yaml", Steps: []config.Step{{Name: "a", Agent: "g1"}}})
+	reg, errs := registry.Build(cfg)
+	if len(errs) > 0 {
+		t.Fatalf("registry: %v", errs)
+	}
+	if !needsConfirm(reg, "two-step") {
+		t.Fatal("a workflow whose second agent is ungrounded must need confirmation")
+	}
+	if needsConfirm(reg, "all-grounded") {
+		t.Fatal("an all-grounded workflow must not need confirmation")
+	}
+	if !needsConfirm(reg, "no-such-workflow") {
+		t.Fatal("an unknown workflow must need confirmation")
 	}
 }
