@@ -215,8 +215,9 @@ The governed core is real and runnable today:
   signs a card with `agenthof card`.
   The first such agents are published in a **public hub** — `agenthof/hub` — that
   you install from by URL (`agenthof enroll https://…/agents/<name>/card.json`):
-  each is a least-privilege, reproducibly built program your engine pins by
-  content hash and runs contained. The hub distributes the signed card and the
+  each is a least-privilege, reproducibly built program the card pins by content
+  hash, which your engine verifies at enrollment and your confiner runs
+  contained. The hub distributes the signed card and the
   program, never a grant — your gateway still decides what the agent may do, and
   your confiner still refuses any bytes but the ones the card pins — so you can
   install an agent you do not have to trust.
