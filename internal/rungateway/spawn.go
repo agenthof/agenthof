@@ -3,6 +3,7 @@ package rungateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -90,79 +91,126 @@ type spawnResponse struct {
 	Reason        string `json:"reason,omitempty"`
 }
 
-// spawnHandler is the spawn door: POST /spawn {role, workflow, input}. It
+// errSpawnIncomplete marks the internal-failure path of authorizeAndSpawn: the
+// Spawner returned an error, and the ledger already carries the fixed-reason
+// failed event.
+var errSpawnIncomplete = errors.New(reasonSpawnIncomplete)
+
+// authorizeAndSpawn is the spawn gate, independent of any transport. It
 // authorizes the target against the agent's may_spawn list, reserves a slot
 // under the run's caps in one step under mu, runs the child through the
-// Spawner under a context derived from the step's (stepCtx) that is also
-// cancelled when the agent hangs up, and records one spawn event on the
-// parent's ledger once the child is over. The whole call runs under the
-// admission hold registerDoor took, so Stop waits for it and for its append;
-// a request that arrives once the proxy is closing is answered 503 by
-// registerDoor before it is a door call — neither counted nor recorded.
-// A body that is a JSON object but not the request's shape is a recorded
-// refusal answered 400.
+// Spawner under ctx, gives the max_total_spawns reservation back unless a
+// compartment set was consumed, and records exactly one spawn event on the
+// parent's ledger through appendEvent. It returns the outcome: a gate refusal
+// is Status "refused" with a fixed Reason; a child's own outcome is returned as
+// the Spawner reported it (an unknown status becomes "failed", the reason is
+// capped). A non-nil error is the internal-failure path only (errSpawnIncomplete);
+// its event is already recorded. The caller must hold whatever keeps the run's
+// ledger open (registerDoor's admission hold) across the call, and ctx is the
+// context the child runs under.
+func (p *Gateway) authorizeAndSpawn(ctx context.Context, bind engine.Binding, agent config.AgentDef, role, workflow, input string, appendEvent func(engine.Event), logger *slog.Logger) (SpawnResult, error) {
+	depth := bind.Depth + 1
+	// The role and workflow are agent-supplied: capped before they enter
+	// the ledger or a log line, and matched exactly against config.
+	childRole, childWorkflow := capRunes(role, 200), capRunes(workflow, 200)
+	refuse := func(reason string) (SpawnResult, error) {
+		logger.Warn("spawn refused", "child_role", childRole, "child_workflow", childWorkflow, "reason", reason)
+		appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: "refused", Reason: reason,
+			ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth, Binding: bind})
+		return SpawnResult{Status: "refused", Reason: reason}, nil
+	}
+	if p.spawner == nil {
+		return refuse(reasonSpawnUnavailable)
+	}
+	if !agent.MaySpawnTarget(role, workflow) {
+		return refuse(reasonSpawnNotAllowed)
+	}
+	// Check-and-reserve is one step under mu, so N concurrent requests
+	// cannot each see room for one more. A refused attempt reserves
+	// nothing and so never counts; the reservation taken here is given
+	// back below unless the Spawner reports that a compartment set was
+	// consumed (SpawnResult.Provisioned).
+	p.mu.Lock()
+	switch {
+	case depth > p.gwcfg.Spawn.MaxDepth:
+		p.mu.Unlock()
+		return refuse(reasonSpawnDepth)
+	case p.spawnInflight >= p.gwcfg.Spawn.MaxParallel:
+		p.mu.Unlock()
+		return refuse(reasonSpawnParallel)
+	case p.spawnTotal >= p.gwcfg.Spawn.MaxTotalSpawns:
+		p.mu.Unlock()
+		return refuse(reasonSpawnTotal)
+	}
+	p.spawnInflight++
+	p.spawnTotal++
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.spawnInflight--
+		p.mu.Unlock()
+	}()
+
+	logger.Info("spawn started", "child_role", childRole, "child_workflow", childWorkflow, "depth", depth)
+	res, err := p.spawner.Spawn(ctx, role, workflow, input, bind)
+	if !res.Provisioned {
+		// No compartment set was consumed: give the max_total_spawns
+		// reservation back, on this path and on the error path alike. The
+		// attempt is still recorded below.
+		p.mu.Lock()
+		p.spawnTotal--
+		p.mu.Unlock()
+	}
+	if err != nil {
+		// The error can carry a path or whatever an adapter said; the
+		// ledger gets a fixed reason and the log an error class.
+		logger.Error("spawn did not complete", "child_run", res.ChildRunID, "class", errClass(err))
+		appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: "failed", Reason: reasonSpawnIncomplete,
+			ChildRunID: res.ChildRunID, ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth, Binding: bind,
+			ChildConfiner: res.ChildConfiner, ChildConfinerOpts: res.ChildConfinerOpts, ChildArtifact: res.ChildArtifact})
+		return res, errSpawnIncomplete
+	}
+	switch res.Status {
+	case "succeeded", "failed", "refused":
+	default:
+		// A Spawner that reports a status the ledger does not know has
+		// broken its contract: recorded as failed, never as anything
+		// that could read as success.
+		logger.Error("spawn reported an unknown status", "child_run", res.ChildRunID, "status", capRunes(res.Status, 40))
+		res.Status = "failed"
+	}
+	res.Reason = capRunes(res.Reason, 200)
+	logger.Info("spawn finished", "child_run", res.ChildRunID, "status", res.Status)
+	appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: res.Status, Reason: res.Reason,
+		ChildRunID: res.ChildRunID, ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth,
+		OutputSHA: res.OutputSHA, Binding: bind,
+		ChildConfiner: res.ChildConfiner, ChildConfinerOpts: res.ChildConfinerOpts,
+		ChildArtifact: res.ChildArtifact})
+	return res, nil
+}
+
+// spawnHandler is the spawn door: POST /spawn {role, workflow, input}. It
+// decodes the request and runs it through authorizeAndSpawn under a context
+// derived from the step's (stepCtx) that is also cancelled when the agent
+// hangs up. The whole call runs under the admission hold registerDoor took,
+// so Stop waits for it and for its append; a request that arrives once the
+// proxy is closing is answered 503 by registerDoor before it is a door call —
+// neither counted nor recorded. A body that is a JSON object but not the
+// request's shape is a recorded refusal answered 400.
 func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) doorHandler {
 	return func(w http.ResponseWriter, r *http.Request, body []byte) {
 		var req spawnRequest
-		childRole, childWorkflow := "", ""
-		depth := bind.Depth + 1
 		answer := func(code int, resp spawnResponse) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(code)
 			_ = json.NewEncoder(w).Encode(resp)
 		}
-		refuse := func(reason string) {
-			logger.Warn("spawn refused", "child_role", childRole, "child_workflow", childWorkflow, "reason", reason)
-			appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: "refused", Reason: reason,
-				ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth, Binding: bind})
-			answer(http.StatusForbidden, spawnResponse{Status: "refused", Reason: reason})
-		}
 		if err := json.Unmarshal(body, &req); err != nil {
 			logger.Warn("spawn refused", "reason", reasonSpawnRequestMalformed)
-			appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: "refused", Reason: reasonSpawnRequestMalformed, Depth: depth, Binding: bind})
+			appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: "refused", Reason: reasonSpawnRequestMalformed, Depth: bind.Depth + 1, Binding: bind})
 			answer(http.StatusBadRequest, spawnResponse{Status: "refused", Reason: reasonSpawnRequestMalformed})
 			return
 		}
-		// The role and workflow are agent-supplied: capped before they enter
-		// the ledger or a log line, and matched exactly against config.
-		childRole, childWorkflow = capRunes(req.Role, 200), capRunes(req.Workflow, 200)
-		if p.spawner == nil {
-			refuse(reasonSpawnUnavailable)
-			return
-		}
-		if !agent.MaySpawnTarget(req.Role, req.Workflow) {
-			refuse(reasonSpawnNotAllowed)
-			return
-		}
-		// Check-and-reserve is one step under mu, so N concurrent requests
-		// cannot each see room for one more. A refused attempt reserves
-		// nothing and so never counts; the reservation taken here is given
-		// back below unless the Spawner reports that a compartment set was
-		// consumed (SpawnResult.Provisioned).
-		p.mu.Lock()
-		switch {
-		case depth > p.gwcfg.Spawn.MaxDepth:
-			p.mu.Unlock()
-			refuse(reasonSpawnDepth)
-			return
-		case p.spawnInflight >= p.gwcfg.Spawn.MaxParallel:
-			p.mu.Unlock()
-			refuse(reasonSpawnParallel)
-			return
-		case p.spawnTotal >= p.gwcfg.Spawn.MaxTotalSpawns:
-			p.mu.Unlock()
-			refuse(reasonSpawnTotal)
-			return
-		}
-		p.spawnInflight++
-		p.spawnTotal++
-		p.mu.Unlock()
-		defer func() {
-			p.mu.Lock()
-			p.spawnInflight--
-			p.mu.Unlock()
-		}()
-
 		// The child runs under the parent step's context — the step's
 		// deadline or cancel tears the child down with it — and is cancelled
 		// too when the agent that asked hangs up.
@@ -171,48 +219,16 @@ func (p *Gateway) spawnHandler(stepCtx context.Context, bind engine.Binding, age
 		stop := context.AfterFunc(r.Context(), cancel)
 		defer stop()
 
-		logger.Info("spawn started", "child_role", childRole, "child_workflow", childWorkflow, "depth", depth)
-		res, err := p.spawner.Spawn(ctx, req.Role, req.Workflow, req.Input, bind)
-		if !res.Provisioned {
-			// No compartment set was consumed: give the max_total_spawns
-			// reservation back, on this path and on the error path alike. The
-			// attempt is still recorded below.
-			p.mu.Lock()
-			p.spawnTotal--
-			p.mu.Unlock()
-		}
+		res, err := p.authorizeAndSpawn(ctx, bind, agent, req.Role, req.Workflow, req.Input, appendEvent, logger)
 		if err != nil {
-			// The error can carry a path or whatever an adapter said; the
-			// ledger gets a fixed reason and the log an error class.
-			logger.Error("spawn did not complete", "child_run", res.ChildRunID, "class", errClass(err))
-			appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: "failed", Reason: reasonSpawnIncomplete,
-				ChildRunID: res.ChildRunID, ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth, Binding: bind,
-				ChildConfiner: res.ChildConfiner, ChildConfinerOpts: res.ChildConfinerOpts, ChildArtifact: res.ChildArtifact})
 			http.Error(w, reasonSpawnIncomplete, http.StatusBadGateway)
 			return
 		}
-		status := res.Status
-		switch status {
-		case "succeeded", "failed", "refused":
-		default:
-			// A Spawner that reports a status the ledger does not know has
-			// broken its contract: recorded as failed, never as anything
-			// that could read as success.
-			logger.Error("spawn reported an unknown status", "child_run", res.ChildRunID, "status", capRunes(status, 40))
-			status = "failed"
-		}
-		reason := capRunes(res.Reason, 200)
-		logger.Info("spawn finished", "child_run", res.ChildRunID, "status", status)
-		appendEvent(engine.Event{Type: "spawn", Agent: agent.Name, Status: status, Reason: reason,
-			ChildRunID: res.ChildRunID, ChildRole: childRole, ChildWorkflow: childWorkflow, Depth: depth,
-			OutputSHA: res.OutputSHA, Binding: bind,
-			ChildConfiner: res.ChildConfiner, ChildConfinerOpts: res.ChildConfinerOpts,
-			ChildArtifact: res.ChildArtifact})
 		code := http.StatusOK
-		if status == "refused" {
+		if res.Status == "refused" {
 			code = http.StatusForbidden
 		}
-		answer(code, spawnResponse{Status: status, ChildRunID: res.ChildRunID,
-			OutputSHA: res.OutputSHA, OutputPreview: res.OutputPreview, Reason: reason})
+		answer(code, spawnResponse{Status: res.Status, ChildRunID: res.ChildRunID,
+			OutputSHA: res.OutputSHA, OutputPreview: res.OutputPreview, Reason: res.Reason})
 	}
 }
