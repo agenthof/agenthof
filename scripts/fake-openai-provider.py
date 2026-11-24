@@ -12,7 +12,10 @@ process can serve a parent's rounds and its children's plain calls at once —
 and the fixed --reply once the script is exhausted; a request offering no
 tools gets the plain --reply as before. With --delay it holds every
 successful answer for that many seconds, so a test that must inspect a
-caller's compartment while its call is in flight has time to. It never contacts a real provider
+caller's compartment while its call is in flight has time to. With one or more
+--reply-for MODEL=TEXT it answers a call whose request names that model with
+TEXT instead of --reply, so one process can play a classifier and an
+answerer at once. It never contacts a real provider
 and holds no real credential.
 """
 import argparse
@@ -92,7 +95,7 @@ class Handler(BaseHTTPRequestHandler):
                 for i, c in enumerate(script[rounds_done])]}
             finish = "tool_calls"
         else:
-            message = {"role": "assistant", "content": opts.reply}
+            message = {"role": "assistant", "content": self.server.replies.get(body.get("model"), opts.reply)}
             finish = "stop"
         if opts.delay > 0:
             time.sleep(opts.delay)
@@ -125,6 +128,8 @@ def parse_args(argv=None):
     where.add_argument("--unix", help="Unix socket path to listen on")
     p.add_argument("--reply", default="fake reply", help="assistant content returned on every call")
     p.add_argument("--log", help="append one JSON line per request to this file")
+    p.add_argument("--reply-for", action="append", default=[], metavar="MODEL=TEXT",
+                   help="answer a call naming MODEL with TEXT instead of --reply (repeatable)")
     p.add_argument("--status", type=int, default=200, help="HTTP status to answer with; non-200 simulates a refusal")
     p.add_argument("--tool-script", help="JSON file {\"rounds\": [[{\"name\", \"arguments\"}, ...], ...]}: play a tool-calling model for requests that offer tools")
     p.add_argument("--delay", type=float, default=0.0,
@@ -163,6 +168,12 @@ def make_server(opts):
         listening = "%s:%d" % srv.server_address[:2]
     srv.opts = opts
     srv.tool_script = None
+    srv.replies = {}
+    for item in opts.reply_for:
+        model, sep, text = item.partition("=")
+        if not sep or not model:
+            raise SystemExit("fake-provider: --reply-for expects MODEL=TEXT")
+        srv.replies[model] = text
     return srv, listening
 
 
