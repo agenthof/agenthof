@@ -194,6 +194,7 @@ func TestScript(t *testing.T) {
 			// its run id (filename minus .jsonl) as $RUNID for later exec lines.
 			"cardsigner": cmdCardSigner,
 			"mkcard":     cmdMkCard,
+			"addsigner":  cmdAddSigner,
 			"carddigest": cmdCardDigest,
 			"cardserve":  cmdCardServe,
 			"snapshot":   cmdSnapshot,

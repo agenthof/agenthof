@@ -85,6 +85,53 @@ verified-authorized call:
    a supported interface, or a refusal that names the
    problem — still before anything is disclosed or written.
 
+## Signing a card
+
+If you curate cards, `agenthof card` makes and signs them locally. It reads
+and writes only the files you name: it edits no configuration and contacts
+nothing.
+
+1. **Make a curator key pair.** `agenthof card keygen --dir curator` writes
+   `curator/curator.key` (the private key, mode 0600; keep it with you) and
+   `curator/curator.pub`, and prints the public key and a suggested `kid`. It
+   never overwrites an existing pair. The printed `public_key` is the raw 32
+   bytes in standard base64, exactly what a `trusted_signers` entry takes.
+2. **Write the card.** A minimal one:
+
+   ```json
+   {
+     "name": "Triage Bot",
+     "version": "1.2.0",
+     "capabilities": {"extensions": [{
+       "uri": "https://agenthof.dev/ext/agent/v1",
+       "params": {
+         "artifact": "ghcr.io/acme/triage@sha256:<64 hex digits>",
+         "interface": "a2a",
+         "model": "fast",
+         "tools": [{"resource": "code-search", "tools": ["search"], "mode": "read-only"}]
+       }
+     }]}
+   }
+   ```
+
+3. **Sign it.** `agenthof card sign --key curator/curator.key --kid <kid>
+   card.json` writes the signed card to stdout (or to `--out <path>`, which
+   never overwrites). It refuses, writing nothing, a card that does not parse,
+   one without exactly one Agenthof extension, an unreadable key, or an empty
+   or over-long `kid`.
+4. **Hand over the key and the card.** The operator who will enroll it adds the
+   public key to the gateway's `trusted_signers`:
+
+   ```yaml
+   trusted_signers:
+     - {kid: <kid>, key: <public_key>}
+   ```
+
+   and then runs `agenthof enroll signed.json ...` as described above.
+
+Signing proves who vouched for the card, not that the agent is safe: the card
+stays a request, and the operator's consent and the doors decide what it gets.
+
 ## The two-step consent
 
 `enroll <source>` with no `--accept` **discloses and stops**: it prints
