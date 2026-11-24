@@ -1,0 +1,77 @@
+# A curator makes a key pair, signs a card with it, and an operator who trusts
+# the printed public key enrolls the card: keygen -> sign -> trusted_signers ->
+# enroll. Signing refuses a malformed card and a card with no agenthof
+# extension, and keygen never overwrites an existing pair.
+
+exec agenthof card keygen --dir curator
+stdout 'public_key: [A-Za-z0-9+/]{43}='
+stdoutvar PUBKEY 'public_key: (\S+)'
+stdoutvar KID 'kid: (\S+)'
+exists curator/curator.key
+exists curator/curator.pub
+
+# a second keygen refuses and leaves the pair alone
+! exec agenthof card keygen --dir curator
+stderr 'refusing to overwrite'
+
+# refusals write no signed card
+! exec agenthof card sign --key curator/curator.key --kid $KID bad.json
+! stdout .
+stderr 'card sign'
+! exec agenthof card sign --key curator/curator.key --kid $KID noext.json
+! stdout .
+stderr 'no https://agenthof.dev/ext/agent/v1 extension'
+
+# sign the card, then trust the printed key and enroll
+exec agenthof card sign --key curator/curator.key --kid $KID --out signed.json card.json
+exists signed.json
+addsigner cfg/gateway.yaml PUBKEY KID
+carddigest signed.json DIGEST
+exec agenthof apply --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+
+exec agenthof enroll signed.json --name triage --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stdout 'card digest: '
+! exists cfg/agents/triage.yaml
+
+exec agenthof enroll signed.json --name triage --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops --accept $DIGEST
+stdout 'enrolled "triage"'
+exists cfg/agents/triage.yaml
+grep 'card_sha256: ' cfg/agents/triage.yaml
+
+# a key the gateway does not trust is refused
+exec agenthof card keygen --dir other
+stdoutvar OTHERKID 'kid: (\S+)'
+exec agenthof card sign --key other/curator.key --kid $OTHERKID --out foreign.json card.json
+! exec agenthof enroll foreign.json --name triage2 --role dev --config cfg --control-log ctl/control.jsonl --as ops-user --groups ops
+stderr 'no signature verifies'
+! exists cfg/agents/triage2.yaml
+
+-- card.json --
+{"name":"Triage Bot","version":"1.2.0","capabilities":{"extensions":[{"uri":"https://agenthof.dev/ext/agent/v1","params":{"artifact":"ghcr.io/acme/triage@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","interface":"a2a","model":"fast","tools":[{"resource":"code-search","tools":["search"],"mode":"read-only"}]}}]}}
+-- noext.json --
+{"name":"Plain","version":"1","capabilities":{"extensions":[]}}
+-- bad.json --
+{not json
+-- cfg/gateway.yaml --
+models:
+  fast: {endpoint: http://localhost:4000, model: fast, api_key_env: K}
+defaults:
+  model: fast
+tools:
+  code-search: {kind: mcp, url: https://mcp.example.internal/cs, credential_source: static_env, token_env: T, read_only_tools: [search]}
+-- cfg/agents/orch.yaml --
+name: orch
+endpoint: http://localhost:9
+-- cfg/workflows/main.yaml --
+name: main
+steps:
+  - {name: s, agent: orch}
+-- cfg/roles/admin.yaml --
+name: admin
+workflows: [main]
+allowed_groups: [ops]
+control: [apply, enroll]
+-- cfg/roles/dev.yaml --
+name: dev
+workflows: [main]
+allowed_groups: [devs]

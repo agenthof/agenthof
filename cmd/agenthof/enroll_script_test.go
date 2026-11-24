@@ -61,6 +61,19 @@ func cmdCardSigner(ts *testscript.TestScript, neg bool, args []string) {
 	ts.Check(os.WriteFile(p, b, 0o644))
 }
 
+// addsigner <gateway.yaml> <PUBKEY> <KID>: appends a trusted_signers entry
+// built from the env vars PUBKEY and KID (the values `card keygen` printed).
+func cmdAddSigner(ts *testscript.TestScript, neg bool, args []string) {
+	if len(args) != 3 {
+		ts.Fatalf("usage: addsigner <gateway.yaml> <PUBKEY var> <KID var>")
+	}
+	p := ts.MkAbs(args[0])
+	b, err := os.ReadFile(p)
+	ts.Check(err)
+	b = append(b, []byte("trusted_signers:\n  - {kid: "+ts.Getenv(args[2])+", key: "+ts.Getenv(args[1])+"}\n")...)
+	ts.Check(os.WriteFile(p, b, 0o644))
+}
+
 // mkcard <variant> <out>: writes a signed A2A card. Variants: good; the
 // signature failures swap (body changed after signing), jku and algnone; and
 // the validly signed but refused wildcard, spawn, notool, noartifact,

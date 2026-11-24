@@ -616,7 +616,7 @@ func Validate(cfg config.Config) []ValidationError {
 	for i, ts := range cfg.Gateway.TrustedSigners {
 		id := fmt.Sprintf("trusted_signers[%d]", i)
 		switch {
-		case len(ts.KID) == 0 || len(ts.KID) > config.MaxSignerKIDLen || !printableASCII(ts.KID):
+		case !config.ValidSignerKID(ts.KID):
 			add("gateway.yaml", id, "bad-trusted-signer",
 				fmt.Sprintf("trusted_signers kid must be 1 to %d printable ASCII characters, no spaces", config.MaxSignerKIDLen))
 		case signerKIDs[ts.KID]:
@@ -768,15 +768,4 @@ func InsideDir(dir, parent string) bool {
 		return true
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// printableASCII reports whether s is non-empty printable ASCII with no
-// space: a signer kid is recorded in the ledger and printed verbatim.
-func printableASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] <= 0x20 || s[i] > 0x7e {
-			return false
-		}
-	}
-	return s != ""
 }

@@ -458,6 +458,22 @@ type TrustedSigner struct {
 // control ledger puts on a recorded signer id.
 const MaxSignerKIDLen = 128
 
+// ValidSignerKID reports whether kid is usable as a trusted signer's key id:
+// 1 to MaxSignerKIDLen printable ASCII characters, no spaces. Config
+// validation and card signing both use it, so a kid a card is signed with can
+// always be listed in trusted_signers.
+func ValidSignerKID(kid string) bool {
+	if kid == "" || len(kid) > MaxSignerKIDLen {
+		return false
+	}
+	for i := 0; i < len(kid); i++ {
+		if kid[i] <= 0x20 || kid[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // PublicKey decodes Key: standard base64 of exactly the 32 raw bytes of an
 // Ed25519 public key.
 func (s TrustedSigner) PublicKey() (ed25519.PublicKey, error) {
