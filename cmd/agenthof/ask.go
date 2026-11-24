@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/investigate"
 	"github.com/agenthof/agenthof/internal/obs"
 	"github.com/agenthof/agenthof/internal/refspawn"
 	"github.com/agenthof/agenthof/internal/registry"
@@ -273,12 +276,20 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 		return finish("failed", "classification failed", 1)
 	}
 	fi, statErr := os.Stdin.Stat()
+	var served servedLeaf
 	status, reason, code := dispatchPick(ctx, pickRun{
 		gw: gw, bind: bind, orch: orch, reg: reg, menu: menu, prompt: prompt, store: store,
 		yes: *yes, interactive: statErr == nil && fi.Mode()&os.ModeCharDevice != 0,
 		in: os.Stdin, out: out, msg: stderr, runID: runID, appendEvent: appendEvent, logger: logger,
+		served: &served,
 	}, role, workflow, matched)
-	return finish(status, reason, code)
+	code = finish(status, reason, code)
+	// The receipt follows the answer, after the run's own terminal event is
+	// on its ledger, so the verdicts it reports cover the whole run.
+	if served.answered {
+		renderReceipt(stderr, *logDir, runID, served.agents)
+	}
+	return code
 }
 
 // printMenu lists what ask can do: the projected menu, never the
@@ -365,6 +376,14 @@ type pickRun struct {
 	runID       string
 	appendEvent func(engine.Event)
 	logger      *slog.Logger
+	served      *servedLeaf // when set, filled once an answer has been printed
+}
+
+// servedLeaf records what the receipt needs to know about the leaf that
+// answered: the agents its workflow ran.
+type servedLeaf struct {
+	answered bool
+	agents   []config.AgentDef
 }
 
 // dispatchPick acts on the classifier's pick: it must be one of the offered
@@ -429,5 +448,135 @@ func dispatchPick(ctx context.Context, p pickRun, role, workflow string, matched
 		return "failed", "answer empty", 1
 	}
 	_, _ = fmt.Fprintln(p.out, body)
+	if p.served != nil {
+		p.served.answered = true
+		p.served.agents = workflowAgents(p.reg, workflow)
+	}
 	return "succeeded", "", 0
+}
+
+// workflowAgents returns the registered agents the workflow's steps run, in
+// step order.
+func workflowAgents(reg *registry.Registry, workflow string) []config.AgentDef {
+	wf, ok := reg.Workflow(workflow)
+	if !ok {
+		return nil
+	}
+	var out []config.AgentDef
+	for _, st := range wf.Steps {
+		if a, ok := reg.Agent(st.Agent); ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// doorKinds are the run-ledger event kinds that record a door call.
+var doorKinds = map[string]bool{"model_call": true, "tool_call": true, "exec": true, "spawn": true}
+
+// renderReceipt prints, to w, what ask can say about the run it just did.
+// The facts come from the run subtree: the orchestrator's ledger (the invoker
+// and, on each parent spawn event, the child's containment tier and measured
+// artifact) and every child ledger (the doors that child's run fired), read
+// and verified by the investigate timeline. Verification is not repeated
+// here. What the agents say about themselves is kept apart and labelled. It
+// carries digests and verdicts only, never an artifact body.
+func renderReceipt(w io.Writer, logDir, runID string, leafAgents []config.AgentDef) {
+	res, err := investigate.Timeline(logDir, "", investigate.Filter{Run: runID}, investigate.Options{})
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "receipt unavailable: %v\n", err)
+		return
+	}
+	events, _, err := engine.ReadLog(logDir, runID)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "receipt unavailable: the run ledger could not be read in full: %v\n", err)
+		return
+	}
+
+	doors := map[string]map[string]int{} // run id -> door kind -> count
+	for _, r := range res.Events {
+		if r.Source == "run" && doorKinds[r.Kind] {
+			if doors[r.RunID] == nil {
+				doors[r.RunID] = map[string]int{}
+			}
+			doors[r.RunID][r.Kind]++
+		}
+	}
+
+	_, _ = fmt.Fprintf(w, "receipt for ask %s\n", runID)
+	_, _ = fmt.Fprintln(w, "enforced by construction (recorded by the gateway in the run ledgers, not reported by the agents):")
+	for _, e := range events {
+		if e.Type == "workflow_started" {
+			_, _ = fmt.Fprintf(w, "  invoker: %s (%s)\n", e.Binding.Invoker.Subject, e.Binding.Invoker.Method)
+			break
+		}
+	}
+	for _, e := range events {
+		if e.Type != "spawn" || e.ChildRunID == "" {
+			continue
+		}
+		tier := e.ChildConfiner
+		if tier == "" {
+			tier = "none recorded"
+		}
+		if len(e.ChildConfinerOpts) > 0 {
+			tier += " (" + strings.Join(e.ChildConfinerOpts, ", ") + ")"
+		}
+		_, _ = fmt.Fprintf(w, "  %s/%s  run %s: containment tier %s", e.ChildRole, e.ChildWorkflow, e.ChildRunID, tier)
+		if len(e.ChildArtifact) > 0 {
+			agents := make([]string, 0, len(e.ChildArtifact))
+			for a := range e.ChildArtifact {
+				agents = append(agents, a)
+			}
+			sort.Strings(agents)
+			for _, a := range agents {
+				ref := e.ChildArtifact[a]
+				_, _ = fmt.Fprintf(w, "; measured artifact %s %s:%s", a, ref.Kind, strings.Join(ref.Values, ","))
+			}
+		}
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintf(w, "    doors fired: %s\n", doorSummary(doors[e.ChildRunID]))
+	}
+	for _, s := range res.Sources {
+		if s.Kind != "run" {
+			continue
+		}
+		comp := s.Completeness
+		if comp == "" {
+			comp = "not checked"
+		}
+		_, _ = fmt.Fprintf(w, "  ledger %s: chain %s, completeness %s\n", strings.TrimSuffix(filepath.Base(s.Path), ".jsonl"), s.Integrity, comp)
+	}
+	_, _ = fmt.Fprintln(w, "  limits: the chain links each record to the one before it, so edits to a ledger show up; it is evidence, not a guarantee against someone who controls the ledger")
+
+	_, _ = fmt.Fprintln(w, "agent-asserted (the agent's own claim, not checked by agenthof):")
+	for _, a := range leafAgents {
+		_, _ = fmt.Fprintf(w, "  %s\n", assertedLine(a))
+	}
+}
+
+// doorSummary renders a door-kind count as a stable "kind xN" list.
+func doorSummary(counts map[string]int) string {
+	if len(counts) == 0 {
+		return "none"
+	}
+	kinds := make([]string, 0, len(counts))
+	for k := range counts {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	parts := make([]string, len(kinds))
+	for i, k := range kinds {
+		parts[i] = fmt.Sprintf("%s x%d", k, counts[k])
+	}
+	return strings.Join(parts, ", ")
+}
+
+// assertedLine is the agent's own claim about where its answer comes from,
+// as its configuration declares it.
+func assertedLine(a config.AgentDef) string {
+	if a.Grounding == "grounded" {
+		return fmt.Sprintf("%s: grounded — declared to answer from your data", a.Name)
+	}
+	return fmt.Sprintf("%s: agent-asserted: generated from the model's own knowledge — not your data", a.Name)
 }

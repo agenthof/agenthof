@@ -14,6 +14,7 @@ import (
 	"github.com/agenthof/agenthof/internal/artifact"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
+	"github.com/agenthof/agenthof/internal/identity"
 	"github.com/agenthof/agenthof/internal/registry"
 	"github.com/agenthof/agenthof/internal/rungateway"
 )
@@ -437,5 +438,87 @@ func TestNeedsConfirmAnyStepOrUnknown(t *testing.T) {
 	}
 	if !needsConfirm(reg, "no-such-workflow") {
 		t.Fatal("an unknown workflow must need confirmation")
+	}
+}
+
+// receiptLedgers writes an orchestrator ledger whose parent spawn event for
+// the leaf carries a containment tier, plus the leaf's own child ledger with
+// the doors it fired. It returns the log dir.
+func receiptLedgers(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(runID string, evs []engine.Event) {
+		l, err := engine.OpenLog(dir, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = l.Close() }()
+		for _, e := range evs {
+			e.Time = time.Now().UTC()
+			if err := l.Append(e); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	inv := identity.Invoker{Subject: "dana@example.com", Method: "asserted"}
+	orch := engine.Binding{Invoker: inv, Role: orchestratorRole, Workflow: askWorkflow, RunID: "r-orch"}
+	child := engine.Binding{Invoker: inv, Role: "dev", Workflow: "generic-chat", RunID: "r-leaf", ParentRunID: "r-orch", Depth: 1}
+	write("r-orch", []engine.Event{
+		{Type: "workflow_started", Binding: orch, DoorAccounting: engine.DoorAccountingAdmission},
+		{Type: "spawn", Binding: orch, ChildRunID: "r-leaf", ChildRole: "dev", ChildWorkflow: "generic-chat", Depth: 1,
+			ChildConfiner: "podman", ChildConfinerOpts: []string{"userns"}},
+		{Type: "workflow_finished", Binding: orch, Status: "succeeded"},
+	})
+	write("r-leaf", []engine.Event{
+		{Type: "workflow_started", Binding: child, DoorAccounting: engine.DoorAccountingAdmission},
+		{Type: "model_call", Binding: child, Model: "m"},
+		{Type: "workflow_finished", Binding: child, Status: "succeeded"},
+	})
+	return dir
+}
+
+func receiptFor(t *testing.T, grounding string) string {
+	t.Helper()
+	var b strings.Builder
+	renderReceipt(&b, receiptLedgers(t), "r-orch", []config.AgentDef{{Name: "chat", Grounding: grounding}})
+	return b.String()
+}
+
+func TestReceiptComposesSubtree(t *testing.T) {
+	got := receiptFor(t, "generated")
+	// The tier is on the parent's spawn event; the door is in the child's ledger.
+	for _, want := range []string{"containment tier podman (userns)", "model_call x1", "dana@example.com", "ledger r-orch: chain verified", "ledger r-leaf: chain verified"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("receipt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestReceiptLabelsProvenance(t *testing.T) {
+	got := receiptFor(t, "generated")
+	enforced, asserted, ok := strings.Cut(got, "agent-asserted (")
+	if !ok {
+		t.Fatalf("no agent-asserted section:\n%s", got)
+	}
+	if !strings.Contains(asserted, "agent-asserted: generated from the model's own knowledge — not your data") {
+		t.Errorf("missing generated label:\n%s", asserted)
+	}
+	if strings.Contains(enforced, "not your data") || !strings.Contains(enforced, "containment tier") {
+		t.Errorf("the asserted claim leaked into the enforced section:\n%s", enforced)
+	}
+	if g := receiptFor(t, "grounded"); !strings.Contains(g, "grounded — declared") || strings.Contains(g, "not your data") {
+		t.Errorf("grounded leaf mislabelled:\n%s", g)
+	}
+}
+
+func TestReceiptHonestWording(t *testing.T) {
+	got := strings.ToLower(receiptFor(t, "generated"))
+	for _, bad := range []string{"tamper-proof", "sandboxed"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("receipt must not claim %q", bad)
+		}
+	}
+	if !strings.Contains(got, "enforced by construction") || !strings.Contains(got, "agent-asserted (") {
+		t.Errorf("enforced-vs-asserted split not explicit:\n%s", got)
 	}
 }
