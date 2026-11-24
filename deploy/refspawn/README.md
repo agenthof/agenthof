@@ -39,7 +39,9 @@ than ignored:
   run); each `images` value is an image reference.
 - **seatbelt:** `store_root` and `pid_dir` (absolute directories that
   must already exist), optionally `deny_read` (extra subtrees compartments
-  may not read) and `shared_host_scratch`; no `refexec.image`. Each
+  may not read), optionally `deny_config_read` (an absolute path; set it to
+  your agenthof config directory so a compartment cannot read it) and
+  `shared_host_scratch`; no `refexec.image`. Each
   `images` value is the absolute path of the executable that runs as that
   agent. `limits` and `refexec.limits` are required by the schema but not
   enforced on this tier.
@@ -66,8 +68,12 @@ refexec:
 
 refspawn renders each child's refexec config for the same backend: under
 Seatbelt the child's refexec gets the same `store_root`, `pid_dir` and
-`shared_host_scratch`, and a `deny_read` that is the operator's list plus
-`spawn_root`.
+`shared_host_scratch`, and a `deny_read` that is the operator's list, the
+`deny_config_read` path if set, plus `spawn_root`.
+
+Config isolation: on podman a compartment has no access to the host's
+config directory by construction; on Seatbelt it is denied by configuration,
+so set `deny_config_read` to your agenthof config directory.
 
 The socket's directory is the access gate: it must be mode 0700 and owned
 by the user refspawn runs as, and it must not be under Agenthof's

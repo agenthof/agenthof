@@ -396,3 +396,15 @@ func TestSBPLSafe(t *testing.T) {
 		}
 	}
 }
+
+// A configured config directory reaches the profile as a read-deny subtree,
+// ahead of the compartment's own allows, like every other deny_read entry.
+func TestSeatbeltProfileDeniesConfiguredConfigDir(t *testing.T) {
+	p := sbplProfile(profileInput{Paths: []Path{{Path: "/x/work", RW: true}}, DenyRead: []string{"/x/cfg"}})
+	deny := `(deny file-read* (subpath "/x/cfg"))`
+	allow := `(allow file-read* file-write* (subpath "/x/work"))`
+	di, ai := strings.Index(p, deny), strings.Index(p, allow)
+	if di < 0 || ai < 0 || di > ai {
+		t.Fatalf("config dir not denied ahead of the allows:\n%s", p)
+	}
+}
