@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -87,7 +88,7 @@ func newAskFixture(t *testing.T, answer string) (*rungateway.Gateway, *answerSpa
 func classifyFor(t *testing.T, answer, prompt string) (role, wf string, matched bool, sp *answerSpawner) {
 	t.Helper()
 	gw, sp, orch, reg, store := newAskFixture(t, answer)
-	bind := engine.Binding{Role: orchestratorAgent, Workflow: "ask", RunID: "r-orch"}
+	bind := engine.Binding{Role: orchestratorRole, Workflow: askWorkflow, RunID: "r-orch"}
 	var events []engine.Event
 	role, wf, matched, err := classify(context.Background(), gw, bind, orch, projectMenu(orch, reg), prompt, store,
 		func(e engine.Event) { events = append(events, e) }, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -152,5 +153,39 @@ func TestClassifyMalformedAnswerIsAnError(t *testing.T) {
 		func(engine.Event) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err == nil || matched {
 		t.Fatalf("a pick missing its workflow must be an error, got matched=%v err=%v", matched, err)
+	}
+}
+
+// stubSpawner returns a fixed outcome, for the fail-closed paths.
+type stubSpawner struct {
+	res rungateway.SpawnResult
+	err error
+}
+
+func (s stubSpawner) Spawn(context.Context, string, string, string, engine.Binding) (rungateway.SpawnResult, error) {
+	return s.res, s.err
+}
+
+func TestClassifyFailsClosed(t *testing.T) {
+	missing := "0000000000000000000000000000000000000000000000000000000000000000"
+	cases := []struct {
+		name string
+		sp   stubSpawner
+	}{
+		{"spawner error", stubSpawner{res: rungateway.SpawnResult{Status: "succeeded", OutputSHA: missing}, err: errors.New("boom")}},
+		{"failed status", stubSpawner{res: rungateway.SpawnResult{Status: "failed", Provisioned: true}}},
+		{"empty output sha", stubSpawner{res: rungateway.SpawnResult{Status: "succeeded", Provisioned: true}}},
+		{"store miss", stubSpawner{res: rungateway.SpawnResult{Status: "succeeded", OutputSHA: missing, Provisioned: true}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gw, _, orch, reg, store := newAskFixture(t, "null")
+			gw = rungateway.New(askCfg().Gateway, ".", nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "").WithSpawner(c.sp)
+			role, wf, matched, err := classify(context.Background(), gw, engine.Binding{RunID: "r-orch"}, orch, projectMenu(orch, reg), "hi", store,
+				func(engine.Event) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err == nil || matched || role != "" || wf != "" {
+				t.Fatalf("want an error and no pick, got %q %q matched=%v err=%v", role, wf, matched, err)
+			}
+		})
 	}
 }

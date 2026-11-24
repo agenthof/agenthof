@@ -9,7 +9,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/agenthof/agenthof/internal/artifact"
@@ -96,7 +98,7 @@ func classify(ctx context.Context, gw *rungateway.Gateway, bind engine.Binding, 
 	}
 	res, err := gw.AuthorizeAndSpawn(ctx, bind, orch, routerRole, routerWorkflow, string(in), appendEvent, logger)
 	if err != nil {
-		return "", "", false, errors.New("classifier spawn did not complete")
+		return "", "", false, fmt.Errorf("classifier spawn did not complete: %w", err)
 	}
 	if res.Status != "succeeded" {
 		reason := res.Reason
@@ -259,9 +261,13 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 		return code
 	}
 
+	// One cancellable command context for every spawn: an interrupt or a
+	// termination signal cancels a child that is still running.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	gw := rungateway.New(cfg.Gateway, ".", deps.broker, logger, r.subjectToken).WithSpawner(deps)
 	menu := projectMenu(orch, reg)
-	role, workflow, matched, err := classify(context.Background(), gw, bind, orch, menu, prompt, store, appendEvent, logger)
+	role, workflow, matched, err := classify(ctx, gw, bind, orch, menu, prompt, store, appendEvent, logger)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "ask %s: %v\n", runID, err)
 		return finish("failed", "classification failed", 1)
