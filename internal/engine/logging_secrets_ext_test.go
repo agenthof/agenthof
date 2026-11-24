@@ -74,16 +74,40 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// closedAddr returns a loopback host:port nothing listens on.
-func closedAddr(t *testing.T) string {
+// unreachableAddr returns a loopback host:port that stays bound for the test's
+// whole lifetime yet never completes a request: a listener holds the port and
+// closes every connection it accepts without answering, so a door that dials it
+// fails to connect or to complete its call — exactly as an unreachable upstream
+// would, and deterministically.
+//
+// The obvious shortcut — bind an ephemeral port, close it, and reuse the freed
+// address as "nothing listens here" — is unsafe under a full-suite `go test
+// ./...` run: once freed, that one port can be re-bound by another httptest
+// server or gateway listener (this process and every parallel package churn
+// ephemeral ports), which then ANSWERS the supposedly-unreachable upstream and
+// sends the door down a different branch (a model 401, or a tool connect that
+// succeeds) — so the scenario's own door line is never logged and the capture
+// assertion fails. Holding the port removes the race. Binding without listening
+// does not help: that is "connection refused" on Linux but a silently dropped
+// SYN (a dial timeout) on darwin, so it is not both held and portable —
+// accepting and immediately closing is.
+func unreachableAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // listener closed at cleanup
+			}
+			_ = conn.Close() // no response: the dialing door's call cannot complete
+		}
+	}()
+	return ln.Addr().String()
 }
 
 // doorExec is the fronted step: it receives the proxy coordinates, records
@@ -342,7 +366,7 @@ func TestOperationalLogCarriesNoSecret(t *testing.T) {
 	t.Setenv("CC_ID", ccClientID)
 	t.Setenv("CC_SECRET", ccSecret)
 
-	refusedAddr := closedAddr(t)
+	unreachable := unreachableAddr(t)
 	modelRoute := func(endpoint string) config.GatewayConfig {
 		return config.GatewayConfig{Models: map[string]config.ModelRoute{"fast": {Endpoint: endpoint, Model: "gpt-test", APIKeyEnv: "MODEL_KEY"}}}
 	}
@@ -362,15 +386,15 @@ func TestOperationalLogCarriesNoSecret(t *testing.T) {
 	scenarios := []doorScenario{
 		{name: "model success", gateway: modelRoute(modelUpstream(t, modelOK).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "model call routed"},
 		{name: "model upstream 401 echoing the key", gateway: modelRoute(modelUpstream(t, model401).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model upstream returned error status"},
-		{name: "model upstream connection refused with query secret", gateway: modelRoute("http://" + refusedAddr + "/v1?key=" + querySecret), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model call did not complete"},
+		{name: "model upstream unreachable with query secret", gateway: modelRoute("http://" + unreachable + "/v1?key=" + querySecret), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model call did not complete"},
 		{name: "model upstream oversized body", gateway: modelRoute(modelUpstream(t, modelHuge).URL), agent: config.AgentDef{Model: "fast"}, call: postModel, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model upstream response too large"},
 		{name: "embeddings success", gateway: embedRoute(modelUpstream(t, embedOK).URL), agent: embedAgent, call: postEmbed, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "model call routed"},
 		{name: "embeddings upstream 401 echoing the key", gateway: embedRoute(modelUpstream(t, model401).URL), agent: embedAgent, call: postEmbed, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model upstream returned error status"},
-		{name: "embeddings upstream connection refused with query secret", gateway: embedRoute("http://" + refusedAddr + "/v1?key=" + querySecret), agent: embedAgent, call: postEmbed, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model call did not complete"},
+		{name: "embeddings upstream unreachable with query secret", gateway: embedRoute("http://" + unreachable + "/v1?key=" + querySecret), agent: embedAgent, call: postEmbed, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model call did not complete"},
 		{name: "embeddings upstream answers with a stream", gateway: embedRoute(modelUpstream(t, embedStream).URL), agent: embedAgent, call: postEmbed, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "model upstream answered with a stream"},
 		{name: "tool static bearer success", gateway: toolCfg(staticTool(stubMCP(t, toolBearer).URL)), agent: toolGrant, call: callEcho, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "tool call routed"},
 		{name: "tool upstream rejects credential", gateway: toolCfg(staticTool(stubMCP(t, "somethingelse").URL)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineListener, wantDoorLine: "tool call reported error"},
-		{name: "tool upstream connection refused with query secret", gateway: toolCfg(staticTool("http://" + refusedAddr + "/?key=" + querySecret)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineConnect},
+		{name: "tool upstream unreachable with query secret", gateway: toolCfg(staticTool("http://" + unreachable + "/?key=" + querySecret)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineConnect},
 		{name: "tool client_credentials success", gateway: toolCfg(ccTool(stubMCP(t, mintedToken).URL, tokenEndpoint(t, http.StatusOK, `{"access_token":"`+mintedToken+`","token_type":"Bearer","expires_in":3600}`).URL)), agent: toolGrant, call: callEcho, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "tool call routed"},
 		{name: "tool client_credentials token endpoint rejects and echoes the secret", gateway: toolCfg(ccTool(stubMCP(t, mintedToken).URL, tokenEndpoint(t, http.StatusUnauthorized, `{"error":"invalid_client","error_description":"secret `+ccSecret+` rejected for `+ccClientID+`"}`).URL)), agent: toolGrant, call: callEcho, wantStatus: "failed", wantLine: lineConnect},
 		{name: "exec first-hand: run allowed, run refused", gateway: config.GatewayConfig{}, agent: config.AgentDef{Exec: config.ExecConfig{Runtime: "refexec", URL: refexecStubURL(t), Timeout: 10 * time.Second, Allow: []config.ExecEntry{{Exe: "ls"}}}}, call: callExec, wantStatus: "succeeded", wantLine: lineListener, wantDoorLine: "exec run recorded"},
