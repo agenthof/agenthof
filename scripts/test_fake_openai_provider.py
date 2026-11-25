@@ -2,6 +2,7 @@
 import http.client
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -181,7 +182,7 @@ class EmbeddingsTest(unittest.TestCase):
         self.assertEqual(a1, a2)
         _, b = self.embed("catering for the autumn offsite")
         self.assertEqual(len(a1), len(b))
-        self.assertEqual(len(a1), 64)
+        self.assertEqual(len(a1), 512)
         self.assertNotEqual(a1, b)
 
     def test_retrieval_selects_the_matching_text(self):
@@ -191,6 +192,38 @@ class EmbeddingsTest(unittest.TestCase):
         _, near = self.embed("an entitlement is granted to a named agent")
         _, far = self.embed("the caterer offers vegetarian lunch at the offsite")
         self.assertGreater(dot(query, near), dot(query, far))
+
+    def sample_notes(self):
+        """The real sample note bodies, read from the fake-drive source."""
+        src = (Path(__file__).resolve().parent.parent / "examples" / "fake-drive-mcp" / "main.go").read_text(encoding="utf-8")
+        found = dict(re.findall(r"const (\w+Note) = `(.*?)`", src, re.S))
+        self.assertEqual(sorted(found), ["entitlementsNote", "offsiteNote", "tokenNote"])
+        return found
+
+    def test_queries_select_the_right_sample_note_by_margin(self):
+        # The grounding proof depends on retrieval picking the right note, so
+        # prove it on the real notes (whole, and per chunk) with a clear gap.
+        def dot(x, y):
+            return sum(p * q for p, q in zip(x, y))
+        notes = self.sample_notes()
+        whole = {name: self.embed(body)[1] for name, body in notes.items()}
+        chunks = [(name, self.embed(c)[1]) for name, body in notes.items() for c in body.split("\n\n")]
+        margin = 0.10
+        cases = {
+            "entitlementsNote": ["how is an entitlement granted to an agent", "entitlement revocation",
+                                 "what entitlements does an agent have"],
+            "tokenNote": ["JWT verification", "token handling", "how long do access tokens live"],
+        }
+        for want, queries in cases.items():
+            for q in queries:
+                qv = self.embed(q)[1]
+                scored = sorted(((dot(qv, v), n) for n, v in whole.items()), reverse=True)
+                self.assertEqual(scored[0][1], want, (q, scored))
+                self.assertGreaterEqual(scored[0][0] - scored[1][0], margin, (q, scored))
+                best = sorted(((dot(qv, v), n) for n, v in chunks), reverse=True)
+                self.assertEqual(best[0][1], want, (q, best[:3]))
+                other = max(s for s, n in best if n != want)
+                self.assertGreaterEqual(best[0][0] - other, margin, (q, best[:3]))
 
     def test_request_is_logged_with_the_input_text(self):
         self.embed("secret grounding text")

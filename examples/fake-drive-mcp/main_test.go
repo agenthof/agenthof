@@ -125,6 +125,9 @@ func TestDatedNotes(t *testing.T) {
 		if isErr || !strings.HasPrefix(body, "Meeting notes - "+date+"\n") {
 			t.Fatalf("readGoogleDoc %s = %q (error %v), want a dated header %s", id, body, isErr, date)
 		}
+		if want := map[string]string{"note-3": "entitlement", "note-4": "JWT"}[id]; want != "" && !strings.Contains(body, want) {
+			t.Fatalf("readGoogleDoc %s lacks its topic %q", id, want)
+		}
 		if strings.Count(body, "\n\n") < 3 {
 			t.Fatalf("readGoogleDoc %s has too few paragraphs to chunk", id)
 		}

@@ -32,15 +32,24 @@ from http.server import BaseHTTPRequestHandler
 
 ROUTE = "/v1/chat/completions"
 EMBEDDINGS_ROUTE = "/v1/embeddings"
-EMBEDDING_DIM = 64
+EMBEDDING_DIM = 512
+
+
+# Words that carry no topic (and the boilerplate every sample note shares) are
+# dropped, so retrieval is decided by content words alone.
+STOPWORDS = frozenset("""a an and are as at be been but by can do does for from had has have how i if in is it
+its of on or so than that the their then there these they this to was we were what when which who will with
+meeting notes attendees action items dana example com""".split())
 
 
 def embed(text):
-    """A deterministic embedding of text: EMBEDDING_DIM floats, unit length.
-    Each lower-cased alphanumeric token adds a signed, hash-derived weight to
-    a few dimensions, so equal text gives a byte-identical vector and texts
-    sharing words are closer than unrelated ones (a nearest-neighbour search
-    selects the matching chunk). Empty text maps to a fixed unit vector."""
+    """A deterministic embedding of text: EMBEDDING_DIM non-negative floats,
+    unit length. Each content token (lower-cased alphanumeric run, not a
+    stopword, a trailing plural 's' stripped) adds weight to a few
+    hash-chosen dimensions, so equal text gives a byte-identical vector and
+    texts sharing content words are closer than unrelated ones: a
+    nearest-neighbour search selects the matching chunk. Text with no content
+    token maps to a fixed unit vector."""
     vec = [0.0] * EMBEDDING_DIM
     token = []
     for ch in text.lower() + " ":
@@ -48,10 +57,15 @@ def embed(text):
             token.append(ch)
             continue
         if token:
-            digest = hashlib.sha256("".join(token).encode()).digest()
-            for k in range(3):
-                vec[digest[2 * k] % EMBEDDING_DIM] += 1.0 if digest[2 * k + 1] % 2 == 0 else -1.0
+            word = "".join(token)
             token = []
+            if word in STOPWORDS:
+                continue
+            if len(word) > 3 and word.endswith("s"):
+                word = word[:-1]
+            digest = hashlib.sha256(word.encode()).digest()
+            for k in range(2):
+                vec[int.from_bytes(digest[2 * k:2 * k + 2], "big") % EMBEDDING_DIM] += 1.0
     norm = math.sqrt(sum(v * v for v in vec))
     if norm == 0:
         vec[0] = 1.0
