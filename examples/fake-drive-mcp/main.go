@@ -39,7 +39,45 @@ type note struct{ id, title, body string }
 var notes = []note{
 	{"note-1", "Roadmap notes", "Roadmap: ship the governed read path first, then widen the grant."},
 	{"note-2", "Meeting notes", "Meeting: agreed to review the audit ledger every Friday."},
+	{"note-3", "Entitlements sync", entitlementsNote},
+	{"note-4", "Token handling sync", tokenNote},
+	{"note-5", "Offsite logistics sync", offsiteNote},
 }
+
+// The dated notes below are shaped like a sanitised meeting-notes export: a
+// leading "Meeting notes - <date>" line, then several paragraphs. They give a
+// retrieval test distinct topics to select between (entitlements, tokens) and
+// an unrelated distractor (offsite). Titles avoid the words in notes 1 and 2,
+// so a search for either of those still returns exactly one hit.
+const entitlementsNote = `Meeting notes - 2026-09-14
+
+Attendees: dana@example.com and the platform group.
+
+Entitlements. The team agreed that every entitlement is granted to a named agent, never to a whole team. An entitlement lists the tools an agent may call and nothing else. Dana raised that a broad entitlement is hard to review, so the group decided each one stays narrow and is reviewed when it is issued.
+
+Revocation. Revoking an entitlement takes effect on the next run. A run already in flight keeps the entitlement it started with. The group noted that the ledger records the entitlement in force for each run, so a later audit can see exactly what was allowed at the time.
+
+Action items. Dana will draft the entitlement review checklist. The platform group will add a test that an agent without an entitlement is refused.`
+
+const tokenNote = `Meeting notes - 2026-09-21
+
+Attendees: dana@example.com and the security group.
+
+JWT handling. The group agreed that a JWT is only ever accepted after its signature, issuer and expiry are verified. A token that fails any check is rejected and the rejection is logged. Dana pointed out that clock skew should be bounded to a few seconds, and the group settled on thirty.
+
+Token lifetime. Access tokens stay short-lived and are refreshed rather than extended. Refresh tokens are stored only on the host and are never passed into an agent compartment. The group noted that a leaked refresh token is the larger risk, so rotation happens on every use.
+
+Action items. Dana will write up the token rotation rule. The security group will add a negative test for an expired JWT.`
+
+const offsiteNote = `Meeting notes - 2026-09-28
+
+Attendees: dana@example.com and the events volunteers.
+
+Catering. The group compared two caterers for the autumn offsite and preferred the one with vegetarian lunch options and a flat per-head price. Coffee and fruit will be available all day. Dana will confirm the headcount a week before.
+
+Venue. The hall holds forty people with a projector and a quiet breakout room. Parking is limited, so the group suggested a shared shuttle from the station. Name tags and a printed schedule will be at the door.
+
+Action items. Dana will book the caterer. The volunteers will arrange the shuttle and the signage.`
 
 type searchArgs struct {
 	Query string `json:"query"`

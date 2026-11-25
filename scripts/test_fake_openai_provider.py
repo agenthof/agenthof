@@ -157,6 +157,62 @@ class UnixListenerTest(unittest.TestCase):
         self.assertEqual(json.loads(data)["choices"][0]["message"]["content"], "over-uds")
 
 
+class EmbeddingsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.log = os.path.join(self.tmp.name, "provider.jsonl")
+        self.proc, self.listening = start("--bind", "127.0.0.1:0", "--log", self.log)
+
+    def tearDown(self):
+        self.proc.kill()
+        self.proc.wait()
+        self.tmp.cleanup()
+
+    def embed(self, text):
+        status, data = post(tcp_conn(self.listening), "/v1/embeddings",
+                            {"model": "embed", "input": text}, {"Authorization": "Bearer k"})
+        self.assertEqual(status, 200)
+        return data, json.loads(data)["data"][0]["embedding"]
+
+    def test_deterministic_fixed_dimension_and_distinguishable(self):
+        a1_raw, a1 = self.embed("the entitlement is granted to a named agent")
+        a2_raw, a2 = self.embed("the entitlement is granted to a named agent")
+        self.assertEqual(a1_raw, a2_raw)  # byte-identical response
+        self.assertEqual(a1, a2)
+        _, b = self.embed("catering for the autumn offsite")
+        self.assertEqual(len(a1), len(b))
+        self.assertEqual(len(a1), 64)
+        self.assertNotEqual(a1, b)
+
+    def test_retrieval_selects_the_matching_text(self):
+        def dot(x, y):
+            return sum(p * q for p, q in zip(x, y))
+        _, query = self.embed("how is an entitlement granted to an agent")
+        _, near = self.embed("an entitlement is granted to a named agent")
+        _, far = self.embed("the caterer offers vegetarian lunch at the offsite")
+        self.assertGreater(dot(query, near), dot(query, far))
+
+    def test_request_is_logged_with_the_input_text(self):
+        self.embed("secret grounding text")
+        post(tcp_conn(self.listening), "/v1/embeddings",
+             {"model": "embed", "input": ["one", "two"]}, {"Authorization": "Bearer k"})
+        with open(self.log, encoding="utf-8") as f:
+            lines = [json.loads(line) for line in f]
+        self.assertEqual(lines[0]["path"], "/v1/embeddings")
+        self.assertEqual(lines[0]["input"], "secret grounding text")
+        self.assertEqual(lines[1]["input"], ["one", "two"])
+
+    def test_batch_input_and_bad_input(self):
+        status, data = post(tcp_conn(self.listening), "/v1/embeddings",
+                            {"input": ["one", "two"]}, {"Authorization": "Bearer k"})
+        self.assertEqual(status, 200)
+        self.assertEqual([d["index"] for d in json.loads(data)["data"]], [0, 1])
+        status, _ = post(tcp_conn(self.listening), "/v1/embeddings", {"input": 5}, {"Authorization": "Bearer k"})
+        self.assertEqual(status, 400)
+        status, _ = post(tcp_conn(self.listening), "/v1/embeddings", {"input": "x"}, {})
+        self.assertEqual(status, 401)
+
+
 EXEC_TOOL = {"type": "function", "function": {"name": "exec", "description": "run", "parameters": {"type": "object"}}}
 ECHO_TOOL = {"type": "function", "function": {"name": "echo", "description": "echo", "parameters": {"type": "object"}}}
 SCRIPT = {"rounds": [
