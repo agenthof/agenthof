@@ -31,6 +31,11 @@
 # under its directory name with role = workflow = that name; the orchestrator's
 # menu is router-chat first (the classifier), then rag-ingest, rag-retrieve,
 # rag-research, in that order (the fake classifier picks by menu number).
+# The fake provider runs WITHOUT a tool script, so the proof also assumes the
+# retrieve and research agents (a) retrieve CODE-DRIVEN (deterministic calls,
+# never model-chosen tool calls) and (b) put the retrieved passages in a
+# NON-SYSTEM message of one generation request. An agent that violates either
+# fails the grounding proof loudly, by design.
 #
 # Asserts:
 #   (ingest)    `ask` runs rag-ingest, which queries Drive for "sync" (note-3/4/5),
@@ -205,7 +210,7 @@ def load_store(path):
     return name, cols[name].get("records") or []
 
 
-def cmd_store_report(store, idfile):
+def cmd_store_report(store, idfile, *phrases):
     name, recs = load_store(store)
     n = len(recs)
     assert 1 <= n <= MAX_CHUNKS, "N=%d outside 1..%d" % (n, MAX_CHUNKS)
@@ -225,6 +230,10 @@ def cmd_store_report(store, idfile):
     assert sorted(per_doc) == sorted(DATES), "indexed docs %r, want %r" % (sorted(per_doc), sorted(DATES))
     for doc, idxs in per_doc.items():
         assert sorted(idxs) == list(range(len(idxs))), "%s chunk indexes %r are not 0..n-1" % (doc, sorted(idxs))
+    # Each proof phrase must be stored INTACT in some chunk; otherwise an
+    # absence check on it would pass because it was never stored whole.
+    for ph in phrases:
+        assert any(ph in r["text"] for r in recs), "the proof phrase %r is in no stored chunk intact (the chunker split it)" % ph
     with open(idfile, "w") as f:
         json.dump(sorted([r["id"], r["caller_id"]] for r in recs), f)
     print(n)
@@ -599,7 +608,7 @@ tool_ok() { # LEDGER TOOL: how many succeeded tool_call events name TOOL
 	python3 - "$1" "$2" <<'PY'
 import json, re, sys
 n = 0
-want = re.compile(r"(.*[._/:-])?" + re.escape(sys.argv[2]))
+want = re.compile(r"(.*[./:-]|.*__)?" + re.escape(sys.argv[2]))
 for line in open(sys.argv[1]):
     if line.strip():
         e = json.loads(line)
@@ -628,6 +637,7 @@ echo "confirm gate: ingest without --yes is refused with the write reason and wr
 start_provider 2 "$WORK/f1.jsonl"
 ask "entitlement revocation" --yes
 F1_RC="$ASK_RC"
+if grep -Eq "panic:|fatal error:" "$WORK/ask.err" "$WORK/sup-tail.err"; then fail "falsifier 1: the empty-store retrieve crashed (panic or fatal error)"; fi
 grep -q "picked rag-retrieve/rag-retrieve" "$WORK/ask.err" || fail "falsifier 1: ask did not pick rag-retrieve"
 check no-note-text "$WORK/f1.jsonl" "$P_ENT" "$P_JWT" "$P_OFF" || fail "falsifier 1: note text reached the provider although the store was empty"
 check embedded-query "$WORK/f1.jsonl" "entitlement revocation" || fail "falsifier 1: the retrieve agent never embedded the query, so the empty-store run proves nothing"
@@ -642,7 +652,7 @@ ran_ok rag-ingest
 INGEST_LEDGER="$LEAF_LEDGER"
 printf '%s\n' "$ASK_OUT" | grep -Eq '^indexed [0-9]+ chunks \(0 undated\)$' || { echo "stdout: $ASK_OUT"; fail "the ingest artifact is not exactly \"indexed N chunks (0 undated)\" (all three notes are dated, so M=0)"; }
 N="$(printf '%s\n' "$ASK_OUT" | sed -n 's/^indexed \([0-9][0-9]*\) chunks (0 undated)$/\1/p')"
-STORE_N="$(check store-report "$STORE_FILE" "$WORK/ids.json")" || fail "the store does not hold what the contract says (ids, metadata, dates, sizes)"
+STORE_N="$(check store-report "$STORE_FILE" "$WORK/ids.json" "$P_ENT" "$P_JWT" "$P_OFF")" || fail "the store does not hold what the contract says (ids, metadata, dates, sizes)"
 [ "$STORE_N" = "$N" ] || fail "the artifact says $N chunks but the store holds $STORE_N"
 [ "$(tool_ok "$INGEST_LEDGER" memory_upsert)" = "$N" ] || fail "the ingest ledger does not show $N succeeded memory_upsert calls"
 [ "$(tool_ok "$INGEST_LEDGER" readGoogleDoc)" = 3 ] || fail "the ingest ledger does not show the three notes read"
@@ -674,6 +684,8 @@ ask "entitlement revocation" --yes
 ran_ok rag-retrieve
 [ "$ASK_OUT" = "$CANNED" ] || { echo "stdout: $ASK_OUT"; fail "stdout is not exactly the provider's canned answer"; }
 [ "$(tool_ok "$LEAF_LEDGER" memory_search)" -ge 1 ] || fail "the retrieve ledger shows no succeeded memory_search"
+[ "$(tool_ok "$LEAF_LEDGER" readGoogleDoc)" = 0 ] || fail "the retrieve leaf read Drive directly; grounding must come from the store"
+[ "$(tool_ok "$LEAF_LEDGER" search)" = 0 ] || fail "the retrieve leaf searched Drive directly; grounding must come from the store"
 grep -q '"runtime_attestation":{"runtime":"refbridge"' "$LEAF_LEDGER" || fail "the retrieve tool_call carries no refbridge attestation"
 check embedded-query "$WORK/ret.jsonl" "entitlement revocation" || fail "the query was not embedded through the provider"
 grep -Fq "rag-retrieve: grounded — declared to answer from your data; retrieval observed (read-tool call ×" "$WORK/ask.err" || fail "the receipt does not report rag-retrieve as grounded with retrieval observed"
@@ -689,6 +701,9 @@ ask "JWT verification" --yes
 ran_ok rag-research
 [ "$ASK_OUT" = "$CANNED" ] || { echo "stdout: $ASK_OUT"; fail "research stdout is not exactly the provider's canned answer"; }
 [ "$(tool_ok "$LEAF_LEDGER" memory_search)" -ge 1 ] || fail "the research ledger shows no succeeded memory_search"
+[ "$(tool_ok "$LEAF_LEDGER" readGoogleDoc)" = 0 ] || fail "the research leaf read Drive directly; grounding must come from the store"
+[ "$(tool_ok "$LEAF_LEDGER" search)" = 0 ] || fail "the research leaf searched Drive directly; grounding must come from the store"
+grep -q '"runtime_attestation":{"runtime":"refbridge"' "$LEAF_LEDGER" || fail "the research tool_call carries no refbridge attestation"
 grep -Fq "rag-research: mixed — declared to answer from your notes and the model; retrieval observed (read-tool call ×" "$WORK/ask.err" || fail "the receipt does not report rag-research as mixed with retrieval observed"
 check prove "$WORK/res.jsonl" "$P_JWT" "$P_OFF" || fail "the grounding proof failed for the research run"
 echo "research: mixed answer; the note-4 sentence reached the generation request through retrieval only — ok"
