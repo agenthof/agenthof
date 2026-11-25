@@ -50,6 +50,18 @@ type Record struct {
 	// of it. Absent when none was recorded. Additive and omitempty.
 	ChildArtifact map[string]ArtifactRef `json:"child_artifact,omitempty"`
 
+	// CallKind, Tool, ResourcesTouched and Status carry the per-call
+	// evidence the ledger recorded, each origin.Clean'd (the ledger's writer
+	// may be hostile): which model-door route a model_call took ("chat" |
+	// "embeddings"), the tool a tool_call invoked, the resources it touched,
+	// and the event's status (succeeded | started | failed | refused, carried
+	// verbatim, never collapsed). Absent when the event did not record them.
+	// Additive and omitempty.
+	CallKind         string   `json:"call_kind,omitempty"`
+	Tool             string   `json:"tool,omitempty"`
+	ResourcesTouched []string `json:"resources_touched,omitempty"`
+	Status           string   `json:"status,omitempty"`
+
 	// Anchor is what a control "anchor" record says it pinned, and — on a
 	// success record — whether this reader could stand behind it, decided
 	// offline. Absent on every record that is not an anchor. Present on
@@ -85,6 +97,18 @@ func childArtifact(in map[string]engine.ChildArtifactRef) map[string]ArtifactRef
 			vals[i] = origin.Clean(v)
 		}
 		out[origin.Clean(agent)] = ArtifactRef{Kind: origin.Clean(ref.Kind), Values: vals}
+	}
+	return out
+}
+
+// cleanAll returns each string origin.Clean'd, or nil when there are none.
+func cleanAll(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = origin.Clean(v)
 	}
 	return out
 }
@@ -127,7 +151,12 @@ func normalizeRun(e engine.Event, lineIdx int) Record {
 		ParentRunID:   e.Binding.ParentRunID,
 		Depth:         e.Binding.Depth,
 		ChildArtifact: childArtifact(e.ChildArtifact),
-		pos:           lineIdx,
+
+		CallKind:         origin.Clean(e.CallKind),
+		Tool:             origin.Clean(e.Tool),
+		ResourcesTouched: cleanAll(e.ResourcesTouched),
+		Status:           origin.Clean(e.Status),
+		pos:              lineIdx,
 	}
 }
 

@@ -200,3 +200,46 @@ func TestNormalizeControlAnchorFactsAndVerdict(t *testing.T) {
 		t.Fatalf("a 308-byte backend must be capped at 200 runes, got %d", len(r.Anchor.Backend))
 	}
 }
+
+func TestNormalizeRunCallEvidence(t *testing.T) {
+	chat := normalizeRun(engine.Event{Type: "model_call", Status: "succeeded", CallKind: "chat"}, 0)
+	if chat.CallKind != "chat" || chat.Status != "succeeded" || chat.Tool != "" || chat.ResourcesTouched != nil {
+		t.Fatalf("chat = %+v", chat)
+	}
+	emb := normalizeRun(engine.Event{Type: "model_call", Status: "started", CallKind: "embeddings"}, 1)
+	if emb.CallKind != "embeddings" || emb.Status != "started" {
+		t.Fatalf("embeddings = %+v", emb)
+	}
+	tc := normalizeRun(engine.Event{Type: "tool_call", Status: "refused", Tool: "memory_upsert",
+		ResourcesTouched: []string{"memory-store", "second"}}, 2)
+	if tc.Tool != "memory_upsert" || tc.Status != "refused" ||
+		!reflect.DeepEqual(tc.ResourcesTouched, []string{"memory-store", "second"}) {
+		t.Fatalf("tool_call = %+v", tc)
+	}
+
+	// Ledger-derived strings are hostile input: control bytes are cleaned.
+	h := normalizeRun(engine.Event{Type: "tool_call", Status: "ok\x1b[31m", CallKind: "c\x1bx", Tool: "t\x1b[2Jool",
+		ResourcesTouched: []string{"r\x1b[0m1"}}, 3)
+	for _, s := range append([]string{h.Status, h.CallKind, h.Tool}, h.ResourcesTouched...) {
+		if strings.ContainsRune(s, 0x1b) {
+			t.Fatalf("raw escape byte survived: %q", s)
+		}
+	}
+
+	// Additive: absent on records without the values.
+	b, err := json.Marshal(normalizeRun(engine.Event{Type: "workflow_started"}, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"call_kind", "tool", "resources_touched", `"status"`} {
+		if strings.Contains(string(b), k) {
+			t.Fatalf("%s present in %s", k, b)
+		}
+	}
+	b, _ = json.Marshal(tc)
+	for _, k := range []string{`"tool":"memory_upsert"`, `"resources_touched":["memory-store","second"]`, `"status":"refused"`} {
+		if !strings.Contains(string(b), k) {
+			t.Fatalf("%s missing in %s", k, b)
+		}
+	}
+}
