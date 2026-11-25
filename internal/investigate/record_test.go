@@ -243,3 +243,13 @@ func TestNormalizeRunCallEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeRunStatusScopedToCalls(t *testing.T) {
+	if r := normalizeRun(engine.Event{Type: "bounced_back", Status: "stepB"}, 0); r.Status != "" {
+		t.Fatalf("bounced_back leaked step name into Status: %q", r.Status)
+	}
+	r := normalizeRun(engine.Event{Type: "workflow_finished", Status: "failed"}, 0)
+	if r.Status != "" || r.Outcome != "failed" {
+		t.Fatalf("workflow_finished = %+v", r)
+	}
+}

@@ -54,7 +54,7 @@ type Record struct {
 	// evidence the ledger recorded, each origin.Clean'd (the ledger's writer
 	// may be hostile): which model-door route a model_call took ("chat" |
 	// "embeddings"), the tool a tool_call invoked, the resources it touched,
-	// and the event's status (succeeded | started | failed | refused, carried
+	// and, on model_call and tool_call events only, the call's status (succeeded | started | failed | refused, carried
 	// verbatim, never collapsed). Absent when the event did not record them.
 	// Additive and omitempty.
 	CallKind         string   `json:"call_kind,omitempty"`
@@ -124,8 +124,10 @@ func cleanAll(in []string) []string {
 // Status to the target step name), so copying it blindly would leak a step
 // name into Outcome; every other event type leaves Outcome empty.
 func normalizeRun(e engine.Event, lineIdx int) Record {
-	outcome := ""
+	outcome, status := "", ""
 	switch e.Type {
+	case "model_call", "tool_call":
+		status = origin.Clean(e.Status) // a call status; other types reuse Status for unrelated things
 	case "workflow_finished":
 		outcome = e.Status // "succeeded" | "failed"
 	case "run_refused":
@@ -141,21 +143,20 @@ func normalizeRun(e engine.Event, lineIdx int) Record {
 			Issuer:  e.Binding.Invoker.Issuer,
 			Method:  e.Binding.Invoker.Method,
 		},
-		Role:          e.Binding.Role,
-		Workflow:      e.Binding.Workflow,
-		Agent:         e.Agent,
-		Outcome:       outcome,
-		Reason:        e.Reason,
-		ConfigHash:    e.ConfigHash,
-		ArtifactSHA:   e.ArtifactSHA,
-		ParentRunID:   e.Binding.ParentRunID,
-		Depth:         e.Binding.Depth,
-		ChildArtifact: childArtifact(e.ChildArtifact),
-
+		Role:             e.Binding.Role,
+		Workflow:         e.Binding.Workflow,
+		Agent:            e.Agent,
+		Outcome:          outcome,
+		Reason:           e.Reason,
+		ConfigHash:       e.ConfigHash,
+		ArtifactSHA:      e.ArtifactSHA,
+		ParentRunID:      e.Binding.ParentRunID,
+		Depth:            e.Binding.Depth,
+		ChildArtifact:    childArtifact(e.ChildArtifact),
 		CallKind:         origin.Clean(e.CallKind),
 		Tool:             origin.Clean(e.Tool),
 		ResourcesTouched: cleanAll(e.ResourcesTouched),
-		Status:           origin.Clean(e.Status),
+		Status:           status,
 		pos:              lineIdx,
 	}
 }
