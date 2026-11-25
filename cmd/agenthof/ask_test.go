@@ -308,7 +308,7 @@ func TestConfirmCancelledByContext(t *testing.T) {
 	var ok bool
 	var err error
 	go func() {
-		ok, err = confirm(ctx, io.Discard, pr, false, "run?")
+		ok, err = confirm(ctx, io.Discard, pr, false, "run?", "this answer is not grounded")
 		close(done)
 	}()
 	cancel()
@@ -877,23 +877,7 @@ func TestReceiptUnstampedDeclaresNoProvenance(t *testing.T) {
 func TestReceiptQualifiesProvenanceOnUnverifiedLeafLedger(t *testing.T) {
 	dir := receiptLedgersWith(t, identity.Invoker{Subject: "dana@example.com", Method: "asserted"},
 		[]engine.Event{toolCall("memory_search", "succeeded"), chatCall("succeeded")})
-	path := filepath.Join(dir, "r-leaf.jsonl")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Edit the step terminal, after the calls: the records before the break
-	// are still read, and the chain no longer verifies.
-	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
-	i := len(lines) - 2
-	edited := strings.Replace(lines[i], `"step":"s"`, `"step":"t"`, 1)
-	if edited == lines[i] {
-		t.Fatal("fixture edit did not apply")
-	}
-	lines[i] = edited
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	breakLeafChain(t, dir)
 	var b strings.Builder
 	renderReceipt(&b, dir, "r-orch", leafOf("grounded"), receiptTools)
 	enforced, asserted, _ := strings.Cut(b.String(), "agent-asserted (")
@@ -1308,5 +1292,280 @@ func TestGroundedWriterStillConfirms(t *testing.T) {
 	e = runPickTools(t, "generated", ro, "dev", "generic-chat", true, false, false, "", "x")
 	if !strings.Contains(e.msg.String(), "not grounded") || strings.Contains(e.msg.String(), "write") {
 		t.Fatalf("ungrounded reader keeps provenance wording: %q", e.msg.String())
+	}
+}
+
+// ledgerSpawner is a leaf that does governed work and then fails: for the
+// leaf role it writes the child's own run ledger (doors, then a failed
+// terminal) and reports the run failed; the classifier is answered from the
+// store like any child.
+type ledgerSpawner struct {
+	store *artifact.Store
+	dir   string
+	pick  string
+	doors []engine.Event
+	err   error // returned beside the leaf's result when set
+}
+
+func (s *ledgerSpawner) Spawn(_ context.Context, role, workflow, _ string, parent engine.Binding) (rungateway.SpawnResult, error) {
+	if role == routerRole {
+		sha, prev, err := s.store.Put(s.pick)
+		if err != nil {
+			return rungateway.SpawnResult{}, err
+		}
+		return rungateway.SpawnResult{ChildRunID: "r-router", Status: "succeeded", OutputSHA: sha, OutputPreview: prev, Provisioned: true}, nil
+	}
+	l, err := engine.OpenLog(s.dir, "r-leaf")
+	if err != nil {
+		return rungateway.SpawnResult{}, err
+	}
+	defer func() { _ = l.Close() }()
+	bind := engine.Binding{Role: role, Workflow: workflow, RunID: "r-leaf", ParentRunID: parent.RunID, Depth: 1}
+	n := len(s.doors)
+	evs := []engine.Event{
+		{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission},
+		{Type: "step_started", Step: "s", Agent: "chat"},
+	}
+	evs = append(evs, s.doors...)
+	evs = append(evs,
+		engine.Event{Type: "step_failed", Step: "s", DoorCalls: &n},
+		engine.Event{Type: "workflow_finished", Status: "failed", Reason: "boom"})
+	for _, e := range evs {
+		e.Time, e.Binding = time.Now().UTC(), bind
+		if err := l.Append(e); err != nil {
+			return rungateway.SpawnResult{}, err
+		}
+	}
+	return rungateway.SpawnResult{ChildRunID: "r-leaf", Status: "failed", Reason: "boom", Provisioned: true}, s.err
+}
+
+// A leaf that wrote and then failed has still changed the store. The receipt
+// follows the failure and counts its succeeded writes from the leaf's ledger;
+// with no answer shown, it prints no provenance line even though the leaf's
+// chat call succeeded.
+func TestFailedLeafStillReportsItsWrites(t *testing.T) {
+	for name, spawnErr := range map[string]error{"failed status": nil, "spawn error": errors.New("lost the compartment")} {
+		t.Run(name, func(t *testing.T) {
+			cfg := askCfg()
+			reg, errs := registry.Build(cfg)
+			if len(errs) > 0 {
+				t.Fatalf("registry: %v", errs)
+			}
+			orch, _ := reg.Agent(orchestratorAgent)
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			store, err := newStore(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			sp := &ledgerSpawner{store: store, dir: dir, pick: `{"role":"dev","workflow":"generic-chat"}`, err: spawnErr,
+				doors: []engine.Event{toolCall("memory_upsert", "succeeded"), toolCall("memory_upsert", "succeeded"), chatCall("succeeded")}}
+			gw := rungateway.New(cfg.Gateway, ".", nil, logger, "").WithSpawner(sp)
+			log, err := engine.OpenLog(dir, "r-orch")
+			if err != nil {
+				t.Fatal(err)
+			}
+			menu := projectMenu(orch, reg)
+			var served servedLeaf
+			var out, msg strings.Builder
+			code := runOrchestration(context.Background(), orchestration{
+				gw: gw, bind: engine.Binding{Role: orchestratorRole, Workflow: askWorkflow, RunID: "r-orch"},
+				orch: orch, reg: reg, menu: menu, admitted: menu, prompt: "hi", store: store,
+				log: log, logger: logger, yes: true,
+				in: strings.NewReader(""), out: &out, msg: &msg, served: &served,
+			})
+			if err := log.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if code != 1 || out.Len() != 0 || served.answered || served.runID != "r-leaf" {
+				t.Fatalf("a failed leaf must exit 1 with no answer and its run recorded: code=%d out=%q served=%+v", code, out.String(), served)
+			}
+			var b strings.Builder
+			receiptAfter(&b, dir, "r-orch", served, receiptTools)
+			got := b.String()
+			enforced, asserted, ok := strings.Cut(got, "agent-asserted (")
+			if !ok {
+				t.Fatalf("a failed leaf that ran must still get a receipt:\n%s", got)
+			}
+			if !strings.Contains(leafBlock(t, enforced), "    write-tool calls succeeded: 2 (memory_upsert on memory ×2)\n") {
+				t.Errorf("the failed leaf's succeeded writes must be counted:\n%s", got)
+			}
+			if !strings.Contains(enforced, "no answer was produced") {
+				t.Errorf("the receipt of a failed run must say no answer was produced:\n%s", got)
+			}
+			if l := provenanceLine(asserted); l != "" {
+				t.Errorf("no answer was shown, so no provenance line may print, got %q", l)
+			}
+		})
+	}
+}
+
+// A run that never started a leaf has no receipt: nothing ran to report on.
+func TestNoReceiptWithoutAStartedLeaf(t *testing.T) {
+	var b strings.Builder
+	receiptAfter(&b, receiptLedgers(t), "r-orch", servedLeaf{}, receiptTools)
+	if b.Len() != 0 {
+		t.Fatalf("no leaf started, no receipt, got:\n%s", b.String())
+	}
+}
+
+// breakLeafChain edits the leaf ledger's step terminal, after its door
+// records: the records before the break are still read, and the chain no
+// longer verifies.
+func breakLeafChain(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "r-leaf.jsonl")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	i := len(lines) - 2
+	edited := strings.Replace(lines[i], `"step":"s"`, `"step":"t"`, 1)
+	if edited == lines[i] {
+		t.Fatal("fixture edit did not apply")
+	}
+	lines[i] = edited
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The door, write and refusal counts rest on the leaf ledger's records too.
+// When that ledger's chain does not verify, every count in its block says so,
+// and a verified ledger's block stays unqualified.
+func TestReceiptQualifiesDoorFactsOnUnverifiedLeafLedger(t *testing.T) {
+	const q = " (ledger integrity not verified)"
+	doors := []engine.Event{toolCall("memory_upsert", "succeeded"), toolCall("memory_search", "refused"), chatCall("succeeded")}
+	dir := receiptLedgersWith(t, identity.Invoker{Subject: "dana@example.com", Method: "asserted"}, doors)
+	breakLeafChain(t, dir)
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", leafOf("grounded"), receiptTools)
+	enforced, _, _ := strings.Cut(b.String(), "agent-asserted (")
+	block := leafBlock(t, enforced)
+	for _, want := range []string{
+		"    this run's ledger chain did not verify (broken): the counts below are from the records that could be read and may be partial\n",
+		"    door calls: model_call chat x1, tool_call x2" + q + "\n",
+		"    model chat: attempted ×1 (succeeded ×1)" + q + "\n",
+		"    write-tool calls succeeded: 1 (memory_upsert on memory ×1)" + q + "\n",
+		"    refused model or tool calls: 1 (tool resource memory ×1)" + q + "\n",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("unverified leaf block missing %q:\n%s", want, block)
+		}
+	}
+	// The classifier's ledger verified: its block carries no qualifier.
+	if rest := strings.Replace(enforced, block, "", 1); strings.Contains(rest, q) || strings.Contains(rest, "did not verify") {
+		t.Errorf("a verified ledger's block must stay unqualified:\n%s", rest)
+	}
+	enforced, _ = receiptWith(t, "grounded", doors...)
+	if strings.Contains(enforced, q) || strings.Contains(enforced, "did not verify") || strings.Contains(enforced, "completeness gap:") {
+		t.Errorf("a verified, complete leaf ledger must print unqualified facts:\n%s", enforced)
+	}
+}
+
+// A ledger whose chain verifies but which does not account for every door
+// call can be short of calls: the block says so.
+func TestReceiptNotesCompletenessGapOnLeafBlock(t *testing.T) {
+	dir := t.TempDir()
+	inv := identity.Invoker{Subject: "dana@example.com", Method: "asserted"}
+	src := receiptLedgersWith(t, inv, []engine.Event{toolCall("memory_upsert", "succeeded")})
+	for _, id := range []string{"r-orch", "r-router"} {
+		raw, err := os.ReadFile(filepath.Join(src, id+".jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The leaf's step terminal admits two door calls; one is recorded.
+	child := engine.Binding{Invoker: inv, Role: "dev", Workflow: "generic-chat", RunID: "r-leaf", ParentRunID: "r-orch", Depth: 1}
+	two := 2
+	l, err := engine.OpenLog(dir, "r-leaf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range []engine.Event{
+		{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission},
+		{Type: "step_started", Step: "s", Agent: "chat"},
+		toolCall("memory_upsert", "succeeded"),
+		{Type: "step_succeeded", Step: "s", DoorCalls: &two},
+		{Type: "workflow_finished", Status: "succeeded"},
+	} {
+		e.Time, e.Binding = time.Now().UTC(), child
+		if err := l.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", leafOf(""), receiptTools)
+	enforced, _, _ := strings.Cut(b.String(), "agent-asserted (")
+	if !strings.Contains(enforced, "ledger r-leaf: chain verified, completeness gap") {
+		t.Fatalf("fixture: the leaf ledger must verify with a completeness gap:\n%s", enforced)
+	}
+	block := leafBlock(t, enforced)
+	if !strings.Contains(block, "    ledger completeness gap: this ledger does not account for every door call the run made, so the counts below may be short\n") {
+		t.Errorf("a completeness gap must be noted on the leaf's block:\n%s", block)
+	}
+	if !strings.Contains(block, "    write-tool calls succeeded: 1 (memory_upsert on memory ×1)\n") {
+		t.Errorf("a verified chain's counts carry no integrity qualifier:\n%s", block)
+	}
+}
+
+// A run's block counts that run's own ledger only. A spawn call there means a
+// further run may exist whose calls the block does not hold: it says so.
+func TestReceiptDisclosesUncountedChildRuns(t *testing.T) {
+	const note = "this leaf made spawn calls; a run it started has a ledger of its own, and that run's door calls are not counted here"
+	enforced, _ := receiptWith(t, "", engine.Event{Type: "spawn", Agent: "chat", Status: "succeeded", ChildRunID: "r-grandchild"}, chatCall("succeeded"))
+	block := leafBlock(t, enforced)
+	if !strings.Contains(block, "    exec and spawn refusals are not counted here\n    "+note+"\n") {
+		t.Errorf("a spawn call must bring the uncounted-child note:\n%s", block)
+	}
+	enforced, _ = receiptWith(t, "", engine.Event{Type: "exec", Agent: "chat", Status: "succeeded"}, chatCall("succeeded"))
+	if strings.Contains(enforced, note) {
+		t.Errorf("no spawn call, no note:\n%s", enforced)
+	}
+}
+
+// Closed input on a terminal is no consent. The refusal names the reason the
+// question was asked: a write for a writer, the provenance otherwise.
+func TestConfirmClosedInputNamesTheReason(t *testing.T) {
+	rw := []config.ToolGrant{{Resource: "memory", Tools: []string{"memory_upsert"}, Mode: "read-write"}}
+	e := runPickTools(t, "grounded", rw, "dev", "generic-chat", true, false, true, "", "x")
+	msg := e.msg.String()
+	if e.code == 0 || e.sp.role != "" || !strings.Contains(msg, "no confirmation available: this run will write to your store, which cannot be undone, so it needs --yes") || strings.Contains(msg, "not grounded") {
+		t.Fatalf("a grounded writer with closed input must refuse with write wording: code=%d msg=%q", e.code, msg)
+	}
+	e = runPick(t, "generated", "dev", "generic-chat", true, false, true, "", "x")
+	msg = e.msg.String()
+	if e.code == 0 || e.sp.role != "" || !strings.Contains(msg, "no confirmation available: this answer is not grounded, so it needs --yes") {
+		t.Fatalf("an ungrounded reader with closed input keeps the provenance wording: code=%d msg=%q", e.code, msg)
+	}
+}
+
+// A ledger with no final record may be missing whatever came after its last
+// one: the block says the counts stop there.
+func TestReceiptNotesUnterminatedLeafLedger(t *testing.T) {
+	dir := receiptLedgersWith(t, identity.Invoker{Subject: "dana@example.com", Method: "asserted"},
+		[]engine.Event{toolCall("memory_upsert", "succeeded")})
+	path := filepath.Join(dir, "r-leaf.jsonl")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if err := os.WriteFile(path, []byte(strings.Join(lines[:len(lines)-1], "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", servedLeaf{runID: "r-leaf"}, receiptTools)
+	block := leafBlock(t, b.String())
+	if !strings.Contains(block, "    ledger completeness unterminated: this ledger has no final record, so calls made after its last record are not counted below\n") ||
+		!strings.Contains(block, "    write-tool calls succeeded: 1 (memory_upsert on memory ×1)\n") {
+		t.Errorf("an unterminated leaf ledger must be noted on its block, its counts unqualified:\n%s", b.String())
 	}
 }

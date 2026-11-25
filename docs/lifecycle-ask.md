@@ -171,7 +171,9 @@ runs only on an explicit yes; an interrupt ends the prompt as a decline rather
 than blocking. When the workflow can write, the question says so ("It will write
 to your store; this cannot be undone"). With no terminal to ask on and no
 `--yes`, the pick is refused with a message telling you to re-run with `--yes` —
-consent is never assumed from a closed input.
+consent is never assumed from a closed input. A terminal whose input is closed
+is refused the same way, and the message names the reason the question was
+asked: the write when the workflow can write, the ungrounded answer otherwise.
 
 ## Running the agent, and reading the answer
 
@@ -223,8 +225,12 @@ the cursor, recolour, or clear the screen and forge the trust signals around it.
 text in any language is untouched.)
 
 The **receipt** follows on stderr, after the run's own terminal event is on the
-ledger, so its verdicts cover the whole run. It is printed only when an answer
-was produced — a refusal, a no-match, a declined confirmation, or a failure
+ledger, so its verdicts cover the whole run. It is printed once a leaf run was
+started, whether that run answered or failed: a leaf that fails after writing
+to your store has still written, and the receipt of a failed run says that no
+answer was produced and then reports what the leaf's ledger recorded, its
+succeeded writes included. A run that started no leaf — a refusal, a no-match,
+a declined confirmation, a failed classification, or a spawn the gate refused —
 ends with its own message on stderr and no receipt. It is a rollup of the run
 subtree — the orchestrator's ledger and every child's — in two deliberately
 separated parts. Every fact in it is derived from the run ledgers (the records
@@ -250,13 +256,24 @@ the answer.
     ledger's record; that it counts as a write is the operator's configuration;
   - the number of **refused** calls.
 
+  These counts are only as good as the ledger they are read from, and the
+  child's block says so where it matters. When that child's hash chain did not
+  verify, a line under the child says the counts come from the records that
+  could be read and may be partial, and every count in the block is qualified
+  "(ledger integrity not verified)". When the chain verifies but the ledger
+  reports a completeness gap or has no final record, a line says the counts may
+  be short. A block counts that run's own ledger only: when the run made spawn
+  calls of its own, a line says a run it started has its own ledger and is not
+  counted there.
+
   It carries digests and verdicts only — never an artifact body.
 - **Agent-asserted**, declared in configuration or by the caller and **not
   checked** by Agenthof: an invoker that is not an OIDC token (an `--as`
   identity, shown as asserted by the caller and not verified), and where the
   leaf agent says its answer comes from.
 
-The leaf's provenance line is **evidence-gated**: it appears only when the leaf
+The leaf's provenance line is **evidence-gated**: it appears only when the
+leaf's answer was printed and the leaf
 agent's own ledger shows a `chat` model call that succeeded or was streamed (the
 classifier's calls, on another ledger, never count). The wording follows the
 operator's `grounding`:
@@ -272,8 +289,9 @@ Each line sits beside an observed-retrieval note: "retrieval observed
 (read-tool call ×K)" when the leaf's ledger holds K succeeded read-only tool
 calls, or "no retrieval observed". A `grounded` or `mixed` declaration with no
 retrieval behind it is printed as declared only, never as an unqualified "from
-your data". When the leaf ledger's hash chain did not verify, its facts are
-qualified "(leaf ledger integrity not verified)".
+your data". When the leaf ledger's hash chain did not verify, the provenance
+line is qualified "(leaf ledger integrity not verified)", as the counts in the
+leaf's block are qualified above.
 
 The receipt reuses the honest wording of
 [Article III](constitution.md): the chain links each record to the one before

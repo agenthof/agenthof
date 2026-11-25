@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/agenthof/agenthof/internal/artifact"
+	"github.com/agenthof/agenthof/internal/completeness"
 	"github.com/agenthof/agenthof/internal/config"
 	"github.com/agenthof/agenthof/internal/engine"
 	"github.com/agenthof/agenthof/internal/identity"
@@ -315,15 +316,26 @@ func cmdAsk(args []string, out, stderr io.Writer) int {
 		outTerminal: isCharDevice(out),
 		in:          os.Stdin, out: out, msg: stderr, served: &served,
 	})
-	// The receipt follows the answer, after the run's own terminal event is on
-	// its ledger, so the verdicts it reports cover the whole run. A blank line
-	// separates it from the answer; the answer was control-char-stripped on a
-	// terminal so it cannot drive the cursor to overwrite the receipt.
-	if served.answered {
-		_, _ = fmt.Fprintln(stderr)
-		renderReceipt(stderr, *logDir, runID, served, cfg.Gateway.Tools)
-	}
+	// The receipt follows the answer or the failure message, after the run's
+	// own terminal event is on its ledger, so the verdicts it reports cover the
+	// whole run. The answer was control-char-stripped on a terminal so it
+	// cannot drive the cursor to overwrite the receipt.
+	receiptAfter(stderr, *logDir, runID, served, cfg.Gateway.Tools)
 	return code
+}
+
+// receiptAfter prints the receipt, after a separating blank line, once a leaf
+// run was started — whether it answered or failed: a leaf that failed may
+// already have written to the user's store, and its ledger says whether it
+// did. A run that started no leaf (a refusal, a no-match, a declined
+// confirmation, a failed classification) ended with its own message and has
+// no receipt.
+func receiptAfter(w io.Writer, logDir, runID string, served servedLeaf, tools map[string]config.ToolResource) {
+	if !served.answered && served.runID == "" {
+		return
+	}
+	_, _ = fmt.Fprintln(w)
+	renderReceipt(w, logDir, runID, served, tools)
 }
 
 // orchestration is the ask run's own-ledger orchestration: the gateway and
@@ -481,8 +493,9 @@ func sanitizeForTerminal(s string) string {
 // the question. The read gives way to ctx, so an interrupt ends the prompt
 // instead of leaving it blocked; a cancelled prompt is a decline, with the
 // context's error. With nothing to read (a closed or empty input) and no yes
-// it refuses with a message instead of assuming consent.
-func confirm(ctx context.Context, w io.Writer, r io.Reader, yes bool, prompt string) (bool, error) {
+// it refuses with a message instead of assuming consent; why is the reason the
+// question was asked, named in that message.
+func confirm(ctx context.Context, w io.Writer, r io.Reader, yes bool, prompt, why string) (bool, error) {
 	if yes {
 		return true, nil
 	}
@@ -507,7 +520,7 @@ func confirm(ctx context.Context, w io.Writer, r io.Reader, yes bool, prompt str
 		return false, res.err
 	}
 	if strings.TrimSpace(res.line) == "" && errors.Is(res.err, io.EOF) {
-		_, _ = fmt.Fprintln(w, "\nno confirmation available: this answer is not grounded, so it needs --yes or an interactive confirmation")
+		_, _ = fmt.Fprintf(w, "\nno confirmation available: %s, so it needs --yes or an interactive confirmation\n", why)
 		return false, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(res.line)) {
@@ -532,8 +545,10 @@ func writesInWorkflow(reg *registry.Registry, workflow string) bool {
 	return false
 }
 
-// needsConfirm reports whether running the workflow's agents can produce an
-// answer that is not grounded. An agent it cannot find counts as ungrounded.
+// needsConfirm reports whether the workflow must be confirmed before it runs:
+// one of its step agents is not declared grounded, or holds a read-write tool
+// grant (running it can write to the user's store). An agent it cannot find
+// counts as needing confirmation.
 func needsConfirm(reg *registry.Registry, workflow string) bool {
 	wf, ok := reg.Workflow(workflow)
 	if !ok || len(wf.Steps) == 0 {
@@ -566,11 +581,12 @@ type pickRun struct {
 	out, msg      io.Writer
 	runID         string
 	logger        *slog.Logger
-	served        *servedLeaf // when set, filled once an answer has been printed
+	served        *servedLeaf // when set, filled once a leaf run has been started
 }
 
-// servedLeaf records what the receipt needs to know about the leaf that
-// answered: its child run and the agents its workflow ran.
+// servedLeaf records what the receipt needs to know about the picked leaf:
+// its child run and the agents its workflow ran, set once the spawn gate
+// reported a child run, and whether that run's answer was printed.
 type servedLeaf struct {
 	answered bool
 	runID    string
@@ -578,9 +594,11 @@ type servedLeaf struct {
 }
 
 // dispatchPick acts on the classifier's pick: it must be one of the offered
-// menu entries, ungrounded answers are confirmed, the leaf is spawned through
-// the spawn gate, and its answer is read from the store by digest and
-// printed. It returns the run's final status, reason and exit code.
+// menu entries, a pick that is ungrounded or holds a read-write tool grant is
+// confirmed, the leaf is spawned through the spawn gate, and its answer is
+// read from the store by digest and printed. A leaf run that was started is
+// recorded for the receipt whether or not it answered. It returns the run's
+// final status, reason and exit code.
 func dispatchPick(ctx context.Context, p pickRun, role, workflow string, matched bool) (status, reason string, code int) {
 	inMenu := false
 	if matched {
@@ -613,10 +631,12 @@ func dispatchPick(ctx context.Context, p pickRun, role, workflow string, matched
 			return "failed", "not confirmed", 1
 		}
 		question := fmt.Sprintf("Run %s/%s? Its answer is not grounded.", role, workflow)
+		noInput := "this answer is not grounded"
 		if writes {
 			question = fmt.Sprintf("Run %s/%s? It will write to your store; this cannot be undone.", role, workflow)
+			noInput = "this run will write to your store, which cannot be undone"
 		}
-		ok, err := confirm(ctx, p.msg, p.in, false, question)
+		ok, err := confirm(ctx, p.msg, p.in, false, question, noInput)
 		if err != nil {
 			_, _ = fmt.Fprintf(p.msg, "ask %s: confirmation ended: %v\n", p.runID, err)
 			return "failed", "confirmation ended", 1
@@ -627,6 +647,12 @@ func dispatchPick(ctx context.Context, p pickRun, role, workflow string, matched
 		}
 	}
 	res, err := p.spawn(ctx, role, workflow, p.prompt)
+	// A child run that was started is reported on however it ended: a leaf
+	// that fails after writing has still written.
+	if p.served != nil && res.ChildRunID != "" {
+		p.served.runID = res.ChildRunID
+		p.served.agents = workflowAgents(p.reg, workflow)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s did not complete: %v\n", p.runID, role, workflow, err)
 		return "failed", "leaf spawn failed", 1
@@ -662,7 +688,6 @@ func dispatchPick(ctx context.Context, p pickRun, role, workflow string, matched
 	_, _ = fmt.Fprintln(p.out, body)
 	if p.served != nil {
 		p.served.answered = true
-		p.served.runID = res.ChildRunID
 		p.served.agents = workflowAgents(p.reg, workflow)
 	}
 	return "succeeded", "", 0
@@ -843,9 +868,23 @@ func countList(counts map[string]int) string {
 
 // render prints the run's door facts under its receipt line: the door-call
 // summary, the attempted and succeeded counts per model call kind and tool
-// resource, the succeeded writes, and the refused calls.
-func (f *runFacts) render(w io.Writer) {
-	_, _ = fmt.Fprintf(w, "    door calls: %s\n", doorSummary(f.doors, f.modelKinds))
+// resource, the succeeded writes, and the refused calls. The counts are only
+// as good as the ledger they were read from, so integrity (that ledger's
+// chain verdict) and comp (its completeness verdict) qualify them: every
+// count from a ledger whose chain did not verify says so on its own line, and
+// a verified ledger that does not account for all its door calls is noted.
+func (f *runFacts) render(w io.Writer, integrity, comp string) {
+	q := ""
+	switch {
+	case integrity != "verified":
+		q = " (ledger integrity not verified)"
+		_, _ = fmt.Fprintf(w, "    this run's ledger chain did not verify (%s): the counts below are from the records that could be read and may be partial\n", integrity)
+	case comp == completeness.Gap:
+		_, _ = fmt.Fprintln(w, "    ledger completeness gap: this ledger does not account for every door call the run made, so the counts below may be short")
+	case comp == completeness.Unterminated:
+		_, _ = fmt.Fprintln(w, "    ledger completeness unterminated: this ledger has no final record, so calls made after its last record are not counted below")
+	}
+	_, _ = fmt.Fprintf(w, "    door calls: %s%s\n", doorSummary(f.doors, f.modelKinds), q)
 	labels := make([]string, 0, len(f.calls))
 	for l := range f.calls {
 		labels = append(labels, l)
@@ -858,7 +897,7 @@ func (f *runFacts) render(w io.Writer) {
 		if c.streaming > 0 {
 			_, _ = fmt.Fprintf(w, ", streaming ×%d (started; the ledger does not record how a streamed call ended)", c.streaming)
 		}
-		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, q)
 		if c.refused > 0 {
 			refused += c.refused
 			refusedBy[l] = c.refused
@@ -872,17 +911,23 @@ func (f *runFacts) render(w io.Writer) {
 	if writes > 0 {
 		_, _ = fmt.Fprintf(w, " (%s)", countList(f.writes))
 	}
-	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, q)
 	if f.unclassified > 0 {
-		_, _ = fmt.Fprintf(w, "    tool calls succeeded on a resource this configuration does not define: %d (not classified as read or write)\n", f.unclassified)
+		_, _ = fmt.Fprintf(w, "    tool calls succeeded on a resource this configuration does not define: %d (not classified as read or write)%s\n", f.unclassified, q)
 	}
 	_, _ = fmt.Fprintf(w, "    refused model or tool calls: %d", refused)
 	if refused > 0 {
 		_, _ = fmt.Fprintf(w, " (%s)", countList(refusedBy))
 	}
-	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, q)
 	if f.doors["exec"]+f.doors["spawn"] > 0 {
 		_, _ = fmt.Fprintln(w, "    exec and spawn refusals are not counted here")
+	}
+	// The block holds this run's own ledger and nothing below it. A spawn
+	// door counts attempts, refused ones included, so the note speaks of
+	// calls, not of children that ran.
+	if f.doors["spawn"] > 0 {
+		_, _ = fmt.Fprintln(w, "    this leaf made spawn calls; a run it started has a ledger of its own, and that run's door calls are not counted here")
 	}
 }
 
@@ -895,8 +940,10 @@ func (f *runFacts) render(w io.Writer) {
 // never from a grant or from the answer; tools (the configured tool
 // resources) only labels a recorded tool call as a read or a write. What the
 // agents say about themselves is kept apart and labelled, and a leaf agent's
-// declared provenance is printed only when the leaf's own ledger shows it
-// generated. It carries digests and verdicts only, never an artifact body.
+// declared provenance is printed only when its answer was printed and the
+// leaf's own ledger shows it generated. A leaf that was started and did not
+// answer still gets its block: what it did before it failed is on its ledger.
+// It carries digests and verdicts only, never an artifact body.
 func renderReceipt(w io.Writer, logDir, runID string, leaf servedLeaf, tools map[string]config.ToolResource) {
 	res, err := investigate.Timeline(logDir, "", investigate.Filter{Run: runID}, investigate.Options{})
 	if err != nil {
@@ -912,11 +959,13 @@ func renderReceipt(w io.Writer, logDir, runID string, leaf servedLeaf, tools map
 	facts := map[string]*runFacts{} // run id -> what its ledger recorded
 	haveLedger := map[string]bool{}
 	integrity := map[string]string{} // run id -> its ledger's chain verdict
+	complete := map[string]string{}  // run id -> its ledger's completeness verdict
 	for _, src := range res.Sources {
 		if src.Kind == "run" {
 			id := strings.TrimSuffix(filepath.Base(src.Path), ".jsonl")
 			haveLedger[id] = true
 			integrity[id] = src.Integrity
+			complete[id] = src.Completeness
 		}
 	}
 	for _, r := range res.Events {
@@ -929,6 +978,9 @@ func renderReceipt(w io.Writer, logDir, runID string, leaf servedLeaf, tools map
 	}
 
 	_, _ = fmt.Fprintf(w, "receipt for ask %s\n", runID)
+	if leaf.runID != "" && !leaf.answered {
+		_, _ = fmt.Fprintf(w, "no answer was produced; run %s was started, and what the ledgers recorded of it follows\n", leaf.runID)
+	}
 	var invokerAsserted string
 	_, _ = fmt.Fprintln(w, "enforced by construction (from the run ledgers — recorded as the run happened, the containment tier as the supervisor reported it — not the agents' own claims):")
 	for _, e := range events {
@@ -980,7 +1032,7 @@ func renderReceipt(w io.Writer, logDir, runID string, leaf servedLeaf, tools map
 		if f == nil {
 			f = newRunFacts()
 		}
-		f.render(w)
+		f.render(w, integrity[e.ChildRunID], complete[e.ChildRunID])
 	}
 	for _, s := range res.Sources {
 		if s.Kind != "run" {
@@ -1001,11 +1053,12 @@ func renderReceipt(w io.Writer, logDir, runID string, leaf servedLeaf, tools map
 	if invokerAsserted != "" {
 		_, _ = fmt.Fprintf(w, "  %s\n", invokerAsserted)
 	}
-	// A leaf agent's declared provenance is printed only when the leaf's own
-	// ledger shows that agent generated; the classifier's calls, on another
-	// run's ledger, are never evidence for it.
+	// A leaf agent's declared provenance is printed only when its answer was
+	// printed and the leaf's own ledger shows that agent generated; the
+	// classifier's calls, on another run's ledger, are never evidence for it,
+	// and a run that showed no answer has nothing to say the source of.
 	leafFacts := facts[leaf.runID]
-	if leaf.runID == "" || leafFacts == nil {
+	if leaf.runID == "" || leafFacts == nil || !leaf.answered {
 		leafFacts = newRunFacts()
 	}
 	declared := false

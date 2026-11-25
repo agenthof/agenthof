@@ -31,7 +31,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Enabled | `enabled` | bool | no | `true` |
 | Model | `model` | string | no | — |
 | EmbeddingModel | `embedding_model` | string | no | — |
-| Grounding | `grounding` | string (`generated`, `grounded` or `mixed`) | no | `generated` |
+| Grounding | `grounding` | string (`generated`, `grounded` or `mixed`) | no | unset: treated as `generated` by the `ask` confirmation gate, shown as "no provenance declared" in the receipt |
 | Instruction | `instruction` | string | no | — |
 | Tools | `tools` | list of tool grants ({resource, tools} or {resource, mode} objects) | no | none |
 | Output | `output` | string | no | — |
