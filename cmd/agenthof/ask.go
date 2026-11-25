@@ -517,6 +517,21 @@ func confirm(ctx context.Context, w io.Writer, r io.Reader, yes bool, prompt str
 	return false, nil
 }
 
+// writesInWorkflow reports whether any step agent of the workflow holds a
+// read-write tool grant, i.e. running it can write to the user's store.
+func writesInWorkflow(reg *registry.Registry, workflow string) bool {
+	wf, ok := reg.Workflow(workflow)
+	if !ok {
+		return false
+	}
+	for _, st := range wf.Steps {
+		if a, ok := reg.Agent(st.Agent); ok && a.HoldsReadWriteToolGrant() {
+			return true
+		}
+	}
+	return false
+}
+
 // needsConfirm reports whether running the workflow's agents can produce an
 // answer that is not grounded. An agent it cannot find counts as ungrounded.
 func needsConfirm(reg *registry.Registry, workflow string) bool {
@@ -587,11 +602,20 @@ func dispatchPick(ctx context.Context, p pickRun, role, workflow string, matched
 	}
 	_, _ = fmt.Fprintf(p.msg, "ask %s: picked %s/%s\n", p.runID, role, workflow)
 	if !p.yes && needsConfirm(p.reg, workflow) {
+		writes := writesInWorkflow(p.reg, workflow)
 		if !p.interactive {
-			_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s is not grounded and there is no terminal to confirm on; re-run with --yes\n", p.runID, role, workflow)
+			why := "is not grounded"
+			if writes {
+				why = "will write to your store (this cannot be undone)"
+			}
+			_, _ = fmt.Fprintf(p.msg, "ask %s: %s/%s %s and there is no terminal to confirm on; re-run with --yes\n", p.runID, role, workflow, why)
 			return "failed", "not confirmed", 1
 		}
-		ok, err := confirm(ctx, p.msg, p.in, false, fmt.Sprintf("Run %s/%s? Its answer is not grounded.", role, workflow))
+		question := fmt.Sprintf("Run %s/%s? Its answer is not grounded.", role, workflow)
+		if writes {
+			question = fmt.Sprintf("Run %s/%s? It will write to your store; this cannot be undone.", role, workflow)
+		}
+		ok, err := confirm(ctx, p.msg, p.in, false, question)
 		if err != nil {
 			_, _ = fmt.Fprintf(p.msg, "ask %s: confirmation ended: %v\n", p.runID, err)
 			return "failed", "confirmation ended", 1

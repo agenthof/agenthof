@@ -630,3 +630,24 @@ func TestNeedsConfirm(t *testing.T) {
 		}
 	}
 }
+
+func TestNeedsConfirmWriteGrant(t *testing.T) {
+	rw := []ToolGrant{{Resource: "m", Tools: []string{"memory_upsert"}, Mode: "read-write"}}
+	ro := []ToolGrant{{Resource: "m", Tools: []string{"*"}, Mode: "read-only"}}
+	cases := []struct {
+		a    AgentDef
+		want bool
+	}{
+		{AgentDef{Grounding: "grounded", Tools: rw}, true},
+		{AgentDef{Grounding: "grounded", Tools: ro}, false},
+		{AgentDef{Grounding: "grounded"}, false},
+		{AgentDef{Grounding: "mixed", Tools: ro}, true},
+		{AgentDef{Grounding: "generated"}, true},
+		{AgentDef{}, true},
+	}
+	for i, c := range cases {
+		if got := c.a.NeedsConfirm(); got != c.want {
+			t.Errorf("case %d: NeedsConfirm=%v want %v", i, got, c.want)
+		}
+	}
+}

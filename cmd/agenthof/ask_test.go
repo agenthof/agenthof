@@ -217,10 +217,23 @@ type pickEnv struct {
 // grounding. interactive says whether stdin counts as a terminal.
 func runPick(t *testing.T, grounding, role, wf string, matched, yes, interactive bool, input, answer string) *pickEnv {
 	t.Helper()
+	return runPickTools(t, grounding, nil, role, wf, matched, yes, interactive, input, answer)
+}
+
+// runPickTools is runPick with tool grants on the "chat" agent.
+func runPickTools(t *testing.T, grounding string, tools []config.ToolGrant, role, wf string, matched, yes, interactive bool, input, answer string) *pickEnv {
+	t.Helper()
 	cfg := askCfg()
+	if len(tools) > 0 {
+		cfg.Gateway.Tools = map[string]config.ToolResource{
+			"memory": {Kind: "mcp", URL: "https://mcp.example.com/", CredentialSource: "static_env", TokenEnv: "T",
+				ReadOnlyTools: []string{"memory_search"}},
+		}
+	}
 	for i := range cfg.Agents {
 		if cfg.Agents[i].Name == "chat" {
 			cfg.Agents[i].Grounding = grounding
+			cfg.Agents[i].Tools = tools
 		}
 	}
 	reg, errs := registry.Build(cfg)
@@ -856,5 +869,32 @@ func TestReceiptReportsCompleteness(t *testing.T) {
 	got := receiptFor(t, "generated")
 	if !strings.Contains(got, "completeness complete") {
 		t.Fatalf("receipt must report completeness, not a gap:\n%s", got)
+	}
+}
+
+func TestGroundedWriterStillConfirms(t *testing.T) {
+	rw := []config.ToolGrant{{Resource: "memory", Tools: []string{"memory_upsert"}, Mode: "read-write"}}
+	ro := []config.ToolGrant{{Resource: "memory", Tools: []string{"memory_search"}, Mode: "read-only"}}
+
+	// Non-terminal: refused, with write-aware wording.
+	e := runPickTools(t, "grounded", rw, "dev", "generic-chat", true, false, false, "", "x")
+	msg := e.msg.String()
+	if e.code == 0 || e.sp.role != "" || !strings.Contains(msg, "write") || !strings.Contains(msg, "cannot be undone") || !strings.Contains(msg, "--yes") {
+		t.Fatalf("grounded writer without a terminal must refuse with write wording: code=%d role=%q msg=%q", e.code, e.sp.role, msg)
+	}
+	// Terminal: prompted with write wording; n aborts.
+	e = runPickTools(t, "grounded", rw, "dev", "generic-chat", true, false, true, "n\n", "x")
+	if e.code == 0 || e.sp.role != "" || !strings.Contains(e.msg.String(), "write to your store") {
+		t.Fatalf("grounded writer must prompt with write wording: code=%d msg=%q", e.code, e.msg.String())
+	}
+	// Grounded read-only still auto-runs.
+	e = runPickTools(t, "grounded", ro, "dev", "generic-chat", true, false, true, "", "ok")
+	if e.code != 0 || strings.Contains(e.msg.String(), "[y/N]") {
+		t.Fatalf("grounded read-only must not confirm: code=%d msg=%q", e.code, e.msg.String())
+	}
+	// Ungrounded read-only keeps the provenance wording.
+	e = runPickTools(t, "generated", ro, "dev", "generic-chat", true, false, false, "", "x")
+	if !strings.Contains(e.msg.String(), "not grounded") || strings.Contains(e.msg.String(), "write") {
+		t.Fatalf("ungrounded reader keeps provenance wording: %q", e.msg.String())
 	}
 }
