@@ -35,8 +35,10 @@ type AgentDef struct {
 	Provenance     *Provenance   `yaml:"provenance"` // set for an enrolled third-party agent: where it came from; presence makes it spawn-only
 	// Grounding declares whether the agent's answers are "grounded" (drawn
 	// from governed sources), "generated" (free-form model output), or
-	// "mixed" (drawn from governed sources and model knowledge); empty is
-	// treated as "generated".
+	// "mixed" (drawn from governed sources and model knowledge). Empty is
+	// treated as "generated" by the confirm gate only (NeedsConfirm: confirm
+	// when nothing is declared); the ask receipt reports an empty grounding
+	// as no declaration, never as a declared "generated".
 	Grounding  string `yaml:"grounding,omitempty"`
 	SourceFile string `yaml:"-"`
 }

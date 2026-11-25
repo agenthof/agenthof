@@ -772,7 +772,10 @@ func (f *runFacts) add(r investigate.Record, tools map[string]config.ToolResourc
 			label = "tool resource " + strings.Join(r.ResourcesTouched, "+")
 		}
 	default:
-		return // exec and spawn records carry no per-call status
+		// The ledger records a status on exec and spawn events too, but the
+		// investigate record carries a call status for model and tool calls
+		// only, so these are counted as doors and their outcomes are not.
+		return
 	}
 	c := f.calls[label]
 	if c == nil {
@@ -878,6 +881,9 @@ func (f *runFacts) render(w io.Writer) {
 		_, _ = fmt.Fprintf(w, " (%s)", countList(refusedBy))
 	}
 	_, _ = fmt.Fprintln(w)
+	if f.doors["exec"]+f.doors["spawn"] > 0 {
+		_, _ = fmt.Fprintln(w, "    exec and spawn refusals are not counted here")
+	}
 }
 
 // renderReceipt prints, to w, what ask can say about the run it just did.
@@ -905,9 +911,12 @@ func renderReceipt(w io.Writer, logDir, runID string, leaf servedLeaf, tools map
 
 	facts := map[string]*runFacts{} // run id -> what its ledger recorded
 	haveLedger := map[string]bool{}
+	integrity := map[string]string{} // run id -> its ledger's chain verdict
 	for _, src := range res.Sources {
 		if src.Kind == "run" {
-			haveLedger[strings.TrimSuffix(filepath.Base(src.Path), ".jsonl")] = true
+			id := strings.TrimSuffix(filepath.Base(src.Path), ".jsonl")
+			haveLedger[id] = true
+			integrity[id] = src.Integrity
 		}
 	}
 	for _, r := range res.Events {
@@ -1006,7 +1015,13 @@ func renderReceipt(w io.Writer, logDir, runID string, leaf servedLeaf, tools map
 			continue
 		}
 		declared = true
-		_, _ = fmt.Fprintf(w, "  %s\n", assertedLine(a, ev.reads))
+		// The line rests on the leaf ledger's records; when that ledger's
+		// chain did not verify, say so on the line itself.
+		line := assertedLine(a, ev.reads)
+		if integrity[leaf.runID] != "verified" {
+			line += " (leaf ledger integrity not verified)"
+		}
+		_, _ = fmt.Fprintf(w, "  %s\n", line)
 	}
 	if declared {
 		_, _ = fmt.Fprintln(w, "  an agent's line is printed only when its run ledger shows a chat model call that succeeded or was streamed; where the answer comes from is the agent's declaration, and the retrieval note counts the succeeded read-only tool calls in that ledger — it shows a read happened, not that the answer used what it returned")
@@ -1053,25 +1068,28 @@ func doorSummary(counts, modelKinds map[string]int) string {
 // reads is the count of that agent's succeeded read-only tool calls. The
 // declaration is the agent's word and the retrieval is the evidence, so a
 // grounded or mixed declaration with no retrieval behind it is printed as
-// declared only, never as an unqualified "from your data". The caller prints
-// it only for an agent whose ledger shows it generated.
+// declared only, never as an unqualified "from your data"; an agent with no
+// grounding declared is reported as exactly that, never as a declared
+// "generated". The caller prints it only for an agent whose ledger shows it
+// generated.
 func assertedLine(a config.AgentDef, reads int) string {
-	observed := fmt.Sprintf("retrieval observed (read-tool call ×%d) in the run ledger", reads)
+	observed := "no retrieval observed in the run ledger"
+	if reads > 0 {
+		observed = fmt.Sprintf("retrieval observed (read-tool call ×%d) in the run ledger", reads)
+	}
 	switch a.Grounding {
 	case "grounded":
 		if reads == 0 {
-			return fmt.Sprintf("%s: declared grounded; no retrieval observed in the run ledger", a.Name)
+			return fmt.Sprintf("%s: declared grounded; %s", a.Name, observed)
 		}
 		return fmt.Sprintf("%s: grounded — declared to answer from your data; %s", a.Name, observed)
 	case "mixed":
 		if reads == 0 {
-			return fmt.Sprintf("%s: declared mixed; no retrieval observed in the run ledger", a.Name)
+			return fmt.Sprintf("%s: declared mixed; %s", a.Name, observed)
 		}
 		return fmt.Sprintf("%s: mixed — declared to answer from your notes and the model; %s", a.Name, observed)
+	case "generated":
+		return fmt.Sprintf("%s: agent-asserted: generated from the model's own knowledge — not your data; %s", a.Name, observed)
 	}
-	line := fmt.Sprintf("%s: agent-asserted: generated from the model's own knowledge — not your data", a.Name)
-	if reads > 0 {
-		line += "; " + observed
-	}
-	return line
+	return fmt.Sprintf("%s: no provenance declared; %s", a.Name, observed)
 }
