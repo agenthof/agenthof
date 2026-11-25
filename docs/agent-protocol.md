@@ -102,6 +102,9 @@ POST  {proxy-url}v1/chat/completions      # proxy-url already ends in / for TCP
 
 Read the reply from `choices[0].message.content`. Streamed responses are relayed but
 recorded without token counts (see [`docs/lifecycle-model.md`](lifecycle-model.md)).
+Each call is recorded as a `model_call` carrying a `call_kind` (`chat` here,
+`embeddings` on the route below), which a reader of the ledger can use to tell the
+two apart.
 
 An agent with an `embedding_model` can also embed text:
 
