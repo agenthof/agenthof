@@ -8,7 +8,7 @@
 # the governed Drive read against a real Drive (Linux/Lima, plus Seatbelt on macOS) —
 # run by judgment on a developer machine, never by CI.
 .DEFAULT_GOAL := help
-.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-memory acceptance-drive acceptance-enroll acceptance-hub acceptance-ask
+.PHONY: help install build-runtimes acceptance-podman acceptance-seatbelt acceptance-rekor acceptance-embeddings acceptance-memory acceptance-drive acceptance-enroll acceptance-hub acceptance-ask acceptance-rag
 
 GO ?= go
 UNAME_S ?= $(shell uname -s)
@@ -58,6 +58,12 @@ help:
 	@echo "    (scripts/e2e-ask-seatbelt.sh): the classifier and the answering agent, both signed hub"
 	@echo "    agents, each run contained; the answer, the receipt, the config-dir read denial and a"
 	@echo "    repointed-binary refusal. macOS only; same toolchain note and skip as acceptance-hub."
+	@echo "make acceptance-rag HUB_DIR=<hub checkout> [KEEP=1]"
+	@echo "    The grounded retrieval loop through agenthof ask under the real macOS Seatbelt backend"
+	@echo "    (scripts/e2e-rag-seatbelt.sh): rag-ingest, rag-retrieve and rag-research from the hub,"
+	@echo "    a fake Drive and memory store, the grounding proof and its falsifiers. By judgment, NEVER"
+	@echo "    CI; needs the rag-* hub agents to exist. macOS only; same toolchain note and skip as"
+	@echo "    acceptance-hub. KEEP=1 leaves the scratch directories."
 	@echo "make acceptance-drive [KEEP=1]"
 	@echo "    The real-backend governed Drive read (scripts/e2e-drive.sh): a Drive-reading agent"
 	@echo "    through the tool door against the real Drive API. Linux: podman natively. macOS: podman"
@@ -198,3 +204,10 @@ acceptance-hub:
 # signed hub agents. Local/by-judgment, never CI; skips cleanly like acceptance-hub.
 acceptance-ask:
 	scripts/e2e-ask-seatbelt.sh
+
+# The grounded RAG loop (ingest, retrieve, research) through agenthof ask under the
+# real macOS Seatbelt backend, from the signed rag-* hub agents. By judgment, NEVER CI
+# (the standing real-sandbox rule); it cannot pass until the hub agents exist. HUB_DIR
+# is the hub checkout; KEEP=1 leaves the scratch directories and the store.
+acceptance-rag:
+	KEEP=$(KEEP) scripts/e2e-rag-seatbelt.sh
