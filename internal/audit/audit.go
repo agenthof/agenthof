@@ -130,12 +130,19 @@ func Render(events []engine.Event, head ledger.Head, verr error, comp completene
 				if e.PromptTokens != nil {
 					pt = strconv.Itoa(*e.PromptTokens)
 				}
-				if e.CompletionTokens == nil {
+				// call_kind says what the call was; records written before it
+				// existed fall back to the absent completion count.
+				promptOnly := e.CallKind == "embeddings" || (e.CallKind == "" && e.CompletionTokens == nil)
+				if promptOnly {
 					// A prompt-only call (embeddings) has no completion count to show.
 					fmt.Fprintf(&sb, "  %s  model %s — %s prompt tokens\n", t, e.Model, pt)
 					break
 				}
-				fmt.Fprintf(&sb, "  %s  model %s — %s prompt / %d completion tokens\n", t, e.Model, pt, *e.CompletionTokens)
+				ct := "?"
+				if e.CompletionTokens != nil {
+					ct = strconv.Itoa(*e.CompletionTokens)
+				}
+				fmt.Fprintf(&sb, "  %s  model %s — %s prompt / %s completion tokens\n", t, e.Model, pt, ct)
 			default:
 				fmt.Fprintf(&sb, "  %s  model %s %s\n", t, e.Model, e.Status)
 			}

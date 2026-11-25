@@ -211,16 +211,30 @@ type pickEnv struct {
 	code     int
 	sp       *answerSpawner
 	store    *artifact.Store
+	served   servedLeaf
 }
 
 // runPick dispatches a pick against a fixture whose "chat" agent has the given
 // grounding. interactive says whether stdin counts as a terminal.
 func runPick(t *testing.T, grounding, role, wf string, matched, yes, interactive bool, input, answer string) *pickEnv {
 	t.Helper()
+	return runPickTools(t, grounding, nil, role, wf, matched, yes, interactive, input, answer)
+}
+
+// runPickTools is runPick with tool grants on the "chat" agent.
+func runPickTools(t *testing.T, grounding string, tools []config.ToolGrant, role, wf string, matched, yes, interactive bool, input, answer string) *pickEnv {
+	t.Helper()
 	cfg := askCfg()
+	if len(tools) > 0 {
+		cfg.Gateway.Tools = map[string]config.ToolResource{
+			"memory": {Kind: "mcp", URL: "https://mcp.example.com/", CredentialSource: "static_env", TokenEnv: "T",
+				ReadOnlyTools: []string{"memory_search"}},
+		}
+	}
 	for i := range cfg.Agents {
 		if cfg.Agents[i].Name == "chat" {
 			cfg.Agents[i].Grounding = grounding
+			cfg.Agents[i].Tools = tools
 		}
 	}
 	reg, errs := registry.Build(cfg)
@@ -241,7 +255,7 @@ func runPick(t *testing.T, grounding, role, wf string, matched, yes, interactive
 		reg:   reg, menu: menu, admitted: menu,
 		prompt: "hello", store: store, yes: yes, interactive: interactive,
 		in: strings.NewReader(input), out: &e.out, msg: &e.msg, runID: "r-orch",
-		logger: logger,
+		logger: logger, served: &e.served,
 	}, role, wf, matched)
 	return e
 }
@@ -294,7 +308,7 @@ func TestConfirmCancelledByContext(t *testing.T) {
 	var ok bool
 	var err error
 	go func() {
-		ok, err = confirm(ctx, io.Discard, pr, false, "run?")
+		ok, err = confirm(ctx, io.Discard, pr, false, "run?", "this answer is not grounded")
 		close(done)
 	}()
 	cancel()
@@ -461,15 +475,43 @@ func TestNeedsConfirmAnyStepOrUnknown(t *testing.T) {
 	}
 }
 
-// receiptLedgers writes an orchestrator ledger whose parent spawn event for
-// the leaf carries a containment tier, plus the leaf's own child ledger with
-// the doors it fired. It returns the log dir.
+// receiptTools is the tool configuration the receipt fixtures classify
+// against: on "memory", memory_search is read-only and anything else writes.
+var receiptTools = map[string]config.ToolResource{
+	"memory": {Kind: "mcp", ReadOnlyTools: []string{"memory_search"}},
+}
+
+// Door events as the leaf's doors record them, for the fixtures below. The
+// leaf agent is "chat".
+func chatCall(status string) engine.Event {
+	return engine.Event{Type: "model_call", Agent: "chat", CallKind: "chat", Status: status, Model: "m"}
+}
+
+func embedCall(status string) engine.Event {
+	return engine.Event{Type: "model_call", Agent: "chat", CallKind: "embeddings", Status: status, Model: "e"}
+}
+
+func toolCall(tool, status string) engine.Event {
+	return engine.Event{Type: "tool_call", Agent: "chat", Tool: tool, Status: status, ResourcesTouched: []string{"memory"}}
+}
+
+// receiptLedgers writes the ledgers of an answered ask run with a plain chat
+// leaf (one succeeded chat call). It returns the log dir.
 func receiptLedgers(t *testing.T) string {
 	t.Helper()
 	return receiptLedgersAs(t, identity.Invoker{Subject: "dana@example.com", Method: "asserted"})
 }
 
 func receiptLedgersAs(t *testing.T, inv identity.Invoker) string {
+	t.Helper()
+	return receiptLedgersWith(t, inv, []engine.Event{chatCall("succeeded")})
+}
+
+// receiptLedgersWith writes an orchestrator ledger whose parent spawn events
+// carry each child's containment tier, the classifier's child ledger (one
+// succeeded chat call of its own — which must never count as the leaf's), and
+// the leaf's child ledger with the given door events. It returns the log dir.
+func receiptLedgersWith(t *testing.T, inv identity.Invoker, leafDoors []engine.Event) string {
 	t.Helper()
 	dir := t.TempDir()
 	write := func(runID string, evs []engine.Event) {
@@ -486,42 +528,394 @@ func receiptLedgersAs(t *testing.T, inv identity.Invoker) string {
 		}
 	}
 	orch := engine.Binding{Invoker: inv, Role: orchestratorRole, Workflow: askWorkflow, RunID: "r-orch"}
+	router := engine.Binding{Invoker: inv, Role: routerRole, Workflow: routerWorkflow, RunID: "r-router", ParentRunID: "r-orch", Depth: 1}
 	child := engine.Binding{Invoker: inv, Role: "dev", Workflow: "generic-chat", RunID: "r-leaf", ParentRunID: "r-orch", Depth: 1}
-	// Both ledgers carry the step-window shape a real run writes (the
+	// Every ledger carries the step-window shape a real run writes (the
 	// orchestrator's own from runOrchestration), so every door event sits
 	// inside a step and the receipt reports completeness, not a gap.
-	one := 1
+	one, two, n := 1, 2, len(leafDoors)
 	write("r-orch", []engine.Event{
 		{Type: "workflow_started", Binding: orch, DoorAccounting: engine.DoorAccountingAdmission},
 		{Type: "step_started", Binding: orch, Step: orchestrateStep, Agent: orchestratorAgent},
-		{Type: "spawn", Binding: orch, ChildRunID: "r-leaf", ChildRole: "dev", ChildWorkflow: "generic-chat", Depth: 1,
+		{Type: "spawn", Binding: orch, ChildRunID: "r-router", ChildRole: routerRole, ChildWorkflow: routerWorkflow, Depth: 1,
 			ChildConfiner: "podman", ChildConfinerOpts: []string{"userns"}},
-		{Type: "step_succeeded", Binding: orch, Step: orchestrateStep, DoorCalls: &one},
+		{Type: "spawn", Binding: orch, Status: "succeeded", ChildRunID: "r-leaf", ChildRole: "dev", ChildWorkflow: "generic-chat", Depth: 1,
+			OutputSHA: "0a1b", ChildConfiner: "podman", ChildConfinerOpts: []string{"userns"}},
+		{Type: "step_succeeded", Binding: orch, Step: orchestrateStep, DoorCalls: &two},
 		{Type: "workflow_finished", Binding: orch, Status: "succeeded"},
 	})
-	write("r-leaf", []engine.Event{
+	write("r-router", []engine.Event{
+		{Type: "workflow_started", Binding: router, DoorAccounting: engine.DoorAccountingAdmission},
+		{Type: "step_started", Binding: router, Step: "s", Agent: routerRole},
+		{Type: "model_call", Binding: router, Agent: routerRole, CallKind: "chat", Status: "succeeded", Model: "m"},
+		{Type: "step_succeeded", Binding: router, Step: "s", DoorCalls: &one},
+		{Type: "workflow_finished", Binding: router, Status: "succeeded"},
+	})
+	leaf := []engine.Event{
 		{Type: "workflow_started", Binding: child, DoorAccounting: engine.DoorAccountingAdmission},
 		{Type: "step_started", Binding: child, Step: "s", Agent: "chat"},
-		{Type: "model_call", Binding: child, Model: "m"},
-		{Type: "step_succeeded", Binding: child, Step: "s", DoorCalls: &one},
-		{Type: "workflow_finished", Binding: child, Status: "succeeded"},
-	})
+	}
+	for _, d := range leafDoors {
+		d.Binding = child
+		leaf = append(leaf, d)
+	}
+	leaf = append(leaf,
+		engine.Event{Type: "step_succeeded", Binding: child, Step: "s", DoorCalls: &n},
+		engine.Event{Type: "workflow_finished", Binding: child, Status: "succeeded"})
+	write("r-leaf", leaf)
 	return dir
+}
+
+// leafOf is the answering leaf the fixtures describe: run r-leaf, agent
+// "chat" with the given grounding stamp.
+func leafOf(grounding string) servedLeaf {
+	return servedLeaf{answered: true, runID: "r-leaf", agents: []config.AgentDef{{Name: "chat", Grounding: grounding}}}
 }
 
 func receiptFor(t *testing.T, grounding string) string {
 	t.Helper()
 	var b strings.Builder
-	renderReceipt(&b, receiptLedgers(t), "r-orch", []config.AgentDef{{Name: "chat", Grounding: grounding}})
+	renderReceipt(&b, receiptLedgers(t), "r-orch", leafOf(grounding), receiptTools)
 	return b.String()
+}
+
+// receiptWith renders the receipt of a leaf stamped grounding whose ledger
+// recorded doors, split at the agent-asserted heading.
+func receiptWith(t *testing.T, grounding string, doors ...engine.Event) (enforced, asserted string) {
+	t.Helper()
+	var b strings.Builder
+	dir := receiptLedgersWith(t, identity.Invoker{Subject: "dana@example.com", Method: "asserted"}, doors)
+	renderReceipt(&b, dir, "r-orch", leafOf(grounding), receiptTools)
+	enforced, asserted, ok := strings.Cut(b.String(), "agent-asserted (")
+	if !ok {
+		t.Fatalf("no agent-asserted section:\n%s", b.String())
+	}
+	return enforced, asserted
+}
+
+// leafBlock returns the answering leaf's own lines of the enforced section:
+// its "run r-leaf:" line and the indented facts under it, and nothing of any
+// other run's (the classifier's block prints the same kinds of line).
+func leafBlock(t *testing.T, enforced string) string {
+	t.Helper()
+	var b strings.Builder
+	in := false
+	for _, l := range strings.Split(enforced, "\n") {
+		switch {
+		case strings.Contains(l, " run r-leaf: "):
+			in = true
+		case in && !strings.HasPrefix(l, "    "):
+			return b.String()
+		}
+		if in {
+			b.WriteString(l + "\n")
+		}
+	}
+	if !in {
+		t.Fatalf("no block for run r-leaf:\n%s", enforced)
+	}
+	return b.String()
+}
+
+// provenanceLine returns the leaf agent's line in the agent-asserted
+// section, or "" when the receipt prints none.
+func provenanceLine(asserted string) string {
+	for _, l := range strings.Split(asserted, "\n") {
+		if strings.HasPrefix(l, "  chat: ") {
+			return l
+		}
+	}
+	return ""
+}
+
+// An ingest leaf writes and never generates: the receipt counts its succeeded
+// writes from the ledger and prints no provenance line — whatever its stamp,
+// and although the classifier beside it made a succeeded chat call.
+func TestReceiptIngestWriteLineNoProvenance(t *testing.T) {
+	doors := []engine.Event{embedCall("succeeded"), embedCall("succeeded"),
+		toolCall("memory_upsert", "succeeded"), toolCall("memory_upsert", "succeeded"), toolCall("memory_upsert", "failed")}
+	for _, stamp := range []string{"", "generated", "grounded", "mixed"} {
+		enforced, asserted := receiptWith(t, stamp, doors...)
+		if !strings.Contains(leafBlock(t, enforced), "write-tool calls succeeded: 2 (memory_upsert on memory ×2)") {
+			t.Errorf("stamp %q: missing the ledger-counted write line:\n%s", stamp, enforced)
+		}
+		// It printed an output; an output alone is not a provenance signal.
+		if !strings.Contains(leafBlock(t, enforced), "    output: artifact 0a1b\n") {
+			t.Errorf("stamp %q: missing the recorded output:\n%s", stamp, enforced)
+		}
+		if l := provenanceLine(asserted); l != "" {
+			t.Errorf("stamp %q: a leaf with no chat call must print no provenance line, got %q", stamp, l)
+		}
+		for _, bad := range []string{"your data", "notes and the model", "own knowledge", "retrieval observed", "no provenance declared"} {
+			if strings.Contains(enforced+asserted, bad) {
+				t.Errorf("stamp %q: receipt of a write-only leaf must not say %q:\n%s%s", stamp, bad, enforced, asserted)
+			}
+		}
+	}
+}
+
+// The write count is the ledger's, never the grant's: a leaf that holds a
+// read-write grant but recorded no succeeded write shows zero.
+func TestReceiptWriteCountIsFromLedgerNotGrant(t *testing.T) {
+	var b strings.Builder
+	dir := receiptLedgersWith(t, identity.Invoker{Subject: "dana@example.com", Method: "asserted"},
+		[]engine.Event{toolCall("memory_upsert", "refused"), toolCall("memory_upsert", "failed"), toolCall("memory_search", "succeeded")})
+	leaf := leafOf("")
+	leaf.agents[0].Tools = []config.ToolGrant{{Resource: "memory", Tools: []string{"memory_upsert"}, Mode: "read-write"}}
+	renderReceipt(&b, dir, "r-orch", leaf, receiptTools)
+	block := leafBlock(t, b.String())
+	if !strings.Contains(block, "write-tool calls succeeded: 0\n") || strings.Contains(block, "memory_upsert on memory") {
+		t.Errorf("a refused, a failed and a read call are not writes, whatever the grant:\n%s", block)
+	}
+	if !strings.Contains(block, "tool resource memory: attempted ×3 (succeeded ×1)\n") {
+		t.Errorf("the leaf's three tool calls must be counted as attempts:\n%s", block)
+	}
+}
+
+func TestReceiptRetrieveGroundedWithObservedRetrieval(t *testing.T) {
+	enforced, asserted := receiptWith(t, "grounded", embedCall("succeeded"), toolCall("memory_search", "succeeded"), chatCall("succeeded"))
+	l := provenanceLine(asserted)
+	for _, want := range []string{"from your data", "retrieval observed (read-tool call ×1)"} {
+		if !strings.Contains(l, want) {
+			t.Errorf("grounded retrieve line missing %q: %q", want, l)
+		}
+	}
+	if strings.Contains(l, "no retrieval observed") || strings.Contains(enforced, "from your data") {
+		t.Errorf("grounded retrieve mislabelled: line=%q\nenforced:\n%s", l, enforced)
+	}
+	if block := leafBlock(t, enforced); !strings.Contains(block, "write-tool calls succeeded: 0\n") || !strings.Contains(block, "tool resource memory: attempted ×1 (succeeded ×1)\n") {
+		t.Errorf("a read-only retrieve must count its read and zero writes:\n%s", block)
+	}
+}
+
+func TestReceiptResearchMixedWithObservedRetrieval(t *testing.T) {
+	_, asserted := receiptWith(t, "mixed", embedCall("succeeded"), toolCall("memory_search", "succeeded"), toolCall("memory_search", "succeeded"), chatCall("succeeded"))
+	l := provenanceLine(asserted)
+	for _, want := range []string{"notes and the model", "retrieval observed (read-tool call ×2)"} {
+		if !strings.Contains(l, want) {
+			t.Errorf("mixed research line missing %q: %q", want, l)
+		}
+	}
+	if strings.Contains(l, "not your data") || strings.Contains(l, "from your data") {
+		t.Errorf("mixed must be neither grounded nor generated: %q", l)
+	}
+}
+
+// A streamed answer records its chat call once, as started, and never as
+// succeeded; it is still a generation and still gets its provenance line.
+func TestReceiptStreamedChatKeepsProvenance(t *testing.T) {
+	enforced, asserted := receiptWith(t, "grounded", toolCall("memory_search", "succeeded"), chatCall("started"))
+	if l := provenanceLine(asserted); !strings.Contains(l, "from your data") || !strings.Contains(l, "retrieval observed (read-tool call ×1)") {
+		t.Errorf("a streamed chat call must keep the provenance line, got %q", l)
+	}
+	if !strings.Contains(leafBlock(t, enforced), "model chat: attempted ×1 (succeeded ×0), streaming ×1") {
+		t.Errorf("a streamed call is attempted, not succeeded, and shown as streaming:\n%s", enforced)
+	}
+	_, asserted = receiptWith(t, "generated", chatCall("started"))
+	if l := provenanceLine(asserted); !strings.Contains(l, "generated from the model's own knowledge — not your data; no retrieval observed in the run ledger") {
+		t.Errorf("a streamed generated answer must keep its label, got %q", l)
+	}
+}
+
+// The stamp is the agent's word; the retrieval is the evidence. A stamp with
+// no succeeded read-classified call behind it is printed as a mismatch.
+func TestReceiptStampWithoutRetrievalEvidence(t *testing.T) {
+	cases := map[string][]engine.Event{
+		"no tool call":         {chatCall("succeeded")},
+		"search failed":        {toolCall("memory_search", "failed"), chatCall("succeeded")},
+		"search refused":       {toolCall("memory_search", "refused"), chatCall("succeeded")},
+		"only a write":         {toolCall("memory_upsert", "succeeded"), chatCall("succeeded")},
+		"only embeddings":      {embedCall("succeeded"), chatCall("succeeded")},
+		"unknown resource":     {{Type: "tool_call", Agent: "chat", Tool: "memory_search", Status: "succeeded", ResourcesTouched: []string{"elsewhere"}}, chatCall("succeeded")},
+		"no resource recorded": {{Type: "tool_call", Agent: "chat", Tool: "memory_search", Status: "succeeded"}, chatCall("succeeded")},
+		"another agent's read": {{Type: "tool_call", Agent: "other", Tool: "memory_search", Status: "succeeded", ResourcesTouched: []string{"memory"}}, chatCall("succeeded")},
+	}
+	for name, doors := range cases {
+		_, asserted := receiptWith(t, "grounded", doors...)
+		l := provenanceLine(asserted)
+		if !strings.Contains(l, "declared grounded; no retrieval observed") {
+			t.Errorf("%s: want the stamp-vs-evidence line, got %q", name, l)
+		}
+		if strings.Contains(l, "from your data") || strings.Contains(l, "retrieval observed (") {
+			t.Errorf("%s: an unevidenced stamp must not read as grounded: %q", name, l)
+		}
+		_, asserted = receiptWith(t, "mixed", doors...)
+		l = provenanceLine(asserted)
+		if !strings.Contains(l, "declared mixed; no retrieval observed") || strings.Contains(l, "notes and the model") {
+			t.Errorf("%s: an unevidenced mixed stamp must not read as from your notes: %q", name, l)
+		}
+	}
+}
+
+// Only a chat call that succeeded or was streamed is a generation: an
+// embeddings call, or a chat call that failed or was refused, is not, and the
+// classifier's own chat call never counts for the leaf.
+func TestReceiptNoProvenanceWithoutChatEvidence(t *testing.T) {
+	cases := map[string][]engine.Event{
+		"embeddings only": {embedCall("succeeded"), toolCall("memory_search", "succeeded")},
+		"chat failed":     {toolCall("memory_search", "succeeded"), chatCall("failed")},
+		"chat refused":    {toolCall("memory_search", "succeeded"), chatCall("refused")},
+		"kind unrecorded": {{Type: "model_call", Agent: "chat", Status: "succeeded"}},
+		"other agent":     {{Type: "model_call", Agent: "other", CallKind: "chat", Status: "succeeded"}},
+		"no doors":        nil,
+	}
+	for name, doors := range cases {
+		for _, stamp := range []string{"", "generated", "grounded", "mixed"} {
+			_, asserted := receiptWith(t, stamp, doors...)
+			if l := provenanceLine(asserted); l != "" {
+				t.Errorf("%s, stamp %q: no chat evidence must mean no provenance line, got %q", name, stamp, l)
+			}
+		}
+	}
+	// With no leaf run named, nothing is evidence for it.
+	var b strings.Builder
+	leaf := leafOf("grounded")
+	leaf.runID = ""
+	renderReceipt(&b, receiptLedgers(t), "r-orch", leaf, receiptTools)
+	if _, asserted, _ := strings.Cut(b.String(), "agent-asserted ("); provenanceLine(asserted) != "" {
+		t.Errorf("a leaf with no recorded run must print no provenance line:\n%s", asserted)
+	}
+}
+
+func TestReceiptDoorSummarySplitsModelCallsByKind(t *testing.T) {
+	enforced, _ := receiptWith(t, "grounded", embedCall("succeeded"), embedCall("succeeded"), embedCall("succeeded"), embedCall("failed"),
+		toolCall("memory_search", "succeeded"), chatCall("succeeded"))
+	if !strings.Contains(leafBlock(t, enforced), "door calls: model_call chat x1, embeddings x4, tool_call x1\n") {
+		t.Errorf("door summary must split model_call by call kind:\n%s", enforced)
+	}
+}
+
+// What went out the door is worded as attempts and successes per call kind
+// and resource — never as sent, which the ledger cannot evidence.
+func TestReceiptAttemptedSucceededWording(t *testing.T) {
+	enforced, asserted := receiptWith(t, "grounded", embedCall("succeeded"), embedCall("failed"), embedCall("refused"),
+		toolCall("memory_search", "succeeded"), toolCall("memory_upsert", "refused"), chatCall("succeeded"))
+	for _, want := range []string{
+		"model chat: attempted ×1 (succeeded ×1)\n",
+		"model embeddings: attempted ×3 (succeeded ×1)\n",
+		"tool resource memory: attempted ×2 (succeeded ×1)\n",
+		"refused model or tool calls: 2 (model embeddings ×1, tool resource memory ×1)\n",
+	} {
+		if block := leafBlock(t, enforced); !strings.Contains(block, want) {
+			t.Errorf("leaf block missing %q:\n%s", want, block)
+		}
+	}
+	all := strings.ToLower(enforced + asserted)
+	for _, bad := range []string{"sent", "left the machine"} {
+		if strings.Contains(all, bad) {
+			t.Errorf("receipt must not claim %q:\n%s", bad, all)
+		}
+	}
+}
+
+// The ledger facts sit in the enforced section and the agent's declaration in
+// the asserted one; the ledger-derived retrieval note is marked as such.
+func TestReceiptKeepsLedgerFactsAndDeclarationsApart(t *testing.T) {
+	enforced, asserted := receiptWith(t, "grounded", toolCall("memory_search", "succeeded"), toolCall("memory_upsert", "succeeded"), chatCall("succeeded"))
+	block := leafBlock(t, enforced)
+	for _, want := range []string{"door calls: model_call chat x1, tool_call x2\n", "tool resource memory: attempted ×2 (succeeded ×2)\n", "write-tool calls succeeded: 1 (memory_upsert on memory ×1)\n", "refused model or tool calls: 0\n"} {
+		if !strings.Contains(block, want) || strings.Contains(asserted, want) {
+			t.Errorf("%q belongs in the enforced section only:\nenforced:\n%s\nasserted:\n%s", want, enforced, asserted)
+		}
+	}
+	if strings.Contains(enforced, "grounded") || strings.Contains(enforced, "your data") {
+		t.Errorf("the declared stamp leaked into the enforced section:\n%s", enforced)
+	}
+	if l := provenanceLine(asserted); !strings.Contains(l, "retrieval observed (read-tool call ×1) in the run ledger") {
+		t.Errorf("the retrieval note must be marked as the ledger's: %q", l)
+	}
+}
+
+// A succeeded tool call whose resource the configuration does not know is
+// neither a read nor a write: it is counted apart, never dropped.
+func TestReceiptUnclassifiedToolCall(t *testing.T) {
+	enforced, _ := receiptWith(t, "", engine.Event{Type: "tool_call", Agent: "chat", Tool: "x", Status: "succeeded", ResourcesTouched: []string{"elsewhere"}})
+	block := leafBlock(t, enforced)
+	if !strings.Contains(block, "write-tool calls succeeded: 0\n") || !strings.Contains(block, "tool resource elsewhere: attempted ×1 (succeeded ×1)\n") ||
+		!strings.Contains(block, "tool calls succeeded on a resource this configuration does not define: 1 (not classified as read or write)") {
+		t.Errorf("an unclassifiable call must be counted apart:\n%s", block)
+	}
+}
+
+// A leaf with no grounding stamp made no declaration: the receipt says so
+// and never prints the "generated" claim nobody made.
+func TestReceiptUnstampedDeclaresNoProvenance(t *testing.T) {
+	cases := map[string]struct {
+		doors []engine.Event
+		want  string
+	}{
+		"chat succeeded, no read": {[]engine.Event{chatCall("succeeded")}, "chat: no provenance declared; no retrieval observed in the run ledger"},
+		"chat succeeded, read":    {[]engine.Event{toolCall("memory_search", "succeeded"), chatCall("succeeded")}, "chat: no provenance declared; retrieval observed (read-tool call ×1) in the run ledger"},
+		"chat streamed, no read":  {[]engine.Event{chatCall("started")}, "chat: no provenance declared; no retrieval observed in the run ledger"},
+		"chat streamed, read":     {[]engine.Event{toolCall("memory_search", "succeeded"), chatCall("started")}, "chat: no provenance declared; retrieval observed (read-tool call ×1) in the run ledger"},
+	}
+	for name, c := range cases {
+		enforced, asserted := receiptWith(t, "", c.doors...)
+		if l := provenanceLine(asserted); l != "  "+c.want {
+			t.Errorf("%s: got %q, want %q", name, l, c.want)
+		}
+		for _, bad := range []string{"own knowledge", "not your data", "from your data", "notes and the model"} {
+			if strings.Contains(enforced+asserted, bad) {
+				t.Errorf("%s: an unstamped leaf's receipt must not say %q:\n%s%s", name, bad, enforced, asserted)
+			}
+		}
+	}
+	// An explicit generated stamp is a declaration and keeps its wording,
+	// beside what the ledger observed either way.
+	_, asserted := receiptWith(t, "generated", chatCall("succeeded"))
+	if l := provenanceLine(asserted); l != "  chat: agent-asserted: generated from the model's own knowledge — not your data; no retrieval observed in the run ledger" {
+		t.Errorf("generated without retrieval: %q", l)
+	}
+	_, asserted = receiptWith(t, "generated", toolCall("memory_search", "succeeded"), chatCall("succeeded"))
+	if l := provenanceLine(asserted); l != "  chat: agent-asserted: generated from the model's own knowledge — not your data; retrieval observed (read-tool call ×1) in the run ledger" {
+		t.Errorf("generated with retrieval: %q", l)
+	}
+}
+
+// A provenance line rests on the leaf ledger's records. When that ledger's
+// chain does not verify, the line carries the qualification itself.
+func TestReceiptQualifiesProvenanceOnUnverifiedLeafLedger(t *testing.T) {
+	dir := receiptLedgersWith(t, identity.Invoker{Subject: "dana@example.com", Method: "asserted"},
+		[]engine.Event{toolCall("memory_search", "succeeded"), chatCall("succeeded")})
+	breakLeafChain(t, dir)
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", leafOf("grounded"), receiptTools)
+	enforced, asserted, _ := strings.Cut(b.String(), "agent-asserted (")
+	if strings.Contains(enforced, "ledger r-leaf: chain verified") {
+		t.Fatalf("the edited leaf ledger must not verify:\n%s", enforced)
+	}
+	if l := provenanceLine(asserted); l != "  chat: grounded — declared to answer from your data; retrieval observed (read-tool call ×1) in the run ledger (leaf ledger integrity not verified)" {
+		t.Errorf("a provenance line over an unverified leaf ledger must be qualified, got %q\n%s", l, b.String())
+	}
+}
+
+// Exec and spawn calls are counted as doors, but their refusals are not in
+// the refused count; the receipt says so wherever such a call is present.
+func TestReceiptDisclosesUncountedExecAndSpawnRefusals(t *testing.T) {
+	const note = "exec and spawn refusals are not counted here"
+	enforced, _ := receiptWith(t, "", engine.Event{Type: "exec", Agent: "chat", Status: "refused"}, chatCall("succeeded"))
+	block := leafBlock(t, enforced)
+	if !strings.Contains(block, "refused model or tool calls: 0\n    "+note+"\n") {
+		t.Errorf("an exec call must bring the scope note under the refusal line:\n%s", block)
+	}
+	enforced, _ = receiptWith(t, "", chatCall("succeeded"))
+	if strings.Contains(enforced, note) {
+		t.Errorf("no exec or spawn call, no note:\n%s", enforced)
+	}
 }
 
 func TestReceiptComposesSubtree(t *testing.T) {
 	got := receiptFor(t, "generated")
 	// The tier is on the parent's spawn event; the door is in the child's ledger.
-	for _, want := range []string{"containment tier podman (userns)", "model_call x1", "dana@example.com", "ledger r-orch: chain verified", "ledger r-leaf: chain verified"} {
+	for _, want := range []string{"dana@example.com", "ledger r-orch: chain verified", "ledger r-leaf: chain verified"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("receipt missing %q:\n%s", want, got)
+		}
+	}
+	leaf := leafBlock(t, got)
+	for _, want := range []string{"containment tier podman (userns)", "door calls: model_call chat x1\n"} {
+		if !strings.Contains(leaf, want) {
+			t.Errorf("leaf block missing %q:\n%s", want, leaf)
 		}
 	}
 }
@@ -532,13 +926,15 @@ func TestReceiptLabelsProvenance(t *testing.T) {
 	if !ok {
 		t.Fatalf("no agent-asserted section:\n%s", got)
 	}
-	if !strings.Contains(asserted, "agent-asserted: generated from the model's own knowledge — not your data") {
+	if !strings.Contains(asserted, "agent-asserted: generated from the model's own knowledge — not your data; no retrieval observed in the run ledger") {
 		t.Errorf("missing generated label:\n%s", asserted)
 	}
 	if strings.Contains(enforced, "not your data") || !strings.Contains(enforced, "containment tier") {
 		t.Errorf("the asserted claim leaked into the enforced section:\n%s", enforced)
 	}
-	if g := receiptFor(t, "grounded"); !strings.Contains(g, "grounded — declared") || strings.Contains(g, "not your data") {
+	// This leaf made a chat call and no retrieval: its grounded stamp is shown
+	// as declared, without the unqualified "from your data".
+	if g := receiptFor(t, "grounded"); !strings.Contains(g, "declared grounded; no retrieval observed") || strings.Contains(g, "not your data") || strings.Contains(g, "from your data") {
 		t.Errorf("grounded leaf mislabelled:\n%s", g)
 	}
 }
@@ -558,7 +954,7 @@ func TestReceiptHonestWording(t *testing.T) {
 func TestReceiptInvokerHonesty(t *testing.T) {
 	render := func(inv identity.Invoker) (enforced, asserted string) {
 		var b strings.Builder
-		renderReceipt(&b, receiptLedgersAs(t, inv), "r-orch", nil)
+		renderReceipt(&b, receiptLedgersAs(t, inv), "r-orch", servedLeaf{}, nil)
 		enforced, asserted, _ = strings.Cut(b.String(), "agent-asserted (")
 		return
 	}
@@ -578,7 +974,7 @@ func TestReceiptMissingChildLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	var b strings.Builder
-	renderReceipt(&b, dir, "r-orch", nil)
+	renderReceipt(&b, dir, "r-orch", servedLeaf{}, nil)
 	if !strings.Contains(b.String(), "no ledger found for this run") || strings.Contains(b.String(), "door calls: none") {
 		t.Errorf("a missing child ledger must not read as no doors:\n%s", b.String())
 	}
@@ -586,9 +982,22 @@ func TestReceiptMissingChildLedger(t *testing.T) {
 
 func TestReceiptUnreadableLedgerIsUnavailable(t *testing.T) {
 	var b strings.Builder
-	renderReceipt(&b, t.TempDir(), "r-absent", nil)
+	renderReceipt(&b, t.TempDir(), "r-absent", servedLeaf{}, nil)
 	if !strings.Contains(b.String(), "receipt unavailable") {
 		t.Errorf("want an unavailable line, got %q", b.String())
+	}
+}
+
+// The receipt gates a leaf's provenance on that leaf's own ledger, so the
+// answered pick must hand it the child run the spawn gate reported.
+func TestAnsweredPickRecordsLeafRun(t *testing.T) {
+	e := runPick(t, "grounded", "dev", "generic-chat", true, true, false, "", "the answer")
+	if !e.served.answered || e.served.runID != "r-child" || len(e.served.agents) != 1 || e.served.agents[0].Name != "chat" {
+		t.Fatalf("an answered pick must record the leaf's run and agents, got %+v", e.served)
+	}
+	e = runPick(t, "generated", "dev", "generic-chat", true, false, true, "n\n", "the answer")
+	if e.served.answered || e.served.runID != "" {
+		t.Fatalf("a declined pick answered nothing, got %+v", e.served)
 	}
 }
 
@@ -856,5 +1265,307 @@ func TestReceiptReportsCompleteness(t *testing.T) {
 	got := receiptFor(t, "generated")
 	if !strings.Contains(got, "completeness complete") {
 		t.Fatalf("receipt must report completeness, not a gap:\n%s", got)
+	}
+}
+
+func TestGroundedWriterStillConfirms(t *testing.T) {
+	rw := []config.ToolGrant{{Resource: "memory", Tools: []string{"memory_upsert"}, Mode: "read-write"}}
+	ro := []config.ToolGrant{{Resource: "memory", Tools: []string{"memory_search"}, Mode: "read-only"}}
+
+	// Non-terminal: refused, with write-aware wording.
+	e := runPickTools(t, "grounded", rw, "dev", "generic-chat", true, false, false, "", "x")
+	msg := e.msg.String()
+	if e.code == 0 || e.sp.role != "" || !strings.Contains(msg, "write") || !strings.Contains(msg, "cannot be undone") || !strings.Contains(msg, "--yes") {
+		t.Fatalf("grounded writer without a terminal must refuse with write wording: code=%d role=%q msg=%q", e.code, e.sp.role, msg)
+	}
+	// Terminal: prompted with write wording; n aborts.
+	e = runPickTools(t, "grounded", rw, "dev", "generic-chat", true, false, true, "n\n", "x")
+	if e.code == 0 || e.sp.role != "" || !strings.Contains(e.msg.String(), "write to your store") {
+		t.Fatalf("grounded writer must prompt with write wording: code=%d msg=%q", e.code, e.msg.String())
+	}
+	// Grounded read-only still auto-runs.
+	e = runPickTools(t, "grounded", ro, "dev", "generic-chat", true, false, true, "", "ok")
+	if e.code != 0 || strings.Contains(e.msg.String(), "[y/N]") {
+		t.Fatalf("grounded read-only must not confirm: code=%d msg=%q", e.code, e.msg.String())
+	}
+	// Ungrounded read-only keeps the provenance wording.
+	e = runPickTools(t, "generated", ro, "dev", "generic-chat", true, false, false, "", "x")
+	if !strings.Contains(e.msg.String(), "not grounded") || strings.Contains(e.msg.String(), "write") {
+		t.Fatalf("ungrounded reader keeps provenance wording: %q", e.msg.String())
+	}
+}
+
+// ledgerSpawner is a leaf that does governed work and then fails: for the
+// leaf role it writes the child's own run ledger (doors, then a failed
+// terminal) and reports the run failed; the classifier is answered from the
+// store like any child.
+type ledgerSpawner struct {
+	store *artifact.Store
+	dir   string
+	pick  string
+	doors []engine.Event
+	err   error // returned beside the leaf's result when set
+}
+
+func (s *ledgerSpawner) Spawn(_ context.Context, role, workflow, _ string, parent engine.Binding) (rungateway.SpawnResult, error) {
+	if role == routerRole {
+		sha, prev, err := s.store.Put(s.pick)
+		if err != nil {
+			return rungateway.SpawnResult{}, err
+		}
+		return rungateway.SpawnResult{ChildRunID: "r-router", Status: "succeeded", OutputSHA: sha, OutputPreview: prev, Provisioned: true}, nil
+	}
+	l, err := engine.OpenLog(s.dir, "r-leaf")
+	if err != nil {
+		return rungateway.SpawnResult{}, err
+	}
+	defer func() { _ = l.Close() }()
+	bind := engine.Binding{Role: role, Workflow: workflow, RunID: "r-leaf", ParentRunID: parent.RunID, Depth: 1}
+	n := len(s.doors)
+	evs := []engine.Event{
+		{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission},
+		{Type: "step_started", Step: "s", Agent: "chat"},
+	}
+	evs = append(evs, s.doors...)
+	evs = append(evs,
+		engine.Event{Type: "step_failed", Step: "s", DoorCalls: &n},
+		engine.Event{Type: "workflow_finished", Status: "failed", Reason: "boom"})
+	for _, e := range evs {
+		e.Time, e.Binding = time.Now().UTC(), bind
+		if err := l.Append(e); err != nil {
+			return rungateway.SpawnResult{}, err
+		}
+	}
+	return rungateway.SpawnResult{ChildRunID: "r-leaf", Status: "failed", Reason: "boom", Provisioned: true}, s.err
+}
+
+// A leaf that wrote and then failed has still changed the store. The receipt
+// follows the failure and counts its succeeded writes from the leaf's ledger;
+// with no answer shown, it prints no provenance line even though the leaf's
+// chat call succeeded.
+func TestFailedLeafStillReportsItsWrites(t *testing.T) {
+	for name, spawnErr := range map[string]error{"failed status": nil, "spawn error": errors.New("lost the compartment")} {
+		t.Run(name, func(t *testing.T) {
+			cfg := askCfg()
+			reg, errs := registry.Build(cfg)
+			if len(errs) > 0 {
+				t.Fatalf("registry: %v", errs)
+			}
+			orch, _ := reg.Agent(orchestratorAgent)
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			store, err := newStore(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			sp := &ledgerSpawner{store: store, dir: dir, pick: `{"role":"dev","workflow":"generic-chat"}`, err: spawnErr,
+				doors: []engine.Event{toolCall("memory_upsert", "succeeded"), toolCall("memory_upsert", "succeeded"), chatCall("succeeded")}}
+			gw := rungateway.New(cfg.Gateway, ".", nil, logger, "").WithSpawner(sp)
+			log, err := engine.OpenLog(dir, "r-orch")
+			if err != nil {
+				t.Fatal(err)
+			}
+			menu := projectMenu(orch, reg)
+			var served servedLeaf
+			var out, msg strings.Builder
+			code := runOrchestration(context.Background(), orchestration{
+				gw: gw, bind: engine.Binding{Role: orchestratorRole, Workflow: askWorkflow, RunID: "r-orch"},
+				orch: orch, reg: reg, menu: menu, admitted: menu, prompt: "hi", store: store,
+				log: log, logger: logger, yes: true,
+				in: strings.NewReader(""), out: &out, msg: &msg, served: &served,
+			})
+			if err := log.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if code != 1 || out.Len() != 0 || served.answered || served.runID != "r-leaf" {
+				t.Fatalf("a failed leaf must exit 1 with no answer and its run recorded: code=%d out=%q served=%+v", code, out.String(), served)
+			}
+			var b strings.Builder
+			receiptAfter(&b, dir, "r-orch", served, receiptTools)
+			got := b.String()
+			enforced, asserted, ok := strings.Cut(got, "agent-asserted (")
+			if !ok {
+				t.Fatalf("a failed leaf that ran must still get a receipt:\n%s", got)
+			}
+			if !strings.Contains(leafBlock(t, enforced), "    write-tool calls succeeded: 2 (memory_upsert on memory ×2)\n") {
+				t.Errorf("the failed leaf's succeeded writes must be counted:\n%s", got)
+			}
+			if !strings.Contains(enforced, "no answer was printed; run r-leaf was recorded, and what the ledgers hold of it follows\n") {
+				t.Errorf("the receipt of a failed run must say no answer was printed:\n%s", got)
+			}
+			if l := provenanceLine(asserted); l != "" {
+				t.Errorf("no answer was shown, so no provenance line may print, got %q", l)
+			}
+		})
+	}
+}
+
+// A run that never started a leaf has no receipt: nothing ran to report on.
+func TestNoReceiptWithoutAStartedLeaf(t *testing.T) {
+	var b strings.Builder
+	receiptAfter(&b, receiptLedgers(t), "r-orch", servedLeaf{}, receiptTools)
+	if b.Len() != 0 {
+		t.Fatalf("no leaf started, no receipt, got:\n%s", b.String())
+	}
+}
+
+// breakLeafChain edits the leaf ledger's step terminal, after its door
+// records: the records before the break are still read, and the chain no
+// longer verifies.
+func breakLeafChain(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "r-leaf.jsonl")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	i := len(lines) - 2
+	edited := strings.Replace(lines[i], `"step":"s"`, `"step":"t"`, 1)
+	if edited == lines[i] {
+		t.Fatal("fixture edit did not apply")
+	}
+	lines[i] = edited
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The door, write and refusal counts rest on the leaf ledger's records too.
+// When that ledger's chain does not verify, every count in its block says so,
+// and a verified ledger's block stays unqualified.
+func TestReceiptQualifiesDoorFactsOnUnverifiedLeafLedger(t *testing.T) {
+	const q = " (ledger integrity not verified)"
+	doors := []engine.Event{toolCall("memory_upsert", "succeeded"), toolCall("memory_search", "refused"), chatCall("succeeded")}
+	dir := receiptLedgersWith(t, identity.Invoker{Subject: "dana@example.com", Method: "asserted"}, doors)
+	breakLeafChain(t, dir)
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", leafOf("grounded"), receiptTools)
+	enforced, _, _ := strings.Cut(b.String(), "agent-asserted (")
+	block := leafBlock(t, enforced)
+	for _, want := range []string{
+		"    this run's ledger chain did not verify (broken): the counts below are from the records that could be read and may be partial\n",
+		"    door calls: model_call chat x1, tool_call x2" + q + "\n",
+		"    model chat: attempted ×1 (succeeded ×1)" + q + "\n",
+		"    write-tool calls succeeded: 1 (memory_upsert on memory ×1)" + q + "\n",
+		"    refused model or tool calls: 1 (tool resource memory ×1)" + q + "\n",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("unverified leaf block missing %q:\n%s", want, block)
+		}
+	}
+	// The classifier's ledger verified: its block carries no qualifier.
+	if rest := strings.Replace(enforced, block, "", 1); strings.Contains(rest, q) || strings.Contains(rest, "did not verify") {
+		t.Errorf("a verified ledger's block must stay unqualified:\n%s", rest)
+	}
+	enforced, _ = receiptWith(t, "grounded", doors...)
+	if strings.Contains(enforced, q) || strings.Contains(enforced, "did not verify") || strings.Contains(enforced, "completeness gap:") {
+		t.Errorf("a verified, complete leaf ledger must print unqualified facts:\n%s", enforced)
+	}
+}
+
+// A ledger whose chain verifies but which does not account for every door
+// call can be short of calls: the block says so.
+func TestReceiptNotesCompletenessGapOnLeafBlock(t *testing.T) {
+	dir := t.TempDir()
+	inv := identity.Invoker{Subject: "dana@example.com", Method: "asserted"}
+	src := receiptLedgersWith(t, inv, []engine.Event{toolCall("memory_upsert", "succeeded")})
+	for _, id := range []string{"r-orch", "r-router"} {
+		raw, err := os.ReadFile(filepath.Join(src, id+".jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The leaf's step terminal admits two door calls; one is recorded.
+	child := engine.Binding{Invoker: inv, Role: "dev", Workflow: "generic-chat", RunID: "r-leaf", ParentRunID: "r-orch", Depth: 1}
+	two := 2
+	l, err := engine.OpenLog(dir, "r-leaf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range []engine.Event{
+		{Type: "workflow_started", DoorAccounting: engine.DoorAccountingAdmission},
+		{Type: "step_started", Step: "s", Agent: "chat"},
+		toolCall("memory_upsert", "succeeded"),
+		{Type: "step_succeeded", Step: "s", DoorCalls: &two},
+		{Type: "workflow_finished", Status: "succeeded"},
+	} {
+		e.Time, e.Binding = time.Now().UTC(), child
+		if err := l.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", leafOf(""), receiptTools)
+	enforced, _, _ := strings.Cut(b.String(), "agent-asserted (")
+	if !strings.Contains(enforced, "ledger r-leaf: chain verified, completeness gap") {
+		t.Fatalf("fixture: the leaf ledger must verify with a completeness gap:\n%s", enforced)
+	}
+	block := leafBlock(t, enforced)
+	if !strings.Contains(block, "    ledger completeness gap: this ledger does not account for every door call the run made, so the counts below may be short\n") {
+		t.Errorf("a completeness gap must be noted on the leaf's block:\n%s", block)
+	}
+	if !strings.Contains(block, "    write-tool calls succeeded: 1 (memory_upsert on memory ×1)\n") {
+		t.Errorf("a verified chain's counts carry no integrity qualifier:\n%s", block)
+	}
+}
+
+// A run's block counts that run's own ledger only. A spawn call there means a
+// further run may exist whose calls the block does not hold: it says so.
+func TestReceiptDisclosesUncountedChildRuns(t *testing.T) {
+	const note = "this leaf made spawn calls; a run it started has a ledger of its own, and that run's door calls are not counted here"
+	enforced, _ := receiptWith(t, "", engine.Event{Type: "spawn", Agent: "chat", Status: "succeeded", ChildRunID: "r-grandchild"}, chatCall("succeeded"))
+	block := leafBlock(t, enforced)
+	if !strings.Contains(block, "    exec and spawn refusals are not counted here\n    "+note+"\n") {
+		t.Errorf("a spawn call must bring the uncounted-child note:\n%s", block)
+	}
+	enforced, _ = receiptWith(t, "", engine.Event{Type: "exec", Agent: "chat", Status: "succeeded"}, chatCall("succeeded"))
+	if strings.Contains(enforced, note) {
+		t.Errorf("no spawn call, no note:\n%s", enforced)
+	}
+}
+
+// Closed input on a terminal is no consent. The refusal names the reason the
+// question was asked: a write for a writer, the provenance otherwise.
+func TestConfirmClosedInputNamesTheReason(t *testing.T) {
+	rw := []config.ToolGrant{{Resource: "memory", Tools: []string{"memory_upsert"}, Mode: "read-write"}}
+	e := runPickTools(t, "grounded", rw, "dev", "generic-chat", true, false, true, "", "x")
+	msg := e.msg.String()
+	if e.code == 0 || e.sp.role != "" || !strings.Contains(msg, "no confirmation available: this run will write to your store, which cannot be undone, so it needs --yes") || strings.Contains(msg, "not grounded") {
+		t.Fatalf("a grounded writer with closed input must refuse with write wording: code=%d msg=%q", e.code, msg)
+	}
+	e = runPick(t, "generated", "dev", "generic-chat", true, false, true, "", "x")
+	msg = e.msg.String()
+	if e.code == 0 || e.sp.role != "" || !strings.Contains(msg, "no confirmation available: this answer is not grounded, so it needs --yes") {
+		t.Fatalf("an ungrounded reader with closed input keeps the provenance wording: code=%d msg=%q", e.code, msg)
+	}
+}
+
+// A ledger with no final record may be missing whatever came after its last
+// one: the block says the counts stop there.
+func TestReceiptNotesUnterminatedLeafLedger(t *testing.T) {
+	dir := receiptLedgersWith(t, identity.Invoker{Subject: "dana@example.com", Method: "asserted"},
+		[]engine.Event{toolCall("memory_upsert", "succeeded")})
+	path := filepath.Join(dir, "r-leaf.jsonl")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if err := os.WriteFile(path, []byte(strings.Join(lines[:len(lines)-1], "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", servedLeaf{runID: "r-leaf"}, receiptTools)
+	block := leafBlock(t, b.String())
+	if !strings.Contains(block, "    ledger completeness unterminated: this ledger has no final record, so calls made after its last record are not counted below\n") ||
+		!strings.Contains(block, "    write-tool calls succeeded: 1 (memory_upsert on memory ×1)\n") {
+		t.Errorf("an unterminated leaf ledger must be noted on its block, its counts unqualified:\n%s", b.String())
 	}
 }

@@ -31,7 +31,7 @@ not present in `examples/config/` — they exist to show a rule from
 | Enabled | `enabled` | bool | no | `true` |
 | Model | `model` | string | no | — |
 | EmbeddingModel | `embedding_model` | string | no | — |
-| Grounding | `grounding` | string (`generated` or `grounded`) | no | `generated` |
+| Grounding | `grounding` | string (`generated`, `grounded` or `mixed`) | no | unset: treated as `generated` by the `ask` confirmation gate, shown as "no provenance declared" in the receipt |
 | Instruction | `instruction` | string | no | — |
 | Tools | `tools` | list of tool grants ({resource, tools} or {resource, mode} objects) | no | none |
 | Output | `output` | string | no | — |
@@ -84,10 +84,24 @@ resolves it through [`models`](#models).
 
 ### `grounding`
 
-Optional string: `generated` or `grounded`; any other value fails `apply`
-validation. Declares whether the agent's answers are drawn from governed sources
-(`grounded`) or are free-form model output (`generated`). Empty means
-`generated`, so an unset agent is treated as needing a human confirmation.
+Optional string: `generated`, `grounded` or `mixed`; any other value fails
+`apply` validation. Declares whether the agent's answers are drawn from governed
+sources (`grounded`), are free-form model output (`generated`), or draw on both
+your data and the model's own knowledge (`mixed`). It is the operator's
+declaration, not a measurement.
+
+Two places read it, and they treat an empty value differently:
+
+- **The confirm gate in `agenthof ask`** treats empty as `generated`. `ask`
+  confirms before running an agent that is not `grounded` (so `generated`,
+  `mixed` and unset all confirm) **or** that holds a read-write tool grant, even
+  if it is `grounded`. On a write the prompt reads "It will write to your store;
+  this cannot be undone"; with no terminal and no `--yes` the run is refused with
+  a message saying the same. See [the ask lifecycle](../lifecycle-ask.md#the-confirmation-gate).
+- **The `ask` receipt** reports an empty value as "no provenance declared", never
+  as a declared `generated`, and shows the declaration only beside what the
+  agent's own run ledger recorded. See
+  [the answer and the receipt](../lifecycle-ask.md#the-answer-and-the-receipt).
 
 ### `embedding_model`
 

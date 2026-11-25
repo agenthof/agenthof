@@ -550,7 +550,7 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 	// The files, marshaled once: the bytes disclosed are the bytes written.
 	def.Provenance.CardSHA256 = digest
 	def.Provenance.CardVersion = card.Version
-	files, err := enrollFiles(*name, def, owner.AllowedGroups)
+	files, err := enrollFiles(*name, def, owner.AllowedGroups, card.Description)
 	if err != nil {
 		return enrollRefusal(stderr, "%v", err)
 	}
@@ -681,11 +681,21 @@ func cmdEnroll(argv []string, stdout, stderr io.Writer) int {
 // enrollFiles marshals the three new files for an enrolled agent, in the
 // order they are written: workflow, role, then the agent last (so an agent
 // file exists only once everything it needs does). groups are the owner
-// role's allowed_groups, copied to the dedicated role.
-func enrollFiles(name string, def config.AgentDef, groups []string) ([]enrollFile, error) {
+// role's allowed_groups, copied to the dedicated role. cardDesc is the card's
+// top-level description: untrusted, so it is passed through origin.Clean
+// (printable runes, capped) here, the one place it enters the files. A card
+// with none leaves the generic descriptions unchanged; otherwise the cleaned
+// text describes the agent and its workflow, which is what ask's menu shows.
+func enrollFiles(name string, def config.AgentDef, groups []string, cardDesc string) ([]enrollFile, error) {
+	cardDesc = origin.Clean(cardDesc)
+	wfDesc := "Runs the enrolled agent " + name + " as a spawned child"
+	agDesc := "Enrolled third-party agent (card version " + def.Provenance.CardVersion + "); spawn-only"
+	if cardDesc != "" {
+		wfDesc, agDesc = cardDesc, cardDesc
+	}
 	wf, err := yaml.Marshal(enrollWorkflowYAML{
 		Name:        name,
-		Description: "Runs the enrolled agent " + name + " as a spawned child",
+		Description: wfDesc,
 		Steps:       []enrollStepYAML{{Name: "run", Agent: name}},
 	})
 	if err != nil {
@@ -702,7 +712,7 @@ func enrollFiles(name string, def config.AgentDef, groups []string) ([]enrollFil
 	}
 	ag, err := yaml.Marshal(enrollAgentYAML{
 		Name:           name,
-		Description:    "Enrolled third-party agent (card version " + def.Provenance.CardVersion + "); spawn-only",
+		Description:    agDesc,
 		Model:          def.Model,
 		EmbeddingModel: def.EmbeddingModel,
 		Tools:          def.Tools,

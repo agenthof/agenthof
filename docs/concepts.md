@@ -53,12 +53,17 @@ as building every mode of it now:
    agent calls the per-run listener with the run token and a logical model
    name. Agenthof allows only that agent's effective model, injects the
    per-role provider key (never the run token), forwards to the configured
-   endpoint, and records a `model_call`. A provisioned role key carries
+   endpoint, and records a `model_call` whose `call_kind` says whether it was a
+   chat or an embeddings call. A provisioned role key carries
    `budget_usd_month` to the upstream gateway, which enforces it; with no
    role key, the route's `api_key_env` is used and no budget applies.
    Agenthof does not itself cap spend. A streamed call is recorded without
    token counts. The prompt and the completion are not written to the
-   ledger. See [`lifecycle-model.md`](lifecycle-model.md).
+   ledger. See [`lifecycle-model.md`](lifecycle-model.md). When `agenthof ask`
+   prints its receipt, the facts in it, including where an agent says its
+   answer comes from, are read from these recorded calls rather than from the
+   agent's grants or the answer text; see
+   [`lifecycle-ask.md`](lifecycle-ask.md#the-answer-and-the-receipt).
 2. **Tool/MCP gateway** — the inbound MCP proxy an agent's declared tools
    (`tools:` entries naming `gateway.yaml` tool resources — a whole resource,
    or only named tools within it) are reached through (see

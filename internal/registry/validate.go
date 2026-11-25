@@ -132,10 +132,10 @@ func Validate(cfg config.Config) []ValidationError {
 		}
 
 		switch a.Grounding {
-		case "", "generated", "grounded":
+		case "", "generated", "grounded", "mixed":
 		default:
 			add(a.SourceFile, a.Name, "bad-grounding",
-				fmt.Sprintf("grounding %q must be \"generated\" or \"grounded\"", a.Grounding))
+				fmt.Sprintf("grounding %q must be \"generated\", \"grounded\" or \"mixed\"", a.Grounding))
 		}
 
 		effectiveExec := a.EffectiveExecution()

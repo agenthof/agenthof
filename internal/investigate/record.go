@@ -50,6 +50,18 @@ type Record struct {
 	// of it. Absent when none was recorded. Additive and omitempty.
 	ChildArtifact map[string]ArtifactRef `json:"child_artifact,omitempty"`
 
+	// CallKind, Tool, ResourcesTouched and Status carry the per-call
+	// evidence the ledger recorded, each origin.Clean'd (the ledger's writer
+	// may be hostile): which model-door route a model_call took ("chat" |
+	// "embeddings"), the tool a tool_call invoked, the resources it touched,
+	// and, on model_call and tool_call events only, the call's status (succeeded | started | failed | refused, carried
+	// verbatim, never collapsed). Absent when the event did not record them.
+	// Additive and omitempty.
+	CallKind         string   `json:"call_kind,omitempty"`
+	Tool             string   `json:"tool,omitempty"`
+	ResourcesTouched []string `json:"resources_touched,omitempty"`
+	Status           string   `json:"status,omitempty"`
+
 	// Anchor is what a control "anchor" record says it pinned, and — on a
 	// success record — whether this reader could stand behind it, decided
 	// offline. Absent on every record that is not an anchor. Present on
@@ -89,6 +101,18 @@ func childArtifact(in map[string]engine.ChildArtifactRef) map[string]ArtifactRef
 	return out
 }
 
+// cleanAll returns each string origin.Clean'd, or nil when there are none.
+func cleanAll(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = origin.Clean(v)
+	}
+	return out
+}
+
 // normalizeRun maps a run engine.Event into the unified Record shape.
 // lineIdx is the event's position within its run log, used for merge
 // ordering.
@@ -100,8 +124,10 @@ func childArtifact(in map[string]engine.ChildArtifactRef) map[string]ArtifactRef
 // Status to the target step name), so copying it blindly would leak a step
 // name into Outcome; every other event type leaves Outcome empty.
 func normalizeRun(e engine.Event, lineIdx int) Record {
-	outcome := ""
+	outcome, status := "", ""
 	switch e.Type {
+	case "model_call", "tool_call":
+		status = origin.Clean(e.Status) // a call status; other types reuse Status for unrelated things
 	case "workflow_finished":
 		outcome = e.Status // "succeeded" | "failed"
 	case "run_refused":
@@ -117,17 +143,21 @@ func normalizeRun(e engine.Event, lineIdx int) Record {
 			Issuer:  e.Binding.Invoker.Issuer,
 			Method:  e.Binding.Invoker.Method,
 		},
-		Role:          e.Binding.Role,
-		Workflow:      e.Binding.Workflow,
-		Agent:         e.Agent,
-		Outcome:       outcome,
-		Reason:        e.Reason,
-		ConfigHash:    e.ConfigHash,
-		ArtifactSHA:   e.ArtifactSHA,
-		ParentRunID:   e.Binding.ParentRunID,
-		Depth:         e.Binding.Depth,
-		ChildArtifact: childArtifact(e.ChildArtifact),
-		pos:           lineIdx,
+		Role:             e.Binding.Role,
+		Workflow:         e.Binding.Workflow,
+		Agent:            e.Agent,
+		Outcome:          outcome,
+		Reason:           e.Reason,
+		ConfigHash:       e.ConfigHash,
+		ArtifactSHA:      e.ArtifactSHA,
+		ParentRunID:      e.Binding.ParentRunID,
+		Depth:            e.Binding.Depth,
+		ChildArtifact:    childArtifact(e.ChildArtifact),
+		CallKind:         origin.Clean(e.CallKind),
+		Tool:             origin.Clean(e.Tool),
+		ResourcesTouched: cleanAll(e.ResourcesTouched),
+		Status:           status,
+		pos:              lineIdx,
 	}
 }
 

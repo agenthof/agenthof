@@ -17,6 +17,9 @@ stdout 'ledger completeness: complete \(1 door call\(s\) accounted\)'
 grep '"type":"step_succeeded".*"door_calls":1' logs/${RUNID}.jsonl
 
 grep '"type":"model_call"' logs/${RUNID}.jsonl
+grep '"type":"model_call".*"call_kind":"chat"' logs/${RUNID}.jsonl
+exec agenthof investigate --run $RUNID --log-dir logs --json
+stdout '"call_kind":\s*"chat"'
 grep '"prompt_tokens":11' logs/${RUNID}.jsonl
 
 -- config/agents/caller.yaml --

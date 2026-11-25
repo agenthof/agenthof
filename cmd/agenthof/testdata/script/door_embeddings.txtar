@@ -19,6 +19,9 @@ grep '"type":"model_call".*"model":"embed"' logs/${RUNID}.jsonl
 grep '"prompt_tokens":7' logs/${RUNID}.jsonl
 ! grep 'completion_tokens' logs/${RUNID}.jsonl
 ! grep 'embedding_call' logs/${RUNID}.jsonl
+grep '"type":"model_call".*"call_kind":"embeddings"' logs/${RUNID}.jsonl
+exec agenthof investigate --run $RUNID --log-dir logs --json
+stdout '"call_kind":\s*"embeddings"'
 exec agenthof audit verify $RUNID --log-dir logs
 
 # an agent with no embedding_model is refused for a routed embedding model

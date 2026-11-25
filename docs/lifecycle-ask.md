@@ -66,7 +66,7 @@ receipt go to stderr, so a piped `ask … | …` carries the answer alone.
       │                       └─ answer read from the artifact store by digest: a pick, or null
       ▼
   6. Act on the pick       null / off-menu ──► print what I can do (succeed)
-      │                     on-menu, ungrounded ──► confirm (or --yes), else stop
+      │                     on-menu, not grounded or can write ──► confirm (or --yes), else stop
       │ confirmed
       ▼
   7. Run the agent         spawn the leaf as a governed child  ──►  read its answer from the store by digest
@@ -127,7 +127,10 @@ recording a refusal, because no run was established to attribute one to.)
 
 The menu offered to the classifier is the orchestrator's `may_spawn` list,
 projected in order, each entry carrying its `{role, workflow}` and a
-description drawn from the workflow (or its first agent). The classifier's own
+description drawn from the workflow (or its first agent). An agent
+[enrolled](lifecycle-enroll.md) from a signed card carries the card's
+description into that menu entry, with unprintable characters dropped and its
+length capped, because the text is untrusted. The classifier's own
 target is never a menu choice. Separately, the **invoker-admitted subset** of
 that menu — the entries whose role would admit *this* invoker — is what the
 "here is what I can do" listing shows; the gate, not the listing, is the
@@ -154,18 +157,23 @@ reason — never the classifier's own words — and treated as "nothing fits".
 
 ## The confirmation gate
 
-When the pick is on the menu, `ask` decides whether the answer needs a human's
-go-ahead before it runs the agent. The test is the picked workflow's agents:
-an agent is waved through only if its configuration declares
+When the pick is on the menu, `ask` decides whether the run needs a human's
+go-ahead before it runs the agent. The test is the picked workflow's agents. An
+agent is waved through only if its configuration declares
 [`grounding: grounded`](reference/config.md#grounding) (it answers from your
-data); any other value, an unset value, or an agent the registry cannot find
-means the answer could be the model's own invention, and `ask` confirms.
+data) **and** it holds no read-write tool grant. Any other grounding (`generated`,
+`mixed`, or unset), a read-write grant, or an agent the registry cannot find
+means `ask` confirms: the answer could be the model's own invention, or the run
+could change your store and a write cannot be taken back.
 
 `--yes` skips the question. Without it, on a terminal, `ask` asks `[y/N]` and
 runs only on an explicit yes; an interrupt ends the prompt as a decline rather
-than blocking. With no terminal to ask on and no `--yes`, an ungrounded pick is
-refused with a message telling you to re-run with `--yes` — consent is never
-assumed from a closed input.
+than blocking. When the workflow can write, the question says so ("It will write
+to your store; this cannot be undone"). With no terminal to ask on and no
+`--yes`, the pick is refused with a message telling you to re-run with `--yes` —
+consent is never assumed from a closed input. A terminal whose input is closed
+is refused the same way, and the message names the reason the question was
+asked: the write when the workflow can write, the ungrounded answer otherwise.
 
 ## Running the agent, and reading the answer
 
@@ -217,22 +225,76 @@ the cursor, recolour, or clear the screen and forge the trust signals around it.
 text in any language is untouched.)
 
 The **receipt** follows on stderr, after the run's own terminal event is on the
-ledger, so its verdicts cover the whole run. It is printed only when an answer
-was produced — a refusal, a no-match, a declined confirmation, or a failure
-ends with its own message on stderr and no receipt. It is a rollup of the run subtree —
-the orchestrator's ledger and every child's — in two deliberately separated
-parts:
+ledger, so its verdicts cover the whole run. It is printed once a leaf run was
+started, whether that run answered or failed: a leaf that fails after writing
+to your store has still written, and the receipt of a failed run says that no
+answer was printed and then reports what the leaf's ledger recorded, its
+succeeded writes included. A run that started no leaf — a refusal, a no-match,
+a declined confirmation, a failed classification, or a spawn the gate refused —
+ends with its own message on stderr and no receipt. The two kinds of spawn
+refusal differ here: a child refused by policy has a run id and a ledger of its
+own holding that refusal, so it still gets a receipt, while a spawn refused at
+the gate has no child run and gets none. It is a rollup of the run
+subtree — the orchestrator's ledger and every child's — in two deliberately
+separated parts. Every fact in it is derived from the run ledgers (the records
+written as the run happened), never from an agent's grants or from the text of
+the answer.
 
 - **Enforced by construction**, read from the run ledgers: the invoker, but
   only when it is an OIDC-verified token; for each child, its containment tier
   as the supervisor reported it and, for an enrolled agent, the measured
-  artifact; the door calls each child run fired; and per ledger, the hash-chain
-  integrity and the completeness verdict. It carries digests and verdicts only —
-  never an artifact body.
+  artifact; and per ledger, the hash-chain integrity and the completeness
+  verdict. For each child it also reports the door calls that child's run fired:
+  - a **door summary** counting the doors opened, with model calls split by
+    their [`call_kind`](lifecycle-model.md#what-the-ledger-records) (`chat`,
+    `embeddings`);
+  - for each model kind and tool resource, **"attempted ×N (succeeded ×M)"** —
+    the statuses the ledger recorded. It says *attempted*, not *sent*: a call
+    that failed or was refused may have been stopped at the door or may have
+    reached the provider or resource first, and the ledger does not say which.
+    A streamed model call is shown as started, because the ledger does not record
+    how a stream ended;
+  - a **write line**, counted from succeeded tool calls on a tool outside its
+    resource's `read_only_tools`. That the call happened and succeeded is the
+    ledger's record; that it counts as a write is the operator's configuration;
+  - the number of **refused** calls.
+
+  These counts are only as good as the ledger they are read from, and the
+  child's block says so where it matters. When that child's hash chain did not
+  verify, a line under the child says the counts come from the records that
+  could be read and may be partial, and every count in the block is qualified
+  "(ledger integrity not verified)". When the chain verifies but the ledger
+  reports a completeness gap or has no final record, a line says the counts may
+  be short. A block counts that run's own ledger only: when the run made spawn
+  calls of its own, a line says a run it started has its own ledger and is not
+  counted there.
+
+  It carries digests and verdicts only — never an artifact body.
 - **Agent-asserted**, declared in configuration or by the caller and **not
   checked** by Agenthof: an invoker that is not an OIDC token (an `--as`
-  identity, shown as asserted by the caller and not verified), and whether the
-  leaf agent calls its answers grounded or model-generated.
+  identity, shown as asserted by the caller and not verified), and where the
+  leaf agent says its answer comes from.
+
+The leaf's provenance line is **evidence-gated**: it appears only when the
+leaf's answer was printed and the leaf
+agent's own ledger shows a `chat` model call that succeeded or was streamed (the
+classifier's calls, on another ledger, never count). The wording follows the
+operator's `grounding`:
+
+| Declared | Line |
+| --- | --- |
+| `grounded` | from your data |
+| `mixed` | your notes and the model |
+| `generated` | the model's own knowledge |
+| unset | no provenance declared |
+
+Each line sits beside an observed-retrieval note: "retrieval observed
+(read-tool call ×K)" when the leaf's ledger holds K succeeded read-only tool
+calls, or "no retrieval observed". A `grounded` or `mixed` declaration with no
+retrieval behind it is printed as declared only, never as an unqualified "from
+your data". When the leaf ledger's hash chain did not verify, the provenance
+line is qualified "(leaf ledger integrity not verified)", as the counts in the
+leaf's block are qualified above.
 
 The receipt reuses the honest wording of
 [Article III](constitution.md): the chain links each record to the one before
@@ -265,10 +327,10 @@ plainly where it is claimed.
   reason and treated as "nothing fits". The classifier never widens what can
   run.
 - **Grounding is an operator's declaration, not a measurement.** The confirm
-  gate and the receipt both trust the agent's configured `grounding`; Agenthof
-  does not verify that a "grounded" agent actually answered from your data. The
-  grounded-answer path — retrieval agents whose grounding is earned — is
-  reserved for a later increment.
+  gate trusts the agent's configured `grounding`, and the receipt shows it beside
+  what the ledger observed. A retrieval note shows that a read-only tool call
+  succeeded, not that the answer used what it returned; Agenthof does not verify
+  that a "grounded" agent actually answered from your data.
 - **The answer's integrity rests on the store and the recorded digest.** `ask`
   trusts that the artifact at the recorded digest is the leaf's answer; the
   spawn subtree's ledgers are the evidence for how that answer was produced.

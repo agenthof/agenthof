@@ -161,3 +161,58 @@ func TestWriteNewFilesIsExclusiveAndRollsBack(t *testing.T) {
 		t.Error("a file created before the collision was not rolled back")
 	}
 }
+
+func enrollDescFixture(t *testing.T, desc string) (config.AgentDef, config.WorkflowDef) {
+	t.Helper()
+	def := config.AgentDef{Provenance: &config.Provenance{CardVersion: "1.0.0"}}
+	files, err := enrollFiles("scribe", def, nil, desc)
+	if err != nil {
+		t.Fatalf("enrollFiles: %v", err)
+	}
+	ag, err := enrollReload[config.AgentDef](files[2].data, files[2].rel)
+	if err != nil {
+		t.Fatalf("reload agent: %v", err)
+	}
+	wf, err := enrollReload[config.WorkflowDef](files[0].data, files[0].rel)
+	if err != nil {
+		t.Fatalf("reload workflow: %v", err)
+	}
+	return ag, wf
+}
+
+func TestEnrollCarriesCleanedCappedCardDescription(t *testing.T) {
+	raw := "Summarises\x1b[2J meetings\x00\n" + strings.Repeat("x", 500)
+	ag, wf := enrollDescFixture(t, raw)
+	for _, d := range []string{ag.Description, wf.Description} {
+		if !strings.HasPrefix(d, "Summarises[2J meetings") {
+			t.Fatalf("description not cleaned: %q", d)
+		}
+		for _, r := range d {
+			if r < 0x20 || r == 0x7f {
+				t.Fatalf("control character survived: %q", d)
+			}
+		}
+		if n := len([]rune(d)); n != 200 {
+			t.Fatalf("description is %d runes, want the 200-rune cap", n)
+		}
+	}
+}
+
+func TestEnrollWithoutCardDescriptionKeepsGenericText(t *testing.T) {
+	ag, wf := enrollDescFixture(t, "")
+	if want := "Enrolled third-party agent (card version 1.0.0); spawn-only"; ag.Description != want {
+		t.Fatalf("agent description = %q, want %q", ag.Description, want)
+	}
+	if want := "Runs the enrolled agent scribe as a spawned child"; wf.Description != want {
+		t.Fatalf("workflow description = %q, want %q", wf.Description, want)
+	}
+}
+
+func TestPrintMenuShowsCleanedEnrolledDescription(t *testing.T) {
+	_, wf := enrollDescFixture(t, "Takes notes\x1b[31m well")
+	var b strings.Builder
+	printMenu(&b, "r1", []menuEntry{{Role: "scribe", Workflow: wf.Name, Description: wf.Description}})
+	if !strings.Contains(b.String(), "scribe/scribe: Takes notes[31m well\n") || strings.ContainsRune(b.String(), 0x1b) {
+		t.Fatalf("menu = %q", b.String())
+	}
+}

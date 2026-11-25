@@ -235,11 +235,14 @@ The governed core is real and runnable today:
   request, and runs the chosen one as a spawned child in its own compartment. It
   routes only to the orchestrator's `may_spawn` list — re-checked at the spawn
   gate, so the classifier cannot widen what runs — and runs an answer that is
-  not grounded only after a human confirms (or `--yes`). The answer comes back
-  read from the artifact store by digest, never riding a ledger, and is printed
-  with a receipt that separates what is enforced by construction — the invoker,
-  each child's containment tier and door calls, each ledger's chain and
-  completeness — from what the agent only asserts. On macOS Seatbelt the
+  not grounded, or that can write to your store, only after a human confirms (or
+  `--yes`). The answer comes back read from the artifact store by digest, never
+  riding a ledger, and is printed with a receipt that separates what is enforced
+  by construction — the invoker, each child's containment tier and door calls
+  (attempted and succeeded, counted from the ledger), each ledger's chain and
+  completeness — from what the agent only asserts, which is shown only when the
+  agent's own ledger records a chat model call, beside whether any retrieval was
+  observed. On macOS Seatbelt the
   installed configuration is denied to the compartments by the supervisor's
   `deny_read`; on podman they have no host access by construction.
 - **Served runs and a read API** — `agenthof serve` hosts concurrent

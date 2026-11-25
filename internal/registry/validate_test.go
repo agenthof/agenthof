@@ -1006,7 +1006,7 @@ func TestValidateSpawnOnly(t *testing.T) {
 }
 
 func TestGroundingRejectsUnknown(t *testing.T) {
-	for _, g := range []string{"", "generated", "grounded"} {
+	for _, g := range []string{"", "generated", "grounded", "mixed"} {
 		cfg := baseCfg()
 		cfg.Agents[0].Grounding = g
 		if c := codes(Validate(cfg)); c["bad-grounding"] != 0 {
@@ -1015,6 +1015,11 @@ func TestGroundingRejectsUnknown(t *testing.T) {
 	}
 	cfg := baseCfg()
 	cfg.Agents[0].Grounding = "bogus"
+	maybe := baseCfg()
+	maybe.Agents[0].Grounding = "maybe"
+	if c := codes(Validate(maybe)); c["bad-grounding"] != 1 {
+		t.Fatalf("maybe must be rejected: %v", c)
+	}
 	var msg string
 	for _, e := range Validate(cfg) {
 		if e.Code == "bad-grounding" {

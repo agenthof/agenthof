@@ -922,6 +922,7 @@ func resultErrorText(result *mcp.CallToolResult) string {
 // v1Route describes one OpenAI-compatible route on the model door. The zero
 // value of every optional field is the chat route's behavior.
 type v1Route struct {
+	kind        string                       // the call_kind stamped on every model_call this route records
 	path        string                       // the mux pattern, and the path joined onto the route's endpoint
 	allowed     func(config.AgentDef) string // the one logical model this agent may name here; "" means none
 	responseCap int                          // largest upstream body buffered, in bytes
@@ -944,6 +945,7 @@ const (
 // the configured default when it has none.
 func (p *Gateway) chatRoute() v1Route {
 	return v1Route{
+		kind: "chat",
 		path: "/v1/chat/completions",
 		allowed: func(agent config.AgentDef) string {
 			if agent.Model != "" {
@@ -960,6 +962,7 @@ func (p *Gateway) chatRoute() v1Route {
 // an agent with none configured is refused for every request.
 func (p *Gateway) embeddingsRoute() v1Route {
 	return v1Route{
+		kind:            "embeddings",
 		path:            "/v1/embeddings",
 		allowed:         func(agent config.AgentDef) string { return agent.EmbeddingModel },
 		responseCap:     maxEmbeddingsResponse,
@@ -981,7 +984,13 @@ func (p *Gateway) v1Routes() []v1Route {
 // registerDoor took; every admitted call appends exactly one event, including
 // one still in flight when Stop runs (Stop cuts the connection, which cancels
 // the outbound request and lands in ErrorHandler).
-func (p *Gateway) modelDoor(rt v1Route, bind engine.Binding, agent config.AgentDef, appendEvent func(engine.Event), logger *slog.Logger) doorHandler {
+func (p *Gateway) modelDoor(rt v1Route, bind engine.Binding, agent config.AgentDef, rawAppend func(engine.Event), logger *slog.Logger) doorHandler {
+	// Every model_call this door records is stamped with the route's kind here,
+	// once, so no append site can omit it.
+	appendEvent := func(ev engine.Event) {
+		ev.CallKind = rt.kind
+		rawAppend(ev)
+	}
 	return func(w http.ResponseWriter, r *http.Request, body []byte) {
 		var logical string
 		refuse := func(reason string, code int) {

@@ -106,6 +106,34 @@ func TestReadGoogleDocCanned(t *testing.T) {
 	}
 }
 
+func TestDatedNotes(t *testing.T) {
+	cs := connect(t)
+	hits, isErr := call(t, cs, "search", map[string]any{"query": "sync"})
+	if isErr {
+		t.Fatalf("search sync errored: %q", hits)
+	}
+	for _, id := range []string{"note-3 ", "note-4 ", "note-5 "} {
+		if !strings.Contains(hits, id) {
+			t.Fatalf("search sync = %q, want %q", hits, id)
+		}
+	}
+	if strings.Contains(hits, "note-1 ") || strings.Contains(hits, "note-2 ") {
+		t.Fatalf("search sync = %q, must not match the undated notes", hits)
+	}
+	for id, date := range map[string]string{"note-3": "2026-09-14", "note-4": "2026-09-21", "note-5": "2026-09-28"} {
+		body, isErr := call(t, cs, "readGoogleDoc", map[string]any{"documentId": id})
+		if isErr || !strings.HasPrefix(body, "Meeting notes - "+date+"\n") {
+			t.Fatalf("readGoogleDoc %s = %q (error %v), want a dated header %s", id, body, isErr, date)
+		}
+		if want := map[string]string{"note-3": "entitlement", "note-4": "JWT"}[id]; want != "" && !strings.Contains(body, want) {
+			t.Fatalf("readGoogleDoc %s lacks its topic %q", id, want)
+		}
+		if strings.Count(body, "\n\n") < 3 {
+			t.Fatalf("readGoogleDoc %s has too few paragraphs to chunk", id)
+		}
+	}
+}
+
 func TestReadGoogleDocErrorCanary(t *testing.T) {
 	cs := connect(t)
 	got, isErr := call(t, cs, "readGoogleDoc", map[string]any{"documentId": "__error__:CANARY123"})

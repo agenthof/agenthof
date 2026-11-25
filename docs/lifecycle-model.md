@@ -92,11 +92,22 @@ A `model_call` event names the agent, the **logical** model, and a status.
 It does not contain the prompt or the completion — not the text, and not a
 hash of either.
 
+Every `model_call` carries a `call_kind` saying which model-door route made the
+call: `chat` (`/v1/chat/completions`) or `embeddings` (`/v1/embeddings`). It is
+stamped once by the door on every record it writes, refused and failed calls
+included. The field is additive: records written before it existed carry none,
+and a reader renders an unknown value verbatim. `agenthof investigate --json`
+shows it as `call_kind`; `audit` has no label for it and reflects it only through
+the line's token format (below).
+
 An embeddings call is recorded as a `model_call` too, not a new event kind. Its
 model is the embedding model's logical name. It carries `prompt_tokens` and
 never `completion_tokens`, and `audit` prints it as
-`model <name> — <N> prompt tokens`, with no completion clause (a chat call whose
-provider sent no completion count renders the same prompt-only line). Neither the input
+`model <name> — <N> prompt tokens`, with no completion clause. A chat call whose
+provider sent no completion count is not printed that way: it renders
+`<N> prompt / ? completion tokens`. Only a record written before `call_kind`
+existed, which carries no kind and no completion count, falls back to the
+prompt-only line. Neither the input
 text nor the returned vector is recorded, nor a hash of either.
 
 | Response | `model_call` |
