@@ -228,10 +228,13 @@ The **receipt** follows on stderr, after the run's own terminal event is on the
 ledger, so its verdicts cover the whole run. It is printed once a leaf run was
 started, whether that run answered or failed: a leaf that fails after writing
 to your store has still written, and the receipt of a failed run says that no
-answer was produced and then reports what the leaf's ledger recorded, its
+answer was printed and then reports what the leaf's ledger recorded, its
 succeeded writes included. A run that started no leaf — a refusal, a no-match,
 a declined confirmation, a failed classification, or a spawn the gate refused —
-ends with its own message on stderr and no receipt. It is a rollup of the run
+ends with its own message on stderr and no receipt. The two kinds of spawn
+refusal differ here: a child refused by policy has a run id and a ledger of its
+own holding that refusal, so it still gets a receipt, while a spawn refused at
+the gate has no child run and gets none. It is a rollup of the run
 subtree — the orchestrator's ledger and every child's — in two deliberately
 separated parts. Every fact in it is derived from the run ledgers (the records
 written as the run happened), never from an agent's grants or from the text of

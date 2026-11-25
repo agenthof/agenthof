@@ -979,7 +979,7 @@ func renderReceipt(w io.Writer, logDir, runID string, leaf servedLeaf, tools map
 
 	_, _ = fmt.Fprintf(w, "receipt for ask %s\n", runID)
 	if leaf.runID != "" && !leaf.answered {
-		_, _ = fmt.Fprintf(w, "no answer was produced; run %s was started, and what the ledgers recorded of it follows\n", leaf.runID)
+		_, _ = fmt.Fprintf(w, "no answer was printed; run %s was recorded, and what the ledgers hold of it follows\n", leaf.runID)
 	}
 	var invokerAsserted string
 	_, _ = fmt.Fprintln(w, "enforced by construction (from the run ledgers — recorded as the run happened, the containment tier as the supervisor reported it — not the agents' own claims):")

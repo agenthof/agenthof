@@ -1390,8 +1390,8 @@ func TestFailedLeafStillReportsItsWrites(t *testing.T) {
 			if !strings.Contains(leafBlock(t, enforced), "    write-tool calls succeeded: 2 (memory_upsert on memory ×2)\n") {
 				t.Errorf("the failed leaf's succeeded writes must be counted:\n%s", got)
 			}
-			if !strings.Contains(enforced, "no answer was produced") {
-				t.Errorf("the receipt of a failed run must say no answer was produced:\n%s", got)
+			if !strings.Contains(enforced, "no answer was printed; run r-leaf was recorded, and what the ledgers hold of it follows\n") {
+				t.Errorf("the receipt of a failed run must say no answer was printed:\n%s", got)
 			}
 			if l := provenanceLine(asserted); l != "" {
 				t.Errorf("no answer was shown, so no provenance line may print, got %q", l)
