@@ -714,3 +714,27 @@ func TestRenderPrintsTheAnchorLineAfterCompleteness(t *testing.T) {
 		t.Fatalf("torn output lost:\n%s", torn)
 	}
 }
+
+func TestRenderModelCallPrefersCallKind(t *testing.T) {
+	pt, ct := 7, 3
+	cases := []struct {
+		name string
+		ev   engine.Event
+		want string
+		not  string
+	}{
+		{"embeddings kind wins over a stray completion count", engine.Event{CallKind: "embeddings", PromptTokens: &pt, CompletionTokens: &ct}, "model m — 7 prompt tokens", "completion"},
+		{"chat kind without completion usage", engine.Event{CallKind: "chat", PromptTokens: &pt}, "model m — 7 prompt / ? completion tokens", ""},
+		{"unknown kind renders by usage", engine.Event{CallKind: "rerank", PromptTokens: &pt, CompletionTokens: &ct}, "model m — 7 prompt / 3 completion tokens", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.ev.Type, tc.ev.Status, tc.ev.Model, tc.ev.Time = "model_call", "succeeded", "m", time.Unix(0, 0).UTC()
+			events := []engine.Event{tc.ev}
+			out := Render(events, ledger.Head{Count: len(events)}, nil, completeness.Check(events), "")
+			if !strings.Contains(out, tc.want) || (tc.not != "" && strings.Contains(out, tc.not)) {
+				t.Fatalf("render:\n%s", out)
+			}
+		})
+	}
+}
