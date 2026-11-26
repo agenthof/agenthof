@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -921,30 +923,41 @@ func TestReceiptComposesSubtree(t *testing.T) {
 	}
 }
 
-// The receipt prints each verified ledger's head in the <count>:<hex> form
-// `audit verify <run> --expect-head` accepts, equal to that ledger's real
-// head. The head is what commits the tail: a rewrite that recomputes every
-// later link — the trivial case being an edit to the sole final record —
-// still verifies, so only a head recorded off the machine catches it. The
-// receipt must therefore print the ledger's true head for the operator to
-// record; the --expect-head round trip itself is covered in
-// anchor_runs_verify_test.go.
+// The receipt prints each verified ledger's head as `head <hex> (<n> events)`,
+// equal to that ledger's real head: n records and the sha256 of the final
+// record's line. The head is what commits the tail: a rewrite that recomputes
+// every later link — the trivial case being an edit to the sole final record —
+// still verifies, so only a head recorded off the machine catches it. The head
+// is computed here straight from the file bytes, independently of ledgerHead's
+// own engine.ReadLog call; TestReceiptHeadReplaysThroughAuditVerify below
+// drives the --expect-head round trip.
 func TestReceiptPrintsVerifiedLedgerHead(t *testing.T) {
 	dir := receiptLedgers(t)
 	var b strings.Builder
 	renderReceipt(&b, dir, "r-orch", leafOf("generated"), receiptTools)
 	got := b.String()
 	for _, id := range []string{"r-orch", "r-router", "r-leaf"} {
-		_, head, err := engine.ReadLog(dir, id)
-		if err != nil {
-			t.Fatalf("read %s head: %v", id, err)
-		}
-		want := fmt.Sprintf(", head %s (%d events)", head.Hash, head.Count)
+		n, hash := fileHead(t, filepath.Join(dir, id+".jsonl"))
+		want := fmt.Sprintf(", head %s (%d events)", hash, n)
 		line := receiptLedgerLine(t, got, id)
 		if !strings.HasSuffix(line, want) {
 			t.Errorf("ledger %s line must end with its head %q:\n%s", id, want, line)
 		}
 	}
+}
+
+// fileHead computes a ledger's head independently of the production code: the
+// record count and the sha256 of the final record's line — the bytes the chain
+// hashes, without the trailing newline, exactly as Chain.Append does.
+func fileHead(t *testing.T, path string) (int, string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	sum := sha256.Sum256([]byte(lines[len(lines)-1]))
+	return len(lines), hex.EncodeToString(sum[:])
 }
 
 // An unverified ledger's head is not to be trusted, so no head is printed for
@@ -967,8 +980,8 @@ func TestReceiptOmitsHeadForUnverifiedLedger(t *testing.T) {
 // The head the receipt prints replays through `audit verify --expect-head`:
 // it holds for the untouched ledger (exit 0), and after the final record is
 // edited the chain still verifies — nothing links after it — yet the recorded
-// head no longer matches (exit 4). This is the reported scenario: a tail edit
-// leaves "chain verified", and only a head kept off the machine catches it.
+// head no longer matches (exit 4): a tail edit leaves "chain verified", and
+// only a head kept off the machine catches it.
 func TestReceiptHeadReplaysThroughAuditVerify(t *testing.T) {
 	dir := receiptLedgers(t)
 	var b strings.Builder
@@ -999,9 +1012,9 @@ func TestReceiptHeadReplaysThroughAuditVerify(t *testing.T) {
 	if h2.Hash == head.Hash {
 		t.Fatal("the final-record edit did not change the head")
 	}
-	// The reported symptom: the re-rendered receipt still says the chain
-	// verifies — the tail edit left no broken link — but now prints the new
-	// head, so the old recorded head no longer matches.
+	// The re-rendered receipt still says the chain verifies — the tail edit
+	// left no broken link — but now prints the new head, so the old recorded
+	// head no longer matches.
 	var b2 strings.Builder
 	renderReceipt(&b2, dir, "r-orch", leafOf("generated"), receiptTools)
 	line := receiptLedgerLine(t, b2.String(), "r-orch")

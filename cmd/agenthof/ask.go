@@ -952,8 +952,8 @@ func ledgerHead(logDir, runID string) (int, string) {
 // is reported as-is; the chain is re-read only to print a verified ledger's
 // head, never to re-decide its integrity. Every door, write and refusal fact is
 // counted from ledger records, never from a grant or from the answer; tools
-// (the configured tool
-// resources) only labels a recorded tool call as a read or a write. What the
+// (the configured tool resources) only labels a recorded tool call as a read or
+// a write. What the
 // agents say about themselves is kept apart and labelled, and a leaf agent's
 // declared provenance is printed only when its answer was printed and the
 // leaf's own ledger shows it generated. A leaf that was started and did not
@@ -1075,7 +1075,7 @@ func renderReceipt(w io.Writer, logDir, runID string, leaf servedLeaf, tools map
 	_, _ = fmt.Fprintln(w, "  door calls count every door the run opened, a refused or denied call included")
 	_, _ = fmt.Fprintln(w, "  attempted and succeeded are the statuses the ledger recorded for each model or tool call; a call that failed or was refused may have been stopped at the door or may have reached the provider or resource first — the ledger does not say which")
 	_, _ = fmt.Fprintln(w, "  a write-tool call is a tool call outside its resource's read_only_tools: that it happened and succeeded is the ledger's record, that it is a write is the operator's configuration")
-	_, _ = fmt.Fprintln(w, "  limits: each record is hash-chained to the one before, so editing a record is caught by the next record's link — except the final record, which has none, and a rewrite that recomputes every later link to match. Those, with truncating or regenerating a ledger, are caught only against the head shown on each verified ledger line, kept off this machine: record its hash and re-check later with `agenthof audit verify <run> --expect-head <hash>`, or anchor the run to an external log (`agenthof audit anchor --run`). It is evidence, not a guarantee against someone who controls the ledger.")
+	_, _ = fmt.Fprintln(w, "  limits: each record is hash-chained to the one before, so editing a record is caught by the next record's link — except the final record, which has none, and a rewrite that recomputes every later link to match. Those, with truncating or appending to a ledger, are caught only against the head shown on each verified ledger line, kept off this machine: record its hash and re-check later with `agenthof audit verify <run> --expect-head <hash>`. It is evidence, not a guarantee against someone who controls the ledger.")
 
 	_, _ = fmt.Fprintln(w, "agent-asserted (declared in configuration or by the caller, not checked by agenthof):")
 	if invokerAsserted != "" {

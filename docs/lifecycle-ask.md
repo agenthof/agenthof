@@ -301,11 +301,11 @@ The receipt reuses the honest wording of
 [Article III](constitution.md): each record is hash-chained to the one before
 it, so editing a record is caught by the next record's link — except the final
 record, which has none, and a rewrite that recomputes every later link to
-match. Those, with truncating or regenerating a ledger, are caught only against
+match. Those, with truncating or appending to a ledger, are caught only against
 the head printed on each verified ledger line, kept off the machine: record its
 hash and re-check later with `agenthof audit verify <run> --expect-head
-<hash>`, or anchor the run to an external log (`agenthof audit anchor --run`).
-The chain is evidence, not a guarantee against someone who controls the ledger.
+<hash>`. The chain is evidence, not a guarantee against someone who controls the
+ledger.
 "Door calls" count every door a run opened, a refused or denied call included.
 
 ## Containment of the installed configuration
