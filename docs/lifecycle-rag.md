@@ -248,10 +248,13 @@ write grant for it, not because its instructions say it should not, and
 `rag-ingest` cannot call a chat model because it was never granted one.
 
 The ledger that records all of this is [Article III](constitution.md) evidence:
-each record is hash-chained to the one before, so edits show up, but it is
-limited evidence, not tamper-proof against someone who controls the ledger. It
-carries digests, statuses, and bounded previews; the answer body is read from
-the artifact store by digest and never rides a ledger.
+each record is hash-chained to the one before, so editing a record is caught by
+the next record's link — except the final record, which has none, and a rewrite
+that recomputes every later link to match; those, with truncating the ledger,
+are caught only against a head kept off the machine. It is limited evidence, not
+tamper-proof against someone who controls the ledger. It carries digests,
+statuses, and bounded previews; the answer body is read from the artifact store
+by digest and never rides a ledger.
 
 ## Limits, stated plainly
 
