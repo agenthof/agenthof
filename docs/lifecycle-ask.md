@@ -243,8 +243,9 @@ the answer.
 - **Enforced by construction**, read from the run ledgers: the invoker, but
   only when it is an OIDC-verified token; for each child, its containment tier
   as the supervisor reported it and, for an enrolled agent, the measured
-  artifact; and per ledger, the hash-chain integrity and the completeness
-  verdict. For each child it also reports the door calls that child's run fired:
+  artifact; and per ledger, the hash-chain integrity, the completeness verdict,
+  and — for a verified chain — the head to record off the machine. For each
+  child it also reports the door calls that child's run fired:
   - a **door summary** counting the doors opened, with model calls split by
     their [`call_kind`](lifecycle-model.md#what-the-ledger-records) (`chat`,
     `embeddings`);
@@ -297,10 +298,15 @@ line is qualified "(leaf ledger integrity not verified)", as the counts in the
 leaf's block are qualified above.
 
 The receipt reuses the honest wording of
-[Article III](constitution.md): the chain links each record to the one before
-it, so edits show up; it is evidence, not a guarantee against someone who
-controls the ledger. "Door calls" count every door a run opened, a refused or
-denied call included.
+[Article III](constitution.md): each record is hash-chained to the one before
+it, so editing a record is caught by the next record's link — except the final
+record, which has none, and a rewrite that recomputes every later link to
+match. Those, with truncating or appending to a ledger, are caught only against
+the head printed on each verified ledger line, kept off the machine: record its
+hash and re-check later with `agenthof audit verify <run> --expect-head
+<hash>`. The chain is evidence, not a guarantee against someone who controls the
+ledger.
+"Door calls" count every door a run opened, a refused or denied call included.
 
 ## Containment of the installed configuration
 

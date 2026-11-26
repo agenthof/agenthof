@@ -389,6 +389,14 @@ PY
 grep -Eq "generic-chat/generic-chat +run r-[a-f0-9]+: containment tier seatbelt" "$WORK/ask.err" || { cat "$WORK/ask.err"; fail "the receipt does not name the seatbelt tier on the leaf's line"; }
 grep -q "^receipt for ask $ASK_RUN" "$WORK/ask.err" || fail "no receipt on stderr"
 grep -Eq "ledger $ASK_RUN: chain verified, completeness complete" "$WORK/ask.err" || { cat "$WORK/ask.err"; fail "the ask run's own ledger must report completeness complete in the receipt, not a gap"; }
+# The head the receipt prints for the ask run's own ledger is its real current
+# head: recorded off the box, it replays cleanly through `audit verify
+# --expect-head` (exit 0; a changed head would exit nonzero). The tamper case —
+# a head that no longer matches — is covered by the Go test
+# TestReceiptHeadReplaysThroughAuditVerify.
+ASK_HEAD="$(grep -Eo "ledger $ASK_RUN: chain verified, completeness complete, head [0-9a-f]{64}" "$WORK/ask.err" | grep -Eo '[0-9a-f]{64}' || true)"
+[ -n "$ASK_HEAD" ] || { cat "$WORK/ask.err"; fail "the receipt does not print the ask run's ledger head"; }
+AV_OUT="$("$WORK/agenthof" audit verify "$ASK_RUN" --log-dir "$CTL_DIR/runs" --control-log "$CTL_DIR/control.jsonl" --expect-head "$ASK_HEAD" 2>&1)" || { echo "$AV_OUT"; fail "the receipt head does not replay through audit verify --expect-head"; }
 # `audit <ask-run>` itself must report the orchestrator ledger complete — the
 # acceptance check the completeness fix is for — with both spawns accounted.
 AAUDIT="$("$WORK/agenthof" audit "$ASK_RUN" --log-dir "$CTL_DIR/runs" --control-log "$CTL_DIR/control.jsonl")"

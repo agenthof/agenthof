@@ -931,14 +931,29 @@ func (f *runFacts) render(w io.Writer, integrity, comp string) {
 	}
 }
 
+// ledgerHead returns the hash-verified head of run id's ledger as (count,
+// hex-hash), or (0, "") when the ledger cannot be read or its chain does not
+// fully verify (ReadLog returns a typed error, not a clean head, in that
+// case). It is read straight from disk here rather than carried on an
+// investigate.Source, so the investigate/1 JSON contract is unchanged.
+func ledgerHead(logDir, runID string) (int, string) {
+	_, head, err := engine.ReadLog(logDir, runID)
+	if err != nil {
+		return 0, ""
+	}
+	return head.Count, head.Hash
+}
+
 // renderReceipt prints, to w, what ask can say about the run it just did.
 // The facts come from the run subtree: the orchestrator's ledger (the invoker
 // and, on each parent spawn event, the child's containment tier and measured
 // artifact) and every child ledger (the doors that child's run fired), read
-// and verified by the investigate timeline. Verification is not repeated
-// here. Every door, write and refusal fact is counted from ledger records,
-// never from a grant or from the answer; tools (the configured tool
-// resources) only labels a recorded tool call as a read or a write. What the
+// and verified by the investigate timeline, whose per-ledger integrity verdict
+// is reported as-is; the chain is re-read only to print a verified ledger's
+// head, never to re-decide its integrity. Every door, write and refusal fact is
+// counted from ledger records, never from a grant or from the answer; tools
+// (the configured tool resources) only labels a recorded tool call as a read or
+// a write. What the
 // agents say about themselves is kept apart and labelled, and a leaf agent's
 // declared provenance is printed only when its answer was printed and the
 // leaf's own ledger shows it generated. A leaf that was started and did not
@@ -1038,16 +1053,29 @@ func renderReceipt(w io.Writer, logDir, runID string, leaf servedLeaf, tools map
 		if s.Kind != "run" {
 			continue
 		}
+		id := strings.TrimSuffix(filepath.Base(s.Path), ".jsonl")
 		comp := s.Completeness
 		if comp == "" {
 			comp = "not checked"
 		}
-		_, _ = fmt.Fprintf(w, "  ledger %s: chain %s, completeness %s\n", strings.TrimSuffix(filepath.Base(s.Path), ".jsonl"), s.Integrity, comp)
+		line := fmt.Sprintf("  ledger %s: chain %s, completeness %s", id, s.Integrity, comp)
+		// The chain's current head, in the form `audit verify <run>` prints it:
+		// the value to record off the machine and re-check with `--expect-head
+		// <hash>`, which compares the current head — so a later edit (the final
+		// record included), a truncation, or an appended record is caught.
+		// Printed only for a verified chain; an unverified one's head is not to
+		// be trusted.
+		if s.Integrity == "verified" {
+			if c, hash := ledgerHead(logDir, id); hash != "" {
+				line += fmt.Sprintf(", head %s (%d events)", hash, c)
+			}
+		}
+		_, _ = fmt.Fprintln(w, line)
 	}
 	_, _ = fmt.Fprintln(w, "  door calls count every door the run opened, a refused or denied call included")
 	_, _ = fmt.Fprintln(w, "  attempted and succeeded are the statuses the ledger recorded for each model or tool call; a call that failed or was refused may have been stopped at the door or may have reached the provider or resource first — the ledger does not say which")
 	_, _ = fmt.Fprintln(w, "  a write-tool call is a tool call outside its resource's read_only_tools: that it happened and succeeded is the ledger's record, that it is a write is the operator's configuration")
-	_, _ = fmt.Fprintln(w, "  limits: the chain links each record to the one before it, so edits to a ledger show up; it is evidence, not a guarantee against someone who controls the ledger")
+	_, _ = fmt.Fprintln(w, "  limits: each record is hash-chained to the one before, so editing a record is caught by the next record's link — except the final record, which has none, and a rewrite that recomputes every later link to match. Those, with truncating or appending to a ledger, are caught only against the head shown on each verified ledger line, kept off this machine: record its hash and re-check later with `agenthof audit verify <run> --expect-head <hash>`. It is evidence, not a guarantee against someone who controls the ledger.")
 
 	_, _ = fmt.Fprintln(w, "agent-asserted (declared in configuration or by the caller, not checked by agenthof):")
 	if invokerAsserted != "" {

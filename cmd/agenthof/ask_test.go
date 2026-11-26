@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -918,6 +921,144 @@ func TestReceiptComposesSubtree(t *testing.T) {
 			t.Errorf("leaf block missing %q:\n%s", want, leaf)
 		}
 	}
+}
+
+// The receipt prints each verified ledger's head as `head <hex> (<n> events)`,
+// equal to that ledger's real head: n records and the sha256 of the final
+// record's line. The head is what commits the tail: a rewrite that recomputes
+// every later link — the trivial case being an edit to the sole final record —
+// still verifies, so only a head recorded off the machine catches it. The head
+// is computed here straight from the file bytes, independently of ledgerHead's
+// own engine.ReadLog call; TestReceiptHeadReplaysThroughAuditVerify below
+// drives the --expect-head round trip.
+func TestReceiptPrintsVerifiedLedgerHead(t *testing.T) {
+	dir := receiptLedgers(t)
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", leafOf("generated"), receiptTools)
+	got := b.String()
+	for _, id := range []string{"r-orch", "r-router", "r-leaf"} {
+		n, hash := fileHead(t, filepath.Join(dir, id+".jsonl"))
+		want := fmt.Sprintf(", head %s (%d events)", hash, n)
+		line := receiptLedgerLine(t, got, id)
+		if !strings.HasSuffix(line, want) {
+			t.Errorf("ledger %s line must end with its head %q:\n%s", id, want, line)
+		}
+	}
+}
+
+// fileHead computes a ledger's head independently of the production code: the
+// record count and the sha256 of the final record's line — the bytes the chain
+// hashes, without the trailing newline, exactly as Chain.Append does.
+func fileHead(t *testing.T, path string) (int, string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	sum := sha256.Sum256([]byte(lines[len(lines)-1]))
+	return len(lines), hex.EncodeToString(sum[:])
+}
+
+// An unverified ledger's head is not to be trusted, so no head is printed for
+// a broken chain: breakLeafChain edits r-leaf's penultimate record, breaking
+// the next link, so its line reports a broken chain and carries no head.
+func TestReceiptOmitsHeadForUnverifiedLedger(t *testing.T) {
+	dir := receiptLedgers(t)
+	breakLeafChain(t, dir)
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", leafOf("generated"), receiptTools)
+	line := receiptLedgerLine(t, b.String(), "r-leaf")
+	if strings.Contains(line, "chain verified") {
+		t.Fatalf("the edited r-leaf ledger must not verify: %q", line)
+	}
+	if strings.Contains(line, ", head ") {
+		t.Errorf("an unverified ledger line must carry no head: %q", line)
+	}
+}
+
+// The head the receipt prints replays through `audit verify --expect-head`:
+// it holds for the untouched ledger (exit 0), and after the final record is
+// edited the chain still verifies — nothing links after it — yet the recorded
+// head no longer matches (exit 4): a tail edit leaves "chain verified", and
+// only a head kept off the machine catches it.
+func TestReceiptHeadReplaysThroughAuditVerify(t *testing.T) {
+	dir := receiptLedgers(t)
+	var b strings.Builder
+	renderReceipt(&b, dir, "r-orch", leafOf("generated"), receiptTools)
+	_, head, err := engine.ReadLog(dir, "r-orch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), fmt.Sprintf(", head %s (%d events)", head.Hash, head.Count)) {
+		t.Fatalf("the receipt did not print r-orch's head:\n%s", b.String())
+	}
+	// The control log is used only to find anchor.pub; the unanchored run has
+	// no sidecar, so an absent path is never read.
+	ctl := filepath.Join(dir, "control.jsonl")
+	verify := func(expect string) (int, string) {
+		var out strings.Builder
+		code := cmdAudit([]string{"verify", "r-orch", "--log-dir", dir, "--control-log", ctl, "--expect-head", expect}, &out)
+		return code, out.String()
+	}
+	if code, out := verify(head.Hash); code != 0 {
+		t.Fatalf("the printed head must replay clean, got exit %d:\n%s", code, out)
+	}
+	editFinalRecord(t, filepath.Join(dir, "r-orch.jsonl"))
+	_, h2, err := engine.ReadLog(dir, "r-orch")
+	if err != nil {
+		t.Fatalf("a final-record edit must leave the chain verified, got: %v", err)
+	}
+	if h2.Hash == head.Hash {
+		t.Fatal("the final-record edit did not change the head")
+	}
+	// The re-rendered receipt still says the chain verifies — the tail edit
+	// left no broken link — but now prints the new head, so the old recorded
+	// head no longer matches.
+	var b2 strings.Builder
+	renderReceipt(&b2, dir, "r-orch", leafOf("generated"), receiptTools)
+	line := receiptLedgerLine(t, b2.String(), "r-orch")
+	if !strings.Contains(line, "chain verified") || !strings.Contains(line, fmt.Sprintf(", head %s (", h2.Hash)) {
+		t.Fatalf("after a tail edit the receipt must still verify and print the new head: %q", line)
+	}
+	code, out := verify(head.Hash)
+	if code != 4 || !strings.Contains(out, "expect-head mismatch") {
+		t.Fatalf("the recorded head must now mismatch (exit 4), got exit %d:\n%s", code, out)
+	}
+}
+
+// editFinalRecord rewrites the invoker subject in a ledger's last record in
+// place. Nothing links after the final record, so the chain still verifies;
+// the subject is not part of door accounting, so completeness stays complete;
+// only the head changes — the tail-edit case the receipt head defends against.
+func editFinalRecord(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	i := len(lines) - 1
+	edited := strings.Replace(lines[i], `"subject":"dana@example.com"`, `"subject":"mallory@example.com"`, 1)
+	if edited == lines[i] {
+		t.Fatalf("final-record edit did not apply: %s", lines[i])
+	}
+	lines[i] = edited
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// receiptLedgerLine returns the receipt's "  ledger <id>: ..." line.
+func receiptLedgerLine(t *testing.T, receipt, id string) string {
+	t.Helper()
+	for _, l := range strings.Split(receipt, "\n") {
+		if strings.HasPrefix(l, "  ledger "+id+":") {
+			return l
+		}
+	}
+	t.Fatalf("no ledger line for %s:\n%s", id, receipt)
+	return ""
 }
 
 func TestReceiptLabelsProvenance(t *testing.T) {
