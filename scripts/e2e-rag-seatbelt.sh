@@ -576,7 +576,15 @@ ask() {
 	shift
 	SUP_AT="$(wc -l <"$WORK/refspawn.err" | tr -d ' ')"
 	ASK_RC=0
-	ASK_OUT="$("$WORK/agenthof" ask "$@" "${ARGS[@]}" --log-dir "$CTL_DIR/runs" --artifact-dir "$CTL_DIR/artifacts" "$prompt" 2>"$WORK/ask.err" </dev/null)" || ASK_RC=$?
+	# Feed stdin from an empty pipe, not /dev/null: ask detects an interactive
+	# terminal as a character device, and /dev/null is a character device, so
+	# </dev/null takes the prompt-then-EOF branch. A pipe is not a character
+	# device, so ask takes the non-interactive branch and the confirm gate
+	# reports the "re-run with --yes" refusal this test asserts. (Note: real
+	# cron/systemd/nohup jobs DO pass /dev/null as stdin and hit the former
+	# branch; it still fails closed and names --yes, so the engine is left
+	# as-is. That heuristic is a separate, tracked limitation.)
+	ASK_OUT="$(printf '' | "$WORK/agenthof" ask "$@" "${ARGS[@]}" --log-dir "$CTL_DIR/runs" --artifact-dir "$CTL_DIR/artifacts" "$prompt" 2>"$WORK/ask.err")" || ASK_RC=$?
 	tail -n "+$((SUP_AT + 1))" "$WORK/refspawn.err" >"$WORK/sup-tail.err"
 	cat "$WORK/ask.err"
 }
@@ -595,14 +603,21 @@ ran_ok() {
 	[ "$(field "$al" spawn child_confiner succeeded | sort -u)" = seatbelt ] || fail "$a: a spawn does not record the seatbelt tier"
 	for c in $(field "$al" spawn child_run_id succeeded); do
 		grep -q "compartment started.*child=$c.*compartment=agenthof-spawn-$c-" "$WORK/sup-tail.err" || fail "$a: child $c did not run in a compartment named for it"
-		audit_of "$c" | grep -q "ledger integrity: verified" || fail "$a: child $c ledger not verified"
+		# Capture, then grep: a piped `grep -q` closes the pipe on its first
+		# match, and under `set -o pipefail` the SIGPIPE'd audit process can make
+		# the pipeline fail even though the text matched. Dump the output on a
+		# real miss so the failure is legible.
+		local aout
+		aout="$(audit_of "$c" 2>&1)"
+		printf '%s\n' "$aout" | grep -q "ledger integrity: verified" || { echo "--- audit $c ---"; printf '%s\n' "$aout"; fail "$a: child $c ledger not verified"; }
 	done
 	grep -q "compartment started.*-$a" "$WORK/sup-tail.err" || fail "$a did not run in a compartment"
 	LEAF="$(field "$al" spawn child_run_id succeeded | tail -n 1)"
 	LEAF_LEDGER="$(ledger "$LEAF")"
 	grep -Eq "$a/$a +run r-[a-f0-9]+: containment tier seatbelt" "$WORK/ask.err" || fail "$a: the receipt does not name the seatbelt tier on the leaf's line"
 	grep -Eq "ledger $ASK_RUN: chain verified, completeness complete" "$WORK/ask.err" || fail "$a: the ask run's own ledger does not report completeness complete"
-	audit_of "$ASK_RUN" | grep -q "ledger completeness: complete (2 door call(s) accounted)" || fail "$a: audit <ask-run> does not report completeness complete with two door calls"
+	aout="$(audit_of "$ASK_RUN" 2>&1)"
+	printf '%s\n' "$aout" | grep -q "ledger completeness: complete (2 door call(s) accounted)" || { echo "--- audit $ASK_RUN ---"; printf '%s\n' "$aout"; fail "$a: audit <ask-run> does not report completeness complete with two door calls"; }
 }
 tool_ok() { # LEDGER TOOL: how many succeeded tool_call events name TOOL
 	python3 - "$1" "$2" <<'PY'

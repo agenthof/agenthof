@@ -220,7 +220,11 @@ The governed core is real and runnable today:
   contained. The hub distributes the signed card and the
   program, never a grant — your gateway still decides what the agent may do, and
   your confiner still refuses any bytes but the ones the card pins — so you can
-  install an agent you do not have to trust.
+  install an agent you do not have to trust. The hub's first retrieval agents
+  put this to work: one indexes your meeting notes into a governed memory store,
+  and two answer questions from them — strictly from the notes, or from the notes
+  plus the model's own knowledge — with the write confirmed before it runs and
+  the receipt showing whether retrieval was observed behind the answer.
   The same ceremony also brings an **operator-vetted local MCP tool resource**
   under governance (`agenthof enroll mcp`), with no signed card: it discloses
   the exact command, environment variable names, egress and read-only tools,
